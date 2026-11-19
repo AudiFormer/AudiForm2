@@ -148,7 +148,10 @@ fn spectrogram_texture(
     rows_per_ch: usize,
 ) -> Option<egui::TextureHandle> {
     let d = st.doc()?;
+    // The document is part of the key: another file at the same version
+    // and view must not show the drawing of one just closed.
     let key = (
+        d.id,
         d.version,
         (d.view.start * 1000.0) as i64,
         (d.view.len * 100_000.0) as i64,

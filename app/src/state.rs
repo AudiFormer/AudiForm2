@@ -174,13 +174,25 @@ impl Doc {
 }
 
 pub enum Job {
-    /// A file decoding in the background.
+    /// A file decoding in the background (copied into the session folder
+    /// first when it is going into a saved session). The result carries
+    /// the path it was opened from.
     Load {
         path: PathBuf,
-        rx: Receiver<Result<af27_io::Opened, String>>,
+        rx: Receiver<(PathBuf, Result<af27_io::Opened, String>)>,
         /// Put it on this track at this time when done.
         place: Option<(af27_core::TrackId, f64)>,
+        /// The import batch and slot it belongs to.
+        batch: Option<(u64, usize)>,
     },
+}
+
+impl Job {
+    pub fn path(&self) -> &Path {
+        match self {
+            Job::Load { path, .. } => path,
+        }
+    }
 }
 
 pub struct Toast {
@@ -331,6 +343,11 @@ pub struct State {
     pub audition_key: Option<String>,
     /// The session before a drag on a transport field began.
     pub gesture_before: Option<Session>,
+    /// Sessions set aside, the recent list, imports on their way in,
+    /// recovery copies.
+    pub sessions: crate::sessions::Sessions,
+    /// The Files panel's selection, sort and filter.
+    pub files_ui: crate::files_panel::FilesUi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +548,8 @@ impl State {
             spec_split: 0.5,
             spec_colors: None,
             spectral_job: None,
+            sessions: crate::sessions::Sessions::load(),
+            files_ui: Default::default(),
         }
     }
 
@@ -613,27 +632,79 @@ impl State {
         let (tx, rx) = channel();
         let p = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(af27_io::open_file(&p));
+            let _ = tx.send((p.clone(), af27_io::open_file(&p)));
         });
-        self.jobs.push(Job::Load { path, rx, place });
+        self.jobs.push(Job::Load {
+            path,
+            rx,
+            place,
+            batch: None,
+        });
+    }
+
+    /// Decodes a file for an import batch, copying it into the session
+    /// folder first when `copy` says so (on the loading thread).
+    pub fn load_into(
+        &mut self,
+        path: PathBuf,
+        batch: Option<(u64, usize)>,
+        copy: Option<crate::sessions::CopyTo>,
+    ) {
+        let (tx, rx) = channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let (from, note) = match copy.map(|c| c.place(&p)) {
+                Some(Ok(q)) => (q, None),
+                Some(Err(e)) => (p.clone(), Some(e)),
+                None => (p.clone(), None),
+            };
+            let r = af27_io::open_file(&from);
+            // A failed copy still opens the original; say so.
+            let r = match (r, note) {
+                (Ok(o), Some(e)) => {
+                    eprintln!("{e}");
+                    Ok(o)
+                }
+                (r, _) => r,
+            };
+            let _ = tx.send((from, r));
+        });
+        self.jobs.push(Job::Load {
+            path,
+            rx,
+            place: None,
+            batch,
+        });
     }
 
     /// Picks up finished background loads.
     pub fn poll_jobs(&mut self) {
         let mut done = Vec::new();
         self.jobs.retain(|j| match j {
-            Job::Load { path, rx, place } => match rx.try_recv() {
-                Ok(r) => {
-                    done.push((path.clone(), r, *place));
+            Job::Load {
+                rx, place, batch, ..
+            } => match rx.try_recv() {
+                Ok((from, r)) => {
+                    done.push((from, r, *place, *batch));
                     false
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => true,
                 Err(_) => false,
             },
         });
-        for (path, r, place) in done {
+        let any = !done.is_empty();
+        for (path, r, place, batch) in done {
             match r {
                 Ok(opened) => {
+                    // Opened before (a copy found again, or a second drop).
+                    if let Some(id) = self.doc_for_path(&path) {
+                        if let Some(b) = batch {
+                            self.batch_loaded(b, Some(id));
+                        } else if let Some((track, at)) = place {
+                            self.place_doc(id, track, at);
+                        }
+                        continue;
+                    }
                     let name = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -648,33 +719,62 @@ impl State {
                         d.markers = file_markers(&info, d.duration());
                         d.info = info;
                     }
-                    // Session media waiting on this file.
+                    // Session media waiting on this file, in every open
+                    // session.
+                    let same = |m: &MediaItem| {
+                        m.path
+                            .as_deref()
+                            .is_some_and(|p| crate::sessions::same_path(p, &path))
+                    };
                     let waiting: Vec<MediaId> = self
                         .session
                         .media
                         .iter()
-                        .filter(|m| m.path.as_deref() == Some(&path))
+                        .filter(|m| same(m))
                         .map(|m| m.id)
                         .collect();
                     for m in waiting {
                         self.link_media(m, id);
                     }
-                    if let Some((track, at)) = place {
+                    let (dur, rate, ch) = self
+                        .doc_by_id(id)
+                        .map(|d| (d.duration(), d.buf.rate, d.buf.num_channels() as u16))
+                        .unwrap_or_default();
+                    for p in &mut self.sessions.parked {
+                        for m in p.session.media.iter_mut().filter(|m| same(m)) {
+                            m.duration = dur;
+                            m.rate = rate;
+                            m.channels = ch;
+                            p.media_docs.insert(m.id, id);
+                        }
+                    }
+                    if let Some(b) = batch {
+                        self.batch_loaded(b, Some(id));
+                    } else if let Some((track, at)) = place {
                         self.place_doc(id, track, at);
                     } else if self.current.is_none() || self.mode == Mode::Waveform {
                         self.current = Some(id);
                     }
                 }
-                Err(e) => self.error(e),
+                Err(e) => {
+                    if let Some(b) = batch {
+                        self.batch_loaded(b, None);
+                    }
+                    self.error(e)
+                }
             }
+        }
+        if any {
+            self.finish_batches();
         }
     }
 
     pub fn loading(&self) -> Vec<String> {
         self.jobs
             .iter()
-            .map(|Job::Load { path, .. }| {
-                path.file_name()
+            .map(|j| {
+                j.path()
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default()
             })
@@ -724,20 +824,22 @@ impl State {
         }
     }
 
+    /// Closes a file. A file a clip plays, in any open session, stays.
+    /// Its waveform leaves the editor (and stops playing) with it.
     pub fn close_doc(&mut self, id: DocId) {
-        let used = self.media_docs.values().any(|&d| d == id)
-            && self
-                .session
-                .tracks
-                .iter()
-                .flat_map(|t| &t.clips)
-                .any(|c| self.media_docs.get(&c.media) == Some(&id));
-        if used {
-            self.error("That file is used in the session. Remove its clips first.");
+        if self.doc_used(id) {
+            self.error("That file is used in an open session. Remove its clips first.");
             return;
+        }
+        if self.current == Some(id) && self.mode == Mode::Waveform && self.is_playing() {
+            self.stop();
         }
         self.docs.retain(|d| d.id != id);
         self.media_docs.retain(|_, d| *d != id);
+        for p in &mut self.sessions.parked {
+            p.media_docs.retain(|_, d| *d != id);
+        }
+        self.files_ui.forget(id);
         if self.current == Some(id) {
             self.current = self.docs.last().map(|d| d.id);
         }
@@ -752,7 +854,20 @@ impl State {
         self.session_version += 1;
     }
 
+    /// Opens a session. One already open comes to the front instead; the
+    /// session in front is set aside, not closed.
     pub fn open_session(&mut self, path: &Path) {
+        match self.find_open(path) {
+            Some(None) => {
+                self.mode = Mode::Multitrack;
+                return;
+            }
+            Some(Some(i)) => {
+                self.switch_session(i);
+                return;
+            }
+            None => {}
+        }
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -762,19 +877,19 @@ impl State {
             std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
                 .and_then(|t| Session::from_json(&t))
-                .map(|s| (s, Vec::new()))
+                .map(|s| (s, Vec::new(), None))
         } else {
-            af27_interop::import(path).map(|i| {
-                self.session_base = i.base;
-                (i.session, i.notices)
-            })
+            af27_interop::import(path).map(|i| (i.session, i.notices, i.base))
         };
-        if ext == "af27" || ext == "sesx" {
-            self.session_base = None;
-        }
         match result {
-            Ok((session, notices)) => {
+            Ok((session, notices, base)) => {
+                self.park_front();
                 self.session = session;
+                self.session_base = if ext == "af27" || ext == "sesx" {
+                    None
+                } else {
+                    base
+                };
                 self.session_history.clear();
                 // Audiform sessions save back to themselves; a .sesx import
                 // asks for a name on first save.
@@ -786,6 +901,7 @@ impl State {
                             path.to_path_buf()
                         }
                     });
+                self.sessions.source = Some(path.to_path_buf());
                 self.session_dirty = false;
                 self.session_version += 1;
                 self.media_docs.clear();
@@ -793,25 +909,8 @@ impl State {
                 self.session_view = View::fit(self.session.duration().max(30.0));
                 self.session_cursor = self.session.playhead.max(0.0);
                 self.mode = Mode::Multitrack;
-                let media: Vec<_> = self.session.media.clone();
-                let mut missing = 0;
-                for m in media {
-                    match &m.path {
-                        Some(p) if p.exists() => {
-                            if let Some(d) = self
-                                .docs
-                                .iter()
-                                .find(|d| d.path.as_deref() == Some(p.as_path()))
-                            {
-                                let id = d.id;
-                                self.link_media(m.id, id);
-                            } else if !self.jobs.iter().any(|Job::Load { path, .. }| path == p) {
-                                self.load_file(p.clone(), None);
-                            }
-                        }
-                        _ => missing += 1,
-                    }
-                }
+                let missing = self.link_session_media();
+                self.remember_recent(path);
                 self.toast(format!(
                     "Opened {}",
                     path.file_name().unwrap_or_default().to_string_lossy()
@@ -830,11 +929,34 @@ impl State {
     /// Saves the session. `.audfrm` (the default) is Audiform's own format,
     /// written losslessly over what was opened; `.af27` is a plain dump of
     /// Audiform27's model.
+    ///
+    /// Before writing: unsaved Waveform edits to files the session uses are
+    /// kept, files that came in this run are copied into the session
+    /// folder (Session Media), media no clip uses that was never saved is
+    /// left out, and the file as it was goes into Backups.
     pub fn save_session_to(&mut self, path: PathBuf) {
         self.keep_playhead();
         let is_af27 = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("af27"));
+        // Save As, or the first save, names the session after its file.
+        let new_file = !self
+            .session_path
+            .as_deref()
+            .is_some_and(|p| crate::sessions::same_path(p, &path));
+        if new_file {
+            if let Some(stem) = path.file_stem() {
+                self.session.name = stem.to_string_lossy().to_string();
+            }
+        }
+        self.keep_waveform_edits(&path);
+        self.copy_new_media_on_save(&path);
+        self.prune_unsaved_media();
+        if self.prefs.backups {
+            if let Err(e) = crate::sessions::back_up(&path, self.prefs.backups_keep as usize) {
+                self.error(format!("Could not back up the session first: {e}"));
+            }
+        }
         let result = if is_af27 {
             std::fs::write(&path, self.session.to_json()).map_err(|e| e.to_string())
         } else {
@@ -847,28 +969,13 @@ impl State {
         match result {
             Ok(()) => {
                 self.session_path = Some(path.clone());
+                self.sessions.source = Some(path.clone());
                 self.session_dirty = false;
+                crate::sessions::delete_autosave(self.sessions.key);
+                self.remember_recent(&path);
                 self.toast(format!("Saved {}", path.display()));
             }
             Err(e) => self.error(format!("Could not save the session: {e}")),
-        }
-    }
-
-    pub fn autosave(&mut self) {
-        let every = self.prefs.autosave_minutes.max(1) as u64 * 60;
-        if !self.prefs.autosave || self.last_autosave.elapsed().as_secs() < every {
-            return;
-        }
-        self.last_autosave = Instant::now();
-        if self.session_dirty {
-            let dir = data_dir().join("autosave");
-            let _ = std::fs::create_dir_all(&dir);
-            let base = self.session_base.clone();
-            let _ = af27_interop::audfrm::save(
-                &mut self.session,
-                base.as_ref(),
-                &dir.join("autosave.audfrm"),
-            );
         }
     }
 
@@ -944,7 +1051,10 @@ impl State {
         let program = match self.mode {
             Mode::Waveform => match self.doc() {
                 Some(d) => af27_engine::buffer_program(d.buf.clone()),
-                None => return,
+                // No file open: nothing plays (not the file just closed).
+                None => {
+                    af27_engine::buffer_program(Arc::new(AudioBuffer::new(self.session.rate, 2, 0)))
+                }
             },
             Mode::Multitrack => {
                 let rate = self.engine.as_ref().map_or(self.session.rate, |e| e.rate);

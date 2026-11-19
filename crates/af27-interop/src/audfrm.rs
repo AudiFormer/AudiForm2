@@ -814,7 +814,10 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
 /// Saves `session` to `path` as an Audiform session, pretty-printed as
 /// Audiform writes it. Returns the document written (the new base).
 pub fn save(session: &mut Session, base: Option<&Value>, path: &Path) -> Result<Value, String> {
-    let doc = export(session, base);
+    let mut doc = export(session, base);
+    if let Some(dir) = path.parent() {
+        fill_relative_paths(&mut doc, base, dir);
+    }
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     let tmp: PathBuf = path.with_extension("audfrm.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
@@ -822,9 +825,78 @@ pub fn save(session: &mut Session, base: Option<&Value>, path: &Path) -> Result<
     Ok(doc)
 }
 
+/// Media added since the file was read, and kept inside the session's
+/// folder, gets a path relative to the session file as Audiform writes
+/// it, so the folder can move. Media the file already had keeps what it
+/// said, so an unedited session saves the same.
+fn fill_relative_paths(doc: &mut Value, base: Option<&Value>, dir: &Path) {
+    let known: Vec<&str> = base
+        .and_then(|b| b["media"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    let Some(media) = doc.get_mut("media").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for m in media {
+        if m["id"].as_str().is_some_and(|id| known.contains(&id)) || !m["relative_path"].is_null() {
+            continue;
+        }
+        let Some(p) = m["path"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        if let Ok(rel) = p.strip_prefix(dir) {
+            m["relative_path"] = json!(rel.to_string_lossy());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_media_in_the_session_folder_gets_a_relative_path() {
+        let dir = std::env::temp_dir().join(format!("af27-rel-{}", new_uuid()));
+        std::fs::create_dir_all(dir.join("Audio")).unwrap();
+        let file = dir.join("Show.audfrm");
+        let imp = import(SAMPLE, &dir).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let id = s.alloc_id();
+        s.media.push(MediaItem {
+            id,
+            name: "guest.wav".into(),
+            path: Some(dir.join("Audio").join("guest.wav")),
+            duration: 1.0,
+            rate: 48_000,
+            channels: 1,
+            ext_id: None,
+        });
+        let outside = s.alloc_id();
+        s.media.push(MediaItem {
+            id: outside,
+            name: "music.wav".into(),
+            path: Some(std::env::temp_dir().join("elsewhere").join("music.wav")),
+            duration: 1.0,
+            rate: 48_000,
+            channels: 2,
+            ext_id: None,
+        });
+        let doc = save(&mut s, Some(&base), &file).unwrap();
+        let media = doc["media"].as_array().unwrap();
+        // The file's own media: untouched.
+        assert_eq!(media[0], base["media"][0]);
+        let rel = std::path::Path::new("Audio").join("guest.wav");
+        assert_eq!(media[1]["relative_path"], json!(rel.to_string_lossy()));
+        assert!(media[2]["relative_path"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A session with fields Audiform27 does not use anywhere: they must
     /// all survive a load and save.

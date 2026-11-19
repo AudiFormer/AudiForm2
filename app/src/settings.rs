@@ -73,6 +73,17 @@ pub struct Prefs {
     pub follow_playhead: bool,
     pub autosave: bool,
     pub autosave_minutes: u32,
+    /// Each save first copies the previous file into Backups.
+    pub backups: bool,
+    /// How many backups of each session to keep (1 to 50).
+    pub backups_keep: u32,
+    /// What happens to audio imported into a saved session.
+    pub media_policy: crate::sessions::MediaPolicy,
+    /// The session's media subfolder.
+    pub media_folder: String,
+    /// When saving, copy in audio that came into the session while it was
+    /// outside the session folder.
+    pub copy_on_save: bool,
     /// Bring the Effects panel up when an effect is picked from the menu.
     pub show_effects_on_pick: bool,
     pub colors: ColorOverrides,
@@ -89,6 +100,11 @@ impl Default for Prefs {
             follow_playhead: true,
             autosave: true,
             autosave_minutes: 2,
+            backups: true,
+            backups_keep: 10,
+            media_policy: crate::sessions::MediaPolicy::Copy,
+            media_folder: "Audio".into(),
+            copy_on_save: true,
             show_effects_on_pick: true,
             colors: ColorOverrides::default(),
         }
@@ -207,6 +223,13 @@ impl Draft {
             "Autosave" => {
                 self.prefs.autosave = d.autosave;
                 self.prefs.autosave_minutes = d.autosave_minutes;
+                self.prefs.backups = d.backups;
+                self.prefs.backups_keep = d.backups_keep;
+            }
+            "Session Media" => {
+                self.prefs.media_policy = d.media_policy;
+                self.prefs.media_folder = d.media_folder.clone();
+                self.prefs.copy_on_save = d.copy_on_save;
             }
             "Effects" => self.prefs.show_effects_on_pick = d.show_effects_on_pick,
             "Playback and Recording" => {
@@ -477,15 +500,60 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                         });
                     });
                 });
-                let p = data_dir().join("autosave").join("autosave.audfrm");
+                let p = data_dir().join("autosave");
                 note(
                     ui,
                     th,
                     &format!(
-                        "The copy goes to {}; your own file is never touched.",
+                        "Every open session with unsaved changes gets its own copy in {}; your own files are never touched. Saving or closing a session deletes its copy. Copies left when AudiForm 2 did not close normally are offered at the next start.",
                         p.display()
                     ),
                 );
+            });
+            group(ui, th, "Backups", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.backups,
+                    "Before each save, copy the session file as it was into a Backups folder beside it",
+                );
+                ui.add_enabled_ui(d.prefs.backups, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Keep the newest");
+                        ui.add(
+                            egui::DragValue::new(&mut d.prefs.backups_keep)
+                                .range(1..=50)
+                                .speed(0.2),
+                        );
+                        ui.label("backups of each session");
+                    });
+                });
+                note(ui, th, "Backups are named after the session and the time it was saved (UTC). Only these are ever deleted.");
+            });
+        }
+        "Session Media" => {
+            use crate::sessions::MediaPolicy;
+            group(ui, th, "Audio imported into a saved session", |ui| {
+                ui.radio_value(
+                    &mut d.prefs.media_policy,
+                    MediaPolicy::Copy,
+                    "Copy it into the session folder",
+                );
+                ui.radio_value(&mut d.prefs.media_policy, MediaPolicy::Ask, "Ask each time");
+                ui.radio_value(
+                    &mut d.prefs.media_policy,
+                    MediaPolicy::Leave,
+                    "Leave it where it is",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Folder beside the session file");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut d.prefs.media_folder).desired_width(140.0),
+                    );
+                });
+                ui.checkbox(
+                    &mut d.prefs.copy_on_save,
+                    "When saving, copy in audio that came in while it was outside the session folder",
+                );
+                note(ui, th, "The original is never moved or changed. Files already inside the session folder stay where they are. The same file imported again uses its copy; a different file with the same name gets a numbered name. File > Collect Session Media copies in everything the session uses at any time.");
             });
         }
         "Effects" => {
