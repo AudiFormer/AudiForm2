@@ -148,7 +148,19 @@ pub fn and_mask(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub use win::{frame, install};
+pub use win::{alt_down, frame, install, system_pointer};
+
+/// Not Windows: the pointer comes from egui.
+#[cfg(not(all(windows, target_pointer_width = "64")))]
+pub fn system_pointer() -> Option<(f32, f32)> {
+    None
+}
+
+/// Not Windows: the modifier comes from egui.
+#[cfg(not(all(windows, target_pointer_width = "64")))]
+pub fn alt_down() -> bool {
+    false
+}
 
 /// Not Windows: there is no hardware path; the software pointer draws.
 #[cfg(not(all(windows, target_pointer_width = "64")))]
@@ -221,6 +233,31 @@ mod win {
         fn SetWindowLongPtrW(hwnd: HWND, index: i32, value: isize) -> isize;
         fn CallWindowProcW(prev: isize, hwnd: HWND, msg: u32, w: usize, l: isize) -> isize;
         fn DefWindowProcW(hwnd: HWND, msg: u32, w: usize, l: isize) -> isize;
+        fn ScreenToClient(hwnd: HWND, p: *mut POINT) -> i32;
+        fn GetAsyncKeyState(key: i32) -> i16;
+    }
+
+    /// The pointer in the window's client area, in physical pixels, read
+    /// from the system. While files are dragged in from the file manager
+    /// the window hears no mouse moves, so egui's pointer is stale.
+    pub fn system_pointer() -> Option<(f32, f32)> {
+        HW.with(|hw| {
+            let hwnd = hw.borrow().as_ref()?.hwnd;
+            let mut p = POINT::default();
+            unsafe {
+                if GetCursorPos(&mut p) == 0 || ScreenToClient(hwnd, &mut p) == 0 {
+                    return None;
+                }
+            }
+            Some((p.x as f32, p.y as f32))
+        })
+    }
+
+    /// Alt is held, read from the system (the window hears no keys while
+    /// files are dragged in from the file manager).
+    pub fn alt_down() -> bool {
+        const VK_MENU: i32 = 0x12;
+        (unsafe { GetAsyncKeyState(VK_MENU) } as u16) & 0x8000 != 0
     }
 
     #[link(name = "gdi32")]

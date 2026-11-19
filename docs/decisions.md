@@ -144,3 +144,65 @@
   on the UI thread for the open track's instrument and swapped in over
   the command queue (the old one comes back to be freed), heard whether
   or not the transport runs and never in exports.
+
+## 2026-11-19: Sessions, the Files panel and importing many files
+
+Behaviour follows Audiform 1's decisions log (dates are its entries).
+
+- **Several files dropped on the Multitrack** (Audiform 1, 2026-10-27,
+  which replaced the 2026-10-25 setting): one per track, all from the drop
+  time; the first on the track under the pointer, the rest on the audio
+  tracks below it, then on new tracks named after the files. **Holding Alt
+  puts them one after another on one track.** The drop preview follows Alt
+  as it goes down and up. While files come from the file manager the window
+  hears no keys or mouse moves, so on Windows Alt and the pointer are read
+  from the system. A drop below the last track, or on a bus or MIDI track,
+  makes new tracks. Drops close to the start land on it (2026-10-25).
+  Ours: dropped files are taken in natural name order ("2-guest" before
+  "10-guest") rather than the order the file manager hands them over, and
+  folders are searched (8 levels, 5,000 files) as Audiform 1 did for the
+  Files panel (2026-10-13). The whole drop is one undoable step.
+- **Insert Files as Tracks** (2026-10-14): each file on its own new track at
+  the start, named without a leading speaker number. Ours: only one to three
+  digits count as a speaker number, so "2026-11-19 call" keeps its date.
+  Zips are not extracted yet.
+- **Several sessions open at once** (2026-10-25): New, Open and Open Recent
+  set the session in front aside with its changes, undo history and view;
+  the Files panel lists them (double-click to switch, × to close, asking to
+  save). Closing the front one brings the last one set aside forward. An
+  untouched blank session is dropped, not listed. Opening one already open
+  brings it forward. Quitting asks about unsaved sessions.
+- **Session commands** (2026-10-14): Open Recent (10), Save, Save As (names
+  the session after its file), Save All, Close, Close All, Save as Session
+  Template (an `.audfrm` in the app's templates folder; a new session from
+  it gets a new id and records the template's), Remove Unused Files (keeps
+  every file a clip in any open session plays; asks before dropping unsaved
+  Waveform edits, 2026-10-31), Collect Session Media (one undoable step,
+  2026-10-25), Session Properties, Show in File Manager.
+- **Session Media** (2026-10-25): copy imported audio into the session's
+  `Audio` folder (default), ask, or leave it; the folder name; copy in
+  outside audio when saving. Copies are found again by name, size and the
+  first and last 64 KB; a different file with the same name is numbered;
+  copies are written under a temporary name first. Ours, to keep `.audfrm`
+  files unchanged: copy-on-save only moves files that came into the session
+  in this run, never paths the file already had, and opening a file for the
+  Waveform editor does not copy it (only imports into the session do).
+- **Autosave, recovery, backups** (2026-10-14, 2026-10-19, 2026-10-21): a
+  recovery copy per open session with unsaved changes; saving or closing
+  deletes it; copies whose run has no fresh lock (150 s) are offered at
+  start. Each save first copies the previous file into `Backups` beside it,
+  keeping the newest 1 to 50 (default 10); only our own time-stamped names
+  are pruned. Stamps are UTC.
+- **Waveform edits on session save** (2026-11-01): unsaved edits to a file
+  the session uses are written into it when it is a WAV in the session
+  folder, else as `<name> (edited).wav` in the media folder, the session and
+  the Files panel moving to it.
+- **The four fixes asked for on 2026-11-02:** wheel zoom over the tracks
+  (Ctrl+wheel) already weighs the same as over the ruler here (tested in
+  `zoom.rs`); a saved session leaves out media no clip uses that was never
+  saved with it; New Audio File always lists the file; closing a file stops
+  it playing and no longer leaves its spectrogram (the drawing cache is now
+  keyed by document).
+- **`.audfrm` stays byte-exact for unedited sessions:** none of the above
+  touches media the file already had. New media inside the session folder
+  gets a `relative_path`, as Audiform writes it.

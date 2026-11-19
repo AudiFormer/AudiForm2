@@ -18,7 +18,7 @@
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense, Stroke};
 
-use crate::state::{DocId, State, Tool, View};
+use crate::state::{State, Tool, View};
 use crate::theme::{c, ca, lerp};
 use crate::ui::Caches;
 use crate::waveform::{draw_channel, playhead, time_to_x, x_to_time};
@@ -108,7 +108,7 @@ mod vzoom_tests {
     }
 }
 
-fn track_at(st: &State, lanes_top: f32, scroll: f32, y: f32) -> Option<usize> {
+pub(crate) fn track_at(st: &State, lanes_top: f32, scroll: f32, y: f32) -> Option<usize> {
     let mut top = lanes_top - scroll;
     for (i, t) in st.session.tracks.iter().enumerate() {
         if y >= top && y < top + t.height {
@@ -228,19 +228,6 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 (ti, c.id, (pp.x - x0).abs() < 6.0, (pp.x - x1).abs() < 6.0)
             })
     };
-
-    // Drop from the Files panel.
-    if let Some(doc) = resp.dnd_release_payload::<DocId>() {
-        if let Some(pp) = ui.input(|i| i.pointer.interact_pos()) {
-            let t = x_to_time(&v, lanes, pp.x).max(0.0);
-            let ti = track_at(st, lanes.top(), scroll, pp.y).unwrap_or_else(|| {
-                st.add_track();
-                st.session.tracks.len() - 1
-            });
-            let track = st.session.tracks[ti].id;
-            st.place_doc(*doc, track, t);
-        }
-    }
 
     // MIDI clips: (track index, clip id) under a point.
     let tempo = st.session.tempo.clone();
@@ -804,11 +791,186 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         p.text(
             lanes.center(),
             Align2::CENTER_CENTER,
-            "Drag files here from the Files panel, or open a .sesx / .audfrm / .af27 session",
+            "Drag files here from the Files panel or the file manager, or open a .sesx / .audfrm / .af27 session",
             FontId::proportional(14.0),
             c(th.text_dim),
         );
     }
+    file_drop(ui, st, &resp, &p, lanes, scroll, &v, &snap_marks);
+}
+
+/// Files dragged onto the lanes, from the Files panel or the file manager.
+/// Several go one per track from the drop time (the track under the
+/// pointer, then the audio tracks below it, then new tracks); with Alt
+/// held they go one after another on one track. While they hover, a box
+/// shows where each would land, following Alt as it goes down and up.
+#[allow(clippy::too_many_arguments)]
+fn file_drop(
+    ui: &egui::Ui,
+    st: &mut State,
+    resp: &egui::Response,
+    p: &egui::Painter,
+    lanes: Rect,
+    scroll: f32,
+    v: &View,
+    snap_marks: &[f64],
+) {
+    use crate::files_panel::DragFiles;
+    use crate::sessions::{layout_drop, Lane, Layout};
+    let land = |st: &State, pos: egui::Pos2| {
+        let track = track_at(st, lanes.top(), scroll, pos.y).map(|i| st.session.tracks[i].id);
+        let t = x_to_time(v, lanes, pos.x).max(0.0);
+        let t = crate::ruler::snap(st, t, v, lanes, snap_marks).max(0.0);
+        let px_per_sec = lanes.width() as f64 / v.len.max(1e-9);
+        let at = crate::sessions::snap_drop_start(t, px_per_sec, crate::ruler::EDGE_PX as f64);
+        (track, at)
+    };
+
+    // Let go of Files panel rows.
+    if let Some(files) = resp.dnd_release_payload::<DragFiles>() {
+        if let Some(pos) = ui
+            .input(|i| i.pointer.interact_pos())
+            .filter(|pp| lanes.contains(*pp))
+        {
+            let alt = ui.input(|i| i.modifiers.alt);
+            let (track, at) = land(st, pos);
+            st.import_docs(files.0.clone(), Layout::Drop { track, at, alt });
+        }
+        return;
+    }
+    // Dropped from the file manager this frame.
+    let on_lanes = st
+        .sessions
+        .os_drop
+        .as_ref()
+        .and_then(|d| d.pos)
+        .is_some_and(|pp| lanes.contains(pp));
+    if on_lanes {
+        if let Some(d) = st.sessions.os_drop.take() {
+            let (track, at) = land(st, d.pos.unwrap_or_default());
+            st.import_paths(
+                d.paths,
+                Layout::Drop {
+                    track,
+                    at,
+                    alt: d.alt,
+                },
+            );
+        }
+        return;
+    }
+
+    // Hovering: what is coming, where the pointer is, and Alt.
+    let th = st.theme.clone();
+    let ppp = ui.ctx().pixels_per_point();
+    let modifiers_alt = ui.input(|i| i.modifiers.alt);
+    // (name, length when known) for each file coming in.
+    type Items = Vec<(String, Option<f64>)>;
+    let (items, pos, alt): (Items, Option<egui::Pos2>, bool) = if let Some(f) =
+        egui::DragAndDrop::payload::<DragFiles>(ui.ctx())
+    {
+        let items =
+            f.0.iter()
+                .filter_map(|d| st.doc_by_id(*d))
+                .map(|d| (d.name.clone(), Some(d.duration())))
+                .collect();
+        (items, ui.input(|i| i.pointer.hover_pos()), modifiers_alt)
+    } else {
+        let hovered: Vec<std::path::PathBuf> = ui.input(|i| {
+            i.raw
+                .hovered_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if hovered.is_empty() {
+            return;
+        }
+        // Loose files only: folders are searched once they land.
+        let loose: Vec<std::path::PathBuf> = hovered.into_iter().filter(|p| !p.is_dir()).collect();
+        let (audio, _) = crate::sessions::expand_paths(&loose);
+        let items = audio
+            .iter()
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let len = st
+                    .doc_for_path(p)
+                    .and_then(|d| st.doc_by_id(d))
+                    .map(|d| d.duration());
+                (name, len)
+            })
+            .collect();
+        let pos = crate::hwcursor::system_pointer()
+            .map(|(x, y)| egui::pos2(x / ppp, y / ppp))
+            .or(ui.input(|i| i.pointer.hover_pos()));
+        (items, pos, modifiers_alt || crate::hwcursor::alt_down())
+    };
+    let Some(pos) = pos.filter(|pp| lanes.contains(*pp)) else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    let (track, at) = land(st, pos);
+    // Files not read yet show at a nominal width.
+    let unknown = v.len * 120.0 / lanes.width().max(1.0) as f64;
+    let lengths: Vec<f64> = items.iter().map(|(_, l)| l.unwrap_or(unknown)).collect();
+    let audio: Vec<bool> = st
+        .session
+        .tracks
+        .iter()
+        .map(|t| t.kind == af27_core::TrackKind::Audio)
+        .collect();
+    let target = track.and_then(|id| st.session.track_index(id));
+    let placements = layout_drop(&lengths, &audio, target, at, alt);
+    let mut tops = Vec::with_capacity(st.session.tracks.len());
+    let mut y = lanes.top() - scroll;
+    for t in &st.session.tracks {
+        tops.push(y);
+        y += t.height;
+    }
+    let new_h = st.session.tracks.last().map_or(80.0, |t| t.height);
+    let lp = p.with_clip_rect(lanes);
+    for (((name, known), len), pl) in items.iter().zip(&lengths).zip(&placements) {
+        let (y0, h) = match pl.lane {
+            Lane::Track(i) => (tops[i], st.session.tracks[i].height),
+            Lane::New(k) => (y + k as f32 * new_h, new_h),
+        };
+        let x0 = time_to_x(v, lanes, pl.start);
+        let x1 = time_to_x(v, lanes, pl.start + len).max(x0 + 24.0);
+        let r = Rect::from_min_max(pos2(x0, y0 + 3.0), pos2(x1, y0 + h - 3.0));
+        lp.rect_filled(r, Rounding::same(4.0), ca(th.accent, 46));
+        lp.rect_stroke(r, Rounding::same(4.0), Stroke::new(1.5_f32, c(th.accent)));
+        let label = match known {
+            Some(l) => format!("{name}  {}", af27_core::time::format_time(*l)),
+            None => name.clone(),
+        };
+        lp.with_clip_rect(r.intersect(lanes)).text(
+            r.left_top() + vec2(6.0, 4.0),
+            Align2::LEFT_TOP,
+            label,
+            FontId::proportional(12.0),
+            c(th.text),
+        );
+    }
+    if items.len() > 1 {
+        let hint = if alt {
+            "One after another on one track (Alt)"
+        } else {
+            "One per track from here; hold Alt for one after another"
+        };
+        lp.text(
+            pos + vec2(14.0, -18.0),
+            Align2::LEFT_BOTTOM,
+            hint,
+            FontId::proportional(12.0),
+            c(th.accent),
+        );
+    }
+    ui.ctx().request_repaint();
 }
 
 fn drag_scroll(caches: &Caches) -> f32 {

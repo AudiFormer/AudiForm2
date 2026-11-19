@@ -6,6 +6,7 @@
 mod classic_themes;
 mod corners;
 mod export;
+mod files_panel;
 mod fx;
 mod fx_menu;
 mod hud;
@@ -22,6 +23,7 @@ mod record_input;
 mod ruler;
 mod selfshot;
 mod separation;
+mod sessions;
 mod settings;
 mod skin;
 mod space;

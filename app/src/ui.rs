@@ -137,7 +137,8 @@ pub struct App {
 }
 
 /// What a cached spectrogram was drawn from.
-pub type SpectroKey = (u64, i64, i64, usize, usize, String);
+/// (document, its version, view start, view length, columns, rows, look).
+pub type SpectroKey = (u64, u64, i64, i64, usize, usize, String);
 
 /// Per-panel drawing caches (textures and the like) kept between frames.
 #[derive(Default)]
@@ -555,22 +556,31 @@ pub fn open_dialog(st: &mut State) {
 fn save(st: &mut State) {
     match st.mode {
         Mode::Waveform => crate::export::save_in_place(st),
-        Mode::Multitrack => match st.session_path.clone() {
-            Some(p) => st.save_session_to(p),
-            None => save_session_as(st),
-        },
+        Mode::Multitrack => {
+            st.save_front(false);
+        }
     }
 }
 
 fn save_session_as(st: &mut State) {
-    if let Some(p) = rfd::FileDialog::new()
-        .set_file_name(format!("{}.audfrm", st.session.name))
-        .add_filter("Audiform session", &["audfrm"])
-        .add_filter("AudiForm 2 model dump", &["af27"])
-        .save_file()
+    st.save_front(true);
+}
+
+/// Multitrack > Insert Files as Tracks.
+fn insert_files_as_tracks(st: &mut State) {
+    if let Some(paths) = rfd::FileDialog::new()
+        .add_filter("Audio", AUDIO_FILTER)
+        .pick_files()
     {
-        st.save_session_to(p);
+        st.import_paths(paths, crate::sessions::Layout::AsTracks);
     }
+}
+
+fn open_props(st: &mut State) {
+    st.sessions.props = Some(crate::sessions::PropsDraft {
+        name: st.session.name.clone(),
+        rate: st.session.rate,
+    });
 }
 
 /// A menu item for a command, its key shown at the right.
@@ -612,19 +622,85 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
     egui::menu::bar(ui, |ui| {
         ui.menu_button("File", |ui| {
             cmd_item(ui, km, Cmd::NewFile, "New Audio File", true, &mut cmd);
-            if ui.button("New Multitrack Session").clicked() {
-                let before = st.session.clone();
-                st.session = af27_core::Session::default();
-                st.session_base = None;
-                st.session_history.push("New session", before);
-                st.session_path = None;
-                st.media_docs.clear();
-                st.session_version += 1;
-                st.mode = Mode::Multitrack;
+            if ui
+                .button("New Multitrack Session")
+                .on_hover_text("The session open now is set aside, not closed")
+                .clicked()
+            {
+                st.new_session(None);
                 ui.close_menu();
             }
+            ui.menu_button("New Session from Template", |ui| {
+                let templates = crate::sessions::list_templates();
+                if templates.is_empty() {
+                    ui.label("No templates yet: File > Save as Session Template.");
+                }
+                for t in templates {
+                    let name = t
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if ui.button(name).clicked() {
+                        st.new_session(Some(&t));
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                if ui.button("Open Templates Folder").clicked() {
+                    let dir = crate::sessions::templates_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    crate::sessions::reveal(&dir);
+                    ui.close_menu();
+                }
+            });
             cmd_item(ui, km, Cmd::Open, "Open...", true, &mut cmd);
+            ui.menu_button("Open Recent", |ui| {
+                let recent = st.sessions.recent.clone();
+                if recent.is_empty() {
+                    ui.label("No sessions yet.");
+                }
+                let mut gone = None;
+                for (i, p) in recent.iter().enumerate() {
+                    let name = p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if ui
+                        .button(format!("{}  {name}", i + 1))
+                        .on_hover_text(p.display().to_string())
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        if p.exists() {
+                            st.open_paths(vec![p.clone()]);
+                        } else {
+                            st.error(format!("{} is no longer there.", p.display()));
+                            gone = Some(i);
+                        }
+                    }
+                }
+                if let Some(i) = gone {
+                    st.sessions.recent.remove(i);
+                    crate::sessions::save_recent(&st.sessions.recent);
+                }
+                if !recent.is_empty() {
+                    ui.separator();
+                    if ui.button("Clear Recent").clicked() {
+                        st.sessions.recent.clear();
+                        crate::sessions::save_recent(&st.sessions.recent);
+                        ui.close_menu();
+                    }
+                }
+            });
             ui.menu_button("Import", |ui| {
+                if ui
+                    .button("Files as Tracks...")
+                    .on_hover_text("Each file on its own new track at the start, named without a leading speaker number")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    insert_files_as_tracks(st);
+                }
                 if ui.button("MIDI File...").clicked() {
                     ui.close_menu();
                     if let Some(p) = rfd::FileDialog::new()
@@ -640,7 +716,75 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             let has_doc = st.doc().is_some();
             cmd_item(ui, km, Cmd::SaveAs, "Save Audio As...", has_doc, &mut cmd);
             if ui.button("Save Session As...").clicked() {
+                ui.close_menu();
                 save_session_as(st);
+            }
+            if ui
+                .button("Save All")
+                .on_hover_text("Every open session with unsaved changes")
+                .clicked()
+            {
+                ui.close_menu();
+                st.save_all();
+            }
+            if ui.button("Save as Session Template...").clicked() {
+                ui.close_menu();
+                st.save_template();
+            }
+            ui.separator();
+            if ui.button("Close File").clicked() {
+                if let Some(id) = st.current {
+                    st.close_doc(id);
+                }
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(!st.front_is_blank(), egui::Button::new("Close Session"))
+                .clicked()
+            {
+                ui.close_menu();
+                st.close_front();
+            }
+            if ui.button("Close All Sessions").clicked() {
+                ui.close_menu();
+                st.close_all_sessions();
+            }
+            ui.separator();
+            if ui
+                .button("Remove Unused Files")
+                .on_hover_text("Close every file no clip in an open session plays")
+                .clicked()
+            {
+                ui.close_menu();
+                st.remove_unused_files();
+            }
+            if ui
+                .add_enabled(
+                    st.session_path.is_some(),
+                    egui::Button::new("Collect Session Media"),
+                )
+                .on_hover_text("Copy every file the session uses into its folder")
+                .on_disabled_hover_text("Save the session first")
+                .clicked()
+            {
+                ui.close_menu();
+                st.collect_media();
+            }
+            if ui.button("Session Properties...").clicked() {
+                open_props(st);
+                ui.close_menu();
+            }
+            let shown = match st.mode {
+                Mode::Multitrack => st.session_path.clone(),
+                Mode::Waveform => st.doc().and_then(|d| d.path.clone()),
+            };
+            if ui
+                .add_enabled(shown.is_some(), egui::Button::new("Show in File Manager"))
+                .clicked()
+            {
+                if let Some(p) = shown {
+                    crate::sessions::reveal(&p);
+                }
                 ui.close_menu();
             }
             ui.separator();
@@ -662,12 +806,6 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
             ui.separator();
-            if ui.button("Close File").clicked() {
-                if let Some(id) = st.current {
-                    st.close_doc(id);
-                }
-                ui.close_menu();
-            }
             if ui.button("Exit").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -766,6 +904,30 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.selected_track.is_some(),
                 &mut cmd,
             );
+            ui.separator();
+            if ui
+                .button("Insert Files as Tracks...")
+                .on_hover_text("Each file on its own new track at the start, named without a leading speaker number")
+                .clicked()
+            {
+                ui.close_menu();
+                insert_files_as_tracks(st);
+            }
+            let picked = st.files_ui.selected.len();
+            if ui
+                .add_enabled(picked > 0, egui::Button::new("Insert Selected Files as Tracks"))
+                .on_disabled_hover_text("Pick files in the Files panel first")
+                .clicked()
+            {
+                let order: Vec<_> = st.docs.iter().map(|d| d.id).collect();
+                let docs = st.files_ui.picked_in(&order);
+                st.import_docs(docs, crate::sessions::Layout::AsTracks);
+                ui.close_menu();
+            }
+            if ui.button("Session Properties...").clicked() {
+                open_props(st);
+                ui.close_menu();
+            }
             if ui.button("Insert Current File at Playhead").clicked() {
                 if let (Some(d), Some(t)) = (
                     st.current,
@@ -1826,7 +1988,23 @@ impl eframe::App for App {
                 .collect()
         });
         if !dropped.is_empty() {
-            self.st.open_paths(dropped);
+            // Files from the file manager: the Multitrack takes them if
+            // they landed on its lanes (where the pointer and Alt are read
+            // from the system: the window heard neither during the drag);
+            // anywhere else they open.
+            let ppp = ctx.pixels_per_point();
+            let pos = crate::hwcursor::system_pointer()
+                .map(|(x, y)| egui::pos2(x / ppp, y / ppp))
+                .or(ctx.input(|i| i.pointer.hover_pos()));
+            let alt = crate::hwcursor::alt_down() || ctx.input(|i| i.modifiers.alt);
+            self.st.sessions.os_drop = Some(crate::sessions::OsDrop {
+                paths: dropped,
+                pos,
+                alt,
+            });
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.st.may_quit() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.st.tick();
         self.keys(ctx);
@@ -2037,6 +2215,17 @@ impl eframe::App for App {
         if let Some(t) = open_tab {
             self.show_tab(t);
         }
+        // Dropped files the Multitrack did not take open (folders searched).
+        if let Some(d) = self.st.sessions.os_drop.take() {
+            let (audio, sessions) = crate::sessions::expand_paths(&d.paths);
+            for s in sessions {
+                self.st.open_session(&s);
+            }
+            for a in audio {
+                self.st.load_file(a, None);
+            }
+        }
+        crate::sessions::windows(ctx, &mut self.st);
         if std::mem::take(&mut self.st.reset_workspace) {
             self.dock = self.st.workspace.build();
         }
