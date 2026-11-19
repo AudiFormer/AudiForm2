@@ -9,7 +9,7 @@
 //! after the note ends, velocity and pan. Only the track's resonant
 //! low-pass filter keeps state. Nothing allocates while playing.
 
-use af27_core::midi::{note_freq, Instrument, Wave};
+use af27_core::midi::{note_freq, Instrument, Segment, Wave};
 use af27_core::time::db_to_gain;
 use std::f32::consts::{PI, TAU};
 
@@ -205,17 +205,31 @@ impl Svf {
     }
 }
 
-/// The metronome click at time `t`: a short ping on every beat, higher on
-/// the first beat of each bar.
+/// The metronome click at time `t` on a tempo map's stretches (in
+/// order): a short ping on every beat of the time signature (eighths in
+/// 6/8), higher on the first beat of each bar.
 #[inline]
-pub fn click(t: f64, bpm: f64, beats_per_bar: u32) -> f32 {
-    let spb = 60.0 / bpm.max(1.0);
-    let k = (t / spb).floor();
-    let local = (t - k * spb) as f32;
-    if !(0.0..0.04).contains(&local) {
+pub fn click(t: f64, segs: &[Segment]) -> f32 {
+    let Some(first) = segs.first() else {
+        return 0.0;
+    };
+    let mut seg = first;
+    for s in &segs[1..] {
+        if s.secs > t {
+            break;
+        }
+        seg = s;
+    }
+    let spb = seg.spq() * seg.unit_beats();
+    let into = (t - seg.secs).max(0.0);
+    // A hair of slack so a beat computed a little late still sounds.
+    let k = ((into + 1e-9) / spb).floor();
+    let local = (into - k * spb) as f32;
+    if !(0.0..0.04).contains(&local) || t < 0.0 {
         return 0.0;
     }
-    let accent = (k as i64).rem_euclid(beats_per_bar.max(1) as i64) == 0;
+    // Each stretch starts on a bar line.
+    let accent = (k as i64).rem_euclid(seg.beats_per_bar.max(1) as i64) == 0;
     let f = if accent { 1760.0 } else { 1320.0 };
     (TAU * f * local).sin() * (-local * 120.0).exp() * if accent { 0.5 } else { 0.35 }
 }
@@ -256,8 +270,39 @@ mod tests {
 
     #[test]
     fn clicks_land_on_beats() {
-        assert!(click(0.001, 120.0, 4).abs() > 0.0);
-        assert_eq!(click(0.25, 120.0, 4), 0.0);
-        assert!(click(0.5005, 120.0, 4).abs() > 0.0);
+        let t = af27_core::midi::Tempo::default();
+        let segs: Vec<_> = t.segments().collect();
+        assert!(click(0.001, &segs).abs() > 0.0);
+        assert_eq!(click(0.25, &segs), 0.0);
+        assert!(click(0.5005, &segs).abs() > 0.0);
+    }
+
+    #[test]
+    fn clicks_follow_the_tempo_map_with_the_bar_accented() {
+        use af27_core::midi::{Tempo, TempoChange};
+        // One bar of 4/4 at 120 (2 s), then 6/8 at 60: eighths every 0.5 s.
+        let mut t = Tempo::default();
+        t.changes.push(TempoChange {
+            bar: 1,
+            bpm: 60.0,
+            beats_per_bar: 6,
+            beat_unit: 8,
+            ext_id: None,
+        });
+        let segs: Vec<_> = t.segments().collect();
+        let at = |x: f64| click(x + 0.0005, &segs);
+        // Accent (higher, louder) on each bar's first beat.
+        let peak = |x: f64| {
+            (0..400)
+                .map(|i| click(x + i as f64 / 20_000.0, &segs).abs())
+                .fold(0.0f32, f32::max)
+        };
+        assert!(peak(0.0) > peak(0.5) * 1.2);
+        assert!(peak(2.0) > peak(2.5) * 1.2);
+        assert!(at(2.5).abs() > 0.0 && at(3.0).abs() > 0.0);
+        assert_eq!(click(2.25, &segs), 0.0);
+        // Six eighths later (3 s into 6/8) the next bar is accented again.
+        assert!(peak(5.0) > peak(4.5) * 1.2);
+        assert!(peak(4.5) > 0.1);
     }
 }

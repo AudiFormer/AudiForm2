@@ -55,6 +55,8 @@ pub struct MixTrack {
     pub gain_r: f32,
     pub clips: Vec<MixClip>,
     pub synth: Option<Synth>,
+    /// A SoundFont in place of the built-in synth.
+    pub font: Option<Box<crate::soundfont::SfPlayer>>,
     pub chain: Chain,
     /// Index of the bus track it feeds, or None for the master.
     pub output: Option<usize>,
@@ -86,7 +88,10 @@ pub struct Mix {
     pub master: f32,
     pub duration: f64,
     pub space: Option<SpaceMix>,
-    pub metronome: Option<(f64, u32)>,
+    /// The click is on.
+    pub metronome: bool,
+    /// The tempo map's stretches, for the click.
+    pub click: Vec<af27_core::midi::Segment>,
     ml: Vec<f32>,
     mr: Vec<f32>,
     /// The audio and MIDI tracks (not buses), whose own work runs in parallel.
@@ -211,6 +216,9 @@ fn render_source(t: &mut MixTrack, t0: f64, dt: f64, n: usize) {
     if let Some(s) = &mut t.synth {
         s.render(t0, dt, &mut t.l[..n], &mut t.r[..n]);
     }
+    if let Some(f) = &mut t.font {
+        f.render(t0, dt, &mut t.l[..n], &mut t.r[..n]);
+    }
     t.chain.process(&mut t.l[..n], &mut t.r[..n]);
     // With no pre-fader send, the fader can go on here, in parallel too.
     if !t.has_pre {
@@ -273,7 +281,8 @@ fn read_clip(c: &MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
     let ch = &c.buf.channels;
     // The fades change the gain; in the plain middle of a clip it is fixed.
     let in_fade = |local: f64| {
-        (c.fade_in > 0.0 && local < c.fade_in) || (c.fade_out > 0.0 && c.length - local < c.fade_out)
+        (c.fade_in > 0.0 && local < c.fade_in)
+            || (c.fade_out > 0.0 && c.length - local < c.fade_out)
     };
     let local_first = t0 + dt * first as f64 - c.start;
     let local_last = t0 + dt * (last - 1) as f64 - c.start;
@@ -297,7 +306,9 @@ fn read_clip(c: &MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
                     *p += y * g;
                 }
             } else {
-                for (k, (((o, p), x), y)) in dl.iter_mut().zip(dr.iter_mut()).zip(sa).zip(sb).enumerate() {
+                for (k, (((o, p), x), y)) in
+                    dl.iter_mut().zip(dr.iter_mut()).zip(sa).zip(sb).enumerate()
+                {
                     let g = clip_gain(c, local_first + dt * k as f64);
                     *o += x * g;
                     *p += y * g;
@@ -382,25 +393,42 @@ pub fn build(
                     })
                 })
                 .collect();
-            let synth = (t.kind == TrackKind::Midi).then(|| {
-                let notes = t
-                    .midi
-                    .iter()
-                    .filter(|c| !c.muted)
-                    .flat_map(|c| {
-                        c.notes
-                            .iter()
-                            .filter(move |n| n.start < c.length)
-                            .map(move |n| {
-                                let s = session.tempo.secs(c.start + n.start);
-                                let e = session
-                                    .tempo
-                                    .secs(c.start + (n.start + n.length).min(c.length));
-                                synth::note(s, e, n.pitch, n.velocity, n.pan)
-                            })
+            // Notes in seconds, through the tempo map, cut at their clip's end.
+            let notes = || {
+                t.midi.iter().filter(|c| !c.muted).flat_map(|c| {
+                    c.notes
+                        .iter()
+                        .filter(move |n| n.start < c.length)
+                        .map(move |n| {
+                            let s = session.tempo.secs(c.start + n.start);
+                            let e = session
+                                .tempo
+                                .secs(c.start + (n.start + n.length).min(c.length));
+                            (s, e, n)
+                        })
+                })
+            };
+            let midi = t.kind == TrackKind::Midi;
+            let font = t.soundfont.as_ref().filter(|_| midi).and_then(|sf| {
+                let list = notes()
+                    .map(|(s, e, n)| crate::soundfont::SfNote {
+                        start: s,
+                        end: e,
+                        key: n.pitch,
+                        velocity: n.velocity.clamp(1, 127),
+                        pan: n.pan,
                     })
                     .collect();
-                Synth::new(t.instrument, notes, rate)
+                // A font that is missing or cannot play leaves the track silent.
+                crate::soundfont::SfPlayer::new(sf, list, rate)
+                    .ok()
+                    .map(Box::new)
+            });
+            let synth = (midi && t.soundfont.is_none()).then(|| {
+                let list = notes()
+                    .map(|(s, e, n)| synth::note(s, e, n.pitch, n.velocity, n.pan))
+                    .collect();
+                Synth::new(t.instrument, list, rate)
             });
             let stereo =
                 t.kind != TrackKind::Audio || clips.iter().any(|c| c.buf.num_channels() >= 2);
@@ -416,6 +444,7 @@ pub fn build(
                 gain_r,
                 clips,
                 synth,
+                font,
                 chain: build_chain(&t.chain, rate, BLOCK),
                 output: t
                     .output
@@ -479,10 +508,8 @@ pub fn build(
         master: db_to_gain(session.master_db),
         duration: session.duration(),
         space,
-        metronome: session
-            .tempo
-            .metronome
-            .then_some((session.tempo.bpm, session.tempo.beats_per_bar)),
+        metronome: session.tempo.metronome,
+        click: session.tempo.segments().collect(),
         ml: vec![0.0; BLOCK],
         mr: vec![0.0; BLOCK],
     }
@@ -499,6 +526,9 @@ impl Mix {
             t.chain.reset();
             if let Some(s) = &mut t.synth {
                 s.reset();
+            }
+            if let Some(f) = &mut t.font {
+                f.reset();
             }
         }
         self.master_chain.reset();
@@ -534,7 +564,11 @@ impl Mix {
         match out {
             Some(bus) if bus != ti && (bus > ti || !self.tracks[ti].is_bus) => {
                 let (t, b) = pair(&mut self.tracks, ti, bus);
-                for ((bl, br), (l, r)) in b.l[..n].iter_mut().zip(&mut b.r[..n]).zip(t.l[..n].iter().zip(&t.r[..n])) {
+                for ((bl, br), (l, r)) in b.l[..n]
+                    .iter_mut()
+                    .zip(&mut b.r[..n])
+                    .zip(t.l[..n].iter().zip(&t.r[..n]))
+                {
                     *bl += l;
                     *br += r;
                 }
@@ -556,7 +590,11 @@ impl Mix {
                 }
                 None => {
                     let t = &self.tracks[ti];
-                    for ((ml, mr), (l, r)) in self.ml[..n].iter_mut().zip(&mut self.mr[..n]).zip(t.l[..n].iter().zip(&t.r[..n])) {
+                    for ((ml, mr), (l, r)) in self.ml[..n]
+                        .iter_mut()
+                        .zip(&mut self.mr[..n])
+                        .zip(t.l[..n].iter().zip(&t.r[..n]))
+                    {
                         *ml += l;
                         *mr += r;
                     }
@@ -575,7 +613,11 @@ impl Mix {
                 continue;
             }
             let (t, b) = pair(&mut self.tracks, ti, bus);
-            for ((bl, br), (l, r)) in b.l[..n].iter_mut().zip(&mut b.r[..n]).zip(t.l[..n].iter().zip(&t.r[..n])) {
+            for ((bl, br), (l, r)) in b.l[..n]
+                .iter_mut()
+                .zip(&mut b.r[..n])
+                .zip(t.l[..n].iter().zip(&t.r[..n]))
+            {
                 *bl += l * g;
                 *br += r * g;
             }
@@ -696,8 +738,8 @@ impl Mix {
         for i in 0..n {
             let mut l = self.ml[i] * self.master;
             let mut r = self.mr[i] * self.master;
-            if let Some((bpm, bpb)) = self.metronome {
-                let c = synth::click(t0 + dt * i as f64, bpm, bpb);
+            if self.metronome {
+                let c = synth::click(t0 + dt * i as f64, &self.click);
                 l += c;
                 r += c;
             }

@@ -120,6 +120,10 @@ pub struct Track {
     /// MIDI tracks: the built-in instrument's settings.
     #[serde(default)]
     pub instrument: crate::midi::Instrument,
+    /// MIDI tracks: a SoundFont that plays the notes instead of the
+    /// built-in synth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soundfont: Option<crate::midi::SoundFontRef>,
     /// The object's id in an `.audfrm` file it came from, so saving back
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,6 +308,7 @@ impl Session {
             pos: Default::default(),
             midi: Vec::new(),
             instrument: Default::default(),
+            soundfont: None,
             ext_id: None,
         });
         id

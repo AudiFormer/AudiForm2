@@ -27,6 +27,7 @@ mod space;
 mod spectral_select;
 mod splash;
 mod state;
+mod tempo;
 mod theme;
 mod transport;
 mod ui;

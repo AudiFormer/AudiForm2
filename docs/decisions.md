@@ -73,3 +73,74 @@
   the lead's PC.
 - **Visual Effects Auto/Full/Lite.** Auto watches real frame pacing and
   drops to Lite on slow devices.
+
+## 2026-11-19: Tempo map, MIDI files, piano roll, quantize, SoundFonts
+
+- **Tempo map.** `Tempo` now carries `beat_unit` and `changes` (bar,
+  tempo, top, bottom), the model Audiform's `.audfrm` already stores:
+  changes on bar lines (bars from 0, so 1 is the second bar), no ramps,
+  beats are quarter notes, each stretch starts where the previous one's
+  bars end, out-of-order changes are ignored as Audiform does. It drives
+  note timing, the synth, the click (accent on each bar's first beat, a
+  click per beat of the time signature: eighths in 6/8), bar.beat.tick
+  (960 ticks per beat of the time signature), the piano roll's bar and
+  beat lines, a bar grid and bar numbers in the Multitrack (shown when
+  there are MIDI tracks, tempo changes or the metronome), new clips (on
+  bars, four bars long) and the session's length. Multitrack > Tempo and
+  Time Signature... lists the start and every change (bar, tempo, time
+  signature, where it starts) with Add at Playhead and Delete; the
+  transport's tempo field and time signature show and edit the stretch
+  under the playhead.
+- **`.audfrm` compatibility.** The map is read from and written to
+  `tempo` in place. A value read and not edited is written back exactly
+  (same number form), each change keeps its id and any fields we do not
+  use, and a session without changes keeps the file's own `changes`, so
+  unedited sessions save byte-for-byte as before. The "only the first
+  tempo plays" notice is gone.
+- **MIDI files** via `midly` (Unlicense). File > Import > MIDI File...
+  makes one MIDI track per SMF track and channel with notes, each with one
+  clip from the bar of its first note; velocity, channel and pan
+  (controller 10) come across; tempo and time signature events become the
+  map (an event inside a bar moves to the nearest bar line, and a toast
+  says how many). If the session already has tempo changes the app asks
+  before replacing them. Multitrack > Export > MIDI File... writes format
+  1 at 960 PPQ, the map in track 0, one track per MIDI track (unmuted
+  clips as they play, cut at clip ends, pan as controller 10 when it
+  changes). Export then import gives the same notes and map (tested).
+- **Piano roll parity with Audiform.** Draw, Select and Erase tools;
+  Shift-click and box select; moving or stretching one picked note moves
+  or stretches them all (both ends stretch); right-drag erases; Cut, Copy,
+  Paste (at the playhead, or the last spot clicked when the playhead is
+  outside the clip; the clip grows to the next bar line if needed),
+  Delete and Select All on the usual keys while the pointer is over the
+  roll; Tools: velocity set, scale %, randomize; pan set, randomize;
+  channel; Humanize in ms; triplet grids and a one-bar grid; Alt leaves
+  the grid; key height (Alt+wheel or buttons), middle-button pan. Notes
+  sound through the track's instrument when pressed, drawn and moved to
+  another pitch, and the keys play. Every gesture is one undo step.
+- **Quantize** (new): grid (with triplets), strength, swing (100% puts
+  the off-beat a third of a step late, the 2:1 feel), starts on or off,
+  ends kept, pulled to the grid, or lengths to whole steps; on the picked
+  notes or the whole clip. The grid counts from the session start.
+- **SoundFont instruments** via `rustysynth` (MIT, pure Rust). A MIDI
+  track's Inspector picks Built-in synth or SoundFont (.sf2)..., with a
+  file picker, preset list (bank:program name) and level. Fonts load once
+  on the UI thread and are shared; each track's player has its own
+  synthesizer made when the mix is built, plays a pre-sorted event list
+  and renders into buffers it already has, so nothing allocates on the
+  audio thread. Jumps let every note go and restart the notes sounding
+  there. Notes take channels in turn (not 10) so per-note pan holds; the
+  preset is set on all of them, and drum kits are bank 128. Reverb and
+  chorus in the font player are off (use the track's effects). A missing
+  font leaves the track silent and says so in the Inspector.
+- **Where the SoundFont is saved.** `.audfrm` has no place for it, so it
+  goes in AudiForm 2's own track field `af27_soundfont` (path, bank,
+  program, preset name, level), next to the existing `af27_synth`; the
+  writer only adds it when a track uses a SoundFont and removes it when
+  the track goes back to the built-in synth, so other sessions are
+  untouched and Audiform keeps the field. `.af27` saves it as
+  `soundfont` on the track.
+- **Hand-played notes** go through an audition voice in the engine, made
+  on the UI thread for the open track's instrument and swapped in over
+  the command queue (the old one comes back to be freed), heard whether
+  or not the transport runs and never in exports.

@@ -218,7 +218,7 @@ impl TimeFormat {
 }
 
 /// A time format with what it needs: the sample rate and the tempo.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimeCtx {
     pub format: TimeFormat,
     pub rate: u32,

@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use af27_core::midi::{MidiClip, MidiNote};
+use af27_core::midi::{MidiClip, MidiNote, SoundFontRef, TempoChange};
 use af27_core::session::{Clip, EffectSlot, Marker, MediaItem, Send, Session, TrackKind};
 use af27_core::space::{Monitor, SpaceLayout};
 use serde_json::{json, Map, Value};
@@ -188,12 +188,20 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
     if let Some(t) = v.get("tempo").filter(|t| t.is_object()) {
         out.tempo.bpm = t["bpm"].as_f64().unwrap_or(120.0);
         out.tempo.beats_per_bar = t["beats_per_bar"].as_u64().unwrap_or(4) as u32;
-        if t["changes"].as_array().is_some_and(|c| !c.is_empty()) {
-            notices.push(
-                "Tempo changes are kept in the file; Audiform27 plays the first tempo for now."
-                    .into(),
-            );
-        }
+        out.tempo.beat_unit = t["beat_unit"].as_u64().unwrap_or(4) as u32;
+        // Kept in the file's order; the map reads them as Audiform does.
+        out.tempo.changes = t["changes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| TempoChange {
+                bar: c["bar"].as_u64().unwrap_or(0) as u32,
+                bpm: c["bpm"].as_f64().unwrap_or(out.tempo.bpm),
+                beats_per_bar: c["beats_per_bar"].as_u64().unwrap_or(4) as u32,
+                beat_unit: c["beat_unit"].as_u64().unwrap_or(4) as u32,
+                ext_id: c["id"].as_str().map(str::to_string),
+            })
+            .collect();
     }
     if let Some(sp) = v.get("space").filter(|s| s.is_object()) {
         out.space = sp["layout"].as_str().and_then(layout_from);
@@ -337,6 +345,9 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
             {
                 tr.instrument = inst;
             }
+            tr.soundfont = t
+                .get("af27_soundfont")
+                .and_then(|s| serde_json::from_value::<SoundFontRef>(s.clone()).ok());
             tr.clips = clips;
             tr.midi = midi;
             tr.chain = chain;
@@ -406,6 +417,21 @@ fn obj(v: Value) -> Map<String, Value> {
         Value::Object(m) => m,
         _ => Map::new(),
     }
+}
+
+/// Writes a number unless the object already holds the same value (so
+/// `9` stays `9` and `120.0` stays `120.0`). Whole values are written as
+/// integers.
+fn set_num(o: &mut Map<String, Value>, key: &str, v: f64) {
+    if o.get(key).and_then(Value::as_f64) == Some(v) {
+        return;
+    }
+    let val = if v.fract() == 0.0 && (0.0..9.0e15).contains(&v) && key != "bpm" {
+        json!(v as u64)
+    } else {
+        json!(v)
+    };
+    o.insert(key.into(), val);
 }
 
 fn empty_chain() -> Value {
@@ -479,12 +505,39 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
     doc.entry("template_id").or_insert(Value::Null);
     doc.entry("metadata").or_insert_with(|| json!({"show_id": null, "title": null, "show": null, "episode_number": null, "season_number": null, "description": null, "artist": null, "artwork": null, "explicit": false}));
 
-    // Tempo: the first tempo is Audiform27's; changes and beat unit pass through.
-    let mut tempo = obj(base.map(|b| b["tempo"].clone()).unwrap_or(Value::Null));
+    // Tempo: the map is Audiform27's. A value read from the file and not
+    // changed is written back exactly as it was, and a map with no changes
+    // keeps the file's own `changes`, so an unedited session saves the same.
+    let base_tempo = base.map(|b| &b["tempo"]);
+    let mut tempo = obj(base_tempo.cloned().unwrap_or(Value::Null));
     tempo.insert("bpm".into(), json!(session.tempo.bpm));
     tempo.insert("beats_per_bar".into(), json!(session.tempo.beats_per_bar));
-    tempo.entry("beat_unit").or_insert_with(|| json!(4));
-    tempo.entry("changes").or_insert_with(|| json!([]));
+    set_num(&mut tempo, "beat_unit", session.tempo.beat_unit as f64);
+    let base_changes = base_tempo.and_then(|t| t["changes"].as_array());
+    if session.tempo.changes.is_empty() && !base_changes.is_some_and(|c| !c.is_empty()) {
+        tempo.entry("changes").or_insert_with(|| json!([]));
+    } else {
+        let changes: Vec<Value> = session
+            .tempo
+            .changes
+            .iter_mut()
+            .map(|c| {
+                let mut co = obj(by_id(base_changes, c.ext_id.as_deref())
+                    .cloned()
+                    .unwrap_or(Value::Null));
+                co.insert(
+                    "id".into(),
+                    json!(c.ext_id.get_or_insert_with(new_uuid).clone()),
+                );
+                set_num(&mut co, "bar", c.bar as f64);
+                set_num(&mut co, "bpm", c.bpm);
+                set_num(&mut co, "beats_per_bar", c.beats_per_bar as f64);
+                set_num(&mut co, "beat_unit", c.beat_unit as f64);
+                Value::Object(co)
+            })
+            .collect();
+        tempo.insert("changes".into(), Value::Array(changes));
+    }
     doc.insert("tempo".into(), Value::Object(tempo));
     match session.space {
         Some(l) => {
@@ -702,6 +755,18 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 "af27_synth".into(),
                 serde_json::to_value(t.instrument).unwrap_or(Value::Null),
             );
+            // Audiform27's own field, like `af27_synth`: Audiform keeps it.
+            match &t.soundfont {
+                Some(sf) => {
+                    o.insert(
+                        "af27_soundfont".into(),
+                        serde_json::to_value(sf).unwrap_or(Value::Null),
+                    );
+                }
+                None => {
+                    o.remove("af27_soundfont");
+                }
+            }
         }
         tracks.push(Value::Object(o));
     }
@@ -863,6 +928,54 @@ mod tests {
         );
         assert_eq!(out["a_field_from_the_future"]["keep"], json!("me"));
         assert_eq!(out["tempo"]["changes"][0]["bar"], json!(9));
+    }
+
+    #[test]
+    fn tempo_map_and_soundfont_round_trip() {
+        let imp = import(SAMPLE, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        assert_eq!(s.tempo.changes.len(), 1);
+        assert_eq!(s.tempo.changes[0].bar, 9);
+        assert_eq!(s.tempo.changes[0].bpm, 120.0);
+        assert_eq!(s.tempo.changes[0].ext_id.as_deref(), Some("tc1"));
+        // Eight bars of 3/4 at 96 BPM before the change.
+        assert!((s.tempo.secs(24.0) - 15.0).abs() < 1e-9);
+        // An edit writes only that value; a new change gets an id.
+        s.tempo.changes[0].bpm = 130.0;
+        s.tempo.add_change(12);
+        let out = export(&mut s, Some(&base));
+        let ch = &out["tempo"]["changes"];
+        assert_eq!(ch[0]["id"], json!("tc1"));
+        assert_eq!(ch[0]["bar"], json!(9));
+        assert_eq!(ch[0]["bpm"], json!(130.0));
+        assert_eq!(ch[1]["bar"], json!(12));
+        assert!(ch[1]["id"].as_str().is_some_and(|x| !x.is_empty()));
+        assert_eq!(out["tempo"]["beat_unit"], json!(4));
+        let back = import(&out.to_string(), Path::new(".")).unwrap().session;
+        assert_eq!(back.tempo.changes.len(), 2);
+        assert_eq!(back.tempo.changes[1].bpm, 130.0);
+
+        // A SoundFont on a MIDI track rides in Audiform27's own field.
+        let mut s = Session::new("sf", 48_000, 0);
+        let t = s.add_track_of(TrackKind::Midi);
+        s.track_mut(t).unwrap().soundfont = Some(SoundFontRef {
+            path: "C:/fonts/gm.sf2".into(),
+            bank: 0,
+            program: 24,
+            preset_name: "Nylon Guitar".into(),
+            gain_db: -3.0,
+        });
+        let out = export(&mut s, None);
+        assert_eq!(out["tracks"][0]["af27_soundfont"]["program"], json!(24));
+        let back = import(&out.to_string(), Path::new(".")).unwrap();
+        assert_eq!(back.session.tracks[0].soundfont, s.tracks[0].soundfont);
+        // Back to the built-in synth: the field goes.
+        let base = back.base.unwrap();
+        let mut s2 = back.session;
+        s2.tracks[0].soundfont = None;
+        let out = export(&mut s2, Some(&base));
+        assert!(out["tracks"][0].get("af27_soundfont").is_none());
     }
 
     #[test]

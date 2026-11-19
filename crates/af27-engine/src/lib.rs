@@ -15,6 +15,7 @@
 pub mod mix;
 pub mod pool;
 pub mod scope;
+pub mod soundfont;
 pub mod synth;
 pub mod transport;
 
@@ -92,7 +93,28 @@ enum Cmd {
         track: u16,
         inst: af27_core::midi::Instrument,
     },
-    Metronome(Option<(f64, u32)>),
+    Metronome(bool),
+    /// SoundFont level of a track.
+    FontGain {
+        track: u16,
+        db: f32,
+    },
+    /// What hand-played notes go through.
+    Audition(Box<soundfont::Audition>),
+    NoteOn {
+        pitch: u8,
+        velocity: u8,
+        pan: f32,
+    },
+    NoteOff(u8),
+    AllNotesOff,
+}
+
+/// What the audio thread hands back to be freed on the UI thread.
+#[allow(dead_code)]
+enum Garbage {
+    Program(Box<Program>),
+    Audition(Box<soundfont::Audition>),
 }
 
 struct Shared {
@@ -110,13 +132,14 @@ fn store_max_f32(a: &AtomicU32, v: f32) {
 
 struct Voice {
     program: Option<Box<Program>>,
+    audition: Option<Box<soundfont::Audition>>,
     playing: bool,
     t: f64,
     plan: Plan,
 }
 
 impl Voice {
-    fn apply(&mut self, cmd: Cmd, trash: &mut rtrb::Producer<Box<Program>>) {
+    fn apply(&mut self, cmd: Cmd, trash: &mut rtrb::Producer<Garbage>) {
         let mix = match self.program.as_deref_mut() {
             Some(Program::Mix(m)) => Some(m.as_mut()),
             _ => None,
@@ -124,7 +147,7 @@ impl Voice {
         match cmd {
             Cmd::Program(p) => {
                 if let Some(old) = self.program.replace(p) {
-                    if let Err(rtrb::PushError::Full(old)) = trash.push(old) {
+                    if let Err(rtrb::PushError::Full(old)) = trash.push(Garbage::Program(old)) {
                         // Never free on the audio thread.
                         std::mem::forget(old);
                     }
@@ -208,9 +231,43 @@ impl Voice {
                     s.set(inst);
                 }
             }
-            Cmd::Metronome(m2) => {
+            Cmd::Metronome(on) => {
                 if let Some(m) = mix {
-                    m.metronome = m2;
+                    m.metronome = on;
+                }
+            }
+            Cmd::FontGain { track, db } => {
+                if let Some(f) = mix
+                    .and_then(|m| m.tracks.get_mut(track as usize))
+                    .and_then(|t| t.font.as_mut())
+                {
+                    f.set_gain(db);
+                }
+            }
+            Cmd::Audition(a) => {
+                if let Some(old) = self.audition.replace(a) {
+                    if let Err(rtrb::PushError::Full(old)) = trash.push(Garbage::Audition(old)) {
+                        std::mem::forget(old);
+                    }
+                }
+            }
+            Cmd::NoteOn {
+                pitch,
+                velocity,
+                pan,
+            } => {
+                if let Some(a) = &mut self.audition {
+                    a.note_on(pitch, velocity, pan);
+                }
+            }
+            Cmd::NoteOff(pitch) => {
+                if let Some(a) = &mut self.audition {
+                    a.note_off(pitch);
+                }
+            }
+            Cmd::AllNotesOff => {
+                if let Some(a) = &mut self.audition {
+                    a.all_off();
                 }
             }
         }
@@ -313,7 +370,7 @@ fn cross(t: &mut f64, playing: &mut bool, seam: f64, action: transport::Action) 
 pub struct Engine {
     _stream: cpal::Stream,
     tx: rtrb::Producer<Cmd>,
-    trash: rtrb::Consumer<Box<Program>>,
+    trash: rtrb::Consumer<Garbage>,
     shared: Arc<Shared>,
     pub rate: u32,
     pub device: String,
@@ -335,7 +392,7 @@ impl Engine {
         let channels = config.channels() as usize;
         scope::set_rate(rate);
         let (tx, mut rx) = rtrb::RingBuffer::<Cmd>::new(1024);
-        let (mut trash_tx, trash) = rtrb::RingBuffer::<Box<Program>>::new(256);
+        let (mut trash_tx, trash) = rtrb::RingBuffer::<Garbage>::new(256);
         let shared = Arc::new(Shared {
             playing: AtomicBool::new(false),
             pos: AtomicU64::new(0f64.to_bits()),
@@ -345,6 +402,7 @@ impl Engine {
         let sh = shared.clone();
         let mut voice = Voice {
             program: None,
+            audition: None,
             playing: false,
             t: 0.0,
             plan: Plan::default(),
@@ -354,6 +412,10 @@ impl Engine {
                 voice.apply(cmd, &mut trash_tx);
             }
             let (l, r) = voice.render(out, channels, rate as f64, false);
+            // Hand-played notes, heard whether or not the transport runs.
+            if let Some(a) = &mut voice.audition {
+                a.render(out, channels, 1.0 / rate as f64);
+            }
             if voice.playing {
                 for f in out.chunks_exact(channels) {
                     scope::push(f[0], if channels > 1 { f[1] } else { f[0] });
@@ -519,8 +581,36 @@ impl Engine {
         });
     }
 
-    pub fn set_metronome(&mut self, m: Option<(f64, u32)>) {
-        self.send(Cmd::Metronome(m));
+    pub fn set_metronome(&mut self, on: bool) {
+        self.send(Cmd::Metronome(on));
+    }
+
+    pub fn set_font_gain(&mut self, track: usize, db: f32) {
+        self.send(Cmd::FontGain {
+            track: track as u16,
+            db,
+        });
+    }
+
+    /// Sets what hand-played notes go through (built on this thread).
+    pub fn set_audition(&mut self, a: soundfont::Audition) {
+        self.send(Cmd::Audition(Box::new(a)));
+    }
+
+    pub fn note_on(&mut self, pitch: u8, velocity: u8, pan: f32) {
+        self.send(Cmd::NoteOn {
+            pitch,
+            velocity,
+            pan,
+        });
+    }
+
+    pub fn note_off(&mut self, pitch: u8) {
+        self.send(Cmd::NoteOff(pitch));
+    }
+
+    pub fn all_notes_off(&mut self) {
+        self.send(Cmd::AllNotesOff);
     }
 
     pub fn is_playing(&self) -> bool {
@@ -598,6 +688,7 @@ fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -
     };
     let mut v = Voice {
         program: Some(Box::new(program)),
+        audition: None,
         playing: true,
         t: from,
         plan: Plan::new(to, Region::None),
@@ -633,6 +724,7 @@ pub fn render_each(
         playing: true,
         t: from,
         plan: Plan::new(to, Region::None),
+        audition: None,
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.reset();
@@ -983,9 +1075,10 @@ mod tests {
         s.master_chain.push(amp(-6.0206));
         let b2 = buf.clone();
         let program = mix_program(&s, &move |_| Some(b2.clone()), 100);
-        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        let (mut trash, _rx) = rtrb::RingBuffer::<Garbage>::new(4);
         let mut v = Voice {
             program: Some(Box::new(program)),
+            audition: None,
             playing: false,
             t: 0.0,
             plan: Plan::default(),
@@ -1003,7 +1096,7 @@ mod tests {
             out[2]
         };
         assert!((centre(&mut v) - 0.5).abs() < 1e-3);
-        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        let (mut trash, _rx) = rtrb::RingBuffer::<Garbage>::new(4);
         let mut vals = [0.0; MAX_VALUES];
         vals[0] = -12.0412;
         v.apply(
@@ -1047,6 +1140,7 @@ mod tests {
             playing: false,
             t: 0.0,
             plan: Plan::default(),
+            audition: None,
         }
     }
 
@@ -1054,7 +1148,7 @@ mod tests {
     /// the frame reached plus the last sample heard (in frames, x1000).
     fn play_frames(region: Region, from: f64, frames: usize) -> (f64, f32) {
         let mut v = ramp_voice();
-        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        let (mut trash, _rx) = rtrb::RingBuffer::<Garbage>::new(4);
         v.apply(
             Cmd::Play {
                 from: from / 1000.0,
@@ -1114,7 +1208,7 @@ mod tests {
     #[test]
     fn retargeting_keeps_playing_from_where_it_was() {
         let mut v = ramp_voice();
-        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        let (mut trash, _rx) = rtrb::RingBuffer::<Garbage>::new(4);
         v.apply(
             Cmd::Play {
                 from: 0.05,
@@ -1167,6 +1261,49 @@ mod tests {
         });
         let out = render(mix_program(&s, &|_| None, 48_000), 48_000, 0.0, 1.0);
         assert!(out.peak() > 0.01);
+    }
+
+    #[test]
+    fn notes_follow_the_tempo_map() {
+        use af27_core::midi::{MidiClip, MidiNote, TempoChange};
+        // One bar of 4/4 at 120 (2 s), then 60 BPM: beat 5 is at 3 s.
+        let mut s = Session::new("m", 48_000, 0);
+        s.tempo.changes.push(TempoChange {
+            bar: 1,
+            bpm: 60.0,
+            beats_per_bar: 4,
+            beat_unit: 4,
+            ext_id: None,
+        });
+        let t = s.add_track_of(TrackKind::Midi);
+        let ti = s.track_index(t).unwrap();
+        s.tracks[ti].instrument.attack = 0.001;
+        s.tracks[ti].instrument.release = 0.01;
+        s.tracks[ti].midi.push(MidiClip {
+            id: 1,
+            name: "c".into(),
+            start: 4.0,
+            length: 4.0,
+            notes: vec![MidiNote {
+                pitch: 69,
+                start: 1.0,
+                length: 0.5,
+                velocity: 127,
+                channel: 0,
+                pan: 0.0,
+            }],
+            muted: false,
+            ext_id: None,
+        });
+        let rate = 8_000;
+        let out = render(mix_program(&s, &|_| None, rate), rate, 0.0, 4.0);
+        let ch = &out.channels[0];
+        let first = ch.iter().position(|v| v.abs() > 1e-3).unwrap();
+        let last = ch.iter().rposition(|v| v.abs() > 1e-3).unwrap();
+        // Starts at 3 s, held half a beat (0.5 s at 60 BPM), then a short release.
+        assert!((first as f64 / rate as f64 - 3.0).abs() < 0.002, "{first}");
+        assert!((last as f64 / rate as f64 - 3.5).abs() < 0.03, "{last}");
+        assert!((s.duration() - 6.0).abs() < 1e-9);
     }
 }
 

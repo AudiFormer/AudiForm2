@@ -236,6 +236,9 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
 
     // MIDI instrument.
     if kind == TrackKind::Midi {
+        instrument_choice(ui, st, ti);
+    }
+    if kind == TrackKind::Midi && st.session.tracks[ti].soundfont.is_none() {
         ui.collapsing("Instrument (built-in synth)", |ui| {
             let b2 = st.session.clone();
             let mut ch = false;
@@ -312,6 +315,153 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     }
     ui.separator();
     chain(ui, st, ti as u16);
+}
+
+/// Picks a SoundFont file.
+fn pick_sf2() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("SoundFont", &["sf2"])
+        .pick_file()
+}
+
+/// A MIDI track's instrument: the built-in synth or a SoundFont, with its
+/// file, preset and level.
+fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
+    let th = st.theme.clone();
+    let current = st.session.tracks[ti].soundfont.clone();
+    let mut want_font = false;
+    let mut want_builtin = false;
+    ui.horizontal(|ui| {
+        ui.label("Instrument");
+        egui::ComboBox::from_id_salt(("instrument", ti))
+            .selected_text(if current.is_some() {
+                "SoundFont (.sf2)"
+            } else {
+                "Built-in synth"
+            })
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(current.is_none(), "Built-in synth")
+                    .clicked()
+                {
+                    want_builtin = true;
+                }
+                if ui
+                    .selectable_label(current.is_some(), "SoundFont (.sf2)…")
+                    .clicked()
+                {
+                    want_font = true;
+                }
+            });
+    });
+    if want_builtin && current.is_some() {
+        let before = st.session.clone();
+        st.session.tracks[ti].soundfont = None;
+        st.commit_session("Instrument", before);
+    }
+    let set_file =
+        |st: &mut State, path: std::path::PathBuf| match af27_engine::soundfont::load(&path) {
+            Ok(font) => {
+                let list = af27_engine::soundfont::presets(&font);
+                let keep = st.session.tracks[ti].soundfont.clone();
+                // Keep the preset when it is in the new file; else the first.
+                let pick = keep
+                    .as_ref()
+                    .and_then(|k| {
+                        list.iter()
+                            .find(|p| p.bank == k.bank && p.program == k.program)
+                    })
+                    .or_else(|| list.first())
+                    .cloned();
+                let before = st.session.clone();
+                st.session.tracks[ti].soundfont = Some(af27_core::midi::SoundFontRef {
+                    path,
+                    bank: pick.as_ref().map_or(0, |p| p.bank),
+                    program: pick.as_ref().map_or(0, |p| p.program),
+                    preset_name: pick.map(|p| p.name).unwrap_or_default(),
+                    gain_db: keep.map_or(0.0, |k| k.gain_db),
+                });
+                st.commit_session("Instrument", before);
+            }
+            Err(e) => st.error(e),
+        };
+    if want_font && current.is_none() {
+        if let Some(p) = pick_sf2() {
+            set_file(st, p);
+        }
+    }
+    let Some(sf) = st.session.tracks[ti].soundfont.clone() else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        let name = sf
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        ui.label(RichText::new(name).strong())
+            .on_hover_text(sf.path.display().to_string());
+        if ui.small_button("Change File…").clicked() {
+            if let Some(p) = pick_sf2() {
+                set_file(st, p);
+            }
+        }
+    });
+    match af27_engine::soundfont::load(&sf.path) {
+        Ok(font) => {
+            let list = af27_engine::soundfont::presets(&font);
+            let mut pick = None;
+            egui::ComboBox::from_id_salt(("preset", ti))
+                .selected_text(format!(
+                    "{:03}:{:03} {}",
+                    sf.bank, sf.program, sf.preset_name
+                ))
+                .width(ui.available_width().min(260.0))
+                .height(320.0)
+                .show_ui(ui, |ui| {
+                    for p in &list {
+                        let on = p.bank == sf.bank && p.program == sf.program;
+                        if ui
+                            .selectable_label(
+                                on,
+                                format!("{:03}:{:03} {}", p.bank, p.program, p.name),
+                            )
+                            .clicked()
+                        {
+                            pick = Some(p.clone());
+                        }
+                    }
+                });
+            if let Some(p) = pick {
+                let before = st.session.clone();
+                if let Some(x) = st.session.tracks[ti].soundfont.as_mut() {
+                    x.bank = p.bank;
+                    x.program = p.program;
+                    x.preset_name = p.name;
+                }
+                st.commit_session("Instrument preset", before);
+            }
+        }
+        Err(e) => {
+            ui.label(RichText::new(format!("Silent: {e}")).color(c(th.text_dim)));
+        }
+    }
+    let before = st.session.clone();
+    let mut db = sf.gain_db;
+    let ch = ui
+        .add(
+            egui::Slider::new(&mut db, -40.0..=12.0)
+                .suffix(" dB")
+                .text("Level"),
+        )
+        .changed();
+    if ch {
+        if let Some(x) = st.session.tracks[ti].soundfont.as_mut() {
+            x.gain_db = db;
+        }
+        st.live_instrument(ti);
+    }
+    live_commit(st, ui, "Instrument level", &before, ch);
 }
 
 /// An effect chain: up to 16 slots, each with bypass, order and settings.

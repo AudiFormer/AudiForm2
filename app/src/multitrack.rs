@@ -243,7 +243,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     }
 
     // MIDI clips: (track index, clip id) under a point.
-    let tempo = st.session.tempo;
+    let tempo = st.session.tempo.clone();
     let hit_midi = |st: &State, pp: egui::Pos2| -> Option<(usize, ClipId)> {
         let ti = track_at(st, lanes.top(), scroll, pp.y)?;
         let t = tempo.beats(x_to_time(&v, lanes, pp.x));
@@ -261,8 +261,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 st.want_piano = true;
             } else if let Some(ti) = track_at(st, lanes.top(), scroll, pp.y) {
                 if st.session.tracks[ti].kind == af27_core::TrackKind::Midi && lanes.contains(pp) {
-                    let bpb = st.session.tempo.beats_per_bar.max(1) as f64;
-                    let b = (tempo.beats(x_to_time(&v, lanes, pp.x)) / bpb).floor() * bpb;
+                    let b = tempo.bar_floor(tempo.beats(x_to_time(&v, lanes, pp.x)).max(0.0));
                     let id = st.session.tracks[ti].id;
                     crate::pianoroll::new_clip(st, id, b);
                 }
@@ -467,6 +466,24 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     // Drawing.
     let tc = st.time_ctx();
     crate::ruler::draw_ruler(&p, ruler, &v, &th, &st.session.markers, &tc);
+    if st.session.tempo.metronome
+        || st.session.tempo.has_changes()
+        || st
+            .session
+            .tracks
+            .iter()
+            .any(|t| t.kind == af27_core::TrackKind::Midi)
+    {
+        crate::tempo::draw_grid(
+            &ui.painter_at(ruler),
+            Some(ruler),
+            ruler,
+            &tempo,
+            &|t| time_to_x(&v, ruler, t),
+            &|x| x_to_time(&v, ruler, x),
+            &th,
+        );
+    }
     p.rect_filled(
         Rect::from_min_max(rect.min, pos2(ruler.left(), ruler.bottom())),
         Rounding::ZERO,
@@ -474,6 +491,15 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     );
     let lane_p = ui.painter_at(lanes);
     let head_p = ui.painter_at(headers);
+    // Bars and beats under the clips, from the tempo map, when there is
+    // music to line up with.
+    let show_grid = st.session.tempo.metronome
+        || st.session.tempo.has_changes()
+        || st
+            .session
+            .tracks
+            .iter()
+            .any(|t| t.kind == af27_core::TrackKind::Midi);
     let mut top = lanes.top() - scroll;
     let solo = st.session.any_solo();
     let tracks = st.session.tracks.clone();
@@ -498,6 +524,17 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             [row.left_bottom(), row.right_bottom()],
             Stroke::new(1.0_f32, c(th.grid)),
         );
+        if show_grid {
+            crate::tempo::draw_grid(
+                &lane_p,
+                None,
+                row,
+                &tempo,
+                &|t| time_to_x(&v, lanes, t),
+                &|x| x_to_time(&v, lanes, x),
+                &th,
+            );
+        }
         let heard = !tr.mute && (!solo || tr.solo);
         for clip in &tr.clips {
             let x0 = time_to_x(&v, lanes, clip.start);

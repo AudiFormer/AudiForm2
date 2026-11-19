@@ -1,0 +1,549 @@
+// SPDX-License-Identifier: LicenseRef-Audiform27
+// Copyright (c) The Audiform27 contributors.
+
+//! Standard MIDI Files (`.mid`), read and written with `midly`
+//! (Unlicense).
+//!
+//! Reading: every SMF track's notes, split by channel (one Audiform27
+//! track per track and channel that has notes), with velocity and pan
+//! (controller 10, applied to the channel's later notes). Tempo and time
+//! signature meta events become the session's tempo map. The map's
+//! changes sit on bar lines, so an event partway through a bar moves to
+//! the nearest bar line (counted, so the caller can say so). Notes are in
+//! quarter notes either way and keep their exact places.
+//!
+//! Writing: format 1 at 960 ticks per quarter note. Track 0 holds the
+//! tempo map (a tempo and a time signature at each stretch), then one
+//! track per MIDI track with the notes of its unmuted clips as they play
+//! (cut at the clip's end), pan as controller 10 when it changes.
+
+use std::collections::HashMap;
+
+use af27_core::midi::{MidiClip, MidiNote, Tempo, TICKS_PER_BEAT};
+use af27_core::{Session, TrackId, TrackKind};
+use midly::num::{u15, u24, u28, u4, u7};
+use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
+
+/// One track's worth of notes from a file, in quarter notes from the start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SmfTrack {
+    pub name: String,
+    pub channel: u8,
+    pub notes: Vec<MidiNote>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SmfImport {
+    pub tracks: Vec<SmfTrack>,
+    pub tempo: Tempo,
+    /// The file had tempo or time signature events.
+    pub has_tempo: bool,
+    /// Events that were partway through a bar and moved to a bar line.
+    pub moved: usize,
+}
+
+fn pan_of(v: u8) -> f32 {
+    ((v as f32 - 64.0) / 63.0).clamp(-1.0, 1.0)
+}
+
+fn pan_value(p: f32) -> u8 {
+    (64.0 + p.clamp(-1.0, 1.0) * 63.0).round().clamp(0.0, 127.0) as u8
+}
+
+/// A note being held: start tick, velocity, pan.
+type Held = (u64, u8, f32);
+
+enum MapEvent {
+    Tempo(f64),
+    Meter(u32, u32),
+}
+
+/// Reads a `.mid` file.
+pub fn read(bytes: &[u8]) -> Result<SmfImport, String> {
+    let smf = Smf::parse(bytes).map_err(|e| format!("Not a MIDI file: {e}"))?;
+    let ppq = match smf.header.timing {
+        Timing::Metrical(t) => t.as_int().max(1) as f64,
+        Timing::Timecode(..) => {
+            return Err("MIDI files timed in SMPTE frames are not supported.".into())
+        }
+    };
+    let mut map: Vec<(u64, usize, MapEvent)> = Vec::new();
+    let mut tracks = Vec::new();
+    let mut serial = 0usize;
+    for (ti, events) in smf.tracks.iter().enumerate() {
+        let mut tick = 0u64;
+        let mut name = String::new();
+        let mut pan = [0f32; 16];
+        // Held notes per (channel, key): start tick, velocity, pan; first in, first out.
+        let mut held: HashMap<(u8, u8), Vec<Held>> = HashMap::new();
+        let mut by_channel: Vec<Vec<MidiNote>> = vec![Vec::new(); 16];
+        let close = |by_channel: &mut Vec<Vec<MidiNote>>,
+                     ch: u8,
+                     key: u8,
+                     start: u64,
+                     vel: u8,
+                     p: f32,
+                     end: u64| {
+            by_channel[ch as usize].push(MidiNote {
+                pitch: key,
+                start: start as f64 / ppq,
+                length: (end.max(start + 1) - start) as f64 / ppq,
+                velocity: vel.clamp(1, 127),
+                channel: ch,
+                pan: p,
+            });
+        };
+        for ev in events {
+            tick += ev.delta.as_int() as u64;
+            match ev.kind {
+                TrackEventKind::Meta(MetaMessage::TrackName(n)) if name.is_empty() => {
+                    name = String::from_utf8_lossy(n).trim().to_string();
+                }
+                TrackEventKind::Meta(MetaMessage::Tempo(us)) => {
+                    let bpm = 60_000_000.0 / us.as_int().max(1) as f64;
+                    serial += 1;
+                    map.push((
+                        tick,
+                        serial,
+                        MapEvent::Tempo((bpm * 1000.0).round() / 1000.0),
+                    ));
+                }
+                TrackEventKind::Meta(MetaMessage::TimeSignature(num, pow, _, _)) => {
+                    serial += 1;
+                    map.push((
+                        tick,
+                        serial,
+                        MapEvent::Meter(num.max(1) as u32, 1u32 << pow.min(5)),
+                    ));
+                }
+                TrackEventKind::Midi { channel, message } => {
+                    let ch = channel.as_int();
+                    match message {
+                        MidiMessage::NoteOn { key, vel } if vel.as_int() > 0 => {
+                            held.entry((ch, key.as_int())).or_default().push((
+                                tick,
+                                vel.as_int(),
+                                pan[ch as usize],
+                            ));
+                        }
+                        MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
+                            if let Some(v) = held.get_mut(&(ch, key.as_int())) {
+                                if !v.is_empty() {
+                                    let (s, vel, p) = v.remove(0);
+                                    close(&mut by_channel, ch, key.as_int(), s, vel, p, tick);
+                                }
+                            }
+                        }
+                        MidiMessage::Controller { controller, value }
+                            if controller.as_int() == 10 =>
+                        {
+                            pan[ch as usize] = pan_of(value.as_int());
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Notes never let go of end with the track.
+        let mut rest: Vec<_> = held.into_iter().collect();
+        rest.sort_by_key(|((c, k), _)| (*c, *k));
+        for ((ch, key), v) in rest {
+            for (s, vel, p) in v {
+                close(&mut by_channel, ch, key, s, vel, p, tick);
+            }
+        }
+        let used: Vec<usize> = (0..16).filter(|&c| !by_channel[c].is_empty()).collect();
+        for &c in &used {
+            let mut notes = std::mem::take(&mut by_channel[c]);
+            notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+            let base = if name.is_empty() {
+                format!("Track {}", ti + 1)
+            } else {
+                name.clone()
+            };
+            let name = if used.len() > 1 {
+                format!("{base} (Ch {})", c + 1)
+            } else {
+                base
+            };
+            tracks.push(SmfTrack {
+                name,
+                channel: c as u8,
+                notes,
+            });
+        }
+    }
+    map.sort_by_key(|(t, s, _)| (*t, *s));
+    let (tempo, moved) = tempo_from(&map, ppq);
+    Ok(SmfImport {
+        tracks,
+        tempo,
+        has_tempo: !map.is_empty(),
+        moved,
+    })
+}
+
+/// Builds a tempo map from tempo and meter events in tick order.
+fn tempo_from(events: &[(u64, usize, MapEvent)], ppq: f64) -> (Tempo, usize) {
+    let mut t = Tempo::default();
+    let mut moved = 0;
+    for (tick, _, e) in events {
+        let beats = *tick as f64 / ppq;
+        let (bar, into, _) = t.bar_at(beats);
+        let on_line = into < 1e-6;
+        if !on_line {
+            moved += 1;
+        }
+        let bar = if on_line { bar } else { t.nearest_bar(beats) };
+        let at = (bar > 0).then(|| t.add_change(bar));
+        let seg = match at {
+            Some(i) => {
+                let c = &t.changes[i];
+                (c.bpm, c.beats_per_bar, c.beat_unit)
+            }
+            None => (t.bpm, t.beats_per_bar, t.beat_unit),
+        };
+        let (bpm, top, unit) = match e {
+            MapEvent::Tempo(b) => (*b, seg.1, seg.2),
+            MapEvent::Meter(top, unit) => (seg.0, *top, *unit),
+        };
+        t.set_values(at, bpm, top, unit);
+    }
+    // Changes that change nothing go.
+    let mut prev = (t.bpm, t.beats_per_bar, t.beat_unit);
+    t.changes.retain(|c| {
+        let v = (c.bpm, c.beats_per_bar, c.beat_unit);
+        let keep = v != prev;
+        prev = v;
+        keep
+    });
+    (t, moved)
+}
+
+/// Puts imported tracks into `session` as new MIDI tracks, each with one
+/// clip from the bar its first note is in to the bar after its last note
+/// ends. With `replace_tempo`, the file's tempo map replaces the
+/// session's (before the clips are placed, so bars come out right).
+pub fn add_to_session(session: &mut Session, imp: &SmfImport, replace_tempo: bool) -> Vec<TrackId> {
+    if replace_tempo {
+        let metronome = session.tempo.metronome;
+        session.tempo = imp.tempo.clone();
+        session.tempo.metronome = metronome;
+    }
+    let mut ids = Vec::new();
+    for tr in &imp.tracks {
+        let id = session.add_track_of(TrackKind::Midi);
+        let first = tr.notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
+        let last = tr
+            .notes
+            .iter()
+            .map(|n| n.start + n.length)
+            .fold(0.0, f64::max);
+        let tempo = &session.tempo;
+        let start = tempo.bar_floor(first.max(0.0));
+        let (end_bar, into, _) = tempo.bar_at(last);
+        let end = if into < 1e-9 && last > start {
+            tempo.bar_start(end_bar)
+        } else {
+            tempo.bar_start(end_bar + 1)
+        };
+        let clip_id = session.alloc_id();
+        let t = session.track_mut(id).expect("just added");
+        t.name = tr.name.clone();
+        t.midi.push(MidiClip {
+            id: clip_id,
+            name: tr.name.clone(),
+            start,
+            length: (end - start).max(1.0),
+            notes: tr
+                .notes
+                .iter()
+                .map(|n| MidiNote {
+                    start: n.start - start,
+                    ..*n
+                })
+                .collect(),
+            muted: false,
+            ext_id: None,
+        });
+        ids.push(id);
+    }
+    ids
+}
+
+fn tick(beats: f64) -> u64 {
+    (beats * TICKS_PER_BEAT as f64).round().max(0.0) as u64
+}
+
+/// Turns (tick, order, event) into delta-timed events, ending the track.
+fn finish<'a>(mut evs: Vec<(u64, u8, TrackEventKind<'a>)>) -> Vec<TrackEvent<'a>> {
+    evs.sort_by_key(|(t, o, _)| (*t, *o));
+    let mut out = Vec::with_capacity(evs.len() + 1);
+    let mut last = 0u64;
+    for (t, _, kind) in evs {
+        out.push(TrackEvent {
+            delta: u28::new((t - last).min(0x0FFF_FFFF) as u32),
+            kind,
+        });
+        last = t;
+    }
+    out.push(TrackEvent {
+        delta: u28::new(0),
+        kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+    });
+    out
+}
+
+/// Writes every MIDI track of `session` as a format 1 `.mid` file.
+pub fn write(session: &Session) -> Result<Vec<u8>, String> {
+    let names: Vec<Vec<u8>> = std::iter::once(session.name.clone().into_bytes())
+        .chain(
+            session
+                .tracks
+                .iter()
+                .filter(|t| t.kind == TrackKind::Midi || !t.midi.is_empty())
+                .map(|t| t.name.clone().into_bytes()),
+        )
+        .collect();
+    let mut smf = Smf::new(Header::new(
+        Format::Parallel,
+        Timing::Metrical(u15::new(TICKS_PER_BEAT as u16)),
+    ));
+    // Track 0: the tempo map.
+    let mut evs = vec![(
+        0,
+        0,
+        TrackEventKind::Meta(MetaMessage::TrackName(&names[0])),
+    )];
+    for s in session.tempo.segments() {
+        let t = tick(s.beat);
+        let pow = s.beat_unit.max(1).trailing_zeros() as u8;
+        evs.push((
+            t,
+            1,
+            TrackEventKind::Meta(MetaMessage::TimeSignature(
+                s.beats_per_bar.min(255) as u8,
+                pow,
+                24,
+                8,
+            )),
+        ));
+        let us = (60_000_000.0 / s.bpm).round().clamp(1.0, 16_777_215.0) as u32;
+        evs.push((t, 2, TrackEventKind::Meta(MetaMessage::Tempo(u24::new(us)))));
+    }
+    smf.tracks.push(finish(evs));
+
+    let midi_tracks = session
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Midi || !t.midi.is_empty());
+    for (k, tr) in midi_tracks.enumerate() {
+        let mut notes: Vec<(u64, u64, &MidiNote)> = Vec::new();
+        for c in tr.midi.iter().filter(|c| !c.muted) {
+            for n in c.notes.iter().filter(|n| n.start < c.length) {
+                let s = tick(c.start + n.start);
+                let e = tick(c.start + (n.start + n.length).min(c.length)).max(s + 1);
+                notes.push((s, e, n));
+            }
+        }
+        notes.sort_by_key(|(s, _, n)| (*s, n.channel, n.pitch));
+        let mut evs = vec![(
+            0,
+            0,
+            TrackEventKind::Meta(MetaMessage::TrackName(&names[k + 1])),
+        )];
+        let mut pan = [64u8; 16];
+        for (s, e, n) in notes {
+            let ch = u4::new(n.channel.min(15));
+            let p = pan_value(n.pan);
+            if pan[n.channel.min(15) as usize] != p {
+                pan[n.channel.min(15) as usize] = p;
+                evs.push((
+                    s,
+                    2,
+                    TrackEventKind::Midi {
+                        channel: ch,
+                        message: MidiMessage::Controller {
+                            controller: u7::new(10),
+                            value: u7::new(p),
+                        },
+                    },
+                ));
+            }
+            evs.push((
+                s,
+                3,
+                TrackEventKind::Midi {
+                    channel: ch,
+                    message: MidiMessage::NoteOn {
+                        key: u7::new(n.pitch.min(127)),
+                        vel: u7::new(n.velocity.clamp(1, 127)),
+                    },
+                },
+            ));
+            evs.push((
+                e,
+                1,
+                TrackEventKind::Midi {
+                    channel: ch,
+                    message: MidiMessage::NoteOff {
+                        key: u7::new(n.pitch.min(127)),
+                        vel: u7::new(64),
+                    },
+                },
+            ));
+        }
+        smf.tracks.push(finish(evs));
+    }
+    let mut out = Vec::new();
+    smf.write_std(&mut out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use af27_core::midi::TempoChange;
+
+    fn note(pitch: u8, start: f64, length: f64, velocity: u8, channel: u8, pan: f32) -> MidiNote {
+        MidiNote {
+            pitch,
+            start,
+            length,
+            velocity,
+            channel,
+            pan,
+        }
+    }
+
+    fn session() -> Session {
+        let mut s = Session::new("Song", 48_000, 0);
+        s.tempo = Tempo::constant(96.0, 3, 4);
+        s.tempo.changes.push(TempoChange {
+            bar: 2,
+            bpm: 140.0,
+            beats_per_bar: 6,
+            beat_unit: 8,
+            ext_id: None,
+        });
+        s.tempo.changes.push(TempoChange {
+            bar: 4,
+            bpm: 90.0,
+            beats_per_bar: 4,
+            beat_unit: 4,
+            ext_id: None,
+        });
+        let a = s.add_track_of(TrackKind::Midi);
+        let b = s.add_track_of(TrackKind::Midi);
+        let clip = |id, start, notes| MidiClip {
+            id,
+            name: "c".into(),
+            start,
+            length: 32.0,
+            notes,
+            muted: false,
+            ext_id: None,
+        };
+        let ta = s.track_mut(a).unwrap();
+        ta.name = "Lead".into();
+        ta.midi.push(clip(
+            100,
+            3.0,
+            vec![
+                note(60, 0.0, 1.0, 100, 0, 0.0),
+                note(64, 0.5, 0.25, 90, 0, -1.0),
+                note(67, 1.0 + 1.0 / 960.0, 2.5, 127, 0, 21.0 / 63.0),
+                note(60, 4.0, 1.0, 1, 0, 1.0),
+            ],
+        ));
+        let tb = s.track_mut(b).unwrap();
+        tb.name = "Drums".into();
+        tb.midi.push(clip(
+            101,
+            0.0,
+            vec![
+                note(36, 0.0, 0.5, 110, 9, 0.0),
+                note(38, 1.0, 0.5, 80, 9, 0.0),
+            ],
+        ));
+        s
+    }
+
+    /// Absolute notes per track.
+    fn abs(s: &Session) -> Vec<(String, Vec<MidiNote>)> {
+        s.tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Midi)
+            .map(|t| {
+                let mut v: Vec<MidiNote> = t
+                    .midi
+                    .iter()
+                    .flat_map(|c| {
+                        c.notes.iter().map(move |n| MidiNote {
+                            start: c.start + n.start,
+                            ..*n
+                        })
+                    })
+                    .collect();
+                v.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+                (t.name.clone(), v)
+            })
+            .collect()
+    }
+
+    fn same_notes(a: &[MidiNote], b: &[MidiNote]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!(
+                (x.pitch, x.velocity, x.channel),
+                (y.pitch, y.velocity, y.channel)
+            );
+            assert!((x.start - y.start).abs() < 1e-9, "{x:?} {y:?}");
+            assert!((x.length - y.length).abs() < 1e-9, "{x:?} {y:?}");
+            assert!((x.pan - y.pan).abs() < 1e-6, "{x:?} {y:?}");
+        }
+    }
+
+    #[test]
+    fn export_then_import_is_the_same() {
+        let s = session();
+        let bytes = write(&s).unwrap();
+        let imp = read(&bytes).unwrap();
+        assert!(imp.has_tempo);
+        assert_eq!(imp.moved, 0);
+        assert_eq!(imp.tempo, s.tempo);
+        assert_eq!(imp.tracks.len(), 2);
+        let mut back = Session::new("Song", 48_000, 0);
+        add_to_session(&mut back, &imp, true);
+        assert_eq!(back.tempo, s.tempo);
+        let (want, got) = (abs(&s), abs(&back));
+        for ((wn, w), (gn, g)) in want.iter().zip(&got) {
+            assert_eq!(wn, gn);
+            same_notes(w, g);
+        }
+        // Clips start on the bar of their first note.
+        let lead = &back.tracks[0].midi[0];
+        assert_eq!(lead.start, 3.0);
+        assert!(lead.end() >= 3.0 + 5.0);
+        // And it writes the same bytes again.
+        assert_eq!(write(&back).unwrap()[..], bytes[..]);
+    }
+
+    #[test]
+    fn events_inside_a_bar_move_to_a_bar_line() {
+        // A tempo change at beat 5 of 4/4 (bar 2 starts at 4): nearest bar 1.
+        let ev = vec![
+            (0u64, 0usize, MapEvent::Tempo(100.0)),
+            (5 * 480, 1, MapEvent::Tempo(150.0)),
+            (8 * 480, 2, MapEvent::Meter(3, 4)),
+            (8 * 480, 3, MapEvent::Tempo(150.0)),
+        ];
+        let (t, moved) = tempo_from(&ev, 480.0);
+        assert_eq!(moved, 1);
+        assert_eq!(t.bpm, 100.0);
+        assert_eq!(t.changes.len(), 2);
+        assert_eq!((t.changes[0].bar, t.changes[0].bpm), (1, 150.0));
+        assert_eq!((t.changes[1].bar, t.changes[1].beats_per_bar), (2, 3));
+    }
+}
