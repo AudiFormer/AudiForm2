@@ -492,6 +492,99 @@ impl Theme {
     }
 }
 
+/// A user's own colours for a theme: the hue (0..360) of its main light,
+/// its second light and its base tint. The theme keeps its own look
+/// (brightness, contrast, glow); only the colours turn.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Hues {
+    pub primary: f32,
+    pub secondary: f32,
+    pub surface: f32,
+}
+
+/// Hue (0..360), saturation and value of a colour.
+pub fn to_hsv(c: Rgb) -> (f32, f32, f32) {
+    let [r, g, b] = c.map(|x| x as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d <= 1e-6 {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let s = if max <= 1e-6 { 0.0 } else { d / max };
+    (h, s, max)
+}
+
+pub fn from_hsv(h: f32, s: f32, v: f32) -> Rgb {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [r, g, b].map(|k| ((k + m) * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
+fn turn(c: Rgb, by: f32) -> Rgb {
+    let (h, s, v) = to_hsv(c);
+    from_hsv(h + by, s, v)
+}
+
+impl Theme {
+    /// The hues this theme has as made.
+    pub fn hues(&self) -> Hues {
+        Hues {
+            primary: to_hsv(self.accent).0,
+            secondary: to_hsv(self.accent_alt).0,
+            surface: to_hsv(self.panel).0,
+        }
+    }
+
+    /// This theme with its colours turned to `h`. The main light's family
+    /// (accent, selection, the waveform's centre, the grid, quiet meters)
+    /// follows `primary`; the second light's (playhead, the waveform's
+    /// edge, loud meters) follows `secondary`; panels, borders, backdrop
+    /// and text follow `surface`. Spectrogram and track colours are kept.
+    pub fn with_hues(&self, h: &Hues) -> Theme {
+        let base = self.hues();
+        let (p, s, u) = (h.primary - base.primary, h.secondary - base.secondary, h.surface - base.surface);
+        let mut t = self.clone();
+        for c in [&mut t.accent, &mut t.selection, &mut t.wave_centre, &mut t.grid_glow, &mut t.meter_low] {
+            *c = turn(*c, p);
+        }
+        for c in [&mut t.accent_alt, &mut t.playhead, &mut t.wave_peak, &mut t.meter_high] {
+            *c = turn(*c, s);
+        }
+        for c in [
+            &mut t.background,
+            &mut t.panel,
+            &mut t.panel_raised,
+            &mut t.border,
+            &mut t.text,
+            &mut t.text_dim,
+            &mut t.wave_background,
+            &mut t.grid,
+            &mut t.backdrop_top,
+            &mut t.backdrop_bottom,
+        ] {
+            *c = turn(*c, u);
+        }
+        t
+    }
+}
+
 /// Built-ins first, then any `.af27theme` files in the user's folder.
 pub fn load_all(dir: &std::path::Path) -> Vec<Theme> {
     let mut list = Theme::builtins();
@@ -527,6 +620,25 @@ mod tests {
         assert_eq!(t.panel, Theme::zero_point().panel);
         // Theme files from before the HUD fields still load.
         assert_eq!(t.grid_style, "perspective");
+    }
+
+    #[test]
+    fn hsv_round_trips_and_hues_turn_the_right_colours() {
+        for c in [[0u8, 234, 255], [255, 46, 166], [8, 11, 24], [200, 200, 200], [0, 0, 0]] {
+            let (h, s, v) = to_hsv(c);
+            let back = from_hsv(h, s, v);
+            assert!(back.iter().zip(c).all(|(a, b)| (*a as i32 - b as i32).abs() <= 1), "{c:?} {back:?}");
+        }
+        let t = Theme::zero_point();
+        let mut h = t.hues();
+        assert_eq!(t.with_hues(&h), t.with_hues(&t.hues()));
+        h.primary = 120.0;
+        let g = t.with_hues(&h);
+        assert!((to_hsv(g.accent).0 - 120.0).abs() < 2.0);
+        assert_eq!(g.accent_alt, t.accent_alt);
+        assert_eq!(g.panel, t.panel);
+        // Brightness is the theme's own.
+        assert!((to_hsv(g.accent).2 - to_hsv(t.accent).2).abs() < 0.01);
     }
 
     #[test]

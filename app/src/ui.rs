@@ -106,7 +106,7 @@ pub struct Caches {
 
 /// Each workspace keeps its own arrangement, as the user left it.
 fn layout_path(w: crate::workspace::Workspace) -> std::path::PathBuf {
-    data_dir().join(format!("layout3-{}.json", w.key()))
+    data_dir().join(format!("layout3-{}-v{}.json", w.key(), w.version()))
 }
 
 fn load_layout(w: crate::workspace::Workspace) -> DockState<Tab> {
@@ -234,10 +234,18 @@ impl TabViewer for Viewer<'_> {
 impl Viewer<'_> {
     fn ui_inner(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
         match tab {
-            Tab::Editor => match self.st.mode {
-                Mode::Waveform => crate::waveform::editor(ui, self.st, self.caches),
-                Mode::Multitrack => crate::multitrack::editor(ui, self.st, self.caches),
-            },
+            Tab::Editor => {
+                // The time display and transport sit along the bottom of
+                // the Editor panel, as in the leading editor.
+                egui::TopBottomPanel::bottom("editor-transport")
+                    .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(4.0, 4.0)))
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| transport(ui, self.st));
+                match self.st.mode {
+                    Mode::Waveform => crate::waveform::editor(ui, self.st, self.caches),
+                    Mode::Multitrack => crate::multitrack::editor(ui, self.st, self.caches),
+                }
+            }
             Tab::Mixer => crate::multitrack::mixer(ui, self.st),
             Tab::Files => crate::panels::files(ui, self.st, self.open_tab),
             Tab::Markers => crate::panels::markers(ui, self.st, self.caches),
@@ -705,12 +713,55 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     ui.label(RichText::new("Auto chose Lite for this device").small().color(c(st.theme.text_dim)));
                 }
             });
+            ui.menu_button("Theme Colors", |ui| {
+                ui.label(
+                    RichText::new(format!("Your own hues for {}", st.theme_base.name))
+                        .small()
+                        .color(c(st.theme.text_dim)),
+                );
+                let mut h = st.hues.unwrap_or_else(|| st.theme_base.hues());
+                let mut changed = false;
+                for (label, value, sat, val) in [
+                    ("Main light", &mut h.primary, 1.0, 1.0),
+                    ("Second light", &mut h.secondary, 0.82, 1.0),
+                    ("Base tint", &mut h.surface, 0.6, 0.35),
+                ] {
+                    ui.horizontal(|ui| {
+                        let sw = crate::theme::from_hsv(*value, sat, val);
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                        ui.painter().rect_filled(r, 2.0, c(sw));
+                        changed |= ui
+                            .add(egui::Slider::new(value, 0.0..=359.0).suffix("°").text(label))
+                            .changed();
+                    });
+                }
+                if changed {
+                    st.set_hues(Some(h));
+                }
+                ui.horizontal(|ui| {
+                    for (name, p, s, u) in [
+                        ("Ice", 187.0, 325.0, 228.0),
+                        ("Toxic", 105.0, 285.0, 150.0),
+                        ("Ember", 22.0, 350.0, 15.0),
+                        ("Ultraviolet", 275.0, 190.0, 260.0),
+                        ("Gold", 45.0, 200.0, 220.0),
+                    ] {
+                        if ui.small_button(name).clicked() {
+                            st.set_hues(Some(crate::theme::Hues { primary: p, secondary: s, surface: u }));
+                        }
+                    }
+                });
+                if ui.button("Back to the theme's own colors").clicked() {
+                    st.set_hues(None);
+                    ui.close_menu();
+                }
+            });
             ui.menu_button("Theme", |ui| {
                 let names: Vec<String> = st.themes.iter().map(|t| t.name.clone()).collect();
                 for (i, n) in names.iter().enumerate() {
                     if ui.radio(st.theme.name == *n, n).clicked() {
-                        st.theme = st.themes[i].clone();
-                        st.theme_changed = true;
+                        let t = st.themes[i].clone();
+                        st.set_theme(t);
                         let _ = std::fs::create_dir_all(data_dir());
                         let _ = std::fs::write(data_dir().join("theme.txt"), n);
                         ui.close_menu();
@@ -780,26 +831,6 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             ui.separator();
-            ui.menu_button("Workspace", |ui| {
-                for w in crate::workspace::Workspace::ALL {
-                    if ui
-                        .radio(st.workspace == w, w.name())
-                        .on_hover_text(w.about())
-                        .clicked()
-                    {
-                        st.want_workspace = Some(w);
-                        ui.close_menu();
-                    }
-                }
-                ui.separator();
-                if ui
-                    .button(format!("Reset \"{}\" to Saved Layout", st.workspace.name()))
-                    .clicked()
-                {
-                    app.dock = st.workspace.build();
-                    ui.close_menu();
-                }
-            });
             if ui.button("Reset Layout").clicked() {
                 app.dock = st.workspace.build();
                 ui.close_menu();
@@ -846,32 +877,52 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
             ui.add_space(6.0);
             crate::hud::wordmark(ui, &th, &fx);
             ui.add_space(18.0);
-            // Workspaces, along the top right as the leading editor has them.
-            for w in crate::workspace::Workspace::ALL.iter().rev() {
-                let on = st.workspace == *w;
-                let text = RichText::new(w.name().to_uppercase())
-                    .size(11.0)
-                    .extra_letter_spacing(1.2)
-                    .color(if on { c(th.accent) } else { c(th.text_dim) });
-                let r = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
-                if on {
-                    let y = r.rect.bottom() + 2.0;
-                    ui.painter().line_segment(
-                        [egui::pos2(r.rect.left(), y), egui::pos2(r.rect.right(), y)],
-                        egui::Stroke::new(2.0_f32, c(th.accent)),
-                    );
-                }
-                let r = r.on_hover_text(w.about());
-                if r.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if r.clicked() {
-                    st.want_workspace = Some(*w);
-                }
-                ui.add_space(6.0);
+            // The workspace, chosen from one drop-down in the top right.
+            let mut pick = st.workspace;
+            let mut reset = false;
+            egui::ComboBox::from_id_salt("af2-workspace")
+                .selected_text(
+                    RichText::new(st.workspace.name().to_uppercase())
+                        .size(11.0)
+                        .extra_letter_spacing(1.2)
+                        .color(c(th.accent)),
+                )
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for w in crate::workspace::Workspace::ALL {
+                        ui.selectable_value(&mut pick, w, w.name()).on_hover_text(w.about());
+                    }
+                    ui.separator();
+                    if ui.button("Reset to Saved Layout").clicked() {
+                        reset = true;
+                    }
+                })
+                .response
+                .on_hover_text("Workspace");
+            ui.label(
+                RichText::new("WORKSPACE")
+                    .size(9.5)
+                    .extra_letter_spacing(1.5)
+                    .color(c(th.text_dim)),
+            );
+            if pick != st.workspace {
+                st.want_workspace = Some(pick);
+            }
+            if reset {
+                st.reset_workspace = true;
             }
         });
     });
+}
+
+/// The markers of what the editor shows, in time order.
+fn marker_times(st: &State) -> Vec<f64> {
+    let mut v: Vec<f64> = match st.mode {
+        Mode::Waveform => st.doc().map(|d| d.markers.iter().map(|m| m.time).collect()).unwrap_or_default(),
+        Mode::Multitrack => st.session.markers.iter().map(|m| m.time).collect(),
+    };
+    v.sort_by(|a, b| a.total_cmp(b));
+    v
 }
 
 fn transport(ui: &mut egui::Ui, st: &mut State) {
@@ -931,38 +982,53 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                 }
             });
         });
-        ui.add_space((ui.available_width() / 2.0 - 120.0).max(0.0));
-        use crate::hud::Icon;
-        let btn = |ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, col: [u8; 3]| {
-            crate::hud::button(ui, icon, tip, on, col, &th, &fx, icon == Icon::Play || icon == Icon::Pause)
-                .clicked()
-        };
+        ui.add_space(14.0);
+        // The transport, in the order and style long-time editors expect:
+        // Stop, Play, Pause, previous, Rewind, Fast Forward, next, Record,
+        // Loop.
+        use crate::hud::{transport_button as tb, Icon};
         let playing = st.is_playing();
         let rec = st.is_recording();
-        if btn(ui, Icon::Stop, "Stop", false, th.text) {
+        if tb(ui, Icon::Stop, "Stop", false, th.text, &th).clicked() {
             if rec {
                 st.stop_recording();
             } else {
                 st.stop();
             }
         }
-        if btn(
-            ui,
-            if playing { Icon::Pause } else { Icon::Play },
-            "Play / Stop (Space)",
-            playing,
-            th.accent,
-        ) {
+        if tb(ui, Icon::Play, "Play (Space)", playing, th.accent, &th).clicked() && !playing {
             st.toggle_play();
         }
-        if btn(ui, Icon::ToStart, "Go to Start (Home)", false, th.text) {
-            st.set_cursor(0.0);
+        if tb(ui, Icon::Pause, "Pause", false, th.text, &th).clicked() && playing {
+            // Pause keeps the playhead where it is.
+            let at = st.position();
+            st.stop();
+            st.set_cursor(at);
         }
-        if btn(ui, Icon::ToEnd, "Go to End (End)", false, th.text) {
-            let l = st.program_len();
-            st.set_cursor(l);
+        let marks = marker_times(st);
+        if tb(ui, Icon::ToStart, "Move Playhead to Previous (marker, or the start)", false, th.text, &th).clicked() {
+            let now = st.cursor();
+            let t = marks.iter().rev().copied().find(|&m| m < now - 1e-3).unwrap_or(0.0);
+            st.set_cursor(t);
         }
-        if btn(ui, Icon::Record, "Record (Shift+Space)", rec, th.accent_alt) {
+        // Rewind and Fast Forward run while held.
+        let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
+        let rw = tb(ui, Icon::Rewind, "Rewind (hold)", false, th.text, &th);
+        let ff = tb(ui, Icon::FastForward, "Fast Forward (hold)", false, th.text, &th);
+        for (r, dir) in [(&rw, -1.0), (&ff, 1.0)] {
+            if r.is_pointer_button_down_on() && !playing {
+                let now = st.cursor();
+                st.set_cursor(now + dir * dt * 4.0);
+                ui.ctx().request_repaint();
+            }
+        }
+        if tb(ui, Icon::ToEnd, "Move Playhead to Next (marker, or the end)", false, th.text, &th).clicked() {
+            let now = st.cursor();
+            let end = st.program_len();
+            let t = marks.iter().copied().find(|&m| m > now + 1e-3).unwrap_or(end);
+            st.set_cursor(t);
+        }
+        if tb(ui, Icon::Record, "Record (Shift+Space)", rec, th.accent_alt, &th).clicked() {
             if rec {
                 st.stop_recording();
             } else {
@@ -970,7 +1036,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             }
         }
         let lp = st.looping;
-        if btn(ui, Icon::Loop, "Loop Playback (Ctrl+L)", lp, th.accent) {
+        if tb(ui, Icon::Loop, "Loop Playback (Ctrl+L)", lp, th.accent, &th).clicked() {
             st.looping = !st.looping;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1230,9 +1296,6 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("status")
             .frame(frame(th.background))
             .show(ctx, |ui| status(ui, &self.st));
-        egui::TopBottomPanel::bottom("transport")
-            .frame(frame(th.panel))
-            .show(ctx, |ui| transport(ui, &mut self.st));
 
         let mut style = Style::from_egui(ctx.style().as_ref());
         let clear = egui::Color32::TRANSPARENT;
@@ -1307,6 +1370,9 @@ impl eframe::App for App {
             });
         if let Some(t) = open_tab {
             self.show_tab(t);
+        }
+        if std::mem::take(&mut self.st.reset_workspace) {
+            self.dock = self.st.workspace.build();
         }
         if let Some(w) = self.st.want_workspace.take() {
             self.switch_workspace(w);

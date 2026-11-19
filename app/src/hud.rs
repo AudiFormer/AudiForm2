@@ -489,6 +489,8 @@ pub enum Icon {
     ToEnd,
     Loop,
     Metronome,
+    Rewind,
+    FastForward,
 }
 
 fn draw_icon(p: &Painter, icon: Icon, c: Pos2, s: f32, col: Color32) {
@@ -531,6 +533,15 @@ fn draw_icon(p: &Painter, icon: Icon, c: Pos2, s: f32, col: Color32) {
                 let tip = c + Vec2::angled(a) * r;
                 let t = Vec2::angled(a + pi / 2.0 * dir);
                 let pts = vec![tip + t * 4.0, tip + Vec2::angled(a) * 3.5 - t * 1.5, tip - Vec2::angled(a) * 3.5 - t * 1.5];
+                p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
+            }
+        }
+        Icon::Rewind | Icon::FastForward => {
+            let k = if icon == Icon::Rewind { -1.0 } else { 1.0 };
+            for dx in [-0.22, 0.22] {
+                let tip = c + Vec2::new((dx + k * 0.22) * s, 0.0);
+                let back = c + Vec2::new((dx - k * 0.22) * s, 0.0);
+                let pts = vec![tip, back + Vec2::new(0.0, -s * 0.38), back + Vec2::new(0.0, s * 0.38)];
                 p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
             }
         }
@@ -586,6 +597,31 @@ pub fn button(ui: &mut Ui, icon: Icon, tip: &str, on: bool, rgb: Rgb, th: &Theme
         }
         draw_icon(&p, icon, rect.center(), 15.0, if on { col } else { crate::theme::lerp(th.text, rgb, hover * 0.6) });
     }
+    resp
+}
+
+/// A flat square transport button, laid out and drawn the way long-time
+/// users of the leading editor know them: a plain icon, a quiet face that
+/// lights on hover, the theme's colour when on.
+pub fn transport_button(ui: &mut Ui, icon: Icon, tip: &str, on: bool, rgb: Rgb, th: &Theme) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(30.0, 26.0), Sense::click_and_drag());
+    let resp = resp.on_hover_text(tip);
+    let p = ui.painter_at(rect.expand(2.0));
+    let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
+    let down = resp.is_pointer_button_down_on();
+    let face = if on || down {
+        crate::theme::lerp(th.panel_raised, rgb, 0.28)
+    } else {
+        crate::theme::lerp(th.panel_raised, th.text, 0.06 * hover)
+    };
+    p.rect_filled(rect, 2.0, face);
+    p.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, if on { crate::theme::c(rgb) } else { ca(th.border, 220) }));
+    let col = if on || icon == Icon::Record {
+        crate::theme::c(rgb)
+    } else {
+        crate::theme::lerp(th.text_dim, th.text, 0.5 + 0.5 * hover)
+    };
+    draw_icon(&p, icon, rect.center(), 13.0, col);
     resp
 }
 

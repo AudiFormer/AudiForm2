@@ -208,6 +208,7 @@ pub struct State {
     /// The workspace on screen, and one the toolbar asked to switch to.
     pub workspace: crate::workspace::Workspace,
     pub want_workspace: Option<crate::workspace::Workspace>,
+    pub reset_workspace: bool,
     /// Visual effects: 0 Auto (cut back when frames are slow), 1 Full, 2 Lite.
     pub visuals_mode: u8,
     /// Auto mode decided this device needs the lighter look.
@@ -222,6 +223,10 @@ pub struct State {
     pub generate: GenerateUi,
 
     pub theme: Theme,
+    /// The chosen theme as made, before the user's own hues.
+    pub theme_base: Theme,
+    /// The user's hues for the current theme, if they changed any.
+    pub hues: Option<crate::theme::Hues>,
     pub themes: Vec<Theme>,
     pub theme_changed: bool,
     pub toasts: Vec<Toast>,
@@ -264,6 +269,50 @@ pub enum RecordTarget {
     Track(af27_core::TrackId, f64),
 }
 
+fn hues_path(theme: &str) -> std::path::PathBuf {
+    let safe: String = theme.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+    data_dir().join("hues").join(format!("{safe}.json"))
+}
+
+/// The user's saved hues for theme `name`.
+pub fn load_hues(name: &str) -> Option<crate::theme::Hues> {
+    serde_json::from_str(&std::fs::read_to_string(hues_path(name)).ok()?).ok()
+}
+
+impl State {
+    /// Shows theme `t` with the user's saved hues for it.
+    pub fn set_theme(&mut self, t: Theme) {
+        self.hues = load_hues(&t.name);
+        self.theme = match &self.hues {
+            Some(h) => t.with_hues(h),
+            None => t.clone(),
+        };
+        self.theme_base = t;
+        self.theme_changed = true;
+    }
+
+    /// New hues for the current theme (None: back to the theme's own),
+    /// shown at once and saved.
+    pub fn set_hues(&mut self, h: Option<crate::theme::Hues>) {
+        self.hues = h;
+        self.theme = match &h {
+            Some(h) => self.theme_base.with_hues(h),
+            None => self.theme_base.clone(),
+        };
+        self.theme_changed = true;
+        let p = hues_path(&self.theme_base.name);
+        match h {
+            Some(h) => {
+                let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+                let _ = std::fs::write(&p, serde_json::to_string(&h).unwrap_or_default());
+            }
+            None => {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+}
+
 pub fn data_dir() -> PathBuf {
     af27_separation::data_root().join("Audiform27")
 }
@@ -276,11 +325,16 @@ impl State {
         };
         let themes = crate::theme::load_all(&data_dir().join("themes"));
         let saved_theme = std::fs::read_to_string(data_dir().join("theme.txt")).unwrap_or_default();
-        let theme = themes
+        let theme_base = themes
             .iter()
             .find(|t| t.name == saved_theme.trim())
             .cloned()
             .unwrap_or_default();
+        let hues = load_hues(&theme_base.name);
+        let theme = match &hues {
+            Some(h) => theme_base.with_hues(h),
+            None => theme_base.clone(),
+        };
         let mut session = Session::default();
         for (i, t) in session.tracks.iter_mut().enumerate() {
             t.color = theme.track_colors[i % theme.track_colors.len().max(1)];
@@ -314,6 +368,7 @@ impl State {
                 &std::fs::read_to_string(data_dir().join("workspace.txt")).unwrap_or_default(),
             ),
             want_workspace: None,
+            reset_workspace: false,
             visuals_mode: std::fs::read_to_string(data_dir().join("visuals.txt"))
                 .ok()
                 .and_then(|s| s.trim().parse().ok())
@@ -336,6 +391,8 @@ impl State {
                 db: -6.0,
             },
             theme,
+            theme_base,
+            hues,
             themes,
             theme_changed: true,
             toasts: Vec::new(),
