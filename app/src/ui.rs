@@ -210,7 +210,7 @@ impl Viewer<'_> {
             Tab::Files => crate::panels::files(ui, self.st, self.open_tab),
             Tab::Markers => crate::panels::markers(ui, self.st, self.caches),
             Tab::Effects => crate::panels::effects(ui, self.st),
-            Tab::AiSeparation => crate::panels::separation(ui, self.st),
+            Tab::AiSeparation => crate::separation::show(ui, self.st),
             Tab::History => crate::panels::history(ui, self.st),
             Tab::Levels => crate::panels::levels(ui, self.st),
             Tab::Phase => crate::phasewheel::panel(ui, self.st, &mut self.caches.wheel),

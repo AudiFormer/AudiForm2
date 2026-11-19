@@ -45,6 +45,7 @@ file is the record of how every part of Audiform27 was sourced.
 | `crates/af27-fx`: Amp Model and `.nam` player, Tube Preamp, Opto Leveler, Vox Strip, Reverb, Convolution Reverb, Modulation, Center Channel Extractor, Channel Mixer, Stereo Width, Phase Curve | `dsp/effects/{amp,tube,vocal,verb,reverb,modulation,center,mixer,width,phase_curve}.rs`, `dsp/{nam,convolve,meters}.rs` | Created clean, no AAE edits, not in Audiform's ATTRIBUTION |
 | `app/src/visualizer.rs` | `panels/visualizer/` (`VisualizerPanel.svelte`, `analysis.ts`, `palette.ts`, `presets/*.ts`; Oct 29) | Created clean (added, not copied), no AAE edits, not in Audiform's ATTRIBUTION. The spectrum feed is Audiform27's own (`af27-dsp` FFT), not Audiform's core |
 | `crates/af27-dts` | `codecs/dts/` (Audiform 0.4.0) | Created clean; the decoder is an FFmpeg port, so the crate is LGPL |
+| `app/src/separation.rs`, `crates/af27-separation` (model grouping and SDR text, engine checksum and update check, removal, GPU fallback, separated tracks) | `panels/separation/SeparationPanel.svelte`, `app/separation-tools.svelte.ts`, `app/separation.ts`, the Audio Separation page of `SettingsDialog.svelte`, `src-tauri/src/separation/{mod,download}.rs`, `commands/separation.rs` (Oct 28) | Each created clean in one commit (`git log -C --find-copies-harder`), no AAE edits, not in Audiform's ATTRIBUTION; behaviour rewritten for egui, no framework code |
 
 ## Deliberately left out
 
