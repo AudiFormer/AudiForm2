@@ -42,6 +42,32 @@ fn level_db(x: f32) -> f32 {
     20.0 * x.max(1e-9).log10()
 }
 
+/// log2 for positive normal numbers, to about 1e-5 (well under 0.001 dB):
+/// the exponent from the bits, the mantissa by a short odd series.
+#[inline]
+pub fn fast_log2(x: f32) -> f32 {
+    let bits = x.max(1e-30).to_bits();
+    let e = ((bits >> 23) & 0xff) as i32 - 127;
+    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000);
+    let s = (m - 1.0) / (m + 1.0);
+    let s2 = s * s;
+    let ln = 2.0 * s * (1.0 + s2 * (1.0 / 3.0 + s2 * (0.2 + s2 * (1.0 / 7.0 + s2 / 9.0))));
+    e as f32 + ln * std::f32::consts::LOG2_E
+}
+
+/// 2^x to about 2e-6 relative, for x in -126..127.
+#[inline]
+pub fn fast_exp2(x: f32) -> f32 {
+    let x = x.clamp(-126.0, 126.0);
+    // Round, so the series only covers -0.5..0.5, where it is tightest.
+    let i = x.round();
+    let f = x - i;
+    let p = 1.0
+        + f * (0.693_147_2
+            + f * (0.240_226_5 + f * (0.055_504_1 + f * (0.009_618_1 + f * 0.001_333_6))));
+    p * f32::from_bits(((i as i32 + 127) as u32) << 23)
+}
+
 /// Builds the live processor for `e`, or None for effects that need the
 /// whole selection (Normalize, Reverse, Speed and the like).
 pub fn build(e: Effect, rate: u32, vals: &[f32]) -> Option<Box<dyn Live>> {
@@ -145,8 +171,11 @@ impl Filters {
 impl Live for Filters {
     fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         for i in 0..self.n {
-            self.l[i].run(l);
-            self.r[i].run(r);
+            // A band left at 0 dB changes nothing: skip its work.
+            if self.l[i].is_identity() {
+                continue;
+            }
+            Biquad::run_pair(&mut self.l[i], &mut self.r[i], l, r);
         }
     }
     fn set(&mut self, vals: &[f32]) {
@@ -224,6 +253,9 @@ struct Compressor {
     knee: f32,
     makeup: f32,
     env: f32,
+    /// Below this envelope (the knee's start, linear) the gain is just
+    /// the makeup, so the logarithms can be skipped.
+    quiet: f32,
 }
 
 impl Compressor {
@@ -237,37 +269,53 @@ impl Compressor {
             knee: 6.0,
             makeup: 1.0,
             env: 0.0,
+            quiet: 0.0,
         }
     }
 }
 
 impl Live for Compressor {
     fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        // The gain computer works in log2 units (dB / 6.0206), so one fast
+        // log2 and one fast exp2 per sample do the whole job.
+        const PER_DB: f32 = 0.166_096_4;
+        let (ca, cr, quiet, makeup) = (self.ca, self.cr, self.quiet, self.makeup);
+        let thr = self.thr * PER_DB;
+        let knee = self.knee * PER_DB;
+        let half = knee * 0.5;
+        let slope = 1.0 / self.ratio - 1.0;
+        let curve = if knee > 0.0 { slope / (2.0 * knee) } else { 0.0 };
+        let mut env = self.env;
         for (a, b) in l.iter_mut().zip(r.iter_mut()) {
             let x = a.abs().max(b.abs());
-            let c = if x > self.env { self.ca } else { self.cr };
-            self.env = c * self.env + (1.0 - c) * x;
-            let over = level_db(self.env) - self.thr;
-            let k = self.knee;
-            let reduce = if k > 0.0 && over.abs() <= k / 2.0 {
-                (1.0 / self.ratio - 1.0) * (over + k / 2.0).powi(2) / (2.0 * k)
-            } else if over > 0.0 {
-                (1.0 / self.ratio - 1.0) * over
+            let c = if x > env { ca } else { cr };
+            env = c * env + (1.0 - c) * x;
+            if env <= quiet {
+                *a *= makeup;
+                *b *= makeup;
+                continue;
+            }
+            let over = fast_log2(env) - thr;
+            let reduce = if over < half {
+                // Inside the soft knee (below it was handled above).
+                curve * (over + half) * (over + half)
             } else {
-                0.0
+                slope * over
             };
-            let g = db_to_gain(reduce) * self.makeup;
+            let g = fast_exp2(reduce) * makeup;
             *a *= g;
             *b *= g;
         }
+        self.env = env;
     }
     fn set(&mut self, vals: &[f32]) {
         self.thr = v(vals, 0, -18.0);
         self.ratio = v(vals, 1, 3.0).max(1.0);
         self.ca = coeff(v(vals, 2, 10.0), self.rate);
         self.cr = coeff(v(vals, 3, 120.0), self.rate);
-        self.knee = v(vals, 4, 6.0);
+        self.knee = v(vals, 4, 6.0).max(0.0);
         self.makeup = db_to_gain(v(vals, 5, 0.0));
+        self.quiet = db_to_gain(self.thr - self.knee / 2.0);
     }
     fn reset(&mut self) {
         self.env = 0.0;
@@ -647,6 +695,19 @@ pub fn build_chain(slots: &[af27_core::EffectSlot], rate: u32, max_block: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_log_and_exp_are_close() {
+        for k in 0..2000 {
+            let x = 1e-6 * 1.01f32.powi(k);
+            assert!((fast_log2(x) - x.log2()).abs() < 2e-5, "{x}");
+        }
+        for k in -2000..2000 {
+            let x = k as f32 * 0.01;
+            let rel = (fast_exp2(x) - x.exp2()).abs() / x.exp2();
+            assert!(rel < 1e-5, "{x}: {rel}");
+        }
+    }
 
     #[test]
     fn live_filters_keep_state_across_blocks() {

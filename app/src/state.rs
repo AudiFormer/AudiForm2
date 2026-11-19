@@ -216,6 +216,8 @@ pub struct State {
     pub looping: bool,
     pub return_on_stop: bool,
     pub meter: (f32, f32),
+    /// Motion and music state for the HUD chrome.
+    pub fx: crate::hud::Fx,
     pub meter_hold: (f32, f32),
 
     pub clipboard: Option<AudioBuffer>,
@@ -311,6 +313,7 @@ impl State {
             looping: false,
             return_on_stop: true,
             meter: (0.0, 0.0),
+            fx: crate::hud::Fx::default(),
             meter_hold: (0.0, 0.0),
             clipboard: None,
             effect: Effect::Amplify,

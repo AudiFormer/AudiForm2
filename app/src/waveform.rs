@@ -578,19 +578,14 @@ pub fn channel_name(n: usize, ch: usize) -> &'static str {
     }
 }
 
+/// The playhead: the HUD's laser. The motion and music state come from
+/// the shared [`crate::hud::Fx`] the app keeps in egui's memory each frame.
 pub fn playhead(p: &egui::Painter, x: f32, top: f32, bottom: f32, th: &Theme) {
-    if th.glow > 0.0 {
-        p.line_segment(
-            [pos2(x, top), pos2(x, bottom)],
-            Stroke::new(5.0_f32, ca(th.playhead, (50.0 * th.glow) as u8)),
-        );
-    }
-    p.line_segment(
-        [pos2(x, top), pos2(x, bottom)],
-        Stroke::new(1.5_f32, c(th.playhead)),
-    );
-    let tri = vec![pos2(x - 6.0, top), pos2(x + 6.0, top), pos2(x, top + 8.0)];
-    p.add(Shape::convex_polygon(tri, c(th.playhead), Stroke::NONE));
+    let fx: crate::hud::Fx = p
+        .ctx()
+        .data(|d| d.get_temp(egui::Id::new("af27-fx")))
+        .unwrap_or_default();
+    crate::hud::laser(p, x, top, bottom, th, &fx);
 }
 
 pub fn dashed_v(p: &egui::Painter, x: f32, top: f32, bottom: f32, col: Color32) {

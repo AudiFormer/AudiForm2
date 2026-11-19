@@ -54,6 +54,28 @@ pub struct Theme {
     pub phase_high: Option<Rgb>,
     /// Draw the Phase Wheel coarse and blown up, like a low-resolution screen.
     pub pixel: bool,
+    /// The backdrop behind the glass panels, top and bottom of the window.
+    pub backdrop_top: Rgb,
+    pub backdrop_bottom: Rgb,
+    /// "perspective", "hex", "dots", "lines" or "none".
+    pub grid_style: String,
+    /// The grid's light colour and strength (0 = off, 1 = normal).
+    pub grid_glow: Rgb,
+    pub grid_strength: f32,
+    /// How opaque the panels' glass is (0 clear, 1 solid).
+    pub glass: f32,
+    /// How far the panels' top-right and bottom-left corners are cut (px).
+    pub chamfer: f32,
+    /// HUD corner brackets on every panel.
+    pub brackets: bool,
+    /// CRT scan lines over everything (0 = off).
+    pub scanlines: f32,
+    /// Animation speed (0 = nothing moves on its own).
+    pub motion: f32,
+    /// How strongly the chrome reacts to the music (0 = not at all).
+    pub reactive: f32,
+    /// Play the boot sequence when the app starts.
+    pub intro: bool,
 }
 
 pub fn c(rgb: Rgb) -> Color32 {
@@ -72,11 +94,113 @@ pub fn lerp(a: Rgb, b: Rgb, t: f32) -> Color32 {
 
 impl Default for Theme {
     fn default() -> Self {
-        Theme::neon_abyss()
+        Theme::zero_point()
     }
 }
 
 impl Theme {
+    /// The default: a holographic instrument panel. Glass over a moving
+    /// perspective grid, ice-cyan light with hot magenta, laser playhead.
+    pub fn zero_point() -> Theme {
+        Theme {
+            name: "Zero Point".into(),
+            author: "Audiform27".into(),
+            dark: true,
+            background: [3, 4, 10],
+            panel: [8, 11, 24],
+            panel_raised: [17, 22, 44],
+            border: [34, 50, 88],
+            text: [214, 232, 255],
+            text_dim: [112, 132, 178],
+            accent: [0, 234, 255],
+            accent_alt: [255, 46, 166],
+            wave_peak: [126, 66, 255],
+            wave_centre: [0, 240, 255],
+            wave_background: [3, 5, 12],
+            grid: [18, 28, 54],
+            selection: [0, 234, 255],
+            selection_alpha: 34,
+            playhead: [255, 46, 166],
+            marker: [255, 196, 0],
+            spectrum: vec![
+                [3, 5, 12],
+                [14, 10, 60],
+                [70, 20, 160],
+                [200, 30, 190],
+                [255, 90, 120],
+                [255, 200, 110],
+                [255, 255, 255],
+            ],
+            meter_low: [0, 234, 200],
+            meter_mid: [255, 210, 60],
+            meter_high: [255, 46, 110],
+            track_colors: vec![
+                [0, 234, 255],
+                [255, 46, 166],
+                [126, 66, 255],
+                [60, 255, 170],
+                [255, 170, 40],
+                [70, 140, 255],
+                [255, 80, 80],
+                [210, 255, 70],
+            ],
+            rounding: 2.0,
+            glow: 1.2,
+            font_scale: 1.0,
+            phase_low: None,
+            phase_high: None,
+            pixel: false,
+            backdrop_top: [5, 8, 24],
+            backdrop_bottom: [1, 1, 5],
+            grid_style: "perspective".into(),
+            grid_glow: [40, 120, 255],
+            grid_strength: 1.0,
+            glass: 0.82,
+            chamfer: 9.0,
+            brackets: true,
+            scanlines: 0.05,
+            motion: 1.0,
+            reactive: 0.8,
+            intro: true,
+        }
+    }
+
+    /// Amber military HUD over a hex mesh.
+    pub fn solar_flare() -> Theme {
+        Theme {
+            name: "Solar Flare".into(),
+            background: [8, 4, 2],
+            panel: [16, 9, 4],
+            panel_raised: [32, 18, 8],
+            border: [80, 44, 16],
+            text: [255, 228, 196],
+            text_dim: [170, 120, 80],
+            accent: [255, 158, 24],
+            accent_alt: [255, 60, 40],
+            wave_peak: [255, 60, 40],
+            wave_centre: [255, 190, 60],
+            wave_background: [6, 3, 1],
+            grid: [40, 22, 8],
+            selection: [255, 158, 24],
+            playhead: [255, 230, 120],
+            marker: [255, 80, 60],
+            spectrum: vec![
+                [6, 3, 1],
+                [50, 10, 4],
+                [150, 40, 10],
+                [255, 110, 20],
+                [255, 200, 90],
+                [255, 250, 230],
+            ],
+            meter_low: [255, 170, 40],
+            backdrop_top: [18, 8, 2],
+            backdrop_bottom: [3, 1, 0],
+            grid_style: "hex".into(),
+            grid_glow: [255, 120, 30],
+            chamfer: 12.0,
+            ..Theme::zero_point()
+        }
+    }
     /// The default: near-black blue, electric cyan into violet, magenta accents.
     pub fn neon_abyss() -> Theme {
         Theme {
@@ -127,6 +251,18 @@ impl Theme {
             phase_low: None,
             phase_high: None,
             pixel: false,
+            backdrop_top: [7, 8, 14],
+            backdrop_bottom: [7, 8, 14],
+            grid_style: "dots".into(),
+            grid_glow: [56, 240, 255],
+            grid_strength: 0.6,
+            glass: 1.0,
+            chamfer: 0.0,
+            brackets: false,
+            scanlines: 0.0,
+            motion: 0.6,
+            reactive: 0.5,
+            intro: true,
         }
     }
 
@@ -155,7 +291,13 @@ impl Theme {
                 [255, 200, 80],
                 [255, 250, 220],
             ],
-            ..Theme::neon_abyss()
+            backdrop_top: [40, 8, 50],
+            backdrop_bottom: [10, 2, 18],
+            grid_style: "perspective".into(),
+            grid_glow: [255, 60, 170],
+            glass: 0.8,
+            chamfer: 10.0,
+            ..Theme::zero_point()
         }
     }
 
@@ -188,7 +330,13 @@ impl Theme {
             meter_low: [60, 255, 120],
             rounding: 2.0,
             pixel: true,
-            ..Theme::neon_abyss()
+            backdrop_top: [2, 10, 5],
+            backdrop_bottom: [0, 3, 1],
+            grid_style: "lines".into(),
+            grid_glow: [40, 255, 110],
+            chamfer: 5.0,
+            scanlines: 0.35,
+            ..Theme::zero_point()
         }
     }
 
@@ -221,12 +369,22 @@ impl Theme {
                 [40, 0, 40],
             ],
             glow: 0.0,
-            ..Theme::neon_abyss()
+            backdrop_top: [226, 230, 242],
+            backdrop_bottom: [206, 212, 230],
+            grid_style: "dots".into(),
+            grid_glow: [30, 110, 255],
+            grid_strength: 0.0,
+            glass: 0.94,
+            scanlines: 0.0,
+            motion: 0.6,
+            ..Theme::zero_point()
         }
     }
 
     pub fn builtins() -> Vec<Theme> {
         vec![
+            Theme::zero_point(),
+            Theme::solar_flare(),
             Theme::neon_abyss(),
             Theme::synth_sunset(),
             Theme::phosphor(),
@@ -366,7 +524,9 @@ mod tests {
         let t: Theme = serde_json::from_str(r#"{"name":"Mine","accent":[1,2,3]}"#).unwrap();
         assert_eq!(t.name, "Mine");
         assert_eq!(t.accent, [1, 2, 3]);
-        assert_eq!(t.panel, Theme::neon_abyss().panel);
+        assert_eq!(t.panel, Theme::zero_point().panel);
+        // Theme files from before the HUD fields still load.
+        assert_eq!(t.grid_style, "perspective");
     }
 
     #[test]

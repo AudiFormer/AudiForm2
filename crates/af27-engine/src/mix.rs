@@ -133,6 +133,87 @@ pub fn stereo_frame(buf: &AudioBuffer, x: f64) -> (f32, f32) {
     }
 }
 
+/// The clip's gain at `local` seconds into it: clip gain and linear fades.
+#[inline]
+fn clip_gain(c: &MixClip, local: f64) -> f32 {
+    let mut g = c.gain as f64;
+    if c.fade_in > 0.0 && local < c.fade_in {
+        g *= local / c.fade_in;
+    }
+    if c.fade_out > 0.0 && c.length - local < c.fade_out {
+        g *= (c.length - local) / c.fade_out;
+    }
+    g as f32
+}
+
+/// Adds one clip's sound for the block starting at `t0` (frames `dt`
+/// apart) into `l` and `r`. Only the frames inside the clip are visited;
+/// mono and stereo files read their channels directly, and a file at the
+/// output rate is read without interpolation.
+fn read_clip(c: &MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
+    let n = l.len();
+    let first = if c.start > t0 {
+        (((c.start - t0) / dt).ceil() as usize).min(n)
+    } else {
+        0
+    };
+    let last = (((c.start + c.length - t0) / dt).ceil().max(0.0) as usize).min(n);
+    if first >= last {
+        return;
+    }
+    let rate = c.buf.rate as f64;
+    let step = dt * rate;
+    let x0 = (c.offset + (t0 + dt * first as f64 - c.start)) * rate;
+    let ch = &c.buf.channels;
+    // The fades change the gain; in the plain middle of a clip it is fixed.
+    let in_fade = |local: f64| {
+        (c.fade_in > 0.0 && local < c.fade_in) || (c.fade_out > 0.0 && c.length - local < c.fade_out)
+    };
+    let local_first = t0 + dt * first as f64 - c.start;
+    let local_last = t0 + dt * (last - 1) as f64 - c.start;
+    let flat = !in_fade(local_first) && !in_fade(local_last);
+    let whole = (step - 1.0).abs() < 1e-9 && (x0 - x0.round()).abs() < 1e-6 && x0 >= -0.5;
+    match ch.len() {
+        2 if whole => {
+            let start = x0.round() as usize;
+            let (a, b) = (&ch[0], &ch[1]);
+            let avail = a.len().min(b.len());
+            if start >= avail {
+                return;
+            }
+            let count = (last - first).min(avail - start);
+            let (sa, sb) = (&a[start..start + count], &b[start..start + count]);
+            let (dl, dr) = (&mut l[first..first + count], &mut r[first..first + count]);
+            if flat {
+                let g = c.gain;
+                for (((o, p), x), y) in dl.iter_mut().zip(dr.iter_mut()).zip(sa).zip(sb) {
+                    *o += x * g;
+                    *p += y * g;
+                }
+            } else {
+                for (k, (((o, p), x), y)) in dl.iter_mut().zip(dr.iter_mut()).zip(sa).zip(sb).enumerate() {
+                    let g = clip_gain(c, local_first + dt * k as f64);
+                    *o += x * g;
+                    *p += y * g;
+                }
+            }
+        }
+        _ => {
+            for i in first..last {
+                let k = (i - first) as f64;
+                let local = local_first + dt * k;
+                if local < 0.0 || local >= c.length {
+                    continue;
+                }
+                let g = if flat { c.gain } else { clip_gain(c, local) };
+                let (a, b) = stereo_frame(&c.buf, x0 + step * k);
+                l[i] += a * g;
+                r[i] += b * g;
+            }
+        }
+    }
+}
+
 /// Per-speaker gains for a track's left and right sides in a 3D session.
 pub fn space_gains(
     layout: af27_core::space::SpaceLayout,
@@ -414,24 +495,7 @@ impl Mix {
                 if c.start >= t1 || c.start + c.length <= t0 {
                     continue;
                 }
-                let rate = c.buf.rate as f64;
-                for i in 0..n {
-                    let t = t0 + dt * i as f64;
-                    let local = t - c.start;
-                    if local < 0.0 || local >= c.length {
-                        continue;
-                    }
-                    let mut g = c.gain as f64;
-                    if c.fade_in > 0.0 && local < c.fade_in {
-                        g *= local / c.fade_in;
-                    }
-                    if c.fade_out > 0.0 && c.length - local < c.fade_out {
-                        g *= (c.length - local) / c.fade_out;
-                    }
-                    let (a, b) = stereo_frame(&c.buf, (c.offset + local) * rate);
-                    tl[i] += a * g as f32;
-                    tr[i] += b * g as f32;
-                }
+                read_clip(c, t0, dt, &mut tl[..n], &mut tr[..n]);
             }
             let t = &mut self.tracks[ti];
             if let Some(s) = &mut t.synth {
