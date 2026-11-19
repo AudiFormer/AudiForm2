@@ -141,18 +141,25 @@ pub fn button_anchor(view: &View, playhead: f64) -> f64 {
 }
 
 /// Follow Playhead: on or off, and whether a hand-made scroll or zoom
-/// during playback has let go of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// during playback has let go of it. It picks up again once the view is
+/// left alone for [`FOLLOW_QUIET`] seconds with the playhead in it.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Follow {
     pub on: bool,
     paused: bool,
+    /// Seconds since the last hand-made move.
+    quiet: f64,
 }
+
+/// How long the view must be left alone before following picks up again.
+pub const FOLLOW_QUIET: f64 = 0.5;
 
 impl Default for Follow {
     fn default() -> Self {
         Follow {
             on: true,
             paused: false,
+            quiet: 0.0,
         }
     }
 }
@@ -163,6 +170,17 @@ impl Follow {
     pub fn hand_moved(&mut self, playing: bool) {
         if playing {
             self.paused = true;
+        }
+        self.quiet = 0.0;
+    }
+
+    /// `dt` seconds passed with the view untouched; `in_view` says whether
+    /// the playhead is in it. Left alone long enough with the playhead in
+    /// view, following picks up again.
+    pub fn idle(&mut self, dt: f64, in_view: bool) {
+        self.quiet += dt;
+        if self.paused && in_view && self.quiet >= FOLLOW_QUIET {
+            self.paused = false;
         }
     }
 
@@ -533,6 +551,20 @@ mod tests {
         f.set_on(false);
         assert!(!f.active());
         f.set_on(true);
+        assert!(f.active());
+    }
+
+    #[test]
+    fn follow_picks_up_when_the_view_is_left_alone_with_the_playhead_in_it() {
+        let mut f = Follow::default();
+        f.hand_moved(true);
+        // Playhead out of view: stays let go however long.
+        f.idle(5.0, false);
+        assert!(!f.active());
+        f.hand_moved(true);
+        f.idle(0.3, true);
+        assert!(!f.active());
+        f.idle(0.3, true);
         assert!(f.active());
     }
 

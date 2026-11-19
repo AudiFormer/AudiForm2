@@ -3,7 +3,10 @@
 
 //! The Waveform editor: one file, every channel stacked, an overview bar,
 //! a time ruler with markers, and an optional spectral display under the
-//! waveform. Drag to select time, click to place the playhead.
+//! waveform. Drag to select time (or drag a selection edge), click to
+//! place the playhead (not while playing: then only the ruler moves it).
+//! The ruler, the start marker and middle-button panning are in
+//! [`crate::ruler`].
 //!
 //! Wheel (see [`crate::zoom`]): over the waveform and the spectrum it
 //! zooms time (around the pointer, between the pointer and the middle, or
@@ -33,89 +36,6 @@ pub fn time_to_x(v: &View, rect: Rect, t: f64) -> f32 {
 
 pub fn x_to_time(v: &View, rect: Rect, x: f32) -> f64 {
     v.start + ((x - rect.left()) / rect.width()) as f64 * v.len
-}
-
-/// A "nice" ruler step for `len` seconds across `px` pixels.
-fn ruler_step(len: f64, px: f32) -> f64 {
-    let target = len / (px as f64 / 90.0).max(1.0);
-    let steps = [
-        0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0,
-        60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0,
-    ];
-    steps
-        .iter()
-        .copied()
-        .find(|s| *s >= target)
-        .unwrap_or(3600.0)
-}
-
-fn ruler_label(t: f64, step: f64) -> String {
-    if step < 1.0 {
-        let m = (t / 60.0).floor();
-        let s = t - m * 60.0;
-        let dec = if step < 0.01 {
-            3
-        } else if step < 0.1 {
-            2
-        } else {
-            1
-        };
-        format!("{}:{:0w$.dec$}", m as u64, s, w = dec + 3, dec = dec)
-    } else {
-        let t = t.round() as u64;
-        if t >= 3600 {
-            format!("{}:{:02}:{:02}", t / 3600, (t / 60) % 60, t % 60)
-        } else {
-            format!("{}:{:02}", t / 60, t % 60)
-        }
-    }
-}
-
-pub fn draw_ruler(
-    p: &egui::Painter,
-    rect: Rect,
-    v: &View,
-    th: &Theme,
-    markers: &[af27_core::Marker],
-) {
-    p.rect_filled(rect, Rounding::ZERO, c(th.panel));
-    let step = ruler_step(v.len, rect.width());
-    let first = (v.start / step).floor() as i64;
-    let last = ((v.start + v.len) / step).ceil() as i64;
-    for i in first..=last {
-        let t = i as f64 * step;
-        let x = time_to_x(v, rect, t);
-        if x < rect.left() - 1.0 || x > rect.right() {
-            continue;
-        }
-        p.line_segment(
-            [pos2(x, rect.bottom() - 7.0), pos2(x, rect.bottom())],
-            Stroke::new(1.0_f32, c(th.text_dim)),
-        );
-        let xm = time_to_x(v, rect, t + step / 2.0);
-        p.line_segment(
-            [pos2(xm, rect.bottom() - 3.0), pos2(xm, rect.bottom())],
-            Stroke::new(1.0_f32, c(th.border)),
-        );
-        p.text(
-            pos2(x + 3.0, rect.top() + 2.0),
-            Align2::LEFT_TOP,
-            ruler_label(t, step),
-            FontId::proportional(10.0),
-            c(th.text_dim),
-        );
-    }
-    for m in markers {
-        let x = time_to_x(v, rect, m.time);
-        if x >= rect.left() && x <= rect.right() {
-            let tri = vec![
-                pos2(x, rect.bottom()),
-                pos2(x - 5.0, rect.bottom() - 8.0),
-                pos2(x + 5.0, rect.bottom() - 8.0),
-            ];
-            p.add(Shape::convex_polygon(tri, c(th.marker), Stroke::NONE));
-        }
-    }
 }
 
 /// Draws one channel's waveform with a centre-to-peak gradient.
@@ -324,9 +244,16 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         (body, None)
     };
 
+    // The ruler is its own widget on top: it moves the playhead.
+    let rresp = ui.interact(
+        ruler,
+        ui.id().with("af27-wave-ruler"),
+        Sense::click_and_drag(),
+    );
+
     // Interaction first so drawing shows this frame's state.
     st.wave_px = body.width();
-    let hover = resp.hover_pos();
+    let hover = resp.hover_pos().or(rresp.hover_pos());
     if let Some(hp) = hover {
         let input = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers));
         let areas = Areas {
@@ -339,35 +266,53 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         wheel(st, &areas, hp, input);
     }
     let mut moved_by_hand = false;
+    let playing = st.transport_playing();
+    let snap_marks: Vec<f64> = st
+        .doc()
+        .map(|d| d.markers.iter().map(|m| m.time).collect())
+        .unwrap_or_default();
+    let ghost = {
+        let (v, dur) = st
+            .doc()
+            .map_or((View::fit(1.0), 0.0), |d| (d.view, d.duration()));
+        crate::ruler::input(ui, st, &rresp, body, &v, dur, &snap_marks)
+    };
+    // Middle-button drag anywhere pans in time.
+    if let Some(dv) = crate::ruler::pan_delta(ui, &resp).or(crate::ruler::pan_delta(ui, &rresp)) {
+        let d = st.doc_mut().unwrap();
+        d.view.start -= dv.x as f64 / body.width().max(1.0) as f64 * d.view.len;
+        moved_by_hand = true;
+    }
+    let snap_view = st.doc().map(|d| d.view).unwrap_or(View::fit(1.0));
+    let snapped = |st: &State, t: f64| crate::ruler::snap(st, t, &snap_view, body, &snap_marks);
+    let drag_t = resp
+        .interact_pointer_pos()
+        .map(|pp| snapped(st, x_to_time(&snap_view, body, pp.x)));
+    let on_edge = resp
+        .interact_pointer_pos()
+        .or(resp.hover_pos())
+        .filter(|pp| body.contains(*pp))
+        .and_then(|pp| crate::ruler::edge_at(st.doc().and_then(|d| d.sel), &snap_view, body, pp.x));
+    if on_edge.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
     {
         let d = st.doc_mut().unwrap();
         let dur = d.duration();
-        if resp.drag_started() {
+        if resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pp) = resp.interact_pointer_pos() {
                 if overview.contains(pp) {
                     caches.wave_drag = Some(WaveDrag::Overview);
                 } else {
-                    let t = x_to_time(&d.view, body, pp.x).clamp(0.0, dur);
+                    let t = drag_t.unwrap_or(0.0).clamp(0.0, dur);
                     // Grab the far edge when starting on an existing edge.
-                    let anchor = match d.sel {
-                        Some((a, b)) => {
-                            let near = |e: f64| (time_to_x(&d.view, body, e) - pp.x).abs() < 6.0;
-                            if near(a) {
-                                b
-                            } else if near(b) {
-                                a
-                            } else {
-                                t
-                            }
-                        }
-                        None => t,
-                    };
+                    let anchor = on_edge.map_or(t, |(_, other)| other);
                     caches.wave_drag = Some(WaveDrag::Select { anchor });
                 }
             }
         }
         if let (Some(drag), Some(pp)) = (caches.wave_drag, resp.interact_pointer_pos()) {
-            if resp.dragged() {
+            if resp.dragged_by(egui::PointerButton::Primary) {
                 match drag {
                     WaveDrag::Overview => {
                         moved_by_hand = true;
@@ -375,7 +320,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         d.view.start = (t - d.view.len / 2.0).max(0.0);
                     }
                     WaveDrag::Select { anchor } => {
-                        let t = x_to_time(&d.view, body, pp.x).clamp(0.0, dur);
+                        let t = drag_t.unwrap_or(0.0).clamp(0.0, dur);
                         d.sel = Some((anchor.min(t), anchor.max(t)));
                         d.cursor = anchor.min(t);
                         // Scroll while dragging past an edge.
@@ -397,8 +342,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     let t = ((pp.x - overview.left()) / overview.width()) as f64 * dur;
                     d.view.start = (t - d.view.len / 2.0).max(0.0);
                     moved_by_hand = true;
-                } else {
-                    d.cursor = x_to_time(&d.view, body, pp.x).clamp(0.0, dur);
+                } else if on_edge.is_none() {
+                    // A click on a selection edge keeps the selection.
+                    // While playing, only the ruler moves the playhead.
+                    if !playing {
+                        d.cursor = x_to_time(&d.view, body, pp.x).clamp(0.0, dur);
+                    }
                     d.sel = None;
                 }
             }
@@ -409,13 +358,6 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     }
     if moved_by_hand {
         st.hand_moved_view();
-    }
-    let was_playing = st.is_playing();
-    let on_overview = resp
-        .interact_pointer_pos()
-        .is_some_and(|pp| overview.contains(pp));
-    if resp.clicked() && was_playing && !on_overview {
-        st.play();
     }
     // Right-click on the spectrum: its view menu.
     if let Some(sa) = spec_area {
@@ -461,11 +403,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     p.rect_filled(win, Rounding::same(3.0), ca(th.accent, 30));
     p.rect_stroke(win, Rounding::same(3.0), Stroke::new(1.0_f32, c(th.accent)));
 
-    draw_ruler(&p, ruler, &v, &th, &d.markers);
+    let tc = st.time_ctx();
+    crate::ruler::draw_ruler(&p, ruler, &v, &th, &d.markers, &tc);
 
     // Waveform lanes.
     p.rect_filled(wave_area, Rounding::ZERO, c(th.wave_background));
-    let step = ruler_step(v.len, wave_area.width());
+    let step = tc.ruler_step(v.len, wave_area.width());
     let first = (v.start / step).floor() as i64;
     for i in first..=((v.start + v.len) / step).ceil() as i64 {
         let x = time_to_x(&v, wave_area, i as f64 * step);
@@ -597,7 +540,16 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             );
         }
     }
-    // Playhead.
+    // Start marker, the ruler drag's target, the playhead.
+    if let Some(s) = st.start_marker {
+        let x = time_to_x(&v, body, s);
+        if x >= body.left() && x <= body.right() {
+            crate::ruler::start_marker(&p, x, ruler, body.bottom(), &th);
+        }
+    }
+    if let Some(g) = ghost {
+        crate::ruler::ghost(&p, time_to_x(&v, body, g), ruler.top(), body.bottom(), &th);
+    }
     let x = time_to_x(&v, body, pos);
     if x >= body.left() && x <= body.right() {
         playhead(&p, x, ruler.top(), body.bottom(), &th);
@@ -608,7 +560,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             p.text(
                 hp + vec2(10.0, -14.0),
                 Align2::LEFT_BOTTOM,
-                af27_core::time::format_time(t),
+                tc.format(t),
                 FontId::monospace(10.0),
                 ca(th.text, 200),
             );
@@ -814,6 +766,8 @@ pub fn channel_name(n: usize, ch: usize) -> &'static str {
 /// The playhead: the HUD's laser. The motion and music state come from
 /// the shared [`crate::hud::Fx`] the app keeps in egui's memory each frame.
 pub fn playhead(p: &egui::Painter, x: f32, top: f32, bottom: f32, th: &Theme) {
+    // The head on the ruler and the line on the same pixel column.
+    let x = crate::ruler::pixel_x(p, x);
     let fx: crate::hud::Fx = p
         .ctx()
         .data(|d| d.get_temp(egui::Id::new("af27-fx")))
