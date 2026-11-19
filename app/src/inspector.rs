@@ -34,6 +34,7 @@ fn live_commit(
 
 pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
+    file_info(ui, st);
     let ti = st.selected_track.and_then(|id| st.session.track_index(id));
     match ti {
         Some(ti) => track(ui, st, ti),
@@ -472,4 +473,56 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
     if structural {
         st.commit_session("Effect chain", before);
     }
+}
+
+/// Read-only tags of the open file and what was found in it (markers,
+/// chapters), shown in Waveform view.
+fn file_info(ui: &mut egui::Ui, st: &State) {
+    if st.mode != crate::state::Mode::Waveform {
+        return;
+    }
+    let Some(d) = st.doc() else { return };
+    let rows = d.info.tags.rows();
+    let found = d.info.markers.len();
+    if rows.is_empty() && found == 0 {
+        return;
+    }
+    let th = &st.theme;
+    egui::CollapsingHeader::new(RichText::new("FILE INFO").strong().color(c(th.accent)))
+        .id_salt(("file-info", d.id))
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new(("file-info-grid", d.id))
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (k, v) in &rows {
+                        ui.label(RichText::new(k).size(10.0).color(c(th.text_dim)));
+                        ui.add(egui::Label::new(RichText::new(v).size(11.0)).wrap());
+                        ui.end_row();
+                    }
+                });
+            if found > 0 {
+                use af27_io::meta::MarkerKind;
+                let n = |k| d.info.markers.iter().filter(|m| m.kind == k).count();
+                let mut parts = Vec::new();
+                for (k, one, many) in [
+                    (MarkerKind::Cue, "cue", "cues"),
+                    (MarkerKind::Range, "range", "ranges"),
+                    (MarkerKind::Chapter, "chapter", "chapters"),
+                ] {
+                    match n(k) {
+                        0 => {}
+                        1 => parts.push(format!("1 {one}")),
+                        x => parts.push(format!("{x} {many}")),
+                    }
+                }
+                ui.label(
+                    RichText::new(format!("From the file: {}", parts.join(", ")))
+                        .size(10.0)
+                        .color(c(th.text_dim)),
+                );
+            }
+        });
+    ui.separator();
 }
