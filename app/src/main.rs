@@ -22,6 +22,7 @@ mod skin;
 mod space;
 mod splash;
 mod state;
+mod tempo;
 mod theme;
 mod ui;
 mod visualizer;

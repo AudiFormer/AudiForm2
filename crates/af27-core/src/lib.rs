@@ -7,6 +7,8 @@
 pub mod buffer;
 pub mod history;
 pub mod midi;
+pub mod noteops;
+pub mod quantize;
 pub mod session;
 pub mod space;
 pub mod time;

@@ -354,6 +354,19 @@ impl App {
             Cmd::Save => save(st),
             Cmd::Undo => st.undo(),
             Cmd::Redo => st.redo(),
+            // Over the Piano Roll these act on its notes.
+            Cmd::Cut | Cmd::Copy | Cmd::Paste | Cmd::SelectAll | Cmd::Delete
+                if st.piano_hover && st.piano_clip.is_some() =>
+            {
+                use crate::pianoroll::PianoCmd;
+                st.piano_cmd = Some(match cmd {
+                    Cmd::Cut => PianoCmd::Cut,
+                    Cmd::Copy => PianoCmd::Copy,
+                    Cmd::Paste => PianoCmd::Paste,
+                    Cmd::SelectAll => PianoCmd::SelectAll,
+                    _ => PianoCmd::Delete,
+                });
+            }
             Cmd::Cut => st.edit_cut(),
             Cmd::Copy => st.edit_copy(),
             Cmd::Paste => st.edit_paste(),
@@ -595,6 +608,17 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.close_menu();
             }
             cmd_item(ui, km, Cmd::Open, "Open...", true, &mut cmd);
+            ui.menu_button("Import", |ui| {
+                if ui.button("MIDI File...").clicked() {
+                    ui.close_menu();
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("MIDI files", &["mid", "midi", "smf"])
+                        .pick_file()
+                    {
+                        crate::tempo::import_midi(st, p);
+                    }
+                }
+            });
             ui.separator();
             cmd_item(ui, km, Cmd::Save, "Save", true, &mut cmd);
             if ui.button("Save Audio As...").clicked() {
@@ -710,11 +734,28 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.close_menu();
             }
             ui.separator();
+            if ui.button("Tempo and Time Signature...").clicked() {
+                st.tempo_ui.open = true;
+                ui.close_menu();
+            }
             let mut m = st.session.tempo.metronome;
             if ui.checkbox(&mut m, "Metronome").changed() {
                 st.session.tempo.metronome = m;
                 st.live_metronome();
             }
+            ui.menu_button("Export", |ui| {
+                if ui.button("MIDI File...").clicked() {
+                    ui.close_menu();
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_file_name(format!("{}.mid", st.session.name))
+                        .add_filter("MIDI file", &["mid"])
+                        .save_file()
+                    {
+                        crate::tempo::export_midi(st, p);
+                    }
+                }
+            });
+            ui.separator();
             cmd_item(
                 ui,
                 km,
@@ -1239,23 +1280,51 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                     .color(c(th.text_dim)),
             ),
         );
-        let mut bpm = st.session.tempo.bpm;
-        if ui
+        // The tempo and time signature of the stretch the playhead is in.
+        let seg = st.session.tempo.seg_at_secs(st.position().max(0.0));
+        let mut bpm = seg.bpm;
+        let r = ui
             .add_sized(
                 egui::vec2(78.0, 26.0),
                 egui::DragValue::new(&mut bpm)
-                    .range(20.0..=300.0)
+                    .range(af27_core::midi::BPM_MIN..=af27_core::midi::BPM_MAX)
                     .speed(0.5)
                     .suffix(" BPM")
-                    .max_decimals(1),
+                    .max_decimals(2),
             )
-            .on_hover_text("Tempo: drag, or double-click to type")
-            .changed()
-        {
-            st.session.tempo.bpm = bpm;
+            .on_hover_text("Tempo where the playhead is: drag, or double-click to type");
+        if r.drag_started() {
+            st.gesture_before = Some(st.session.clone());
+        }
+        if r.changed() {
+            let before = st.session.clone();
+            st.session
+                .tempo
+                .set_values(seg.change, bpm, seg.beats_per_bar, seg.beat_unit);
             st.session_version += 1;
-            st.session_dirty = true;
             st.live_metronome();
+            if !r.dragged() && st.gesture_before.is_none() {
+                st.commit_session("Tempo", before);
+            }
+        }
+        if r.drag_stopped() || (r.lost_focus() && st.gesture_before.is_some()) {
+            if let Some(b) = st.gesture_before.take() {
+                if b != st.session {
+                    st.commit_session("Tempo", b);
+                }
+            }
+        }
+        if ui
+            .add_sized(
+                egui::vec2(36.0, 26.0),
+                egui::Button::new(seg.meter_text()).frame(false),
+            )
+            .on_hover_text(
+                "Time signature where the playhead is (Multitrack > Tempo and Time Signature...)",
+            )
+            .clicked()
+        {
+            st.tempo_ui.open = true;
         }
         let m = st.session.tempo.metronome;
         if crate::hud::transport_button(
@@ -1583,6 +1652,8 @@ impl eframe::App for App {
         }
         self.st.tick();
         self.keys(ctx);
+        // The Piano Roll says again this frame whether the pointer is on it.
+        self.st.piano_hover = false;
         // How fast frames really arrive (CPU and GPU together). In Auto, a
         // device that keeps missing the HUD's pace gets the lighter look.
         let now = ctx.input(|i| i.time);
@@ -1799,6 +1870,8 @@ impl eframe::App for App {
             self.show_tab(Tab::PianoRoll);
         }
         generate_window(ctx, &mut self.st);
+        crate::tempo::window(ctx, &mut self.st);
+        crate::tempo::replace_prompt(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);
         let th_now = self.st.theme.clone();

@@ -287,6 +287,16 @@ pub struct State {
     pub session_px: f32,
     /// Display-only amplitude zoom of the Multitrack's waveforms (1 to 16).
     pub session_amp: f32,
+    /// The tempo window and a `.mid` import waiting for an answer.
+    pub tempo_ui: crate::tempo::TempoUi,
+    /// The pointer is over the Piano Roll: Cut, Copy, Paste, Delete and
+    /// Select All go to its notes.
+    pub piano_hover: bool,
+    pub piano_cmd: Option<crate::pianoroll::PianoCmd>,
+    /// What the engine's audition plays through (a track and its settings).
+    pub audition_key: Option<String>,
+    /// The session before a drag on a transport field began.
+    pub gesture_before: Option<Session>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,6 +466,11 @@ impl State {
             wave_px: 1000.0,
             session_px: 1000.0,
             session_amp: 1.0,
+            tempo_ui: Default::default(),
+            piano_hover: false,
+            piano_cmd: None,
+            audition_key: None,
+            gesture_before: None,
         }
     }
 
@@ -1391,18 +1406,76 @@ impl State {
     }
 
     pub fn live_instrument(&mut self, ti: usize) {
-        let Some(inst) = self.session.tracks.get(ti).map(|t| t.instrument) else {
+        let Some(t) = self.session.tracks.get(ti) else {
             return;
         };
+        let inst = t.instrument;
+        let font_db = t.soundfont.as_ref().map(|f| f.gain_db);
         if let Some(e) = &mut self.engine {
             e.set_instrument(ti, inst);
+            if let Some(db) = font_db {
+                e.set_font_gain(ti, db);
+            }
         }
     }
 
     pub fn live_metronome(&mut self) {
-        let t = self.session.tempo;
+        let on = self.session.tempo.metronome;
         if let Some(e) = &mut self.engine {
-            e.set_metronome(t.metronome.then_some((t.bpm, t.beats_per_bar)));
+            e.set_metronome(on);
+        }
+    }
+
+    /// Points the engine's audition at track `ti`'s instrument, building
+    /// it only when the track or its settings changed.
+    fn audition_for(&mut self, ti: usize) -> bool {
+        let Some(t) = self.session.tracks.get(ti) else {
+            return false;
+        };
+        let key = format!(
+            "{}|{:?}|{:?}",
+            t.id,
+            t.instrument,
+            t.soundfont
+                .as_ref()
+                .map(|f| (&f.path, f.bank, f.program, f.gain_db))
+        );
+        if self.audition_key.as_deref() == Some(key.as_str()) {
+            return self.engine.is_some();
+        }
+        let Some(e) = &mut self.engine else {
+            return false;
+        };
+        let a = match &t.soundfont {
+            Some(sf) => match af27_engine::soundfont::Audition::font(sf, e.rate) {
+                Ok(a) => a,
+                Err(_) => return false,
+            },
+            None => af27_engine::soundfont::Audition::synth(t.instrument, e.rate),
+        };
+        e.set_audition(a);
+        self.audition_key = Some(key);
+        true
+    }
+
+    /// Starts a note on track `ti`'s instrument (the piano roll).
+    pub fn audition_on(&mut self, ti: usize, pitch: u8, velocity: u8, pan: f32) {
+        if self.audition_for(ti) {
+            if let Some(e) = &mut self.engine {
+                e.note_on(pitch, velocity, pan);
+            }
+        }
+    }
+
+    pub fn audition_off(&mut self, pitch: u8) {
+        if let Some(e) = &mut self.engine {
+            e.note_off(pitch);
+        }
+    }
+
+    pub fn audition_all_off(&mut self) {
+        if let Some(e) = &mut self.engine {
+            e.all_notes_off();
         }
     }
 
