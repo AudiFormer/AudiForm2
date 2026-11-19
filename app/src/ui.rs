@@ -171,8 +171,10 @@ impl App {
         crate::skin::install_fallback_fonts(&cc.egui_ctx);
         crate::hwcursor::install(cc);
         crate::caustics::install(cc);
+        crate::app_icon::install(cc);
         lay_colors(&mut st);
         st.theme.apply(&cc.egui_ctx);
+        crate::app_icon::apply(&cc.egui_ctx, &st.theme);
         st.theme_changed = false;
         st.open_paths(files);
         let dock = load_layout(st.workspace);
@@ -1994,8 +1996,10 @@ impl eframe::App for App {
         if self.st.theme_changed {
             lay_colors(&mut self.st);
             self.st.theme.apply(ctx);
+            crate::app_icon::apply(ctx, &self.st.theme);
             self.st.theme_changed = false;
         }
+        crate::app_icon::frame();
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files

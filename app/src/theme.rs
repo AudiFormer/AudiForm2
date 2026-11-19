@@ -131,6 +131,11 @@ pub struct Theme {
     /// The theme's own mouse pointers (see `pointers.rs`): `glass`,
     /// `phosphor`, `mall`, or empty for the system's.
     pub pointers: String,
+    /// The theme's own window icon (see `app_icon.rs`): `pastel`,
+    /// `pastel-night`, `undercurrent`, or empty for the AudiForm 2 icon in
+    /// the theme's colours.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 fn is_zero(x: &f32) -> bool {
@@ -247,6 +252,7 @@ impl Theme {
             realistic: true,
             splash: String::new(),
             pointers: String::new(),
+            icon: String::new(),
         }
     }
 

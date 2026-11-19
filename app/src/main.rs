@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_icon;
 mod caustics;
 mod classic_themes;
 mod corners;
@@ -66,9 +67,13 @@ fn main() -> eframe::Result<()> {
 }
 
 fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default().with_title("AudiForm 2");
+    // The Zero Point icon until the theme's own is put up (app_icon.rs).
+    if let Some(icon) = app_icon::default_icon_data() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("AudiForm 2")
+        viewport: viewport
             .with_inner_size(selfshot::window_size().unwrap_or([1600.0, 940.0]))
             .with_min_inner_size([900.0, 560.0])
             .with_drag_and_drop(true),

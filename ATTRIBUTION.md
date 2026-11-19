@@ -10,6 +10,7 @@
 | Freeverb (Jezar at Dreampoint) | Public domain | The comb and allpass delay tunings in `crates/af27-dsp/src/reverb.rs` |
 | `midly` (Negamartin) | Unlicense | Reading and writing `.mid` files (`crates/af27-interop/src/smf.rs`), as a crate dependency |
 | `rustysynth` (Nobuaki Tanaka) | MIT | SoundFont instruments (`crates/af27-engine/src/soundfont.rs`), as a crate dependency; its MIT notice must travel with release builds |
+| `embed-resource` (nabijaczleweli and others) | MIT | Builds the icon and version text into the Windows exe (`app/build.rs`); a build-time dependency only, nothing of it is in the program |
 
 **To do before any release:** copy NeuralAmpModelerCore's MIT notice verbatim from its repository's LICENSE file into this section. The MIT licence requires that notice to travel with the code.
 
