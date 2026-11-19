@@ -12,7 +12,7 @@
 //! Glow is drawn additively: in egui's premultiplied colours, a colour with
 //! alpha 0 adds light instead of covering what is beneath.
 
-use egui::epaint::{Mesh, PathShape, PathStroke};
+use egui::epaint::Mesh;
 use egui::{
     Align2, Color32, FontId, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2,
 };
@@ -223,7 +223,7 @@ fn perspective_grid(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
             let a = Pos2::new(cx + f * rect.width() * 0.08, y_far);
             let b = Pos2::new(cx + f * spread, y_near);
             let s = k * (0.55 + 0.45 * (1.0 - f.abs())) * if dir < 0.0 { 0.5 } else { 1.0 };
-            p.line_segment([a, b], Stroke::new(1.0, light(col, s)));
+            p.line_segment([a, b], Stroke::new(1.0_f32, light(col, s)));
         }
         // Cross lines rush towards you, faster when it is loud.
         let rows = 16;
@@ -236,13 +236,13 @@ fn perspective_grid(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
             let boost = near_pointer(fx, Pos2::new(fx.pointer.map_or(cx, |m| m.x), y)) * 0.5;
             p.line_segment(
                 [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                Stroke::new(1.0, light(col, s + boost * k)),
+                Stroke::new(1.0_f32, light(col, s + boost * k)),
             );
         }
     }
     // The horizon burns, and flares on a beat.
     let flare = 0.35 + fx.level * 0.4 + fx.pulse * 0.5;
-    for (wdt, a) in [(9.0, 0.06), (4.0, 0.14), (1.2, 0.5)] {
+    for (wdt, a) in [(9.0_f32, 0.06_f32), (4.0, 0.14), (1.2, 0.5)] {
         p.line_segment(
             [Pos2::new(rect.left(), horizon), Pos2::new(rect.right(), horizon)],
             Stroke::new(wdt, light(th.accent, a * flare * th.grid_strength)),
@@ -274,7 +274,7 @@ fn hex_grid(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
                     c + Vec2::angled(a) * (size - 2.0)
                 })
                 .collect();
-            p.add(Shape::closed_line(pts, Stroke::new(1.0, light(th.grid_glow, s))));
+            p.add(Shape::closed_line(pts, Stroke::new(1.0_f32, light(th.grid_glow, s))));
         }
     }
 }
@@ -304,12 +304,12 @@ fn line_grid(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
     let off = (fx.t * 8.0) % step;
     let mut x = rect.left() - off;
     while x < rect.right() {
-        p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, light(th.grid_glow, s)));
+        p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, light(th.grid_glow, s)));
         x += step;
     }
     let mut y = rect.top() - off;
     while y < rect.bottom() {
-        p.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], Stroke::new(1.0, light(th.grid_glow, s)));
+        p.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], Stroke::new(1.0_f32, light(th.grid_glow, s)));
         y += step;
     }
 }
@@ -322,7 +322,7 @@ pub fn scanlines(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
     let a = (th.scanlines * 70.0) as u8;
     let mut y = rect.top();
     while y < rect.bottom() {
-        p.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], Stroke::new(1.0, Color32::from_black_alpha(a)));
+        p.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], Stroke::new(1.0_f32, Color32::from_black_alpha(a)));
         y += 3.0;
     }
     // A band of light rolls down the screen every few seconds.
@@ -359,14 +359,14 @@ pub fn glass(p: &Painter, rect: Rect, th: &Theme) {
 pub fn frame(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool, serial: usize) {
     let pts = chamfer(rect, th.chamfer);
     let edge = if focused { ca(th.accent, 150) } else { ca(th.border, 200) };
-    p.add(Shape::closed_line(pts.clone(), Stroke::new(1.0, edge)));
+    p.add(Shape::closed_line(pts.clone(), Stroke::new(1.0_f32, edge)));
     if focused && th.glow > 0.0 {
-        p.add(Shape::closed_line(pts.clone(), Stroke::new(4.0, light(th.accent, 0.12 * th.glow))));
+        p.add(Shape::closed_line(pts.clone(), Stroke::new(4.0_f32, light(th.accent, 0.12 * th.glow))));
     }
     if th.brackets {
         let len = 12.0f32.min(rect.width() * 0.2);
         let col = if focused { crate::theme::c(th.accent) } else { ca(th.accent, 110) };
-        let s = Stroke::new(2.0, col);
+        let s = Stroke::new(2.0_f32, col);
         let tl = rect.left_top() + Vec2::new(-1.5, -1.5);
         p.add(Shape::line(vec![tl + Vec2::new(0.0, len), tl, tl + Vec2::new(len, 0.0)], s));
         let br = rect.right_bottom() + Vec2::new(1.5, 1.5);
@@ -412,8 +412,8 @@ fn running_light(p: &Painter, pts: &[Pos2], th: &Theme, fx: &Fx) {
         let d0 = head - seg * k as f32 / steps as f32;
         let d1 = head - seg * (k + 1) as f32 / steps as f32;
         let fade = 1.0 - k as f32 / steps as f32;
-        p.line_segment([at(d0), at(d1)], Stroke::new(2.0, light(th.accent, 0.9 * fade)));
-        p.line_segment([at(d0), at(d1)], Stroke::new(6.0, light(th.accent, 0.15 * fade * th.glow)));
+        p.line_segment([at(d0), at(d1)], Stroke::new(2.0_f32, light(th.accent, 0.9 * fade)));
+        p.line_segment([at(d0), at(d1)], Stroke::new(6.0_f32, light(th.accent, 0.15 * fade * th.glow)));
     }
 }
 
@@ -424,7 +424,7 @@ pub fn tab_light(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool) {
     let breathe = 0.85 + 0.15 * (fx.t * 2.0).sin() + fx.pulse * 0.3;
     p.line_segment(
         [Pos2::new(rect.left() + 2.0, y), Pos2::new(rect.right() - 2.0, y)],
-        Stroke::new(2.0, light(th.accent, k * breathe)),
+        Stroke::new(2.0_f32, light(th.accent, k * breathe)),
     );
     if th.glow > 0.0 {
         // A glow rising from the underline.
@@ -447,7 +447,7 @@ pub fn laser(p: &Painter, x: f32, top: f32, bottom: f32, th: &Theme, fx: &Fx) {
     let col = th.playhead;
     let g = th.glow.max(0.0);
     if g > 0.0 {
-        for (w, k) in [(14.0, 0.05), (7.0, 0.12), (3.0, 0.35)] {
+        for (w, k) in [(14.0_f32, 0.05_f32), (7.0, 0.12), (3.0, 0.35)] {
             p.line_segment(
                 [Pos2::new(x, top), Pos2::new(x, bottom)],
                 Stroke::new(w, light(col, k * g * (1.0 + fx.pulse * 0.5))),
@@ -456,7 +456,7 @@ pub fn laser(p: &Painter, x: f32, top: f32, bottom: f32, th: &Theme, fx: &Fx) {
     }
     p.line_segment(
         [Pos2::new(x, top), Pos2::new(x, bottom)],
-        Stroke::new(1.0, crate::theme::lerp(col, [255, 255, 255], 0.6)),
+        Stroke::new(1.0_f32, crate::theme::lerp(col, [255, 255, 255], 0.6)),
     );
     if th.motion > 0.0 && g > 0.0 {
         let span = (bottom - top).max(1.0);
@@ -475,7 +475,7 @@ pub fn laser(p: &Painter, x: f32, top: f32, bottom: f32, th: &Theme, fx: &Fx) {
     if g > 0.0 {
         blob(p, head, 16.0, col, 0.5 * g);
     }
-    p.add(Shape::convex_polygon(pts, crate::theme::c(col), Stroke::new(1.0, Color32::WHITE)));
+    p.add(Shape::convex_polygon(pts, crate::theme::c(col), Stroke::new(1.0_f32, Color32::WHITE)));
 }
 
 /// What a transport button draws.
@@ -492,7 +492,7 @@ pub enum Icon {
 }
 
 fn draw_icon(p: &Painter, icon: Icon, c: Pos2, s: f32, col: Color32) {
-    let stroke = Stroke::new(1.8, col);
+    let stroke = Stroke::new(1.8_f32, col);
     match icon {
         Icon::Play => {
             let pts = vec![c + Vec2::new(-s * 0.4, -s * 0.5), c + Vec2::new(s * 0.55, 0.0), c + Vec2::new(-s * 0.4, s * 0.5)];
@@ -557,7 +557,7 @@ pub fn button(ui: &mut Ui, icon: Icon, tip: &str, on: bool, rgb: Rgb, th: &Theme
         let r = rect.width() * 0.5 - 2.0;
         let fill = if on { ca(rgb, 60) } else { ca(th.panel_raised, 230) };
         p.circle_filled(c, r, fill);
-        p.circle_stroke(c, r, Stroke::new(1.5, if on || hover > 0.0 { col } else { ca(rgb, 140) }));
+        p.circle_stroke(c, r, Stroke::new(1.5_f32, if on || hover > 0.0 { col } else { ca(rgb, 140) }));
         if g > 0.0 {
             let k = 0.18 + 0.25 * hover + if on { 0.25 + fx.level * 0.5 + fx.pulse * 0.4 } else { 0.0 };
             blob(&p, c, r * 2.2, rgb, k * g);
@@ -572,7 +572,7 @@ pub fn button(ui: &mut Ui, icon: Icon, tip: &str, on: bool, rgb: Rgb, th: &Theme
             let a0 = spin + i as f32 / n as f32 * std::f32::consts::TAU;
             let a1 = a0 + std::f32::consts::TAU / n as f32 * 0.8;
             let pts: Vec<Pos2> = (0..=4).map(|k| c + Vec2::angled(a0 + (a1 - a0) * k as f32 / 4.0) * (r + 5.0)).collect();
-            p.add(Shape::line(pts, Stroke::new(1.5, ca(rgb, if on { 220 } else { 90 }))));
+            p.add(Shape::line(pts, Stroke::new(1.5_f32, ca(rgb, if on { 220 } else { 90 }))));
         }
         draw_icon(&p, icon, c + Vec2::new(if icon == Icon::Play { 2.0 } else { 0.0 }, 0.0), 18.0, if on { col } else { crate::theme::c(th.text) });
     } else {
@@ -580,9 +580,9 @@ pub fn button(ui: &mut Ui, icon: Icon, tip: &str, on: bool, rgb: Rgb, th: &Theme
         let fill = if on { ca(rgb, 70) } else { ca(th.panel_raised, (200.0 + 40.0 * hover) as u8) };
         p.add(Shape::convex_polygon(pts.clone(), fill, Stroke::NONE));
         let edge = if on { col } else { crate::theme::lerp(th.border, rgb, hover) };
-        p.add(Shape::closed_line(pts.clone(), Stroke::new(1.0, edge)));
+        p.add(Shape::closed_line(pts.clone(), Stroke::new(1.0_f32, edge)));
         if g > 0.0 && (on || hover > 0.0) {
-            p.add(Shape::closed_line(pts, Stroke::new(5.0, light(rgb, (0.12 * hover + if on { 0.2 } else { 0.0 }) * g))));
+            p.add(Shape::closed_line(pts, Stroke::new(5.0_f32, light(rgb, (0.12 * hover + if on { 0.2 } else { 0.0 }) * g))));
         }
         draw_icon(&p, icon, rect.center(), 15.0, if on { col } else { crate::theme::lerp(th.text, rgb, hover * 0.6) });
     }
@@ -615,9 +615,9 @@ pub fn readout(ui: &mut Ui, text: &str, caption: &str, th: &Theme, fx: &Fx, leve
     let p = ui.painter_at(rect.expand(16.0));
     let pts = chamfer(rect, 9.0);
     gradient_poly(&p, &pts, ca(th.wave_background, 235), ca(th.panel, 235));
-    p.add(Shape::closed_line(pts.clone(), Stroke::new(1.0, ca(th.accent, 120))));
+    p.add(Shape::closed_line(pts.clone(), Stroke::new(1.0_f32, ca(th.accent, 120))));
     if th.glow > 0.0 {
-        p.add(Shape::closed_line(pts, Stroke::new(5.0, light(th.accent, 0.08 * th.glow))));
+        p.add(Shape::closed_line(pts, Stroke::new(5.0_f32, light(th.accent, 0.08 * th.glow))));
     }
     spaced(&p, rect.left_top() + Vec2::new(10.0, 4.0), Align2::LEFT_TOP, caption, 8.5, 2.0, ca(th.text_dim, 200), true);
     let ghost: String = text.chars().map(|ch| if ch.is_ascii_digit() { '8' } else { ch }).collect();
@@ -625,7 +625,7 @@ pub fn readout(ui: &mut Ui, text: &str, caption: &str, th: &Theme, fx: &Fx, leve
     p.text(at, Align2::LEFT_CENTER, ghost, FontId::monospace(23.0), ca(th.accent, 22));
     if th.glow > 0.0 {
         for d in [Vec2::new(-1.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0), Vec2::new(0.0, -1.0)] {
-            p.text(at + d, Align2::LEFT_CENTER, text, FontId::monospace(23.0), light(th.accent, 0.25 * th.glow));
+            p.text(at + d, Align2::LEFT_CENTER, text, FontId::monospace(23.0), light(th.accent, (0.25 + 0.2 * fx.pulse) * th.glow));
         }
     }
     p.text(at, Align2::LEFT_CENTER, text, FontId::monospace(23.0), crate::theme::lerp(th.accent, [255, 255, 255], 0.25));
@@ -636,11 +636,11 @@ pub fn readout(ui: &mut Ui, text: &str, caption: &str, th: &Theme, fx: &Fx, leve
         let db = (v.max(1e-6).log10() * 20.0).clamp(-60.0, 0.0);
         let f = (db + 60.0) / 60.0;
         let yy = y - k as f32 * 3.0;
-        p.line_segment([Pos2::new(rect.left() + 10.0, yy), Pos2::new(rect.left() + 10.0 + w, yy)], Stroke::new(1.5, ca(th.border, 160)));
+        p.line_segment([Pos2::new(rect.left() + 10.0, yy), Pos2::new(rect.left() + 10.0 + w, yy)], Stroke::new(1.5_f32, ca(th.border, 160)));
         if f > 0.0 {
             p.line_segment(
                 [Pos2::new(rect.left() + 10.0, yy), Pos2::new(rect.left() + 10.0 + w * f, yy)],
-                Stroke::new(1.5, th.meter_color(db)),
+                Stroke::new(1.5_f32, th.meter_color(db)),
             );
         }
     }
@@ -658,7 +658,7 @@ pub fn segmented(ui: &mut Ui, id: &str, labels: &[&str], current: usize, th: &Th
     let (rect, _) = ui.allocate_exact_size(Vec2::new(total, 26.0), Sense::hover());
     let p = ui.painter_at(rect.expand(12.0));
     let pts = chamfer(rect, 7.0);
-    p.add(Shape::convex_polygon(pts.clone(), ca(th.wave_background, 220), Stroke::new(1.0, ca(th.border, 220))));
+    p.add(Shape::convex_polygon(pts.clone(), ca(th.wave_background, 220), Stroke::new(1.0_f32, ca(th.border, 220))));
     let mut x = rect.left();
     let mut starts = Vec::new();
     for w in &widths {
@@ -670,9 +670,9 @@ pub fn segmented(ui: &mut Ui, id: &str, labels: &[&str], current: usize, th: &Th
     let sw = widths[current.min(widths.len() - 1)];
     let hl = Rect::from_min_size(Pos2::new(slide, rect.top()), Vec2::new(sw, rect.height())).shrink(2.0);
     let hp = chamfer(hl, 5.0);
-    p.add(Shape::convex_polygon(hp.clone(), ca(th.accent, 46), Stroke::new(1.0, crate::theme::c(th.accent))));
+    p.add(Shape::convex_polygon(hp.clone(), ca(th.accent, 46), Stroke::new(1.0_f32, crate::theme::c(th.accent))));
     if th.glow > 0.0 {
-        p.add(Shape::closed_line(hp, Stroke::new(5.0, light(th.accent, (0.14 + fx.pulse * 0.1) * th.glow))));
+        p.add(Shape::closed_line(hp, Stroke::new(5.0_f32, light(th.accent, (0.14 + fx.pulse * 0.1) * th.glow))));
     }
     let mut clicked = None;
     for (i, l) in labels.iter().enumerate() {
@@ -748,7 +748,7 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
         let r = rt * 520.0;
         let a = (1.0 - rt / 1.4).max(0.0) * fade;
         if a > 0.0 {
-            p.circle_stroke(c, r, Stroke::new(1.5, light(th.accent, 0.6 * a)));
+            p.circle_stroke(c, r, Stroke::new(1.5_f32, light(th.accent, 0.6 * a)));
         }
     }
     // A grid draws itself in.
@@ -756,7 +756,7 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
     for i in -10..=10 {
         let x = c.x + i as f32 * 60.0;
         let len = screen.height() * 0.5 * gt;
-        p.line_segment([Pos2::new(x, c.y - len), Pos2::new(x, c.y + len)], Stroke::new(1.0, light(th.grid_glow, 0.12 * fade)));
+        p.line_segment([Pos2::new(x, c.y - len), Pos2::new(x, c.y + len)], Stroke::new(1.0_f32, light(th.grid_glow, 0.12 * fade)));
     }
     // The wordmark decodes letter by letter.
     let word = "AUDIFORM27";
@@ -785,8 +785,8 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
     // A light bar sweeps open under it, and the tagline types itself out.
     let bt = ((t - 0.6) / 0.6).clamp(0.0, 1.0);
     let half = 260.0 * bt;
-    p.line_segment([c + Vec2::new(-half, 38.0), c + Vec2::new(half, 38.0)], Stroke::new(2.0, light(th.accent_alt, 0.9 * fade)));
-    p.line_segment([c + Vec2::new(-half, 38.0), c + Vec2::new(half, 38.0)], Stroke::new(8.0, light(th.accent_alt, 0.2 * fade)));
+    p.line_segment([c + Vec2::new(-half, 38.0), c + Vec2::new(half, 38.0)], Stroke::new(2.0_f32, light(th.accent_alt, 0.9 * fade)));
+    p.line_segment([c + Vec2::new(-half, 38.0), c + Vec2::new(half, 38.0)], Stroke::new(8.0_f32, light(th.accent_alt, 0.2 * fade)));
     let tag = "SIGNAL PATH ONLINE  //  ALL CHANNELS NOMINAL";
     let n = (((t - 0.9) / 0.7).clamp(0.0, 1.0) * tag.len() as f32) as usize;
     let cursor = if (t * 8.0) as i32 % 2 == 0 { "_" } else { " " };
@@ -802,37 +802,6 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
     );
     ctx.request_repaint();
     true
-}
-
-/// A thin decorative line with ticks, used to divide the top bars.
-pub fn ticker_line(p: &Painter, a: Pos2, b: Pos2, th: &Theme, fx: &Fx) {
-    p.line_segment([a, b], Stroke::new(1.0, ca(th.border, 180)));
-    let len = b.x - a.x;
-    let mut x = a.x;
-    let mut i = 0;
-    while x < b.x {
-        let h = if i % 8 == 0 { 4.0 } else { 2.0 };
-        p.line_segment([Pos2::new(x, a.y), Pos2::new(x, a.y - h)], Stroke::new(1.0, ca(th.border, 160)));
-        x += 12.0;
-        i += 1;
-    }
-    if th.motion > 0.0 && len > 0.0 {
-        let x = a.x + (fx.t * 0.08).fract() * len;
-        let mut m = Mesh::default();
-        let col = light(th.accent, 0.8);
-        m.colored_vertex(Pos2::new(x - 80.0, a.y), Color32::TRANSPARENT);
-        m.colored_vertex(Pos2::new(x, a.y), col);
-        m.colored_vertex(Pos2::new(x, a.y + 1.0), col);
-        m.colored_vertex(Pos2::new(x - 80.0, a.y + 1.0), Color32::TRANSPARENT);
-        m.add_triangle(0, 1, 2);
-        m.add_triangle(0, 2, 3);
-        p.add(Shape::mesh(m));
-    }
-}
-
-#[allow(dead_code)]
-fn _path(points: Vec<Pos2>, stroke: Stroke) -> Shape {
-    Shape::Path(PathShape::line(points, PathStroke::from(stroke)))
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 //! and status bar. Every panel lives in the dock and can be dragged to a
 //! new place, tabbed with others, split, or floated in its own window.
 
-use egui::{Align2, FontId, Key, KeyboardShortcut, Modifiers, RichText, Rounding, Sense, Vec2};
+use egui::{Key, KeyboardShortcut, Modifiers, RichText, Rounding};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use serde::{Deserialize, Serialize};
 
@@ -31,10 +31,12 @@ pub enum Tab {
     Inspector,
     Space,
     PianoRoll,
+    Visualizer,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 15] = [
+    pub const ALL: [Tab; 16] = [
+        Tab::Visualizer,
         Tab::Inspector,
         Tab::Space,
         Tab::PianoRoll,
@@ -68,6 +70,7 @@ impl Tab {
             Tab::Inspector => "Inspector",
             Tab::Space => "3D Space",
             Tab::PianoRoll => "Piano Roll",
+            Tab::Visualizer => "Visualizer",
         }
     }
 }
@@ -79,7 +82,7 @@ pub fn default_layout() -> DockState<Tab> {
     let [_files, left_mid] = s.split_below(left, 0.42, vec![Tab::Effects, Tab::AiSeparation]);
     let [_fx, _hist] = s.split_below(left_mid, 0.62, vec![Tab::History]);
     let [center, _levels] = s.split_below(center, 0.9, vec![Tab::Levels]);
-    let [_editor, right] = s.split_right(center, 0.83, vec![Tab::Phase]);
+    let [_editor, right] = s.split_right(center, 0.83, vec![Tab::Phase, Tab::Visualizer]);
     let [_phase, right_mid] = s.split_below(
         right,
         0.38,
@@ -93,6 +96,9 @@ pub struct App {
     pub st: State,
     dock: DockState<Tab>,
     pub viewer: Caches,
+    /// The docked cards as drawn last frame: their glass goes under them.
+    cards: Vec<egui::Rect>,
+    boot_skipped: bool,
 }
 
 /// What a cached spectrogram was drawn from.
@@ -128,6 +134,8 @@ impl App {
             st,
             dock,
             viewer: Caches::default(),
+            cards: Vec::new(),
+            boot_skipped: false,
         }
     }
 
@@ -153,6 +161,7 @@ struct Viewer<'a> {
     st: &'a mut State,
     caches: &'a mut Caches,
     open_tab: &'a mut Option<Tab>,
+    tab_rects: &'a mut Vec<(Tab, egui::Rect)>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -173,9 +182,19 @@ impl TabViewer for Viewer<'_> {
                     if self.st.session_dirty { " *" } else { "" }
                 ),
             };
-            return format!("{t}: {name}").into();
+            return RichText::new(format!("{}: {name}", t.to_uppercase()))
+                .size(11.5)
+                .extra_letter_spacing(1.2)
+                .into();
         }
-        t.into()
+        RichText::new(t.to_uppercase())
+            .size(11.5)
+            .extra_letter_spacing(1.2)
+            .into()
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        self.tab_rects.push((*tab, response.rect));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
@@ -193,6 +212,7 @@ impl TabViewer for Viewer<'_> {
             | Tab::Phase
             | Tab::Spectrum
             | Tab::PianoRoll
+            | Tab::Visualizer
             | Tab::Space => [false, false],
             _ => [false, true],
         }
@@ -220,6 +240,7 @@ impl Viewer<'_> {
             Tab::Inspector => crate::inspector::panel(ui, self.st),
             Tab::Space => crate::space::panel(ui, self.st, &mut self.caches.space_drag),
             Tab::PianoRoll => crate::pianoroll::panel(ui, self.st, &mut self.caches.piano),
+            Tab::Visualizer => crate::visualizer::show(ui, self.st),
         }
     }
 }
@@ -702,6 +723,23 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 {
                     st.theme_changed = true;
                 }
+                ui.separator();
+                ui.label(RichText::new("HUD").small().color(c(st.theme.text_dim)));
+                ui.horizontal(|ui| {
+                    for g in ["perspective", "hex", "dots", "lines", "none"] {
+                        if ui.selectable_label(st.theme.grid_style == g, g).clicked() {
+                            st.theme.grid_style = g.into();
+                        }
+                    }
+                });
+                ui.add(egui::Slider::new(&mut st.theme.grid_strength, 0.0..=2.0).text("Grid"));
+                ui.add(egui::Slider::new(&mut st.theme.glass, 0.3..=1.0).text("Glass"));
+                ui.add(egui::Slider::new(&mut st.theme.chamfer, 0.0..=20.0).text("Corner cut"));
+                ui.add(egui::Slider::new(&mut st.theme.scanlines, 0.0..=0.6).text("Scan lines"));
+                ui.add(egui::Slider::new(&mut st.theme.motion, 0.0..=2.0).text("Motion"));
+                ui.add(egui::Slider::new(&mut st.theme.reactive, 0.0..=1.5).text("Reacts to music"));
+                ui.checkbox(&mut st.theme.brackets, "Corner brackets");
+                ui.checkbox(&mut st.theme.intro, "Boot sequence");
             });
         });
         ui.menu_button("Window", |ui| {
@@ -729,29 +767,17 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn mode_button(ui: &mut egui::Ui, st: &mut State, mode: Mode, label: &str) {
-    let on = st.mode == mode;
-    let th = &st.theme;
-    let text = RichText::new(label)
-        .strong()
-        .color(if on { c(th.background) } else { c(th.text) });
-    let b = egui::Button::new(text)
-        .fill(if on { c(th.accent) } else { c(th.panel_raised) })
-        .rounding(Rounding::same(th.rounding));
-    let r = ui.add(b);
-    if on {
-        th.glow_rect(ui.painter(), r.rect, th.accent, 1.0);
-    }
-    if r.clicked() {
-        st.mode = mode;
-    }
-}
-
 fn toolbar(ui: &mut egui::Ui, st: &mut State) {
     ui.horizontal(|ui| {
         ui.add_space(4.0);
-        mode_button(ui, st, Mode::Waveform, "🎵 Waveform");
-        mode_button(ui, st, Mode::Multitrack, "☰ Multitrack");
+        let fx = st.fx.clone();
+        let th = st.theme.clone();
+        let cur = if st.mode == Mode::Waveform { 0 } else { 1 };
+        match crate::hud::segmented(ui, "af27-mode", &["Waveform", "Multitrack"], cur, &th, &fx) {
+            Some(0) => st.mode = Mode::Waveform,
+            Some(1) => st.mode = Mode::Multitrack,
+            _ => {}
+        }
         ui.add_space(14.0);
         for (tool, label, tip) in [
             (Tool::Move, "↔", "Move (V)"),
@@ -768,11 +794,7 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(6.0);
-            let wordmark = RichText::new("AUDIFORM27")
-                .strong()
-                .size(15.0)
-                .color(c(st.theme.accent));
-            ui.label(wordmark);
+            crate::hud::wordmark(ui, &th, &fx);
         });
     });
 }
@@ -781,18 +803,16 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     ui.horizontal(|ui| {
         // Big timecode.
+        let fx = st.fx.clone();
         let t = format_time(st.position());
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(190.0, 34.0), Sense::hover());
-        let p = ui.painter();
-        p.rect_filled(rect, Rounding::same(th.rounding), c(th.wave_background));
-        th.glow_rect(p, rect, th.accent, 0.5);
-        p.text(
-            rect.left_center() + egui::vec2(12.0, 0.0),
-            Align2::LEFT_CENTER,
-            t,
-            FontId::monospace(22.0),
-            c(th.accent),
-        );
+        let caption = if st.is_recording() {
+            "REC // TIME"
+        } else if st.is_playing() {
+            "PLAY // TIME"
+        } else {
+            "TIME"
+        };
+        crate::hud::readout(ui, &t, caption, &th, &fx, st.meter);
         ui.add_space(8.0);
         ui.vertical(|ui| {
             ui.label(
@@ -818,35 +838,33 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                     st.live_metronome();
                 }
                 let mut m = st.session.tempo.metronome;
-                if ui
-                    .toggle_value(&mut m, "♩")
-                    .on_hover_text("Metronome")
-                    .changed()
+                if crate::hud::button(
+                    ui,
+                    crate::hud::Icon::Metronome,
+                    "Metronome",
+                    m,
+                    th.accent,
+                    &th,
+                    &fx,
+                    false,
+                )
+                .clicked()
                 {
+                    m = !m;
                     st.session.tempo.metronome = m;
                     st.live_metronome();
                 }
             });
         });
         ui.add_space((ui.available_width() / 2.0 - 120.0).max(0.0));
-        let btn = |ui: &mut egui::Ui, s: &str, tip: &str, on: bool, col: [u8; 3]| {
-            let b = egui::Button::new(RichText::new(s).size(18.0).color(if on {
-                c(th.background)
-            } else {
-                c(col)
-            }))
-            .fill(if on { c(col) } else { c(th.panel_raised) })
-            .rounding(Rounding::same(th.rounding))
-            .min_size(Vec2::new(34.0, 30.0));
-            let r = ui.add(b).on_hover_text(tip);
-            if on {
-                th.glow_rect(ui.painter(), r.rect, col, 1.2);
-            }
-            r.clicked()
+        use crate::hud::Icon;
+        let btn = |ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, col: [u8; 3]| {
+            crate::hud::button(ui, icon, tip, on, col, &th, &fx, icon == Icon::Play || icon == Icon::Pause)
+                .clicked()
         };
         let playing = st.is_playing();
         let rec = st.is_recording();
-        if btn(ui, "⏹", "Stop", false, th.text) {
+        if btn(ui, Icon::Stop, "Stop", false, th.text) {
             if rec {
                 st.stop_recording();
             } else {
@@ -855,21 +873,21 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         }
         if btn(
             ui,
-            if playing { "⏸" } else { "▶" },
+            if playing { Icon::Pause } else { Icon::Play },
             "Play / Stop (Space)",
             playing,
             th.accent,
         ) {
             st.toggle_play();
         }
-        if btn(ui, "⏮", "Go to Start (Home)", false, th.text) {
+        if btn(ui, Icon::ToStart, "Go to Start (Home)", false, th.text) {
             st.set_cursor(0.0);
         }
-        if btn(ui, "⏭", "Go to End (End)", false, th.text) {
+        if btn(ui, Icon::ToEnd, "Go to End (End)", false, th.text) {
             let l = st.program_len();
             st.set_cursor(l);
         }
-        if btn(ui, "⏺", "Record (Shift+Space)", rec, th.accent_alt) {
+        if btn(ui, Icon::Record, "Record (Shift+Space)", rec, th.accent_alt) {
             if rec {
                 st.stop_recording();
             } else {
@@ -877,7 +895,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             }
         }
         let lp = st.looping;
-        if btn(ui, "🔁", "Loop Playback (Ctrl+L)", lp, th.accent) {
+        if btn(ui, Icon::Loop, "Loop Playback (Ctrl+L)", lp, th.accent) {
             st.looping = !st.looping;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1075,9 +1093,22 @@ impl eframe::App for App {
         self.st.tick();
         self.keys(ctx);
         let th = self.st.theme.clone();
+        let peak = self.st.meter.0.max(self.st.meter.1);
+        self.st.fx.update(ctx, &th, peak);
+        let fx = self.st.fx.clone();
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("af27-fx"), fx.clone()));
+        let screen = ctx.screen_rect();
+        // The living backdrop, then last frame's cards as glass on top of it.
+        {
+            let bg = ctx.layer_painter(egui::LayerId::background());
+            crate::hud::backdrop(&bg, screen, &th, &fx);
+            for r in &self.cards {
+                crate::hud::glass(&bg, *r, &th);
+            }
+        }
         let frame = |fill: [u8; 3]| {
             egui::Frame::none()
-                .fill(c(fill))
+                .fill(crate::theme::ca(fill, (th.glass * 200.0) as u8))
                 .inner_margin(egui::Margin::symmetric(6.0, 4.0))
         };
 
@@ -1095,33 +1126,75 @@ impl eframe::App for App {
             .show(ctx, |ui| transport(ui, &mut self.st));
 
         let mut style = Style::from_egui(ctx.style().as_ref());
-        style.tab_bar.bg_fill = c(th.background);
-        style.tab_bar.hline_color = c(th.border);
-        style.tab.active.bg_fill = c(th.panel);
-        style.tab.active.text_color = c(th.accent);
-        style.tab.inactive.bg_fill = c(th.background);
+        let clear = egui::Color32::TRANSPARENT;
+        style.dock_area_padding = Some(egui::Margin::same(4.0));
+        style.main_surface_border_stroke = egui::Stroke::NONE;
+        style.tab_bar.bg_fill = clear;
+        style.tab_bar.height = 26.0;
+        style.tab_bar.rounding = Rounding::ZERO;
+        style.tab_bar.hline_color = crate::theme::ca(th.border, 120);
+        for t in [
+            &mut style.tab.active,
+            &mut style.tab.inactive,
+            &mut style.tab.focused,
+            &mut style.tab.hovered,
+            &mut style.tab.active_with_kb_focus,
+            &mut style.tab.inactive_with_kb_focus,
+            &mut style.tab.focused_with_kb_focus,
+        ] {
+            t.bg_fill = clear;
+            t.outline_color = clear;
+            t.rounding = Rounding::ZERO;
+        }
+        style.tab.active.bg_fill = crate::theme::ca(th.accent, 14);
+        style.tab.focused.bg_fill = crate::theme::ca(th.accent, 24);
+        style.tab.active.text_color = c(th.text);
+        style.tab.focused.text_color = crate::theme::lerp(th.accent, [255, 255, 255], 0.3);
         style.tab.inactive.text_color = c(th.text_dim);
-        style.tab.focused.bg_fill = c(th.panel);
-        style.tab.focused.text_color = c(th.accent);
         style.tab.hovered.text_color = c(th.text);
-        style.tab.tab_body.bg_fill = c(th.panel);
-        style.separator.color_idle = c(th.background);
-        style.separator.color_hovered = c(th.accent);
+        style.tab.hovered.bg_fill = crate::theme::ca(th.accent, 10);
+        style.tab.tab_body.bg_fill = clear;
+        style.tab.tab_body.stroke = egui::Stroke::NONE;
+        style.tab.tab_body.rounding = Rounding::ZERO;
+        style.separator.color_idle = clear;
+        style.separator.color_hovered = crate::theme::ca(th.accent, 160);
         style.separator.color_dragged = c(th.accent_alt);
-        style.separator.width = 3.0;
+        style.separator.width = 6.0;
+        style.overlay.selection_color = crate::theme::ca(th.accent, 60);
 
         let mut open_tab = None;
+        let mut tab_rects = Vec::new();
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(c(th.background)))
+            .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let mut viewer = Viewer {
                     st: &mut self.st,
                     caches: &mut self.viewer,
                     open_tab: &mut open_tab,
+                    tab_rects: &mut tab_rects,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
                     .show_inside(ui, &mut viewer);
+                // The HUD over the cards: edges, brackets, the running light
+                // on the focused card and the light under each active tab.
+                let p = ui.painter();
+                let focused = self.dock.focused_leaf().map(|(_, n)| n.0);
+                self.cards.clear();
+                let mut serial = 0;
+                for (i, node) in self.dock.main_surface().iter().enumerate() {
+                    if let egui_dock::Node::Leaf { rect, tabs, active, .. } = node {
+                        serial += 1;
+                        let on = focused == Some(i);
+                        self.cards.push(*rect);
+                        crate::hud::frame(p, *rect, &th, &fx, on, serial);
+                        if let Some(t) = tabs.get(active.0) {
+                            if let Some((_, r)) = tab_rects.iter().find(|(x, _)| x == t) {
+                                crate::hud::tab_light(p, *r, &th, &fx, on);
+                            }
+                        }
+                    }
+                }
             });
         if let Some(t) = open_tab {
             self.show_tab(t);
@@ -1132,6 +1205,14 @@ impl eframe::App for App {
         }
         generate_window(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
+        {
+            let top = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("af27-scan"),
+            ));
+            crate::hud::scanlines(&top, screen, &th, &fx);
+        }
+        crate::hud::boot(ctx, &th, &fx, &mut self.boot_skipped);
         if self.st.is_playing()
             || self.st.is_recording()
             || !self.st.jobs.is_empty()
@@ -1139,6 +1220,9 @@ impl eframe::App for App {
             || self.st.meter.0 > 0.001
         {
             ctx.request_repaint();
+        } else if fx.animating(&th) {
+            // The HUD keeps moving at a gentle 30 frames a second when idle.
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
