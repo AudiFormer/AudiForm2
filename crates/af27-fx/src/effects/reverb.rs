@@ -236,6 +236,174 @@ pub struct ConvolutionReverb {
     pre_len: usize,
     low: Option<[Biquad; 2]>,
     high: Option<[Biquad; 2]>,
+    /// On a speaker bed; None for stereo.
+    bed: Option<ConvBed>,
+}
+
+/// A short all-pass and a delay that make one speaker's copy of the
+/// reverb sound unlike the others' while keeping its tone and level.
+struct Decorrelate {
+    delay: Vec<f32>,
+    at: usize,
+    ap: [(Vec<f32>, usize); 2],
+}
+
+impl Decorrelate {
+    fn new(rate: u32, delay_ms: f64, k: usize) -> Self {
+        let ms = |v: f64| ((v / 1000.0 * f64::from(rate)) as usize).max(1);
+        Self {
+            delay: vec![0.0; ms(delay_ms)],
+            at: 0,
+            ap: [
+                (vec![0.0; ms(1.3 + 0.71 * k as f64)], 0),
+                (vec![0.0; ms(2.9 + 0.53 * k as f64)], 0),
+            ],
+        }
+    }
+    fn run(&mut self, x: f32) -> f32 {
+        let y = std::mem::replace(&mut self.delay[self.at], x);
+        self.at = (self.at + 1) % self.delay.len();
+        let mut v = y;
+        for (buf, at) in &mut self.ap {
+            let g = 0.6f32;
+            let d = buf[*at];
+            let w = v + g * d;
+            buf[*at] = if w.abs() < 1e-20 { 0.0 } else { w };
+            *at = (*at + 1) % buf.len();
+            v = d - g * w;
+        }
+        v
+    }
+    fn clear(&mut self) {
+        self.delay.fill(0.0);
+        for (b, _) in &mut self.ap {
+            b.fill(0.0);
+        }
+    }
+}
+
+/// Where a speaker's reverb comes from in the upmix.
+enum Feed {
+    /// The left (0) or right (1) side of the recorded space, as it is.
+    Front(usize),
+    /// The middle of it, softer.
+    Center,
+    /// A side, decorrelated, at this level.
+    Far(usize, f32, Decorrelate),
+    None,
+}
+
+/// The Convolution Reverb on a speaker bed: the recorded space is stereo,
+/// so its two sides fill the room. The bed's speakers feed its two
+/// inputs; the front left and right get its two sides as they are, the
+/// center a softer middle, and the surrounds, rears and heights a copy of
+/// their side that is delayed a little and decorrelated (so each sounds
+/// like its own wall, not an echo of the front), quieter for the heights.
+/// The low-frequency channel gets none. (Ported from Audiform's reverb.rs.)
+struct ConvBed {
+    channels: usize,
+    feed: Vec<[f32; 2]>,
+    out: Vec<Feed>,
+    /// The dry sound of every channel, held back by the convolution's delay.
+    dry: Vec<f32>,
+    dry_at: usize,
+}
+
+impl ConvBed {
+    fn new(names: &[String], rate: u32) -> Self {
+        const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
+        let feed = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| match n.as_str() {
+                "LFE" => [0.0, 0.0],
+                "L" => [1.0, 0.0],
+                "R" => [0.0, 1.0],
+                "C" | "Cs" | "M" => [H, H],
+                x if x.starts_with('L') => [H, 0.0],
+                x if x.starts_with('R') => [0.0, H],
+                _ if i % 2 == 0 => [H, 0.0],
+                _ => [0.0, H],
+            })
+            .collect();
+        let out = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let side = if n.starts_with('R') || (!n.starts_with('L') && i % 2 == 1) {
+                    1
+                } else {
+                    0
+                };
+                let height = n.len() > 2 && n.as_bytes()[1] == b't';
+                match n.as_str() {
+                    "L" => Feed::Front(0),
+                    "R" => Feed::Front(1),
+                    "C" => Feed::Center,
+                    "LFE" => Feed::None,
+                    _ if height => {
+                        Feed::Far(side, 0.6, Decorrelate::new(rate, 9.0 + i as f64 * 0.7, i))
+                    }
+                    // Rear speakers are the farthest walls: a little later than the sides.
+                    x if x.ends_with("rs") => {
+                        Feed::Far(side, 0.8, Decorrelate::new(rate, 13.0 + i as f64 * 0.5, i))
+                    }
+                    _ => Feed::Far(side, 0.85, Decorrelate::new(rate, 7.0 + i as f64 * 0.5, i)),
+                }
+            })
+            .collect();
+        Self {
+            channels: names.len().max(1),
+            feed,
+            out,
+            dry: vec![0.0; PART * names.len().max(1)],
+            dry_at: 0,
+        }
+    }
+}
+
+impl ConvolutionReverb {
+    /// The Convolution Reverb over a speaker bed with channels named
+    /// `names`: it processes interleaved frames of `names.len()` channels.
+    pub fn wide(p: &Params, rate: u32, data: Option<&str>, names: &[String]) -> Self {
+        let mut s = Self::new(p, rate, data);
+        s.bed = Some(ConvBed::new(names, rate));
+        s
+    }
+
+    fn process_bed(&mut self, buf: &mut [f32]) {
+        let Some(mut bed) = self.bed.take() else {
+            return;
+        };
+        let n = bed.channels;
+        for f in buf.chunks_exact_mut(n) {
+            let (mut il, mut ir) = (0.0f32, 0.0f32);
+            for (x, w) in f.iter().zip(&bed.feed) {
+                il += x * w[0];
+                ir += x * w[1];
+            }
+            let at = bed.dry_at * n;
+            for (c, x) in f.iter_mut().enumerate() {
+                *x = std::mem::replace(&mut bed.dry[at + c], *x) * self.dry;
+            }
+            bed.dry_at = (bed.dry_at + 1) % PART;
+            if self.convs.is_empty() {
+                continue;
+            }
+            let (wl, wr) = self.wet_frame(il, ir);
+            let w = [wl, wr];
+            for (x, o) in f.iter_mut().zip(bed.out.iter_mut()) {
+                let v = match o {
+                    Feed::Front(s) => w[*s],
+                    Feed::Center => 0.35 * (wl + wr),
+                    Feed::Far(s, g, d) => d.run(w[*s]) * *g,
+                    Feed::None => 0.0,
+                };
+                *x += v * self.wet;
+            }
+        }
+        self.bed = Some(bed);
+    }
 }
 
 impl ConvolutionReverb {
@@ -304,6 +472,7 @@ impl ConvolutionReverb {
             pre_len: 0,
             low: None,
             high: None,
+            bed: None,
         };
         s.set_params(p);
         s
@@ -345,6 +514,10 @@ impl ConvolutionReverb {
 
 impl Processor for ConvolutionReverb {
     fn process(&mut self, buf: &mut [f32]) {
+        if self.bed.is_some() {
+            self.process_bed(buf);
+            return;
+        }
         for f in buf.as_chunks_mut::<2>().0 {
             let (l, r) = (f[0], f[1]);
             // The dry sound, held back to line up with the reverb.
@@ -377,6 +550,15 @@ impl Processor for ConvolutionReverb {
         for b in self.low.iter_mut().chain(self.high.iter_mut()) {
             b[0].reset();
             b[1].reset();
+        }
+        if let Some(bed) = self.bed.as_mut() {
+            bed.dry.fill(0.0);
+            bed.dry_at = 0;
+            for o in &mut bed.out {
+                if let Feed::Far(_, _, d) = o {
+                    d.clear();
+                }
+            }
         }
     }
 
@@ -481,5 +663,59 @@ mod tests {
         level(&mut ch);
         let e: f32 = ch[0].iter().map(|v| v * v).sum();
         assert!((e - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn on_a_bed_the_response_fills_the_room_but_not_the_low_channel() {
+        let names: Vec<String> = ["L", "R", "C", "LFE", "Ls", "Rs"]
+            .iter()
+            .map(|x| (*x).to_string())
+            .collect();
+        // A response with a decaying spread of taps on both sides.
+        let mut frames = vec![[0.0f32; 2]; 4000];
+        for (i, f) in frames.iter_mut().enumerate().step_by(37) {
+            let g = (-(i as f32) / 1500.0).exp();
+            *f = [g, -g * 0.8];
+        }
+        let path = write_ir("room.wav", 2, &frames);
+        let mut fx = ConvolutionReverb::wide(
+            &params(&[("dry", LEVEL_FLOOR), ("wet", 0.0)]),
+            48_000,
+            Some(&data(&path)),
+            &names,
+        );
+        assert_eq!(fx.latency(), PART);
+        let n = 12_000;
+        let mut b = vec![0.0f32; n * 6];
+        b[0] = 1.0;
+        b[1] = 1.0;
+        for c in b.chunks_mut(6 * 256) {
+            fx.process(c);
+        }
+        let energy = |c: usize| b.chunks_exact(6).map(|f| f[c] * f[c]).sum::<f32>();
+        for c in [0, 1, 2, 4, 5] {
+            assert!(energy(c) > 1e-4, "speaker {c} gets the room");
+        }
+        assert_eq!(energy(3), 0.0);
+        let corr = |a: usize, c: usize| {
+            let ab: f32 = b.chunks_exact(6).map(|f| f[a] * f[c]).sum();
+            ab / (energy(a) * energy(c)).sqrt()
+        };
+        assert!(
+            corr(0, 4).abs() < 0.9,
+            "the surround is its own wall: {}",
+            corr(0, 4)
+        );
+        assert!(b.iter().all(|x| x.is_finite()));
+        // Without a response: only the dry sound, every channel on time.
+        let mut fx = ConvolutionReverb::wide(&params(&[]), 48_000, None, &names);
+        let mut b = vec![0.0f32; PART * 4 * 6];
+        for c in 0..6 {
+            b[c] = 1.0;
+        }
+        fx.process(&mut b);
+        for c in 0..6 {
+            assert!((b[PART * 6 + c] - 1.0).abs() < 1e-6, "channel {c}");
+        }
     }
 }

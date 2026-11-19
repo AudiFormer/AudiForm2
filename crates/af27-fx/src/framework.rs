@@ -244,6 +244,11 @@ pub trait Processor: Send {
     fn process_keyed(&mut self, buf: &mut [f32], _key: &[f32]) {
         self.process(buf);
     }
+
+    /// Sets this copy apart from other copies of the same effect running
+    /// on a speaker bed's other pairs (copy `k`), so effects that sweep
+    /// or drift do not move in lockstep. Called once, after building.
+    fn vary(&mut self, _k: usize) {}
 }
 
 #[cfg(test)]

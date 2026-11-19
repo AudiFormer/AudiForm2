@@ -7,9 +7,12 @@
 //! clips (or notes), runs its effect chain, feeds pre-fader sends, takes
 //! its fader and pan, feeds post-fader sends, then goes to its output (a
 //! bus or the master). Buses then run in session order. A 3D Space
-//! session spreads each track over the speaker bed instead of panning,
-//! and the bed is heard binaurally or folded to stereo. The master chain
-//! and fader come last, plus the metronome.
+//! session spreads each track over the speaker bed instead of panning;
+//! its master chain then runs on the bed's speakers (every channel, see
+//! `af27_dsp::wide`), before the bed is heard binaurally or folded to
+//! stereo, or exported as it is. Bus tracks stay stereo. In a stereo
+//! session the master chain runs on the stereo mix. The master fader
+//! comes last, plus the metronome.
 //!
 //! Everything a block needs is allocated when the program is built, on
 //! the UI thread. The audio thread only reads and writes those buffers.
@@ -19,6 +22,7 @@ use std::sync::Arc;
 use af27_core::time::db_to_gain;
 use af27_core::{AudioBuffer, Session, TrackKind};
 use af27_dsp::live::{build_chain, Chain};
+use af27_dsp::wide::{build_wide_chain, WideChain};
 
 use crate::synth::{self, Synth};
 
@@ -67,11 +71,15 @@ pub struct SpaceMix {
     pub channels: usize,
     pub lfe_channel: Option<usize>,
     pub monitor: af27_space::Monitoring,
+    /// The master chain, on the speakers.
+    pub chain: WideChain,
     bed: Vec<f32>,
 }
 
 pub struct Mix {
     pub tracks: Vec<MixTrack>,
+    /// The master chain of a stereo session (empty in a 3D session, whose
+    /// master chain is `space.chain`).
     pub master_chain: Chain,
     pub master: f32,
     pub duration: f64,
@@ -256,17 +264,25 @@ pub fn build(
         })
         .collect();
     let space = space.map(|layout| {
-        let channels = af27_space::speakers(layout).len();
+        let speakers = af27_space::speakers(layout);
+        let channels = speakers.len();
+        let names: Vec<String> = speakers.iter().map(|s| s.name.to_string()).collect();
         SpaceMix {
             channels,
             lfe_channel: af27_space::lfe_channel(layout),
             monitor: af27_space::Monitoring::new(layout, session.monitor, rate),
+            chain: build_wide_chain(&session.master_chain, rate, &names, BLOCK),
             bed: vec![0.0; BLOCK * channels],
         }
     });
+    let master_slots: &[af27_core::EffectSlot] = if space.is_some() {
+        &[]
+    } else {
+        &session.master_chain
+    };
     Mix {
         tracks,
-        master_chain: build_chain(&session.master_chain, rate, BLOCK),
+        master_chain: build_chain(master_slots, rate, BLOCK),
         master: db_to_gain(session.master_db),
         duration: session.duration(),
         space,
@@ -293,6 +309,31 @@ impl Mix {
             }
         }
         self.master_chain.reset();
+        if let Some(sp) = &mut self.space {
+            sp.chain.reset();
+        }
+    }
+
+    /// New settings for a master chain slot (on the speakers in 3D).
+    pub fn set_master_param(&mut self, slot: usize, vals: &[f32]) {
+        match &mut self.space {
+            Some(sp) => sp.chain.set(slot, vals),
+            None => self.master_chain.set(slot, vals),
+        }
+    }
+
+    pub fn set_master_bypass(&mut self, slot: usize, on: bool) {
+        match &mut self.space {
+            Some(sp) => sp.chain.set_bypass(slot, on),
+            None => self.master_chain.set_bypass(slot, on),
+        }
+    }
+
+    pub fn set_master_mix(&mut self, mix: f32) {
+        match &mut self.space {
+            Some(sp) => sp.chain.mix = mix,
+            None => self.master_chain.mix = mix,
+        }
     }
 
     fn route(&mut self, ti: usize, n: usize) {
@@ -446,6 +487,8 @@ impl Mix {
             }
         }
         if let Some(sp) = &mut self.space {
+            // The master chain on the speakers, before listening or export.
+            sp.chain.process(&mut sp.bed[..n * sp.channels]);
             if bed_out {
                 let ch = sp.channels;
                 let mut peak = (0.0f32, 0.0f32);

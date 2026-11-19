@@ -18,6 +18,7 @@ pub mod peaks;
 pub mod phase;
 pub mod resample;
 pub mod reverb;
+pub mod wide;
 
 pub use effects::{Effect, ParamSpec};
 pub use peaks::Peaks;

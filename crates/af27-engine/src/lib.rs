@@ -157,37 +157,28 @@ impl Voice {
                 vals,
             } => {
                 if let Some(m) = mix {
-                    let chain = if track == MASTER {
-                        Some(&mut m.master_chain)
-                    } else {
-                        m.tracks.get_mut(track as usize).map(|t| &mut t.chain)
-                    };
-                    if let Some(c) = chain {
-                        c.set(slot as usize, &vals[..n as usize]);
+                    if track == MASTER {
+                        m.set_master_param(slot as usize, &vals[..n as usize]);
+                    } else if let Some(t) = m.tracks.get_mut(track as usize) {
+                        t.chain.set(slot as usize, &vals[..n as usize]);
                     }
                 }
             }
             Cmd::Bypass { track, slot, on } => {
                 if let Some(m) = mix {
-                    let chain = if track == MASTER {
-                        Some(&mut m.master_chain)
-                    } else {
-                        m.tracks.get_mut(track as usize).map(|t| &mut t.chain)
-                    };
-                    if let Some(c) = chain {
-                        c.set_bypass(slot as usize, on);
+                    if track == MASTER {
+                        m.set_master_bypass(slot as usize, on);
+                    } else if let Some(t) = m.tracks.get_mut(track as usize) {
+                        t.chain.set_bypass(slot as usize, on);
                     }
                 }
             }
             Cmd::ChainMix { track, mix: amount } => {
                 if let Some(m) = mix {
-                    let chain = if track == MASTER {
-                        Some(&mut m.master_chain)
-                    } else {
-                        m.tracks.get_mut(track as usize).map(|t| &mut t.chain)
-                    };
-                    if let Some(c) = chain {
-                        c.mix = amount;
+                    if track == MASTER {
+                        m.set_master_mix(amount);
+                    } else if let Some(t) = m.tracks.get_mut(track as usize) {
+                        t.chain.mix = amount;
                     }
                 }
             }
@@ -785,6 +776,136 @@ mod tests {
         assert!(st.channels[0][150].abs() > 0.1);
     }
 
+    fn amp(db: f32) -> af27_core::EffectSlot {
+        af27_core::EffectSlot {
+            effect: "amplify".into(),
+            values: vec![db],
+            bypass: false,
+            data: None,
+            ext_id: None,
+        }
+    }
+
+    #[test]
+    fn a_3d_master_chain_runs_on_every_speaker_before_listening_and_export() {
+        let (mut s, buf) = session_with_tone();
+        s.space = Some(af27_core::space::SpaceLayout::Surround714);
+        // Spread wide so every speaker but the LFE gets some.
+        s.tracks[0].pos.x = 0.3;
+        s.tracks[0].pos.y = 0.2;
+        s.tracks[0].pos.size = 1.0;
+        let b2 = buf.clone();
+        let plain = render_bed(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        let b2 = buf.clone();
+        let plain_st = render(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        s.master_chain.push(amp(-6.0206));
+        let b2 = buf.clone();
+        let bed = render_bed(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        assert_eq!(bed.num_channels(), 12);
+        for c in 0..12 {
+            let (a, b) = (plain.channels[c][150], bed.channels[c][150]);
+            assert!((b - a * 0.5).abs() < 1e-4, "speaker {c}: {a} -> {b}");
+        }
+        assert!(
+            (0..12)
+                .filter(|c| plain.channels[*c][150].abs() > 1e-3)
+                .count()
+                >= 3,
+            "the source reaches the room"
+        );
+        // Heard (folded or binaural) from the processed bed, not run again.
+        let b2 = buf.clone();
+        let st = render(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        for c in 0..2 {
+            let (a, b) = (plain_st.channels[c][150], st.channels[c][150]);
+            assert!((b - a * 0.5).abs() < 1e-3, "side {c}: {a} -> {b}");
+        }
+    }
+
+    #[test]
+    fn a_3d_master_chain_takes_live_settings_bypass_and_mix() {
+        let (mut s, buf) = session_with_tone();
+        s.space = Some(af27_core::space::SpaceLayout::Surround51);
+        s.tracks[0].pos.x = 0.0;
+        s.tracks[0].pos.y = 1.0;
+        s.master_chain.push(amp(-6.0206));
+        let b2 = buf.clone();
+        let program = mix_program(&s, &move |_| Some(b2.clone()), 100);
+        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        let mut v = Voice {
+            program: Some(Box::new(program)),
+            playing: false,
+            t: 0.0,
+            from: 0.0,
+            to: 0.0,
+            looping: false,
+        };
+        let mut centre = |v: &mut Voice| {
+            v.apply(
+                Cmd::Play {
+                    from: 1.2,
+                    to: 1.3,
+                    looping: false,
+                },
+                &mut trash,
+            );
+            let mut out = vec![0.0f32; 6 * 4];
+            v.render(&mut out, 6, 100.0, true);
+            out[2]
+        };
+        assert!((centre(&mut v) - 0.5).abs() < 1e-3);
+        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        let mut vals = [0.0; MAX_VALUES];
+        vals[0] = -12.0412;
+        v.apply(
+            Cmd::Param {
+                track: MASTER,
+                slot: 0,
+                n: 1,
+                vals,
+            },
+            &mut trash,
+        );
+        assert!((centre(&mut v) - 0.25).abs() < 1e-3);
+        v.apply(
+            Cmd::ChainMix {
+                track: MASTER,
+                mix: 0.5,
+            },
+            &mut trash,
+        );
+        assert!((centre(&mut v) - 0.625).abs() < 1e-3);
+        v.apply(
+            Cmd::Bypass {
+                track: MASTER,
+                slot: 0,
+                on: true,
+            },
+            &mut trash,
+        );
+        assert!((centre(&mut v) - 1.0).abs() < 1e-3);
+    }
+
     #[test]
     fn midi_tracks_sound() {
         let mut s = Session::new("m", 48_000, 0);
@@ -832,6 +953,19 @@ mod bench {
     #[test]
     #[ignore]
     fn mix_32_tracks_with_effects() {
+        run_bench(None);
+    }
+
+    /// The same session in 3D Space (7.1.4): the master chain (EQ,
+    /// compressor, reverb, limiter) runs on all twelve speakers, then the
+    /// bed is folded to stereo.
+    #[test]
+    #[ignore]
+    fn mix_32_tracks_on_a_7_1_4_bed() {
+        run_bench(Some(af27_core::space::SpaceLayout::Surround714));
+    }
+
+    fn run_bench(space: Option<af27_core::space::SpaceLayout>) {
         let rate = 48_000u32;
         let secs = 60.0;
         let n = (rate as f64 * secs) as usize;
@@ -881,6 +1015,12 @@ mod bench {
                 ext_id: None,
             });
         }
+        if space.is_some() {
+            s.space = space;
+            s.master_chain.insert(0, slot("reverb"));
+            s.master_chain.insert(0, slot("compressor"));
+            s.master_chain.insert(0, slot("parametric-eq"));
+        }
         s.master_chain.push(slot("limiter"));
         let b2 = buf.clone();
         let t0 = std::time::Instant::now();
@@ -891,8 +1031,13 @@ mod bench {
             secs,
         );
         let took = t0.elapsed().as_secs_f64();
+        let what = if space.is_some() {
+            "3D 7.1.4: 32 tracks x (EQ + compressor) + 2 reverb buses + master EQ, compressor, reverb, limiter on 12 speakers"
+        } else {
+            "32 tracks x (EQ + compressor) + 2 reverb buses + master limiter"
+        };
         eprintln!(
-            "32 tracks x (EQ + compressor) + 2 reverb buses + master limiter: {secs} s of audio in {took:.2} s = {:.1}x real time on one core",
+            "{what}: {secs} s of audio in {took:.2} s = {:.1}x real time on one core",
             secs / took
         );
         assert_eq!(out.frames(), n);
