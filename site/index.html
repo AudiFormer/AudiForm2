@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AudiForm 2</title>
+<meta name="description" content="AudiForm 2: a fast, native audio editor written entirely in Rust. Multitrack, waveform and spectral editing, 3D spatial mixing, AI stems, and themes with unnecessary coolness.">
+<meta property="og:title" content="AudiForm 2">
+<meta property="og:description" content="A fast, native audio editor written entirely in Rust.">
+<meta property="og:image" content="img/hero.jpg">
+<link rel="icon" href="img/audiform2-mark-dark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="grid-floor" aria-hidden="true"></div>
+
+<header class="top">
+  <a class="brand" href="#"><img src="img/audiform2-logo-dark.svg" alt="AudiForm 2"></a>
+  <nav>
+    <a href="#features">Features</a>
+    <a href="#speed">Speed</a>
+    <a href="#themes">Themes</a>
+    <a href="#download">Download</a>
+    <a class="repo-link" href="https://github.com/nwh212/AudiForm2">GitHub</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <p class="kicker">AF2 // AUDIO EDITOR // PURE RUST</p>
+    <h1>Edit sound at the speed<br>of <span class="chroma">thought</span>.</h1>
+    <p class="lede">AudiForm 2 is a multitrack and waveform audio editor written entirely in Rust. No browser engine, no web view: a native app that opens in an instant, mixes three times faster than its predecessor on one core, and looks like nothing else on your desktop.</p>
+    <div class="cta">
+      <a class="btn primary dl-link" href="https://github.com/nwh212/AudiForm2/releases/latest">Download for Windows</a>
+      <a class="btn repo-link" href="https://github.com/nwh212/AudiForm2">View the source</a>
+    </div>
+    <figure class="shot hero-shot">
+      <img src="img/hero.jpg" alt="AudiForm 2 in the Zero Point theme, editing a track with the waveform, spectrum, Phase Wheel and stem separation visible" width="2200" height="1238">
+    </figure>
+  </section>
+
+  <section id="features" class="features">
+    <h2><span class="tag">01</span> Everything in one window</h2>
+    <div class="cards">
+      <article class="card">
+        <h3>Waveform, spectral, multitrack</h3>
+        <p>Destructive waveform editing with an undo history, a spectral display with frequency zoom and log or linear scales, and a multitrack editor with clips, fades, buses and sends.</p>
+      </article>
+      <article class="card">
+        <h3>Laid out like the pros</h3>
+        <p>Dockable panels arranged the way long-time editors expect, with Default, Music, Mixing, Focused Edit and Mastering workspaces. Drag where panels meet to resize four at once.</p>
+      </article>
+      <article class="card">
+        <h3>3D Space</h3>
+        <p>Place every track in a room instead of panning it. 5.1 to 7.1.4 speaker layouts, binaural monitoring on headphones, and every effect works on every channel.</p>
+      </article>
+      <article class="card">
+        <h3>AI stems, locally</h3>
+        <p>Split music into vocals and instruments with public models that run on your own GPU or CPU. Nothing is uploaded, and nothing runs until you ask.</p>
+      </article>
+      <article class="card">
+        <h3>Phase Wheel and Visualizer</h3>
+        <p>The calibrated Phase Wheel, a spectrum analyser, loudness statistics and a full-screen visualizer with seven looks, all drawn on the GPU.</p>
+      </article>
+      <article class="card">
+        <h3>Your shortcuts, your settings</h3>
+        <p>Rebind every command, keep several keys per command, and tune zoom, follow, autosave and colours in a settings window that explains itself.</p>
+      </article>
+      <article class="card">
+        <h3>Opens what you have</h3>
+        <p>WAV, AIFF, FLAC, MP3, AAC and M4A, Ogg, DTS in WAV, multichannel files and Audiform <code>.audfrm</code> sessions, which round-trip byte for byte.</p>
+      </article>
+      <article class="card">
+        <h3>MIDI built in</h3>
+        <p>MIDI tracks with a piano roll, per-note velocity and pan, sixteen channels and a built-in synth, ready before you install a single plug-in.</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="speed" class="speed">
+    <h2><span class="tag">02</span> Fast on any machine</h2>
+    <p class="lede">A dense 48-track session with effects on every track, measured in multiples of real time at the same thread count. Higher is better.</p>
+    <div class="bars" role="table" aria-label="Mix speed, multiples of real time">
+      <div class="row" role="row"><span class="lbl" role="cell">1 thread</span><span class="bar old" style="--v:6.6" role="cell">6.6×</span><span class="bar new" style="--v:19.6" role="cell">19.6×</span></div>
+      <div class="row" role="row"><span class="lbl" role="cell">2 threads</span><span class="bar old" style="--v:12.5" role="cell">12.5×</span><span class="bar new" style="--v:37.1" role="cell">37.1×</span></div>
+      <div class="row" role="row"><span class="lbl" role="cell">4 threads</span><span class="bar old" style="--v:20.5" role="cell">20.5×</span><span class="bar new" style="--v:63.3" role="cell">63.3×</span></div>
+      <div class="row" role="row"><span class="lbl" role="cell">20 threads</span><span class="bar old" style="--v:32.6" role="cell">32.6×</span><span class="bar new" style="--v:78" role="cell">78×</span></div>
+    </div>
+    <p class="legend"><span class="sw old"></span> Audiform 1 &nbsp; <span class="sw new"></span> AudiForm 2</p>
+    <p class="small">A lock-free worker pool, no allocation on the audio thread, and a renderer that rests when nothing moves (about 3% of one core while idle with every animation on).</p>
+  </section>
+
+  <section id="themes" class="themes">
+    <h2><span class="tag">03</span> Unnecessary coolness</h2>
+    <p class="lede">Glass panels over a living grid, a laser playhead and a boot sequence, all in Zero Point, the default. Ten more themes come from Audiform 1, remade with real marble, glazed tile, picture backdrops and their own splash screens. Every theme's colours can be retuned.</p>
+    <div class="theme-view">
+      <figure class="shot"><img id="theme-img" src="img/zero-point.jpg" alt="AudiForm 2 in the Zero Point theme" width="1600" height="900"></figure>
+      <div class="theme-list" role="tablist" aria-label="Themes">
+        <button role="tab" aria-selected="true" data-img="zero-point" data-name="Zero Point">Zero Point</button>
+        <button role="tab" data-img="prism" data-name="Prism">Prism</button>
+        <button role="tab" data-img="analog" data-name="Analog">Analog</button>
+        <button role="tab" data-img="moonlight-aero" data-name="Moonlight Aero">Moonlight Aero</button>
+        <button role="tab" data-img="mall-pastel" data-name="Mall Pastel '95">Mall Pastel '95</button>
+        <button role="tab" data-img="mall-night" data-name="Mall Pastel '95 Night">Mall Pastel '95 Night</button>
+        <button role="tab" data-img="aqua-aero" data-name="Aqua Aero">Aqua Aero</button>
+        <button role="tab" data-img="meadow-aero" data-name="Meadow Aero">Meadow Aero</button>
+        <button role="tab" data-img="phosphor" data-name="Phosphor">Phosphor</button>
+        <button role="tab" data-img="grey-desktop-95" data-name="Grey Desktop '95">Grey Desktop '95</button>
+        <button role="tab" data-img="solar-flare" data-name="Solar Flare">Solar Flare</button>
+        <button role="tab" data-img="synth-sunset" data-name="Synth Sunset">Synth Sunset</button>
+      </div>
+    </div>
+    <p class="small">And at least one you'll have to find for yourself.</p>
+  </section>
+
+  <section class="native">
+    <h2><span class="tag">04</span> Native, all the way down</h2>
+    <div class="cards two">
+      <article class="card">
+        <h3>Pure Rust</h3>
+        <p>The interface, the audio engine, the effects, the decoders and the file formats are all written in Rust. There's no Chromium, no Electron, no web view and no JavaScript, so it starts in a moment and stays light.</p>
+      </article>
+      <article class="card">
+        <h3>Private by default</h3>
+        <p>No account, no telemetry, no network calls of its own. AI features run on your machine and stay off until you turn them on.</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="download" class="download">
+    <h2><span class="tag">05</span> Get it</h2>
+    <p class="lede">Windows 10 and 11 are the main target. Linux and macOS builds are planned.</p>
+    <div class="cta">
+      <a class="btn primary dl-link" href="https://github.com/nwh212/AudiForm2/releases/latest">Latest release</a>
+      <a class="btn repo-link" href="https://github.com/nwh212/AudiForm2">Build from source</a>
+    </div>
+    <pre class="code"><code>git clone https://github.com/nwh212/AudiForm2
+cd AudiForm2
+cargo run --release</code></pre>
+  </section>
+</main>
+
+<footer>
+  <p>AudiForm 2 is the sequel to Audiform. Released under the AudiForm 2 License 1.0; see <a class="repo-link-license" href="https://github.com/nwh212/AudiForm2/blob/main/LICENSE">LICENSE</a> for the terms.</p>
+</footer>
+
+<script>
+  // Theme gallery.
+  const img = document.getElementById('theme-img');
+  document.querySelectorAll('.theme-list button').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.theme-list button').forEach((x) => x.setAttribute('aria-selected', 'false'));
+      b.setAttribute('aria-selected', 'true');
+      img.src = 'img/' + b.dataset.img + '.jpg';
+      img.alt = 'AudiForm 2 in the ' + b.dataset.name + ' theme';
+    });
+  });
+  // On GitHub Pages, point the links at this site's own repository.
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/);
+  const repoName = location.pathname.split('/').filter(Boolean)[0];
+  if (m && repoName) {
+    const repo = 'https://github.com/' + m[1] + '/' + repoName;
+    document.querySelectorAll('.repo-link').forEach((a) => (a.href = repo));
+    document.querySelectorAll('.dl-link').forEach((a) => (a.href = repo + '/releases/latest'));
+    document.querySelectorAll('.repo-link-license').forEach((a) => (a.href = repo + '/blob/main/LICENSE'));
+    document.querySelectorAll('pre.code code').forEach((c) => (c.textContent = c.textContent.replace('https://github.com/nwh212/AudiForm2', repo).replace('cd AudiForm2', 'cd ' + repoName)));
+  }
+</script>
+</body>
+</html>

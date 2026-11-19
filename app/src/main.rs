@@ -16,6 +16,7 @@ mod phasewheel;
 mod pianoroll;
 mod pictures;
 mod pointers;
+mod selfshot;
 mod separation;
 mod settings;
 mod skin;
@@ -57,7 +58,7 @@ fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Re
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("AudiForm 2")
-            .with_inner_size([1600.0, 940.0])
+            .with_inner_size(selfshot::window_size().unwrap_or([1600.0, 940.0]))
             .with_min_inner_size([900.0, 560.0])
             .with_drag_and_drop(true),
         // wgpu (DirectX 12, Vulkan or Metal) presents reliably on more

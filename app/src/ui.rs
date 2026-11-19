@@ -1552,6 +1552,7 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::selfshot::tick(ctx, ctx.input(|i| i.time));
         let __t0 = std::time::Instant::now();
         struct TraceGuard(std::time::Instant, egui::Rect);
         impl Drop for TraceGuard {
