@@ -5,14 +5,15 @@
 //! and status bar. Every panel lives in the dock and can be dragged to a
 //! new place, tabbed with others, split, or floated in its own window.
 
-use egui::{Key, KeyboardShortcut, Modifiers, RichText, Rounding};
+use egui::{RichText, Rounding};
 use egui_dock::{DockArea, DockState, Style, TabViewer};
 use serde::{Deserialize, Serialize};
 
+use crate::keymap::{Cmd, Keymap};
 use crate::state::{data_dir, Mode, State, Tool};
 use crate::theme::c;
 use af27_core::time::{format_time, gain_to_db};
-use af27_dsp::effects::GROUPS;
+use af27_dsp::Effect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum Tab {
@@ -128,6 +129,11 @@ pub struct App {
     pace: f32,
     paced_frames: u32,
     frame_cpu_ms: f32,
+    /// The keyboard shortcuts, and the windows of Edit > Keyboard
+    /// Shortcuts and Edit > Preferences.
+    pub keymap: Keymap,
+    shortcuts: crate::settings::ShortcutsUi,
+    settings: crate::settings::SettingsUi,
 }
 
 /// What a cached spectrogram was drawn from.
@@ -161,6 +167,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, files: Vec<std::path::PathBuf>) -> App {
         let mut st = State::new();
         crate::skin::install_fallback_fonts(&cc.egui_ctx);
+        lay_colors(&mut st);
         st.theme.apply(&cc.egui_ctx);
         st.theme_changed = false;
         st.open_paths(files);
@@ -177,6 +184,9 @@ impl App {
             pace: 1.0 / 30.0,
             paced_frames: 0,
             frame_cpu_ms: 0.0,
+            keymap: Keymap::load(),
+            shortcuts: Default::default(),
+            settings: Default::default(),
         }
     }
 
@@ -205,6 +215,17 @@ impl App {
             self.dock.add_window(vec![tab]);
         }
     }
+}
+
+/// Lays the user's colour overrides (Preferences > Appearance) over the
+/// theme as made with the user's hues.
+fn lay_colors(st: &mut State) {
+    let fresh = match &st.hues {
+        Some(h) => st.theme_base.with_hues(h),
+        None => st.theme_base.clone(),
+    };
+    let o = st.prefs.colors;
+    o.apply(&mut st.theme, &fresh);
 }
 
 impl Drop for App {
@@ -311,101 +332,36 @@ impl Viewer<'_> {
     }
 }
 
-fn shortcut(ctx: &egui::Context, m: Modifiers, k: Key) -> bool {
-    ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)))
-}
-
 impl App {
+    /// Runs the commands whose keys were pressed this frame.
     fn keys(&mut self, ctx: &egui::Context) {
-        let st = &mut self.st;
-        let cmd = Modifiers::COMMAND;
-        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
-        if shortcut(ctx, cs, Key::Z) || shortcut(ctx, cmd, Key::Y) {
-            st.redo();
-        }
-        if shortcut(ctx, cmd, Key::Z) {
-            st.undo();
-        }
-        if shortcut(ctx, cmd, Key::O) {
-            open_dialog(st);
-        }
-        if shortcut(ctx, cmd, Key::S) {
-            save(st);
-        }
-        if shortcut(ctx, cmd, Key::N) {
-            st.new_file(48_000, 2);
-        }
-        if ctx.wants_keyboard_input() {
+        // A key being set in Keyboard Shortcuts is not a command.
+        if self.shortcuts.capture.is_some() {
             return;
         }
-        if shortcut(ctx, cmd, Key::A) {
-            st.select_all();
+        let typing = ctx.wants_keyboard_input();
+        for cmd in self.keymap.pressed(ctx, typing) {
+            self.run_cmd(cmd);
         }
-        if shortcut(ctx, cmd, Key::C) {
-            st.edit_copy();
-        }
-        if shortcut(ctx, cmd, Key::X) {
-            st.edit_cut();
-        }
-        if shortcut(ctx, cmd, Key::V) {
-            st.edit_paste();
-        }
-        if shortcut(ctx, cmd, Key::T) {
-            st.edit_crop();
-        }
-        if shortcut(ctx, cmd, Key::K) {
-            st.split_at_playhead();
-        }
-        if shortcut(ctx, cmd, Key::L) {
-            st.looping = !st.looping;
-        }
-        if shortcut(ctx, Modifiers::SHIFT, Key::Space) {
-            if st.is_recording() {
-                st.stop_recording();
-            } else {
-                st.start_recording();
-            }
-        }
-        let plain = |k| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
-        if plain(Key::Space) {
-            st.toggle_play();
-        }
-        if plain(Key::Delete) || plain(Key::Backspace) {
-            st.edit_delete("Delete");
-        }
-        if plain(Key::Home) {
-            st.set_cursor(0.0);
-        }
-        if plain(Key::End) {
-            let l = st.program_len();
-            st.set_cursor(l);
-        }
-        if plain(Key::M) {
-            st.add_marker();
-        }
-        if plain(Key::Num9) {
-            st.mode = Mode::Waveform;
-        }
-        if plain(Key::Num0) {
-            st.mode = Mode::Multitrack;
-        }
-        if plain(Key::V) {
-            st.tool = Tool::Move;
-        }
-        if plain(Key::R) {
-            st.tool = Tool::Razor;
-        }
-        if plain(Key::T) {
-            st.tool = Tool::TimeSelect;
-        }
-        if plain(Key::Equals) || plain(Key::Plus) {
-            zoom(st, 0.5);
-        }
-        if plain(Key::Minus) {
-            zoom(st, 2.0);
-        }
-        if plain(Key::Escape) {
-            match st.mode {
+    }
+
+    /// Does what a command does, from a key or a menu.
+    fn run_cmd(&mut self, cmd: Cmd) {
+        let st = &mut self.st;
+        match cmd {
+            Cmd::NewFile => st.new_file(48_000, 2),
+            Cmd::Open => open_dialog(st),
+            Cmd::Save => save(st),
+            Cmd::Undo => st.undo(),
+            Cmd::Redo => st.redo(),
+            Cmd::Cut => st.edit_cut(),
+            Cmd::Copy => st.edit_copy(),
+            Cmd::Paste => st.edit_paste(),
+            Cmd::Crop => st.edit_crop(),
+            Cmd::SelectAll => st.select_all(),
+            Cmd::Delete => st.edit_delete("Delete"),
+            Cmd::AddMarker => st.add_marker(),
+            Cmd::ClearSelection => match st.mode {
                 Mode::Waveform => {
                     if let Some(d) = st.doc_mut() {
                         d.sel = None;
@@ -415,9 +371,53 @@ impl App {
                     st.session_sel = None;
                     st.selected_clip = None;
                 }
+            },
+            Cmd::KeyboardShortcuts => self.shortcuts.open = true,
+            Cmd::Preferences => self.settings.open(),
+            Cmd::SplitAtPlayhead => st.split_at_playhead(),
+            Cmd::Invert => apply_now(st, Effect::Invert),
+            Cmd::Reverse => apply_now(st, Effect::Reverse),
+            Cmd::Silence => apply_now(st, Effect::Silence),
+            Cmd::MatchLoudness => {
+                // It has a target to set, so it opens in the Effects panel.
+                st.effect = Effect::MatchLoudness;
+                self.show_tab(Tab::Effects);
             }
+            Cmd::AutoHeal => st.toast(AUTO_HEAL_NOTE),
+            Cmd::PlayStop => st.toggle_play(),
+            Cmd::Record => {
+                if st.is_recording() {
+                    st.stop_recording();
+                } else {
+                    st.start_recording();
+                }
+            }
+            Cmd::Loop => st.looping = !st.looping,
+            Cmd::ToStart => st.set_cursor(0.0),
+            Cmd::ToEnd => {
+                let l = st.program_len();
+                st.set_cursor(l);
+            }
+            Cmd::WaveformView => st.mode = Mode::Waveform,
+            Cmd::MultitrackView => st.mode = Mode::Multitrack,
+            Cmd::ZoomIn => zoom(st, 0.5),
+            Cmd::ZoomOut => zoom(st, 2.0),
+            Cmd::ZoomFull => zoom_full(st),
+            Cmd::MoveTool => st.tool = Tool::Move,
+            Cmd::RazorTool => st.tool = Tool::Razor,
+            Cmd::TimeSelectTool => st.tool = Tool::TimeSelect,
         }
     }
+}
+
+const AUTO_HEAL_NOTE: &str = "Auto Heal is coming: there is no healing effect yet";
+
+/// Runs a no-settings effect on the selection (or the whole file) at once.
+fn apply_now(st: &mut State, e: Effect) {
+    if st.doc().is_some() {
+        st.mode = Mode::Waveform;
+    }
+    st.apply_effect(e);
 }
 
 pub fn zoom(st: &mut State, f: f64) {
@@ -510,15 +510,45 @@ fn save_session_as(st: &mut State) {
     }
 }
 
+/// A menu item for a command, its key shown at the right.
+fn cmd_item(
+    ui: &mut egui::Ui,
+    km: &Keymap,
+    cmd: Cmd,
+    label: &str,
+    enabled: bool,
+    out: &mut Option<Cmd>,
+) -> egui::Response {
+    let r = ui.add_enabled(
+        enabled,
+        egui::Button::new(label).shortcut_text(km.text(cmd)),
+    );
+    if r.clicked() {
+        *out = Some(cmd);
+        ui.close_menu();
+    }
+    r
+}
+
+/// A submenu that cannot open yet, and why.
+fn disabled_submenu(ui: &mut egui::Ui, label: &str, why: &str) {
+    ui.add_enabled_ui(false, |ui| {
+        ui.menu_button(label, |_| {})
+            .response
+            .on_disabled_hover_text(why);
+    });
+}
+
+const PLUGIN_NOTE: &str = "Plug-in hosting is coming";
+
 fn menus(app: &mut App, ui: &mut egui::Ui) {
     let st = &mut app.st;
+    let km = &app.keymap;
     let mut open_tab = None;
+    let mut cmd: Option<Cmd> = None;
     egui::menu::bar(ui, |ui| {
         ui.menu_button("File", |ui| {
-            if ui.button("New Audio File          Ctrl+N").clicked() {
-                st.new_file(48_000, 2);
-                ui.close_menu();
-            }
+            cmd_item(ui, km, Cmd::NewFile, "New Audio File", true, &mut cmd);
             if ui.button("New Multitrack Session").clicked() {
                 let before = st.session.clone();
                 st.session = af27_core::Session::default();
@@ -530,15 +560,9 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.mode = Mode::Multitrack;
                 ui.close_menu();
             }
-            if ui.button("Open...                       Ctrl+O").clicked() {
-                open_dialog(st);
-                ui.close_menu();
-            }
+            cmd_item(ui, km, Cmd::Open, "Open...", true, &mut cmd);
             ui.separator();
-            if ui.button("Save                          Ctrl+S").clicked() {
-                save(st);
-                ui.close_menu();
-            }
+            cmd_item(ui, km, Cmd::Save, "Save", true, &mut cmd);
             if ui.button("Save Audio As...").clicked() {
                 save_doc_as(st);
                 ui.close_menu();
@@ -608,46 +632,34 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     .and_then(|d| d.history.undo_label().map(str::to_string)),
                 Mode::Multitrack => st.session_history.undo_label().map(str::to_string),
             };
-            if ui
-                .add_enabled(
-                    ul.is_some(),
-                    egui::Button::new(format!("Undo {}    Ctrl+Z", ul.unwrap_or_default())),
-                )
-                .clicked()
-            {
-                st.undo();
-                ui.close_menu();
-            }
-            if ui.button("Redo                Ctrl+Y").clicked() {
-                st.redo();
-                ui.close_menu();
-            }
+            let undo = match &ul {
+                Some(l) => format!("Undo {l}"),
+                None => "Undo".to_string(),
+            };
+            cmd_item(ui, km, Cmd::Undo, &undo, ul.is_some(), &mut cmd);
+            cmd_item(ui, km, Cmd::Redo, "Redo", true, &mut cmd);
             ui.separator();
-            for (label, f) in [
-                ("Cut              Ctrl+X", State::edit_cut as fn(&mut State)),
-                ("Copy            Ctrl+C", State::edit_copy),
-                ("Paste           Ctrl+V", State::edit_paste),
-                ("Crop            Ctrl+T", State::edit_crop),
-                ("Select All    Ctrl+A", State::select_all),
-                ("Add Marker   M", State::add_marker),
+            for c in [
+                Cmd::Cut,
+                Cmd::Copy,
+                Cmd::Paste,
+                Cmd::Crop,
+                Cmd::Delete,
+                Cmd::SelectAll,
+                Cmd::AddMarker,
             ] {
-                if ui.button(label).clicked() {
-                    f(st);
-                    ui.close_menu();
-                }
-            }
-            if ui.button("Delete          Del").clicked() {
-                st.edit_delete("Delete");
-                ui.close_menu();
+                cmd_item(ui, km, c, c.label(), true, &mut cmd);
             }
             ui.separator();
-            if ui.button("Insert Silence (5 s)").clicked() {
-                let (rate, ch) = st
-                    .doc()
-                    .map_or((48_000, 2), |d| (d.buf.rate, d.buf.num_channels()));
-                st.insert_buffer("Insert silence", af27_dsp::generate::silence(rate, ch, 5.0));
-                ui.close_menu();
-            }
+            cmd_item(
+                ui,
+                km,
+                Cmd::KeyboardShortcuts,
+                "Keyboard Shortcuts...",
+                true,
+                &mut cmd,
+            );
+            cmd_item(ui, km, Cmd::Preferences, "Preferences...", true, &mut cmd);
         });
         ui.menu_button("Multitrack", |ui| {
             if ui.button("Add Audio Track").clicked() {
@@ -669,10 +681,14 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.session.tempo.metronome = m;
                 st.live_metronome();
             }
-            if ui.button("Split at Playhead     Ctrl+K").clicked() {
-                st.split_at_playhead();
-                ui.close_menu();
-            }
+            cmd_item(
+                ui,
+                km,
+                Cmd::SplitAtPlayhead,
+                "Split at Playhead",
+                true,
+                &mut cmd,
+            );
             if ui.button("Delete Selected Clip").clicked() {
                 st.delete_clip();
                 ui.close_menu();
@@ -690,56 +706,40 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.menu_button("Effects", |ui| {
-            for (group, list) in GROUPS {
-                ui.menu_button(*group, |ui| {
-                    for e in *list {
-                        if ui.button(e.name()).clicked() {
-                            st.effect = *e;
-                            open_tab = Some(Tab::Effects);
-                            ui.close_menu();
-                        }
-                    }
-                });
-            }
-            ui.separator();
-            if ui.button("Generate Tone or Noise...").clicked() {
-                st.generate.open = true;
-                ui.close_menu();
-            }
-            if ui.button("AI Stem Separation...").clicked() {
-                open_tab = Some(Tab::AiSeparation);
-                ui.close_menu();
-            }
+            effects_menu(ui, st, km, &mut cmd, &mut open_tab);
         });
         ui.menu_button("View", |ui| {
-            if ui
-                .radio(st.mode == Mode::Waveform, "Waveform Editor   9")
-                .clicked()
-            {
-                st.mode = Mode::Waveform;
-                ui.close_menu();
-            }
-            if ui
-                .radio(st.mode == Mode::Multitrack, "Multitrack Editor   0")
-                .clicked()
-            {
-                st.mode = Mode::Multitrack;
-                ui.close_menu();
+            for (c, m) in [
+                (Cmd::WaveformView, Mode::Waveform),
+                (Cmd::MultitrackView, Mode::Multitrack),
+            ] {
+                let b = egui::Button::new(c.label())
+                    .selected(st.mode == m)
+                    .shortcut_text(km.text(c));
+                if ui.add(b).clicked() {
+                    cmd = Some(c);
+                    ui.close_menu();
+                }
             }
             ui.separator();
             if let Some(d) = st.doc_mut() {
                 ui.checkbox(&mut d.spectral, "Spectral Display");
             }
-            if ui.button("Zoom In   =").clicked() {
-                zoom(st, 0.5);
+            for c in [Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomFull] {
+                if ui
+                    .add(egui::Button::new(c.label()).shortcut_text(km.text(c)))
+                    .clicked()
+                {
+                    cmd = Some(c);
+                }
             }
-            if ui.button("Zoom Out   -").clicked() {
-                zoom(st, 2.0);
+            if ui
+                .checkbox(&mut st.return_on_stop, "Return Playhead on Stop")
+                .changed()
+            {
+                st.prefs.space_returns = st.return_on_stop;
+                st.prefs.save();
             }
-            if ui.button("Zoom Out Full").clicked() {
-                zoom_full(st);
-            }
-            ui.checkbox(&mut st.return_on_stop, "Return Playhead on Stop");
             ui.separator();
             ui.menu_button("Visual Effects", |ui| {
                 for (m, label, tip) in [
@@ -905,6 +905,112 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
     if let Some(t) = open_tab {
         app.show_tab(t);
     }
+    if let Some(c) = cmd {
+        app.run_cmd(c);
+    }
+}
+
+/// The Effects menu, laid out as in the leading editor.
+fn effects_menu(
+    ui: &mut egui::Ui,
+    st: &mut State,
+    km: &Keymap,
+    cmd: &mut Option<Cmd>,
+    open_tab: &mut Option<Tab>,
+) {
+    let multi = st.mode == Mode::Multitrack;
+    // Clips have no rack of their own yet: a clip's track's rack opens.
+    let clip_track = st
+        .selected_clip
+        .and_then(|id| st.session.find_clip(id))
+        .map(|(ti, _)| st.session.tracks[ti].id);
+    if ui
+        .add_enabled(
+            multi && clip_track.is_some(),
+            egui::Button::new("Edit Clip Effects in Effects Rack"),
+        )
+        .on_hover_text(
+            "Clips play through their track's rack: this opens the rack of the clip's track",
+        )
+        .on_disabled_hover_text("Select a clip in the Multitrack editor")
+        .clicked()
+    {
+        st.selected_track = clip_track;
+        *open_tab = Some(Tab::Inspector);
+        ui.close_menu();
+    }
+    if ui
+        .add_enabled(
+            multi && st.selected_track.is_some(),
+            egui::Button::new("Edit Track Effects in Effects Rack"),
+        )
+        .on_disabled_hover_text("Select a track in the Multitrack editor")
+        .clicked()
+    {
+        *open_tab = Some(Tab::Inspector);
+        ui.close_menu();
+    }
+    ui.separator();
+    let has_doc = st.doc().is_some();
+    let no_doc = "Open a file in the Waveform editor first";
+    for c in [Cmd::Invert, Cmd::Reverse, Cmd::Silence] {
+        cmd_item(ui, km, c, c.label(), has_doc, cmd).on_disabled_hover_text(no_doc);
+    }
+    ui.menu_button("Generate", |ui| {
+        if ui.button("Tone or Noise...").clicked() {
+            st.generate.open = true;
+            ui.close_menu();
+        }
+        if ui.button("Silence (5 s)").clicked() {
+            let (rate, ch) = st
+                .doc()
+                .map_or((48_000, 2), |d| (d.buf.rate, d.buf.num_channels()));
+            st.insert_buffer("Insert silence", af27_dsp::generate::silence(rate, ch, 5.0));
+            ui.close_menu();
+        }
+    });
+    ui.separator();
+    cmd_item(ui, km, Cmd::MatchLoudness, "Match Loudness", true, cmd);
+    ui.add_enabled(
+        false,
+        egui::Button::new("Auto Heal Selection").shortcut_text(km.text(Cmd::AutoHeal)),
+    )
+    .on_disabled_hover_text(AUTO_HEAL_NOTE);
+    ui.separator();
+    let show = st.prefs.show_effects_on_pick;
+    for (cat, items) in crate::fx_menu::categories() {
+        if items.is_empty() {
+            disabled_submenu(ui, cat, "Nothing here yet");
+            continue;
+        }
+        ui.menu_button(cat, |ui| {
+            for item in items {
+                if ui.button(item.name()).clicked() {
+                    match item {
+                        crate::fx_menu::Item::Builtin(e) => {
+                            st.effect = e;
+                            if show {
+                                *open_tab = Some(Tab::Effects);
+                            }
+                        }
+                        crate::fx_menu::Item::Fx(id, _) => {
+                            st.fx_pick = Some(id);
+                            if show {
+                                *open_tab = Some(Tab::Effects);
+                            }
+                        }
+                        crate::fx_menu::Item::Stems => *open_tab = Some(Tab::AiSeparation),
+                    }
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+    ui.separator();
+    disabled_submenu(ui, "VST", PLUGIN_NOTE);
+    disabled_submenu(ui, "VST 3", PLUGIN_NOTE);
+    ui.add_enabled(false, egui::Button::new("Audio Plug-In Manager..."))
+        .on_disabled_hover_text(PLUGIN_NOTE);
 }
 
 fn toolbar(ui: &mut egui::Ui, st: &mut State) {
@@ -1411,6 +1517,7 @@ impl eframe::App for App {
         }
         let _trace = TraceGuard(__t0, ctx.screen_rect());
         if self.st.theme_changed {
+            lay_colors(&mut self.st);
             self.st.theme.apply(ctx);
             self.st.theme_changed = false;
         }
@@ -1641,6 +1748,9 @@ impl eframe::App for App {
         }
         generate_window(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
+        self.settings.show(ctx, &mut self.st);
+        let th_now = self.st.theme.clone();
+        self.shortcuts.show(ctx, &mut self.keymap, &th_now);
         {
             let top = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
