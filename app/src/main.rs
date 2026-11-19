@@ -20,6 +20,7 @@ mod separation;
 mod settings;
 mod skin;
 mod space;
+mod spectral_select;
 mod splash;
 mod state;
 mod theme;

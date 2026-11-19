@@ -81,6 +81,8 @@ pub struct Doc {
     pub spectral: bool,
     /// Display-only amplitude zoom of the waveform (1 to 16).
     pub amp: f32,
+    /// The spectral selection (time x frequency shapes).
+    pub spec_sel: crate::spectral_select::SpecSel,
 }
 
 impl Doc {
@@ -102,6 +104,7 @@ impl Doc {
             version: 1,
             spectral: true,
             amp: 1.0,
+            spec_sel: Default::default(),
         }
     }
 
@@ -287,6 +290,16 @@ pub struct State {
     pub session_px: f32,
     /// Display-only amplitude zoom of the Multitrack's waveforms (1 to 16).
     pub session_amp: f32,
+    /// Brush Select and Spot Repair brush diameter, in pixels.
+    pub brush_px: f32,
+    /// The waveform's share of the Waveform editor's height when the
+    /// spectrum shows (the divider between them).
+    pub spec_split: f32,
+    /// The spectrogram's two colours (quiet, loud), blended around the
+    /// colour wheel; None uses the theme's gradient.
+    pub spec_colors: Option<[[u8; 3]; 2]>,
+    /// A spectral edit running in the background.
+    pub spectral_job: Option<crate::spectral_select::SpecJob>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +307,21 @@ pub enum Tool {
     Move,
     Razor,
     TimeSelect,
+    /// Spectral selection tools (Waveform editor, spectrum).
+    BoxSelect,
+    LassoSelect,
+    BrushSelect,
+    SpotRepair,
+}
+
+impl Tool {
+    /// Works in the spectral display.
+    pub fn is_spectral(self) -> bool {
+        matches!(
+            self,
+            Tool::BoxSelect | Tool::LassoSelect | Tool::BrushSelect | Tool::SpotRepair
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -456,6 +484,21 @@ impl State {
             wave_px: 1000.0,
             session_px: 1000.0,
             session_amp: 1.0,
+            brush_px: 24.0,
+            spec_split: 0.5,
+            spec_colors: None,
+            spectral_job: None,
+        }
+    }
+
+    /// Picks a tool; a spectral tool turns the spectrum on.
+    pub fn choose_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+        if tool.is_spectral() {
+            self.mode = Mode::Waveform;
+            if let Some(d) = self.doc_mut() {
+                d.spectral = true;
+            }
         }
     }
 
@@ -916,6 +959,7 @@ impl State {
     pub fn tick(&mut self) {
         self.poll_jobs();
         crate::separation::poll(self);
+        crate::spectral_select::poll(self);
         self.sync_program();
         if let Some(e) = &mut self.engine {
             e.collect();

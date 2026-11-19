@@ -234,7 +234,8 @@ fn spectrogram_texture(
         (d.view.len * 100_000.0) as i64,
         cols,
         rows_per_ch,
-        st.theme.name.clone() + &format!("{:?}{:?}", st.theme.spectrum, st.spec),
+        st.theme.name.clone()
+            + &format!("{:?}{:?}{:?}", st.theme.spectrum, st.spec, st.spec_colors),
     );
     if let Some((tex, k)) = &caches.spectro {
         if *k == key {
@@ -258,6 +259,7 @@ fn spectrogram_texture(
             (b.floor() as usize, b.fract() as f32)
         })
         .collect();
+    let lut = crate::spectral_select::color_lut(st);
     let mut img = egui::ColorImage::new([cols, rows_per_ch * nch], Color32::BLACK);
     for ch in 0..nch {
         let spec = af27_dsp::fft::spectrogram(&d.buf.channels[ch], start, end, cols, size);
@@ -266,7 +268,7 @@ fn spectrogram_texture(
                 let b1 = (b + 1).min(bins - 1);
                 let db = col[b] + (col[b1] - col[b]) * fr;
                 let level = ((db + 110.0) / 100.0).clamp(0.0, 1.0);
-                let [r, g, b] = st.theme.spectrum_color(level);
+                let [r, g, b] = lut[(level * 255.0).round() as usize];
                 img[(x, ch * rows_per_ch + y)] = Color32::from_rgb(r, g, b);
             }
         }
@@ -315,7 +317,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     let body = Rect::from_min_max(pos2(rect.left(), ruler.bottom()), rect.max);
     let spectral = st.doc().is_some_and(|d| d.spectral);
     let (wave_area, spec_area) = if spectral {
-        let split = body.top() + body.height() * 0.5;
+        let split = body.top() + body.height() * st.spec_split.clamp(0.1, 0.9);
         (
             Rect::from_min_max(body.min, pos2(body.right(), split - 2.0)),
             Some(Rect::from_min_max(pos2(body.left(), split + 2.0), body.max)),
@@ -324,9 +326,18 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         (body, None)
     };
 
+    // The spectral tools take the spectrum's pointer while chosen; the
+    // divider sits between waveform and spectrum.
+    let spec_resp = spec_area.and_then(|sa| crate::spectral_select::overlay(ui, st, sa));
+    if spec_area.is_some() {
+        crate::spectral_select::divider(ui, st, body, (wave_area.bottom() + 2.0).round());
+    }
+
     // Interaction first so drawing shows this frame's state.
     st.wave_px = body.width();
-    let hover = resp.hover_pos();
+    let hover = resp
+        .hover_pos()
+        .or_else(|| spec_resp.as_ref().and_then(|r| r.hover_pos()));
     if let Some(hp) = hover {
         let input = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers));
         let areas = Areas {
@@ -417,9 +428,16 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if resp.clicked() && was_playing && !on_overview {
         st.play();
     }
+    // A time selection or a click outside the spectral tools ends the
+    // spectral selection.
+    if (resp.drag_started() || resp.clicked()) && !on_overview {
+        if let Some(d) = st.doc_mut() {
+            d.spec_sel.clear();
+        }
+    }
     // Right-click on the spectrum: its view menu.
     if let Some(sa) = spec_area {
-        spectrum_menu(ui, st, &resp, sa);
+        spectrum_menu(ui, st, spec_resp.as_ref().unwrap_or(&resp), sa);
     }
 
     let pos = st.position();
@@ -565,6 +583,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 );
             }
         }
+        crate::spectral_select::draw(ui, st, sa, &p);
     }
 
     let d = st.doc().unwrap();
@@ -613,6 +632,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 ca(th.text, 200),
             );
         }
+    }
+    if let Some(sa) = spec_area {
+        crate::spectral_select::action_bar(ui, st, sa);
     }
 }
 
@@ -798,6 +820,8 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
                 .small()
                 .weak(),
         );
+        ui.separator();
+        crate::spectral_select::colors_menu(ui, st);
     });
 }
 

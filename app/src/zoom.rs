@@ -208,11 +208,15 @@ pub struct SpecView {
     pub fft: usize,
 }
 
+/// The scale files open at: a quarter of the way to logarithmic (about
+/// 1 kHz at an eighth of the height, 10 kHz at two thirds).
+pub const DEFAULT_LOG_STEP: u8 = 1;
+
 impl Default for SpecView {
     fn default() -> Self {
         SpecView {
             range: None,
-            log_step: LOG_STEPS,
+            log_step: DEFAULT_LOG_STEP,
             notes: false,
             fft: FFT_DEFAULT,
         }
@@ -593,6 +597,15 @@ mod tests {
     #[test]
     fn scale_steps_and_resolution_limits() {
         let mut s = SpecView::default();
+        assert_eq!(s.log_step, DEFAULT_LOG_STEP);
+        // Opening scale: about 1 kHz at 1/8 of the height, 10 kHz at 2/3.
+        for ny in [22_050.0, 24_000.0] {
+            assert!((s.pos(1000.0, ny) - 0.125).abs() < 0.015);
+            assert!((s.pos(10_000.0, ny) - 0.667).abs() < 0.03);
+        }
+        for _ in 0..10 {
+            s.more_log();
+        }
         assert_eq!(s.log_step, LOG_STEPS);
         s.more_log();
         assert_eq!(s.log_step, LOG_STEPS);
@@ -622,6 +635,7 @@ mod tests {
         assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
         let n = SpecView {
             notes: true,
+            log_step: LOG_STEPS,
             ..SpecView::default()
         };
         assert!(n.ticks(22_050.0, 300.0, 16.0).iter().any(|x| x.1 == "C4"));
