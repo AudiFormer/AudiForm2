@@ -427,6 +427,19 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
     }
     p.add(Shape::mesh(m));
     p.rect_filled(screen, 0.0, rgba([2, 6, 28], 0.25 * a));
+    // Light playing through the water, under the title.
+    if th.caustics > 0.0 {
+        let time = if th.motion > 0.0 { t * 0.5 } else { 0.0 };
+        crate::caustics::paint(
+            p,
+            screen,
+            th,
+            time,
+            // Softer than on the backdrop: no glass lies over it here.
+            th.caustics * a * 0.55,
+            crate::caustics::SLOT_SPLASH,
+        );
+    }
 
     // The title rises from the deep: dim, blue and bent by the water at
     // first, clearing and steadying as it reaches the surface.

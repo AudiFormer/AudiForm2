@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod caustics;
 mod classic_themes;
 mod corners;
 mod export;
