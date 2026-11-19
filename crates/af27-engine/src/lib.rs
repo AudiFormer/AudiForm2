@@ -16,6 +16,7 @@ pub mod mix;
 pub mod pool;
 pub mod scope;
 pub mod synth;
+pub mod transport;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use af27_core::AudioBuffer;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 pub use mix::{space_gains, stereo_frame, track_gains, Mix, BLOCK, MAX_SPEAKERS};
+pub use transport::{Plan, Region};
 
 /// What the audio thread plays.
 pub enum Program {
@@ -43,10 +45,16 @@ pub const MAX_VALUES: usize = 24;
 
 enum Cmd {
     Program(Box<Program>),
+    /// Start afresh (effect tails cleared).
     Play {
         from: f64,
-        to: f64,
-        looping: bool,
+        plan: Plan,
+    },
+    /// New bounds while playing, and a new position if `to` is Some.
+    /// Nothing is reset, so effect tails carry on across the move.
+    Retarget {
+        to: Option<f64>,
+        plan: Plan,
     },
     Stop,
     Gains {
@@ -104,9 +112,7 @@ struct Voice {
     program: Option<Box<Program>>,
     playing: bool,
     t: f64,
-    from: f64,
-    to: f64,
-    looping: bool,
+    plan: Plan,
 }
 
 impl Voice {
@@ -124,15 +130,19 @@ impl Voice {
                     }
                 }
             }
-            Cmd::Play { from, to, looping } => {
-                self.t = from;
-                self.from = from;
-                self.to = to;
-                self.looping = looping;
+            Cmd::Play { from, plan } => {
+                self.t = plan.start_at(from);
+                self.plan = plan;
                 self.playing = true;
                 if let Some(Program::Mix(m)) = self.program.as_deref_mut() {
                     m.reset();
                 }
+            }
+            Cmd::Retarget { to, plan } => {
+                if let Some(t) = to {
+                    self.t = plan.start_at(t);
+                }
+                self.plan = plan;
             }
             Cmd::Stop => self.playing = false,
             Cmd::Gains { track, l, r } => {
@@ -229,19 +239,20 @@ impl Voice {
         let mut peaks = (0.0f32, 0.0f32);
         let mut block = [0.0f32; BLOCK * MAX_SPEAKERS];
         while done < frames && self.playing {
-            if self.t >= self.to {
-                if self.looping && self.to > self.from {
-                    self.t = self.from;
-                    if let Program::Mix(m) = program {
-                        m.reset();
-                    }
-                } else {
-                    self.playing = false;
-                    break;
+            // Render up to the next seam (the stop point, a loop end or a
+            // skipped range), then jump there sample-accurately. The mixer
+            // is not reset at a jump: reverbs and delays ring on across it.
+            let (seam, action) = self.plan.next_seam(self.t);
+            // Within a thousandth of a frame counts as there.
+            let eps = dt * 1e-3;
+            if self.t >= seam - eps {
+                if cross(&mut self.t, &mut self.playing, seam, action) {
+                    continue;
                 }
+                break;
             }
-            let until_end = (((self.to - self.t) / dt).ceil() as usize).max(1);
-            let n = (frames - done).min(BLOCK).min(until_end);
+            let until_seam = (((seam - self.t) / dt - 1e-6).ceil().min(1e12) as usize).max(1);
+            let n = (frames - done).min(BLOCK).min(until_seam);
             let p = match program {
                 Program::Buffer { buf, channel_mask } => {
                     let mut pk = (0.0f32, 0.0f32);
@@ -276,8 +287,26 @@ impl Voice {
             }
             self.t += dt * n as f64;
             done += n;
+            if self.t >= seam - eps && !cross(&mut self.t, &mut self.playing, seam, action) {
+                break;
+            }
         }
         peaks
+    }
+}
+
+/// Playback reached `seam`: jump (carrying any overshoot over) and return
+/// true, or stop and return false.
+fn cross(t: &mut f64, playing: &mut bool, seam: f64, action: transport::Action) -> bool {
+    match action {
+        transport::Action::Stop => {
+            *playing = false;
+            false
+        }
+        transport::Action::Jump(to) => {
+            *t = to + (*t - seam).max(0.0);
+            true
+        }
     }
 }
 
@@ -318,9 +347,7 @@ impl Engine {
             program: None,
             playing: false,
             t: 0.0,
-            from: 0.0,
-            to: 0.0,
-            looping: false,
+            plan: Plan::default(),
         };
         let mut callback = move |out: &mut [f32]| {
             while let Ok(cmd) = rx.pop() {
@@ -383,11 +410,43 @@ impl Engine {
         self.send(Cmd::Program(Box::new(p)));
     }
 
-    /// Plays from `from` up to `to` (None = the end).
+    /// Plays from `from` up to `to` (None = the end), looping `from..to`
+    /// when asked.
     pub fn play(&mut self, from: f64, to: Option<f64>, looping: bool, program_len: f64) {
         let to = to.unwrap_or(program_len).max(from);
-        self.send(Cmd::Play { from, to, looping });
+        let plan = if looping {
+            Plan::new(
+                f64::INFINITY,
+                Region::Loop {
+                    start: from,
+                    end: to,
+                },
+            )
+        } else {
+            Plan::new(to, Region::None)
+        };
+        self.play_plan(from, plan);
+    }
+
+    /// Plays from `from` (or from the end of a skipped range it is in),
+    /// following `plan`. Effect tails start clean.
+    pub fn play_plan(&mut self, from: f64, plan: Plan) {
+        self.send(Cmd::Play { from, plan });
         self.shared.playing.store(true, Ordering::Relaxed);
+        self.shared
+            .pos
+            .store(plan.start_at(from).to_bits(), Ordering::Relaxed);
+    }
+
+    /// While playing: new bounds, and a new position when `to` is Some,
+    /// without a gap or a reset (effect tails continue).
+    pub fn retarget(&mut self, to: Option<f64>, plan: Plan) {
+        self.send(Cmd::Retarget { to, plan });
+        if let Some(t) = to {
+            self.shared
+                .pos
+                .store(plan.start_at(t).to_bits(), Ordering::Relaxed);
+        }
     }
 
     pub fn stop(&mut self) {
@@ -541,9 +600,7 @@ fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -
         program: Some(Box::new(program)),
         playing: true,
         t: from,
-        from,
-        to,
-        looping: false,
+        plan: Plan::new(to, Region::None),
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.reset();
@@ -857,16 +914,13 @@ mod tests {
             program: Some(Box::new(program)),
             playing: false,
             t: 0.0,
-            from: 0.0,
-            to: 0.0,
-            looping: false,
+            plan: Plan::default(),
         };
         let mut centre = |v: &mut Voice| {
             v.apply(
                 Cmd::Play {
                     from: 1.2,
-                    to: 1.3,
-                    looping: false,
+                    plan: Plan::new(1.3, Region::None),
                 },
                 &mut trash,
             );
@@ -905,6 +959,115 @@ mod tests {
             &mut trash,
         );
         assert!((centre(&mut v) - 1.0).abs() < 1e-3);
+    }
+
+    /// A voice playing a one-second ramp at 1000 frames a second, so the
+    /// position in frames reads straight off the samples too.
+    fn ramp_voice() -> Voice {
+        let buf = Arc::new(AudioBuffer {
+            rate: 1000,
+            channels: vec![(0..1000).map(|i| i as f32 / 1000.0).collect()],
+        });
+        Voice {
+            program: Some(Box::new(buffer_program(buf))),
+            playing: false,
+            t: 0.0,
+            plan: Plan::default(),
+        }
+    }
+
+    /// Starts at frame `from` under `region`, renders `frames` and returns
+    /// the frame reached plus the last sample heard (in frames, x1000).
+    fn play_frames(region: Region, from: f64, frames: usize) -> (f64, f32) {
+        let mut v = ramp_voice();
+        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        v.apply(
+            Cmd::Play {
+                from: from / 1000.0,
+                plan: Plan::new(f64::INFINITY, region),
+            },
+            &mut trash,
+        );
+        let mut out = vec![0.0f32; frames * 2];
+        // In uneven callback sizes, as a sound card asks.
+        for chunk in out.chunks_mut(2 * 37) {
+            v.render(chunk, 2, 1000.0, false);
+        }
+        (v.t * 1000.0, out[out.len() - 2] * 1000.0)
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn loop_positions_are_exact() {
+        let lp = Region::Loop {
+            start: 0.1,
+            end: 0.2,
+        };
+        for (from, frames, want) in [(50.0, 40, 90.0), (50.0, 150, 100.0), (50.0, 275, 125.0)] {
+            let (at, _) = play_frames(lp, from, frames);
+            assert!(
+                near(at, want),
+                "start {from}, {frames} frames: at {at}, want {want}"
+            );
+        }
+        // Starting after the loop plays straight on.
+        let (at, _) = play_frames(lp, 300.0, 10);
+        assert!(near(at, 310.0), "{at}");
+        // The frame before the seam is the loop's last; the next is its first.
+        let (_, last) = play_frames(lp, 50.0, 150);
+        assert!((last - 199.0).abs() < 1e-3, "{last}");
+        let (_, first) = play_frames(lp, 50.0, 151);
+        assert!((first - 100.0).abs() < 1e-3, "{first}");
+    }
+
+    #[test]
+    fn skip_positions_are_exact() {
+        let sk = Region::Skip {
+            start: 0.1,
+            end: 0.2,
+        };
+        let (at, heard) = play_frames(sk, 50.0, 60);
+        assert!(near(at, 210.0), "{at}");
+        assert!((heard - 209.0).abs() < 1e-3, "{heard}");
+        // Starting inside the skipped range starts at its end.
+        let (at, _) = play_frames(sk, 150.0, 5);
+        assert!(near(at, 205.0), "{at}");
+    }
+
+    #[test]
+    fn retargeting_keeps_playing_from_where_it_was() {
+        let mut v = ramp_voice();
+        let (mut trash, _rx) = rtrb::RingBuffer::<Box<Program>>::new(4);
+        v.apply(
+            Cmd::Play {
+                from: 0.05,
+                plan: Plan::default(),
+            },
+            &mut trash,
+        );
+        let mut out = vec![0.0f32; 2 * 10];
+        v.render(&mut out, 2, 1000.0, false);
+        // A new loop the playhead is inside: continue with the new bounds.
+        v.apply(
+            Cmd::Retarget {
+                to: None,
+                plan: Plan::new(
+                    f64::INFINITY,
+                    Region::Loop {
+                        start: 0.0,
+                        end: 0.07,
+                    },
+                ),
+            },
+            &mut trash,
+        );
+        let mut out = vec![0.0f32; 2 * 15];
+        v.render(&mut out, 2, 1000.0, false);
+        assert!(near(v.t * 1000.0, 5.0), "{}", v.t * 1000.0);
+        assert!(v.playing);
     }
 
     #[test]

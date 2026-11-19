@@ -222,6 +222,9 @@ pub struct Session {
     pub monitor: crate::space::Monitor,
     #[serde(default)]
     pub tempo: crate::midi::Tempo,
+    /// Where the playhead was when playback last stopped (seconds).
+    #[serde(default)]
+    pub playhead: f64,
 }
 
 const PALETTE: [[u8; 3]; 8] = [
@@ -256,6 +259,7 @@ impl Session {
             space: None,
             monitor: Default::default(),
             tempo: Default::default(),
+            playhead: 0.0,
         };
         for _ in 0..tracks {
             s.add_track();

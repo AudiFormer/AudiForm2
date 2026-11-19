@@ -343,6 +343,19 @@ impl App {
         for cmd in self.keymap.pressed(ctx, typing) {
             self.run_cmd(cmd);
         }
+        // Held Left / Right scrub at 4x (not while typing).
+        if !typing {
+            let (dir, dt) = ctx.input(|i| {
+                let plain = !(i.modifiers.ctrl || i.modifiers.alt || i.modifiers.command);
+                let l = plain && i.key_down(egui::Key::ArrowLeft);
+                let r = plain && i.key_down(egui::Key::ArrowRight);
+                (r as i32 - l as i32, i.stable_dt.min(0.1) as f64)
+            });
+            if dir != 0 {
+                self.st.scrub_arrows(dir as f64, dt);
+                ctx.request_repaint();
+            }
+        }
     }
 
     /// Does what a command does, from a key or a menu.
@@ -385,6 +398,11 @@ impl App {
             }
             Cmd::AutoHeal => st.toast(AUTO_HEAL_NOTE),
             Cmd::PlayStop => st.toggle_play(),
+            Cmd::Pause => st.toggle_pause(),
+            Cmd::ReturnOnStop => {
+                let on = !st.return_on_stop;
+                st.set_return_on_stop(on);
+            }
             Cmd::Record => {
                 if st.is_recording() {
                     st.stop_recording();
@@ -392,11 +410,14 @@ impl App {
                     st.start_recording();
                 }
             }
-            Cmd::Loop => st.looping = !st.looping,
-            Cmd::ToStart => st.set_cursor(0.0),
+            Cmd::Loop => {
+                let m = st.play_mode().toggle_loop();
+                st.set_play_mode(m);
+            }
+            Cmd::ToStart => st.jump_to(0.0),
             Cmd::ToEnd => {
                 let l = st.program_len();
-                st.set_cursor(l);
+                st.jump_to(l);
             }
             Cmd::WaveformView => st.mode = Mode::Waveform,
             Cmd::MultitrackView => st.mode = Mode::Multitrack,
@@ -715,6 +736,8 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.session.tempo.metronome = m;
                 st.live_metronome();
             }
+            playback_menu_items(ui, st, km, &mut cmd);
+            ui.separator();
             cmd_item(
                 ui,
                 km,
@@ -767,13 +790,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     cmd = Some(c);
                 }
             }
-            if ui
-                .checkbox(&mut st.return_on_stop, "Return Playhead on Stop")
-                .changed()
-            {
-                st.prefs.space_returns = st.return_on_stop;
-                st.prefs.save();
-            }
+            ui.menu_button("Time Display", |ui| time_display_items(ui, st));
             if ui
                 .add_enabled(
                     st.selection().is_some(),
@@ -1135,16 +1152,9 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
 }
 
 /// Reads a typed time: `h:mm:ss.mmm`, `m:ss.mmm` or plain seconds.
+#[cfg(test)]
 pub fn parse_time(text: &str) -> Option<f64> {
-    let mut secs = 0.0;
-    for part in text.trim().split(':') {
-        let v: f64 = part.trim().parse().ok()?;
-        if !v.is_finite() || v < 0.0 {
-            return None;
-        }
-        secs = secs * 60.0 + v;
-    }
-    Some(secs)
+    crate::transport::parse_plain(text)
 }
 
 /// The hidden theme a phrase opens, if it is one. As in Audiform, only
@@ -1173,8 +1183,8 @@ fn enter_time(st: &mut State, text: &str) {
         let _ = std::fs::write(data_dir().join("theme.txt"), &t.name);
         st.set_theme(t);
         st.toast("Secret Theme found");
-    } else if let Some(t) = parse_time(text) {
-        st.set_cursor(t);
+    } else if let Some(t) = st.time_ctx().parse(text) {
+        st.jump_to(t);
     }
 }
 
@@ -1191,16 +1201,73 @@ fn marker_times(st: &State) -> Vec<f64> {
     v
 }
 
+/// The Time Display choices (View menu, the ruler's and the clock's
+/// right-click menus).
+pub fn time_display_items(ui: &mut egui::Ui, st: &mut State) {
+    for f in crate::transport::TimeFormat::ALL {
+        if ui.radio(st.prefs.time_format == f, f.label()).clicked() {
+            st.prefs.time_format = f;
+            st.prefs.save();
+            ui.close_menu();
+        }
+    }
+}
+
+/// Pause, the Loop / Skip mode and Return to Start on Stop (Multitrack menu).
+fn playback_menu_items(ui: &mut egui::Ui, st: &mut State, km: &Keymap, cmd: &mut Option<Cmd>) {
+    ui.separator();
+    let pause = egui::Button::new("Pause")
+        .selected(st.paused)
+        .shortcut_text(km.text(Cmd::Pause));
+    if ui
+        .add_enabled(st.transport_playing() || st.paused, pause)
+        .clicked()
+    {
+        *cmd = Some(Cmd::Pause);
+        ui.close_menu();
+    }
+    play_mode_items(ui, st, km);
+    let ret = egui::Button::new("Return to Start on Stop")
+        .selected(st.return_on_stop)
+        .shortcut_text(km.text(Cmd::ReturnOnStop));
+    if ui.add(ret).clicked() {
+        *cmd = Some(Cmd::ReturnOnStop);
+        ui.close_menu();
+    }
+}
+
+/// Normal / Loop Playback / Skip Selection, as radio items.
+fn play_mode_items(ui: &mut egui::Ui, st: &mut State, km: &Keymap) {
+    use crate::transport::PlayMode;
+    for m in PlayMode::ALL {
+        let key = if m == PlayMode::Loop {
+            km.text(Cmd::Loop)
+        } else {
+            String::new()
+        };
+        let b = egui::Button::new(m.label())
+            .selected(st.play_mode() == m)
+            .shortcut_text(key);
+        if ui.add(b).clicked() {
+            st.set_play_mode(m);
+            ui.close_menu();
+        }
+    }
+}
+
 fn transport(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     ui.horizontal(|ui| {
-        // Big timecode.
+        // Big timecode, in the chosen time format.
         let fx = st.fx.clone();
-        let t = format_time(st.position());
+        let tc = st.time_ctx();
+        let t = tc.format(st.position());
         let caption = if st.is_recording() {
             "REC // TIME"
-        } else if st.is_playing() {
+        } else if st.transport_playing() {
             "PLAY // TIME"
+        } else if st.paused {
+            "PAUSED // TIME"
         } else {
             "TIME"
         };
@@ -1225,8 +1292,29 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             } else {
                 st.time_edit = Some(text);
             }
-        } else if crate::hud::readout(ui, &t, caption, &th, &fx, st.meter).clicked() {
-            st.time_edit = Some(format_time(st.cursor()));
+        } else {
+            let r = crate::hud::readout(ui, &t, caption, &th, &fx, st.meter)
+                .on_hover_text("Click to type a time; right-click for the time display");
+            if r.clicked() {
+                st.time_edit = Some(tc.format(st.cursor()));
+            }
+            r.context_menu(|ui| time_display_items(ui, st));
+        }
+        // The time display format: click for the next one.
+        let f = st.prefs.time_format;
+        if ui
+            .add_sized(
+                egui::vec2(34.0, 26.0),
+                egui::Button::new(RichText::new(f.short()).monospace().small()),
+            )
+            .on_hover_text(format!(
+                "Time Display: {} (click for the next format)",
+                f.label()
+            ))
+            .clicked()
+        {
+            st.prefs.time_format = f.next();
+            st.prefs.save();
         }
         ui.add_space(6.0);
         // Bars and beats, the tempo and the metronome, all on the one row
@@ -1276,9 +1364,9 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         // Stop, Play, Pause, previous, Rewind, Fast Forward, next, Record,
         // Loop.
         use crate::hud::{transport_button as tb, Icon};
-        let playing = st.is_playing();
+        let playing = st.transport_playing();
         let rec = st.is_recording();
-        if tb(ui, Icon::Stop, "Stop", false, th.text, &th).clicked() {
+        if tb(ui, Icon::Stop, "Stop (Space)", false, th.text, &th).clicked() {
             if rec {
                 st.stop_recording();
             } else {
@@ -1286,13 +1374,19 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             }
         }
         if tb(ui, Icon::Play, "Play (Space)", playing, th.accent, &th).clicked() && !playing {
-            st.toggle_play();
+            st.play();
         }
-        if tb(ui, Icon::Pause, "Pause", false, th.text, &th).clicked() && playing {
-            // Pause keeps the playhead where it is.
-            let at = st.position();
-            st.stop();
-            st.set_cursor(at);
+        if tb(
+            ui,
+            Icon::Pause,
+            "Pause: the playhead and start marker stay; Pause or Play continues",
+            st.paused,
+            th.accent,
+            &th,
+        )
+        .clicked()
+        {
+            st.toggle_pause();
         }
         let marks = marker_times(st);
         if tb(
@@ -1305,32 +1399,46 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         )
         .clicked()
         {
-            let now = st.cursor();
+            let now = st.position();
             let t = marks
                 .iter()
                 .rev()
                 .copied()
                 .find(|&m| m < now - 1e-3)
                 .unwrap_or(0.0);
-            st.set_cursor(t);
+            st.jump_to(t);
         }
-        // Rewind and Fast Forward run while held.
-        let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
-        let rw = tb(ui, Icon::Rewind, "Rewind (hold)", false, th.text, &th);
-        let ff = tb(
+        // Rewind and Fast Forward: 5 s a click, 1 s with Shift.
+        let step = if ui.input(|i| i.modifiers.shift) {
+            1.0
+        } else {
+            5.0
+        };
+        if tb(
             ui,
-            Icon::FastForward,
-            "Fast Forward (hold)",
+            Icon::Rewind,
+            "Rewind 5 s (1 s with Shift)",
             false,
             th.text,
             &th,
-        );
-        for (r, dir) in [(&rw, -1.0), (&ff, 1.0)] {
-            if r.is_pointer_button_down_on() && !playing {
-                let now = st.cursor();
-                st.set_cursor(now + dir * dt * 4.0);
-                ui.ctx().request_repaint();
-            }
+        )
+        .clicked()
+        {
+            let now = st.position();
+            st.jump_to(now - step);
+        }
+        if tb(
+            ui,
+            Icon::FastForward,
+            "Fast Forward 5 s (1 s with Shift)",
+            false,
+            th.text,
+            &th,
+        )
+        .clicked()
+        {
+            let now = st.position();
+            st.jump_to(now + step);
         }
         if tb(
             ui,
@@ -1342,14 +1450,14 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         )
         .clicked()
         {
-            let now = st.cursor();
+            let now = st.position();
             let end = st.program_len();
             let t = marks
                 .iter()
                 .copied()
                 .find(|&m| m > now + 1e-3)
                 .unwrap_or(end);
-            st.set_cursor(t);
+            st.jump_to(t);
         }
         if tb(
             ui,
@@ -1367,10 +1475,30 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                 st.start_recording();
             }
         }
-        let lp = st.looping;
-        if tb(ui, Icon::Loop, "Loop Playback (Ctrl+L)", lp, th.accent, &th).clicked() {
-            st.looping = !st.looping;
+        // Loop / Skip: one mode, the time selection is the range.
+        use crate::transport::PlayMode;
+        let mode = st.play_mode();
+        let col = if mode == PlayMode::Skip {
+            th.accent_alt
+        } else {
+            th.accent
+        };
+        let tip = format!(
+            "{} (click: Normal, Loop, Skip Selection; right-click to pick; Ctrl+L loops)",
+            mode.label()
+        );
+        let r = tb(ui, Icon::Loop, &tip, mode != PlayMode::Normal, col, &th);
+        if r.clicked() {
+            st.set_play_mode(mode.next());
         }
+        r.context_menu(|ui| {
+            for m in PlayMode::ALL {
+                if ui.radio(st.play_mode() == m, m.label()).clicked() {
+                    st.set_play_mode(m);
+                    ui.close_menu();
+                }
+            }
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             for (s, tip, f) in [
                 ("⛶", "Zoom Out Full", 0.0),

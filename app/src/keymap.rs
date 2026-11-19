@@ -36,8 +36,10 @@ pub enum Cmd {
     MatchLoudness,
     AutoHeal,
     PlayStop,
+    Pause,
     Record,
     Loop,
+    ReturnOnStop,
     ToStart,
     ToEnd,
     WaveformView,
@@ -74,8 +76,10 @@ impl Cmd {
         Cmd::MatchLoudness,
         Cmd::AutoHeal,
         Cmd::PlayStop,
+        Cmd::Pause,
         Cmd::Record,
         Cmd::Loop,
+        Cmd::ReturnOnStop,
         Cmd::ToStart,
         Cmd::ToEnd,
         Cmd::WaveformView,
@@ -112,8 +116,10 @@ impl Cmd {
             Cmd::MatchLoudness => "Match Loudness",
             Cmd::AutoHeal => "Auto Heal Selection",
             Cmd::PlayStop => "Play / Stop",
+            Cmd::Pause => "Pause",
             Cmd::Record => "Record",
             Cmd::Loop => "Loop Playback",
+            Cmd::ReturnOnStop => "Return to Start on Stop",
             Cmd::ToStart => "Move Playhead to Start",
             Cmd::ToEnd => "Move Playhead to End",
             Cmd::WaveformView => "Waveform Editor",
@@ -146,7 +152,13 @@ impl Cmd {
             Cmd::Invert | Cmd::Reverse | Cmd::Silence | Cmd::MatchLoudness | Cmd::AutoHeal => {
                 "Effects"
             }
-            Cmd::PlayStop | Cmd::Record | Cmd::Loop | Cmd::ToStart | Cmd::ToEnd => "Transport",
+            Cmd::PlayStop
+            | Cmd::Pause
+            | Cmd::Record
+            | Cmd::Loop
+            | Cmd::ReturnOnStop
+            | Cmd::ToStart
+            | Cmd::ToEnd => "Transport",
             Cmd::WaveformView
             | Cmd::MultitrackView
             | Cmd::ZoomIn
@@ -200,6 +212,10 @@ impl Cmd {
                 ..p(K::Space)
             }],
             Cmd::Loop => vec![c(K::L)],
+            Cmd::ReturnOnStop => vec![Binding {
+                shift: true,
+                ..p(K::X)
+            }],
             Cmd::ToStart => vec![p(K::Home)],
             Cmd::ToEnd => vec![p(K::End)],
             Cmd::WaveformView => vec![p(K::Num9)],
@@ -210,6 +226,7 @@ impl Cmd {
             Cmd::RazorTool => vec![p(K::R)],
             Cmd::TimeSelectTool => vec![p(K::T)],
             Cmd::Preferences
+            | Cmd::Pause
             | Cmd::Invert
             | Cmd::Reverse
             | Cmd::Silence

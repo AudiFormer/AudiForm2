@@ -21,7 +21,7 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense,
 use crate::state::{DocId, State, Tool, View};
 use crate::theme::{c, ca, lerp};
 use crate::ui::Caches;
-use crate::waveform::{draw_channel, draw_ruler, playhead, time_to_x, x_to_time};
+use crate::waveform::{draw_channel, playhead, time_to_x, x_to_time};
 use af27_core::{ClipId, Session};
 
 const HEADER_W: f32 = 210.0;
@@ -140,6 +140,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         pos2(ruler.left(), rect.bottom()),
     );
     let vresp = ui.interact(vbar, ui.id().with("af27-vzoom"), Sense::click_and_drag());
+    // The ruler is its own widget on top: it moves the playhead.
+    let rresp = ui.interact(
+        ruler,
+        ui.id().with("af27-mt-ruler"),
+        Sense::click_and_drag(),
+    );
     let drag = &mut caches.drag;
 
     // Wheel. The pointer is read directly so the header widgets on top
@@ -164,7 +170,48 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         .clamp(0.0, (total_h - lanes.height() + TAIL_H).max(0.0));
     st.session_view.clamp_to(st.session.duration().max(30.0));
     let v = st.session_view;
+
+    // Ruler clicks and drags position the playhead.
+    let marker_times: Vec<f64> = st.session.markers.iter().map(|m| m.time).collect();
+    let ghost = crate::ruler::input(ui, st, &rresp, lanes, &v, f64::MAX, &marker_times);
+    // Middle-button drag anywhere but the track headers pans: sideways in
+    // time, up and down through the tracks.
+    let from_headers = ui
+        .input(|i| i.pointer.press_origin())
+        .is_some_and(|p| headers.contains(p));
+    if !from_headers {
+        if let Some(dv) = crate::ruler::pan_delta(ui, &resp).or(crate::ruler::pan_delta(ui, &rresp))
+        {
+            let sv = &mut st.session_view;
+            sv.start -= dv.x as f64 / lanes.width().max(1.0) as f64 * sv.len;
+            sv.clamp_to(st.session.duration().max(30.0));
+            drag.scroll_y =
+                (drag.scroll_y - dv.y).clamp(0.0, (total_h - lanes.height() + TAIL_H).max(0.0));
+            st.hand_moved_view();
+        }
+    }
     let scroll = drag.scroll_y;
+    let playing = st.transport_playing();
+    // Selection edges snap to ruler marks, markers, clip edges and the playhead.
+    let mut snap_marks = marker_times.clone();
+    // Not to the playhead while selecting: it sits on the selection start.
+    if !matches!(drag.kind, Some(DragKind::Select { .. })) {
+        snap_marks.push(st.session_cursor);
+    }
+    for tr in &st.session.tracks {
+        for c in &tr.clips {
+            snap_marks.push(c.start);
+            snap_marks.push(c.end());
+        }
+    }
+    let snapped = |st: &State, x: f32| {
+        crate::ruler::snap(st, x_to_time(&v, lanes, x), &v, lanes, &snap_marks).max(0.0)
+    };
+    let on_edge = resp
+        .interact_pointer_pos()
+        .or(resp.hover_pos())
+        .filter(|pp| lanes.contains(*pp) && st.tool != Tool::Razor)
+        .and_then(|pp| crate::ruler::edge_at(st.session_sel, &v, lanes, pp.x));
 
     // Hit-test clips under a point: (track index, clip id, near left edge, near right edge).
     let hit = |st: &State, pp: egui::Pos2| -> Option<(usize, ClipId, bool, bool)> {
@@ -225,7 +272,11 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
 
     // Pointer.
     if let Some(pp) = resp.interact_pointer_pos() {
-        if resp.drag_started() && lanes.contains(pp) && st.tool == Tool::Move {
+        if resp.drag_started_by(egui::PointerButton::Primary)
+            && lanes.contains(pp)
+            && st.tool == Tool::Move
+            && on_edge.is_none()
+        {
             if let Some((ti, id)) = hit_midi(st, pp) {
                 let (mti, mci) = st.session.find_midi(id).unwrap();
                 let grab = tempo.beats(x_to_time(&v, lanes, pp.x))
@@ -236,9 +287,16 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 drag.kind = Some(DragKind::MoveMidi { clip: id, grab });
             }
         }
-        if resp.drag_started() && lanes.contains(pp) && drag.kind.is_none() {
+        if resp.drag_started_by(egui::PointerButton::Primary)
+            && lanes.contains(pp)
+            && drag.kind.is_none()
+        {
             let t = x_to_time(&v, lanes, pp.x).max(0.0);
             let kind = match (st.tool, hit(st, pp)) {
+                // On a selection edge: drag that edge, the other stays.
+                (Tool::Move | Tool::TimeSelect, _) if on_edge.is_some() => {
+                    on_edge.map(|(_, other)| DragKind::Select { anchor: other })
+                }
                 (Tool::Move, Some((ti, id, l, r))) => {
                     st.selected_clip = Some(id);
                     st.selected_track = Some(st.session.tracks[ti].id);
@@ -256,14 +314,16 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     })
                 }
                 (Tool::Razor, _) => None,
-                _ => Some(DragKind::Select { anchor: t }),
+                _ => Some(DragKind::Select {
+                    anchor: snapped(st, pp.x),
+                }),
             };
             if kind.is_some() {
                 drag.before = Some(st.session.clone());
             }
             drag.kind = kind;
         }
-        if resp.dragged() {
+        if resp.dragged_by(egui::PointerButton::Primary) {
             let t = x_to_time(&v, lanes, pp.x).max(0.0);
             match drag.kind {
                 Some(DragKind::Move { clip, grab }) => {
@@ -326,6 +386,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     }
                 }
                 Some(DragKind::Select { anchor }) => {
+                    let t = snapped(st, pp.x);
                     st.session_sel = Some((anchor.min(t), anchor.max(t)));
                     st.session_cursor = anchor.min(t);
                 }
@@ -356,7 +417,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     }
     if resp.clicked() {
         if let Some(pp) = resp.interact_pointer_pos() {
-            if lanes.contains(pp) || ruler.contains(pp) {
+            // A click on a selection edge keeps the selection. While
+            // playing, a click in the lanes leaves the playhead alone.
+            if lanes.contains(pp) && on_edge.is_none() {
                 let t = x_to_time(&v, lanes, pp.x).max(0.0);
                 match (st.tool, hit(st, pp)) {
                     (Tool::Razor, Some((_, id, _, _))) => {
@@ -368,17 +431,18 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     (_, Some((ti, id, _, _))) if lanes.contains(pp) => {
                         st.selected_clip = Some(id);
                         st.selected_track = Some(st.session.tracks[ti].id);
-                        st.session_cursor = t;
+                        if !playing {
+                            st.set_cursor(t);
+                        }
                     }
                     _ => {
                         st.selected_clip = None;
                         st.session_sel = None;
-                        st.session_cursor = t;
+                        if !playing {
+                            st.set_cursor(t);
+                        }
                         if let Some(ti) = track_at(st, lanes.top(), scroll, pp.y) {
                             st.selected_track = Some(st.session.tracks[ti].id);
-                        }
-                        if st.is_playing() {
-                            st.play();
                         }
                     }
                 }
@@ -388,6 +452,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if let Some(hp) = resp.hover_pos() {
         let icon = match (st.tool, hit(st, hp)) {
             (Tool::Razor, _) => egui::CursorIcon::Crosshair,
+            _ if on_edge.is_some() => egui::CursorIcon::ResizeHorizontal,
             (Tool::Move, Some((_, _, true, _))) | (Tool::Move, Some((_, _, _, true))) => {
                 egui::CursorIcon::ResizeHorizontal
             }
@@ -400,7 +465,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     }
 
     // Drawing.
-    draw_ruler(&p, ruler, &v, &th, &st.session.markers);
+    let tc = st.time_ctx();
+    crate::ruler::draw_ruler(&p, ruler, &v, &th, &st.session.markers, &tc);
     p.rect_filled(
         Rect::from_min_max(rect.min, pos2(ruler.left(), ruler.bottom())),
         Rounding::ZERO,
@@ -673,6 +739,18 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         let x = time_to_x(&v, lanes, m.time);
         if x >= lanes.left() && x <= lanes.right() {
             crate::waveform::dashed_v(&lane_p, x, lanes.top(), lanes.bottom(), c(th.marker));
+        }
+    }
+    if let Some(s) = st.start_marker {
+        let x = time_to_x(&v, lanes, s);
+        if x >= lanes.left() && x <= lanes.right() {
+            crate::ruler::start_marker(&p, x, ruler, lanes.bottom(), &th);
+        }
+    }
+    if let Some(g) = ghost {
+        let x = time_to_x(&v, lanes, g);
+        if x >= lanes.left() && x <= lanes.right() {
+            crate::ruler::ghost(&p, x, ruler.top(), lanes.bottom(), &th);
         }
     }
     let x = time_to_x(&v, lanes, st.position());

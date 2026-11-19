@@ -183,6 +183,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
     let mut out = Session::new(v["name"].as_str().unwrap_or("Audiform Session"), rate, 0);
     let mut notices = Vec::new();
     let secs = |x: &Value| x.as_f64().unwrap_or(0.0) / rate as f64;
+    out.playhead = secs(&v["view"]["playhead"]);
 
     if let Some(t) = v.get("tempo").filter(|t| t.is_object()) {
         out.tempo.bpm = t["bpm"].as_f64().unwrap_or(120.0);
@@ -469,6 +470,9 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
     doc.entry("created").or_insert_with(|| json!(now));
     doc.insert("modified".into(), json!(now));
     doc.entry("view").or_insert_with(|| json!({"samples_per_pixel": 512.0, "scroll": 0, "scroll_y": 0, "playhead": 0, "selection": null}));
+    if let Some(view) = doc.get_mut("view").and_then(Value::as_object_mut) {
+        view.insert("playhead".into(), json!(samples(session.playhead)));
+    }
     doc.entry("modes")
         .or_insert_with(|| json!({"podcast": false, "voiceover": false}));
     doc.entry("libraries").or_insert_with(|| json!([]));

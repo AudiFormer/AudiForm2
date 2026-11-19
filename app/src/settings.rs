@@ -59,9 +59,16 @@ impl ColorOverrides {
 #[serde(default)]
 pub struct Prefs {
     pub renderer: Renderer,
-    /// Space while playing: stop and go back to where play started (true)
-    /// or pause where it is (false). Mirrors `State::return_on_stop`.
+    /// Return to Start on Stop: Stop sends the playhead back to where
+    /// playback began (true) or leaves it where playback reached (false).
+    /// Mirrors `State::return_on_stop`.
     pub space_returns: bool,
+    /// Normal, Loop Playback or Skip Selection.
+    pub play_mode: crate::transport::PlayMode,
+    /// How the clock, the rulers and typed times show time.
+    pub time_format: crate::transport::TimeFormat,
+    /// Clicks and selection edges near a ruler mark land on it.
+    pub snap_ruler: bool,
     /// Scroll the view along with the playhead while playing.
     pub follow_playhead: bool,
     pub autosave: bool,
@@ -75,7 +82,10 @@ impl Default for Prefs {
     fn default() -> Prefs {
         Prefs {
             renderer: Renderer::Wgpu,
-            space_returns: true,
+            space_returns: false,
+            play_mode: crate::transport::PlayMode::Normal,
+            time_format: crate::transport::TimeFormat::MinSec,
+            snap_ruler: true,
             follow_playhead: true,
             autosave: true,
             autosave_minutes: 2,
@@ -232,8 +242,14 @@ impl Draft {
             st.want_workspace = Some(self.workspace);
         }
         st.return_on_stop = self.prefs.space_returns;
-        if self.prefs != st.prefs {
-            st.prefs = self.prefs.clone();
+        // The transport's own choices may have changed while the window
+        // was open (they are not on its pages): keep them.
+        let mut prefs = self.prefs.clone();
+        prefs.play_mode = st.prefs.play_mode;
+        prefs.time_format = st.prefs.time_format;
+        prefs.snap_ruler = st.prefs.snap_ruler;
+        if prefs != st.prefs {
+            st.prefs = prefs;
             st.prefs.save();
         }
         st.theme_changed = true;
@@ -522,13 +538,17 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
             });
         }
         "Playback and Recording" => {
-            group(ui, th, "The space bar while playing", |ui| {
+            group(ui, th, "Stop (Space while playing)", |ui| {
+                ui.radio_value(
+                    &mut d.prefs.space_returns,
+                    false,
+                    "Leaves the playhead where playback reached",
+                );
                 ui.radio_value(
                     &mut d.prefs.space_returns,
                     true,
-                    "Stops and goes back to where play started",
+                    "Returns to where playback started (Return to Start on Stop, Shift+X)",
                 );
-                ui.radio_value(&mut d.prefs.space_returns, false, "Pauses where it is");
             });
             group(ui, th, "While playing", |ui| {
                 ui.checkbox(

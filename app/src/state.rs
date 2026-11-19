@@ -216,8 +216,22 @@ pub struct State {
     pub engine: Option<Engine>,
     pub engine_error: Option<String>,
     program_key: (Mode, DocId, u64, u64),
-    pub play_started_at: f64,
-    pub looping: bool,
+    /// Where playback began, shown on the ruler while playing or paused;
+    /// Stop folds it into the playhead.
+    pub start_marker: Option<f64>,
+    /// Paused: the playhead and the start marker stay; Play continues.
+    pub paused: bool,
+    /// Playback this side started and has not yet seen stop (the audio
+    /// thread may stop on its own at the end).
+    transport_live: bool,
+    /// A new selection taking over the loop while playing.
+    loop_watch: crate::transport::Settle,
+    /// Seconds of held Left/Right since playback last skipped along.
+    scrub_clock: f64,
+    /// When the app started (the clock for settling a new loop).
+    born: Instant,
+    /// `born` seconds at the last tick.
+    last_tick: f64,
     pub return_on_stop: bool,
     pub meter: (f32, f32),
     /// Motion and music state for the HUD chrome.
@@ -396,8 +410,13 @@ impl State {
             engine,
             engine_error,
             program_key: (Mode::Waveform, 0, 0, 0),
-            play_started_at: 0.0,
-            looping: false,
+            start_marker: None,
+            paused: false,
+            transport_live: false,
+            loop_watch: Default::default(),
+            scrub_clock: 0.0,
+            born: Instant::now(),
+            last_tick: 0.0,
             return_on_stop: prefs.space_returns,
             meter: (0.0, 0.0),
             fx: crate::hud::Fx::default(),
@@ -714,6 +733,7 @@ impl State {
                 self.media_docs.clear();
                 self.selected_clip = None;
                 self.session_view = View::fit(self.session.duration().max(30.0));
+                self.session_cursor = self.session.playhead.max(0.0);
                 self.mode = Mode::Multitrack;
                 let media: Vec<_> = self.session.media.clone();
                 let mut missing = 0;
@@ -753,6 +773,7 @@ impl State {
     /// written losslessly over what was opened; `.af27` is a plain dump of
     /// Audiform27's model.
     pub fn save_session_to(&mut self, path: PathBuf) {
+        self.keep_playhead();
         let is_af27 = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("af27"));
@@ -809,6 +830,14 @@ impl State {
 
     pub fn set_cursor(&mut self, t: f64) {
         self.follow.resume();
+        self.put_cursor(t);
+        if !self.transport_live && !self.paused {
+            self.keep_playhead();
+        }
+    }
+
+    /// Moves the playhead with nothing else (no follow, nothing saved).
+    fn put_cursor(&mut self, t: f64) {
         match self.mode {
             Mode::Waveform => {
                 if let Some(d) = self.doc_mut() {
@@ -816,6 +845,14 @@ impl State {
                 }
             }
             Mode::Multitrack => self.session_cursor = t.max(0.0),
+        }
+    }
+
+    /// The stopped playhead goes into the session (saved with it, but
+    /// never marking it changed).
+    pub fn keep_playhead(&mut self) {
+        if !self.transport_live && !self.paused {
+            self.session.playhead = self.session_cursor;
         }
     }
 
@@ -865,50 +902,192 @@ impl State {
         self.engine.as_ref().is_some_and(|e| e.is_playing())
     }
 
+    /// The time display format with this editor's rate and tempo.
+    pub fn time_ctx(&self) -> crate::transport::TimeCtx {
+        let rate = match self.mode {
+            Mode::Waveform => self.doc().map_or(self.session.rate, |d| d.buf.rate),
+            Mode::Multitrack => self.session.rate,
+        };
+        crate::transport::TimeCtx {
+            format: self.prefs.time_format,
+            rate,
+            tempo: self.session.tempo,
+        }
+    }
+
+    pub fn play_mode(&self) -> crate::transport::PlayMode {
+        self.prefs.play_mode
+    }
+
+    /// Normal / Loop / Skip (saved). While playing, playback carries on
+    /// from the same spot under the new mode.
+    pub fn set_play_mode(&mut self, m: crate::transport::PlayMode) {
+        if self.prefs.play_mode == m {
+            return;
+        }
+        self.prefs.play_mode = m;
+        self.prefs.save();
+        if self.transport_live && self.is_playing() && !self.is_recording() {
+            let pos = self.position();
+            self.jump_to(pos);
+            self.loop_watch.start(self.selection());
+        }
+    }
+
+    pub fn set_return_on_stop(&mut self, on: bool) {
+        self.return_on_stop = on;
+        self.prefs.space_returns = on;
+        self.prefs.save();
+    }
+
+    /// Plays from the playhead (or continues from Pause).
     pub fn play(&mut self) {
         self.sync_program();
         let len = self.program_len();
-        let (from, to) = match self.selection() {
-            Some((a, b)) => {
-                let c = self.cursor();
-                let start = if c >= a && c < b { c } else { a };
-                (start, Some(b))
-            }
-            None => {
-                let c = self.cursor();
-                (if c >= len - 0.01 { 0.0 } else { c }, None)
-            }
+        let rec = self.is_recording();
+        let cursor = if self.paused || rec {
+            self.cursor()
+        } else {
+            crate::transport::fresh_start(self.cursor(), len)
         };
-        self.play_started_at = from;
+        let sel = self.selection();
+        let (from, plan) = crate::transport::plan_for(self.play_mode(), sel, cursor, len, rec);
+        // Continuing from Pause keeps the marker of where playback began.
+        if !(self.paused && self.start_marker.is_some()) {
+            self.start_marker = Some(from);
+        }
+        self.paused = false;
         self.follow.resume();
-        let looping = self.looping;
+        self.loop_watch.start(sel);
+        self.scrub_clock = 0.0;
         if let Some(e) = &mut self.engine {
-            e.play(from, to, looping, len);
+            e.play_plan(from, plan);
+            self.transport_live = true;
+            self.put_cursor(from);
         } else if let Some(err) = self.engine_error.clone() {
+            self.start_marker = None;
             self.error(err);
         }
     }
 
+    /// Stops: the start marker folds into the playhead, which stays where
+    /// playback reached (or goes back to the marker with Return to Start
+    /// on Stop).
     pub fn stop(&mut self) {
-        let pos = self.engine.as_ref().map_or(0.0, |e| e.position());
+        let reached = if self.transport_live {
+            self.engine.as_ref().map_or(0.0, |e| e.position())
+        } else {
+            self.cursor()
+        };
         if let Some(e) = &mut self.engine {
             e.stop();
         }
-        let t = if self.return_on_stop {
-            self.play_started_at
-        } else {
-            pos
-        };
+        self.finish(reached);
+    }
+
+    /// Playback is over (stopped, or ran to its end) at `reached`.
+    fn finish(&mut self, reached: f64) {
+        let t = crate::transport::stop_position(reached, self.start_marker, self.return_on_stop);
+        self.start_marker = None;
+        self.paused = false;
+        self.transport_live = false;
         self.set_cursor(t);
     }
 
+    /// Pause: the playhead stays and so does the start marker; Pause or
+    /// Play again continues.
+    pub fn toggle_pause(&mut self) {
+        if self.is_recording() {
+            return;
+        }
+        if self.paused {
+            self.play();
+        } else if self.transport_live && self.is_playing() {
+            let pos = self.engine.as_ref().map_or(0.0, |e| e.position());
+            if let Some(e) = &mut self.engine {
+                e.stop();
+            }
+            self.transport_live = false;
+            self.paused = true;
+            self.put_cursor(pos);
+        }
+    }
+
+    /// Playing (and not paused), as the transport sees it.
+    pub fn transport_playing(&self) -> bool {
+        self.transport_live && self.is_playing()
+    }
+
+    /// Space: plays, or stops when playing or recording.
     pub fn toggle_play(&mut self) {
         if self.is_recording() {
             self.stop_recording();
-        } else if self.is_playing() {
+        } else if self.transport_playing() {
             self.stop();
         } else {
             self.play();
+        }
+    }
+
+    /// Moves the playhead; while playing, playback carries on from there
+    /// (without a gap or an effects reset). Ignored while recording.
+    pub fn jump_to(&mut self, t: f64) {
+        if self.is_recording() {
+            return;
+        }
+        let t = t.max(0.0);
+        if self.transport_playing() {
+            let len = self.program_len();
+            let (from, plan) =
+                crate::transport::plan_for(self.play_mode(), self.selection(), t, len, false);
+            if let Some(e) = &mut self.engine {
+                e.retarget(Some(from), plan);
+            }
+            self.follow.resume();
+            self.put_cursor(from);
+        } else {
+            self.set_cursor(t);
+        }
+    }
+
+    /// Held Left (`dir` -1) or Right (1) for `dt` seconds: stopped, the
+    /// playhead glides silently at 4x; playing, playback skips along.
+    pub fn scrub_arrows(&mut self, dir: f64, dt: f64) {
+        use crate::transport::{scrub_jump, SCRUB_SPEED, SCRUB_STEP};
+        if self.is_recording() {
+            return;
+        }
+        if self.transport_playing() {
+            self.scrub_clock += dt;
+            if self.scrub_clock >= SCRUB_STEP {
+                self.scrub_clock -= SCRUB_STEP;
+                let pos = self.position();
+                self.jump_to(pos + scrub_jump(dir));
+            }
+        } else {
+            let now = self.cursor();
+            self.jump_to(now + dir * dt * SCRUB_SPEED);
+        }
+    }
+
+    /// While looping: a new selection becomes the loop once it settles.
+    fn follow_new_loop(&mut self) {
+        use crate::transport::{plan_for, takeover, PlayMode};
+        if self.play_mode() != PlayMode::Loop || self.is_recording() {
+            return;
+        }
+        let now = self.born.elapsed().as_secs_f64();
+        let sel = self.selection();
+        let Some(new) = self.loop_watch.update(sel, now) else {
+            return;
+        };
+        let len = self.program_len();
+        let (a, b) = new.unwrap_or((0.0, len));
+        let pos = self.position();
+        let jump = takeover(pos, a, b);
+        let (_, plan) = plan_for(PlayMode::Loop, new, jump.unwrap_or(pos), len, false);
+        if let Some(e) = &mut self.engine {
+            e.retarget(jump, plan);
         }
     }
 
@@ -929,8 +1108,27 @@ impl State {
                 self.meter.1.max(self.meter_hold.1 * 0.995),
             );
         }
+        if self.transport_live && !self.is_playing() {
+            // The audio thread reached the end (or the selection's end).
+            let reached = self.engine.as_ref().map_or(0.0, |e| e.position());
+            self.finish(reached);
+        }
+        if self.transport_live && self.is_playing() {
+            self.follow_new_loop();
+        }
+        let now = self.born.elapsed().as_secs_f64();
+        let dt = (now - self.last_tick).clamp(0.0, 1.0);
+        self.last_tick = now;
         if self.is_playing() {
             let pos = self.engine.as_ref().map_or(0.0, |e| e.position());
+            // Following picks up again once the view is left alone with
+            // the playhead in it.
+            let v = match self.mode {
+                Mode::Waveform => self.doc().map(|d| d.view),
+                Mode::Multitrack => Some(self.session_view),
+            };
+            let in_view = v.is_some_and(|v| pos >= v.start && pos <= v.start + v.len);
+            self.follow.idle(dt, in_view);
             // The setting, and not let go of by a hand-made move.
             let follow = self.prefs.follow_playhead && self.follow.active();
             match self.mode {
@@ -1023,7 +1221,11 @@ impl State {
         let Some(buf) = e.stop_recording() else {
             return;
         };
+        let reached = e.position();
         e.stop();
+        if self.transport_live {
+            self.finish(reached);
+        }
         let n = self.docs.len() + 1;
         let dir = data_dir().join("recordings");
         let _ = std::fs::create_dir_all(&dir);
@@ -1222,6 +1424,10 @@ impl State {
 
     pub fn add_marker(&mut self) {
         let t = self.position();
+        self.add_marker_at(t);
+    }
+
+    pub fn add_marker_at(&mut self, t: f64) {
         match self.mode {
             Mode::Waveform => {
                 if let Some(d) = self.doc_mut() {
