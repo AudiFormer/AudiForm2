@@ -19,6 +19,7 @@ mod pianoroll;
 mod pictures;
 mod pointers;
 mod record_input;
+mod retro;
 mod ruler;
 mod selfshot;
 mod separation;

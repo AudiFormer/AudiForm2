@@ -10,8 +10,6 @@ use egui::{Context, TextureHandle, TextureOptions, TextureWrapMode};
 
 pub fn bytes(name: &str) -> Option<&'static [u8]> {
     Some(match name {
-        "aqua" => include_bytes!("../../assets/themes/aqua.jpg"),
-        "meadow" => include_bytes!("../../assets/themes/meadow.jpg"),
         "moonlight" => include_bytes!("../../assets/themes/moonlight.jpg"),
         "prism" => include_bytes!("../../assets/themes/prism.jpg"),
         "water" => include_bytes!("../../assets/themes/water.jpg"),
@@ -126,8 +124,6 @@ mod tests {
     #[test]
     fn every_picture_decodes_and_shrinks_for_small_screens() {
         for n in [
-            "aqua",
-            "meadow",
             "moonlight",
             "prism",
             "water",

@@ -127,6 +127,14 @@ pub struct Theme {
     /// The theme's own mouse pointers (see `pointers.rs`): `glass`,
     /// `phosphor`, `mall`, or empty for the system's.
     pub pointers: String,
+    /// How the chrome is drawn: empty for AudiForm 2's glass, or `win95`
+    /// for flat grey windows with bevelled edges, captions and tabs (see
+    /// `retro.rs`).
+    pub chrome: String,
+    /// The font a theme uses for its text: `ms-sans-serif` (Windows' own
+    /// Microsoft Sans Serif, read from the system), or empty for the
+    /// standard one.
+    pub font: String,
 }
 
 pub fn c(rgb: Rgb) -> Color32 {
@@ -238,6 +246,8 @@ impl Theme {
             realistic: true,
             splash: String::new(),
             pointers: String::new(),
+            chrome: String::new(),
+            font: String::new(),
         }
     }
 
@@ -378,54 +388,12 @@ impl Theme {
         }
     }
 
-    pub fn daylight() -> Theme {
-        Theme {
-            name: "Daylight".into(),
-            dark: false,
-            background: [236, 238, 245],
-            panel: [246, 247, 252],
-            panel_raised: [255, 255, 255],
-            border: [205, 210, 228],
-            text: [25, 28, 45],
-            text_dim: [110, 115, 140],
-            accent: [30, 110, 255],
-            accent_alt: [230, 40, 120],
-            wave_peak: [120, 80, 230],
-            wave_centre: [30, 110, 255],
-            wave_background: [252, 252, 255],
-            grid: [228, 231, 242],
-            selection: [30, 110, 255],
-            selection_alpha: 45,
-            playhead: [230, 40, 120],
-            marker: [220, 140, 0],
-            spectrum: vec![
-                [252, 252, 255],
-                [190, 200, 255],
-                [110, 120, 240],
-                [150, 40, 200],
-                [230, 40, 100],
-                [40, 0, 40],
-            ],
-            glow: 0.0,
-            backdrop_top: [226, 230, 242],
-            backdrop_bottom: [206, 212, 230],
-            grid_style: "dots".into(),
-            grid_glow: [30, 110, 255],
-            grid_strength: 0.0,
-            glass: 0.94,
-            scanlines: 0.0,
-            motion: 0.6,
-            ..Theme::zero_point()
-        }
-    }
-
     pub fn builtins() -> Vec<Theme> {
         vec![
             Theme::zero_point(),
             Theme::solar_flare(),
             Theme::neon_abyss(),
             Theme::synth_sunset(),
-            Theme::daylight(),
         ]
         .into_iter()
         .chain(Theme::classics())
@@ -459,6 +427,19 @@ impl Theme {
     }
 
     pub fn apply(&self, ctx: &egui::Context) {
+        crate::skin::install_fonts(ctx, &self.font);
+        if crate::retro::on(self) {
+            ctx.set_visuals(crate::retro::visuals(self));
+            let mut style = (*ctx.style()).clone();
+            style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+            style.spacing.button_padding = egui::vec2(8.0, 3.0);
+            style.spacing.scroll = crate::retro::scroll_style();
+            style.spacing.slider_rail_height = 4.0;
+            style.spacing.interact_size.y = 20.0;
+            style.text_styles = crate::skin::text_sizes(&self.font, self.font_scale);
+            ctx.set_style(style);
+            return;
+        }
         let mut v = if self.dark {
             Visuals::dark()
         } else {
@@ -521,9 +502,10 @@ impl Theme {
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);
         style.spacing.button_padding = egui::vec2(7.0, 3.0);
-        for f in style.text_styles.values_mut() {
-            f.size = (f.size * self.font_scale).clamp(6.0, 40.0);
-        }
+        style.spacing.scroll = egui::Style::default().spacing.scroll;
+        style.spacing.slider_rail_height = egui::Style::default().spacing.slider_rail_height;
+        style.spacing.interact_size = egui::Style::default().spacing.interact_size;
+        style.text_styles = crate::skin::text_sizes(&self.font, self.font_scale);
         ctx.set_style(style);
     }
 
@@ -731,8 +713,6 @@ mod tests {
         assert_eq!(names.len(), n, "theme names are unique");
         for want in [
             "Analog",
-            "Aqua Aero",
-            "Meadow Aero",
             "Moonlight Aero",
             "Prism",
             "Grey Desktop '95",

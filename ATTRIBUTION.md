@@ -27,3 +27,11 @@
 The 3D Space panning and binaural model, the Phase Wheel, and the effects in
 `af27-fx` were written by Audiform's author (nwh212) for Audiform and are
 relicensed here by them. See `docs/clean-room.md`.
+
+## System fonts
+
+Grey Desktop '95 sets its text in Windows' own Microsoft Sans Serif (or
+Tahoma, with Tahoma Bold for window captions), read from the system's font
+folder at run time. No font file is copied into AudiForm 2 or shipped with
+it; elsewhere the theme falls back to egui's built-in fonts.
+

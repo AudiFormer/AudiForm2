@@ -151,6 +151,11 @@ fn blob(p: &Painter, centre: Pos2, radius: f32, rgb: Rgb, k: f32) {
 
 /// The living background behind every panel.
 pub fn backdrop(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
+    if crate::retro::on(th) {
+        // A plain desktop: one flat colour.
+        p.rect_filled(rect, 0.0, crate::theme::c(th.backdrop_top));
+        return;
+    }
     // Deep gradient.
     let mut m = Mesh::default();
     let (top, bottom) = (
@@ -472,6 +477,10 @@ pub fn scanlines(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
 
 /// The glass of a card, drawn beneath its contents.
 pub fn glass(p: &Painter, rect: Rect, th: &Theme) {
+    if crate::retro::on(th) {
+        p.rect_filled(rect, 0.0, crate::theme::c(th.panel));
+        return;
+    }
     let pts = chamfer(rect, th.chamfer);
     let a = (th.glass.clamp(0.0, 1.0) * 255.0) as u8;
     gradient_poly(
@@ -484,6 +493,10 @@ pub fn glass(p: &Painter, rect: Rect, th: &Theme) {
 
 /// The card's edge, brackets and running light, drawn over its contents.
 pub fn frame(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool, serial: usize) {
+    if crate::retro::on(th) {
+        // Drawn as a whole window by `retro::window`, tabs and all.
+        return;
+    }
     if th.bevel.is_some() {
         crate::skin::panel(p, rect, th);
         return;
@@ -573,6 +586,9 @@ fn running_light(p: &Painter, pts: &[Pos2], th: &Theme, fx: &Fx) {
 
 /// Light under the active tab of a card.
 pub fn tab_light(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool) {
+    if crate::retro::on(th) {
+        return;
+    }
     let y = rect.bottom() - 1.0;
     let k = if focused { 1.0 } else { 0.55 };
     let breathe = 0.85 + 0.15 * (fx.t * 2.0).sin() + fx.pulse * 0.3;
@@ -966,6 +982,50 @@ pub fn segmented(
     th: &Theme,
     fx: &Fx,
 ) -> Option<usize> {
+    if crate::retro::on(th) {
+        // Push buttons side by side, the current one held down.
+        let mut clicked = None;
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (i, l) in labels.iter().enumerate() {
+            let font = FontId::proportional(11.0);
+            let w = ui
+                .painter()
+                .layout_no_wrap(l.to_string(), font.clone(), Color32::BLACK)
+                .size()
+                .x
+                + 22.0;
+            let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::click());
+            let down = i == current || resp.is_pointer_button_down_on();
+            let p = ui.painter();
+            crate::retro::panel(
+                p,
+                r,
+                Some(if i == current {
+                    crate::retro::LIGHT
+                } else {
+                    crate::retro::FACE
+                }),
+                if down {
+                    crate::retro::Edge::Pressed
+                } else {
+                    crate::retro::Edge::Button
+                },
+            );
+            let at = r.center()
+                + if down {
+                    Vec2::new(1.0, 1.0)
+                } else {
+                    Vec2::ZERO
+                };
+            p.text(at, Align2::CENTER_CENTER, *l, font, crate::retro::DARK);
+            if resp.clicked() {
+                clicked = Some(i);
+            }
+        }
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let _ = (id, fx);
+        return clicked;
+    }
     let font = FontId::proportional(12.5);
     let widths: Vec<f32> = labels
         .iter()
@@ -1202,6 +1262,23 @@ pub fn logo_mark(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, reveal: f32) {
 /// The wordmark: the mark, then AUDIFORM with light passing across it and
 /// a raised 2 split into the theme's two colours.
 pub fn wordmark(ui: &mut Ui, th: &Theme, fx: &Fx) {
+    if crate::retro::on(th) {
+        // Plain black type, as a program of the time would set its name.
+        let font = FontId::proportional(11.0);
+        let g = ui
+            .painter()
+            .layout_no_wrap("AudiForm 2".into(), font.clone(), Color32::BLACK);
+        let (r, resp) = ui.allocate_exact_size(g.size() + Vec2::new(8.0, 0.0), Sense::hover());
+        ui.painter().text(
+            r.left_center() + Vec2::new(4.0, 0.0),
+            Align2::LEFT_CENTER,
+            "AudiForm 2",
+            font,
+            Color32::BLACK,
+        );
+        resp.on_hover_text("AudiForm 2");
+        return;
+    }
     let text = "AUDIFORM";
     let size = 14.0;
     let spacing = 4.0;

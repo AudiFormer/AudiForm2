@@ -63,17 +63,6 @@ fn h(i: u32) -> f32 {
     (x & 0xFFFF) as f32 / 65535.0
 }
 
-/// Text in a font size and colour, with letter spacing.
-fn text(p: &Painter, at: Pos2, s: &str, size: f32, col: Color32) {
-    p.text(
-        at,
-        Align2::CENTER_CENTER,
-        s,
-        FontId::proportional(size),
-        col,
-    );
-}
-
 // ------------------------------------------------------------- Mall
 
 /// The Mall Pastel '95 splash: a vaporwave sunset over a grid floor
@@ -260,50 +249,41 @@ pub fn mall(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32, night: boo
         Color32::from_white_alpha((a * 255.0) as u8),
     );
 
-    // The title, with a chromatic split that closes as it lands.
+    // The neon sign from the menu bar, larger: it flickers on, tube by
+    // tube as it were, then holds.
     let tt = ease((t - 0.55) / 0.6);
-    let title = "ＡＵＤＩＦＯＲＭ　２";
     let size = (screen.width() / 14.0).clamp(36.0, 92.0);
     let at = Pos2::new(screen.center().x, screen.top() + screen.height() * 0.12);
-    let split = (1.0 - tt) * 18.0 + 3.0;
-    let (ink, glow): (Rgb, Rgb) = if night {
-        ([255, 214, 236], [255, 143, 199])
+    let sign = if night {
+        "mall-night-neon-big"
     } else {
-        ([138, 47, 116], [255, 143, 199])
+        "mall-day-neon-big"
     };
-    text(
-        p,
-        at + Vec2::new(-split, 0.0),
-        title,
-        size,
-        rgba([95, 220, 255], 0.55 * a * tt),
-    );
-    text(
-        p,
-        at + Vec2::new(split, 0.0),
-        title,
-        size,
-        rgba([255, 80, 170], 0.55 * a * tt),
-    );
-    if night {
-        for d in [3.0, -3.0] {
-            text(
-                p,
-                at + Vec2::new(d, 0.0),
-                title,
-                size,
-                rgba(glow, 0.35 * a * tt),
-            );
-            text(
-                p,
-                at + Vec2::new(0.0, d),
-                title,
-                size,
-                rgba(glow, 0.35 * a * tt),
-            );
-        }
+    if let Some(tex) = crate::skin::neon_sign(p.ctx(), sign) {
+        let [w, h] = tex.size_vec2().into();
+        let width = (screen.width() * 0.42).clamp(320.0, 900.0);
+        let r = Rect::from_center_size(
+            at + Vec2::new(0.0, size * 0.45),
+            Vec2::new(width, width * h / w.max(1.0)),
+        );
+        // A neon strike: on, off, on, before it settles.
+        let strike = match t - 0.55 {
+            x if x < 0.0 => 0.0,
+            x if x < 0.08 => 1.0,
+            x if x < 0.16 => 0.25,
+            x if x < 0.24 => 1.0,
+            x if x < 0.3 => 0.5,
+            _ => 1.0,
+        };
+        let k = (a * strike * tt.max(0.6)).clamp(0.0, 1.0);
+        let v = (k * 255.0) as u8;
+        p.image(
+            tex.id(),
+            r,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::from_rgba_premultiplied(v, v, v, v),
+        );
     }
-    text(p, at, title, size, rgba(ink, a * tt));
 
     // The Japanese lines type themselves out.
     let lines = if night {
@@ -324,20 +304,25 @@ pub fn mall(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32, night: boo
         let n = line.chars().count();
         let k = (((t - start) / 0.5).clamp(0.0, 1.0) * n as f32) as usize;
         let s: String = line.chars().take(k).collect();
-        let y = at.y + size * 0.85 + i as f32 * size * 0.42;
+        let y = at.y + size * 1.95 + i as f32 * size * 0.42;
         p.text(
             Pos2::new(screen.center().x - galley_half(p, line, size * 0.3), y),
             Align2::LEFT_CENTER,
             s,
-            FontId::proportional(size * 0.3),
+            jp(size * 0.3),
             rgba(sub, a),
         );
     }
 }
 
+/// One Japanese face for a whole line.
+fn jp(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name(crate::skin::JP.into()))
+}
+
 /// Half the width a line will take, so typed-out text stays put.
 fn galley_half(p: &Painter, s: &str, size: f32) -> f32 {
-    p.layout_no_wrap(s.to_string(), FontId::proportional(size), Color32::WHITE)
+    p.layout_no_wrap(s.to_string(), jp(size), Color32::WHITE)
         .size()
         .x
         * 0.5

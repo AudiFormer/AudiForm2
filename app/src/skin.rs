@@ -174,6 +174,12 @@ pub fn bar(p: &Painter, rect: Rect, th: &Theme) {
 /// A two-tone bevel: light above and left, dark below and right (sunken
 /// swaps them), 2 points wide, as on mid-90s desktops.
 pub fn bevel(p: &Painter, rect: Rect, th: &Theme, sunken: bool) {
+    if crate::retro::on(th) {
+        use crate::retro::Edge;
+        let e = if sunken { Edge::Well } else { Edge::Button };
+        crate::retro::panel(p, rect, None, e);
+        return;
+    }
     let Some([hi, lo, _]) = th.bevel else { return };
     let (tl, br) = if sunken { (lo, hi) } else { (hi, lo) };
     let r = rect.shrink(1.0);
@@ -191,6 +197,10 @@ pub fn bevel(p: &Painter, rect: Rect, th: &Theme, sunken: bool) {
 
 /// A panel's raised bevel and its hard one-point shadow.
 pub fn panel(p: &Painter, rect: Rect, th: &Theme) {
+    if crate::retro::on(th) {
+        crate::retro::panel(p, rect, None, crate::retro::Edge::Raised);
+        return;
+    }
     let Some([_, _, shadow]) = th.bevel else {
         return;
     };
@@ -236,7 +246,7 @@ fn neon_text(
     neon: Option<Rgb>,
 ) {
     if let Some(n) = neon {
-        for (d, a) in [(2.5, 40u8), (1.2, 80)] {
+        for (d, a) in [(2.4, 20u8), (1.3, 42)] {
             for v in [
                 Vec2::new(d, 0.0),
                 Vec2::new(-d, 0.0),
@@ -247,12 +257,43 @@ fn neon_text(
             }
         }
     }
-    p.text(at, align, text, font, col);
+    // A hot core, paler than the glow, keeps the letters readable.
+    let core = if neon.is_some() {
+        let [r, g, b, _] = col.to_array();
+        let w = |x: u8| (x as f32 + (255.0 - x as f32) * 0.45) as u8;
+        Color32::from_rgb(w(r), w(g), w(b))
+    } else {
+        col
+    };
+    p.text(at, align, text, font, core);
 }
 
 /// The theme's own title, at the start of the menu bar: a picture or a
 /// line of text. Returns false when the theme has none.
 pub fn title(ui: &mut egui::Ui, th: &Theme) -> bool {
+    if let Some(t) = neon_sign(ui.ctx(), &th.title_picture) {
+        // A neon sign: drawn at its own size (4 pixels to the point), its
+        // glow spilling a little past the room it takes in the bar.
+        let size = t.size_vec2() / NEON_SCALE * NEON_ZOOM;
+        let room = Vec2::new(size.x - 2.0 * NEON_SPILL_X, size.y - 2.0 * NEON_SPILL_Y);
+        let (r, _) = ui.allocate_exact_size(room + Vec2::new(10.0, 0.0), egui::Sense::hover());
+        let r = Rect::from_center_size(r.center(), size);
+        // The glow may reach over the bar's edges.
+        let p = ui.painter().with_clip_rect(ui.ctx().screen_rect());
+        // The gas breathes, slowly and barely.
+        let fx: Option<crate::hud::Fx> = ui.ctx().data(|d| d.get_temp(egui::Id::new("af27-fx")));
+        let k = fx.map_or(1.0, |f| {
+            0.96 + 0.04 * (f.t * 1.7).sin() * (f.t * 0.43).cos()
+        });
+        let v = (k * 255.0) as u8;
+        p.image(
+            t.id(),
+            r,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::from_rgba_premultiplied(v, v, v, v),
+        );
+        return true;
+    }
     if !th.title_picture.is_empty() {
         if let Some(t) = art(ui.ctx(), &th.title_picture) {
             let [w, h] = t.size_vec2().into();
@@ -300,13 +341,57 @@ pub fn title(ui: &mut egui::Ui, th: &Theme) -> bool {
     true
 }
 
+/// Pixels per point in the neon sign pictures, and how far their glow
+/// reaches past the tubes (points) at the sides and top and bottom.
+const NEON_SCALE: f32 = 4.0;
+/// The sign is shown a little larger than it was drawn (still finer than
+/// the screen).
+const NEON_ZOOM: f32 = 1.4;
+const NEON_SPILL_X: f32 = 13.0;
+const NEON_SPILL_Y: f32 = 13.0;
+
+/// The Mall Pastel '95 neon signs (`scripts/make-mall-neon.py`), decoded
+/// once and kept on the GPU. Mipmapped, so the 4x picture shrinks cleanly.
+pub fn neon_sign(ctx: &egui::Context, name: &str) -> Option<egui::TextureHandle> {
+    let bytes: &'static [u8] = match name {
+        "mall-day-neon" => include_bytes!("../../assets/themes/mall-day-neon.png"),
+        "mall-night-neon" => include_bytes!("../../assets/themes/mall-night-neon.png"),
+        // The splash's, four times finer.
+        "mall-day-neon-big" => include_bytes!("../../assets/themes/mall-day-neon-big.png"),
+        "mall-night-neon-big" => include_bytes!("../../assets/themes/mall-night-neon-big.png"),
+        _ => return None,
+    };
+    let id = egui::Id::new(("af2-neon", name));
+    if let Some(t) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
+        return t;
+    }
+    let tex = image::load_from_memory(bytes).ok().map(|img| {
+        let img = img.to_rgba8();
+        let size = [img.width() as usize, img.height() as usize];
+        ctx.load_texture(
+            format!("neon-{name}"),
+            egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()),
+            egui::TextureOptions {
+                mipmap_mode: Some(egui::TextureFilter::Linear),
+                ..egui::TextureOptions::LINEAR
+            },
+        )
+    });
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    tex
+}
+
 /// The theme's line at the right of the status bar.
 pub fn status_line(ui: &mut egui::Ui, th: &Theme) {
     if th.status_text.is_empty() {
         return;
     }
-    let font = FontId::proportional(12.0);
+    let font = FontId::new(13.0, egui::FontFamily::Name(JP.into()));
     let col = c(th.status_color.unwrap_or(th.text_dim));
+    // Lit like the sign: the theme's neon, or a soft glow of its own colour.
+    let glow = th
+        .neon
+        .or(th.status_color.filter(|_| !th.columns.is_empty()));
     let galley = ui
         .painter()
         .layout_no_wrap(th.status_text.clone(), font.clone(), col);
@@ -318,14 +403,139 @@ pub fn status_line(ui: &mut egui::Ui, th: &Theme) {
         &th.status_text,
         font,
         col,
-        th.neon,
+        glow,
     );
 }
 
-/// Adds a system Japanese font as a fallback for every text style, so
-/// themes' Japanese titles (and Japanese file names) show. MS Gothic is
-/// what Audiform's Mall themes asked for first.
-pub fn install_fallback_fonts(ctx: &egui::Context) {
+/// The family for bold captions (`retro::caption`): a real bold face where
+/// the system has one, else the regular text.
+pub const BOLD: &str = "af2-bold";
+
+/// The family for Japanese lines: the system Japanese font first for every
+/// character it has, so a line never switches face glyph by glyph.
+pub const JP: &str = "af2-jp";
+
+/// True when [`BOLD`] is a real bold face (no need to draw text twice).
+pub fn has_bold(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new("af2-fonts-installed");
+    ctx.data(|d| d.get_temp::<String>(id)).as_deref() == Some("ms-sans-serif")
+        && system_font(&["C:\\Windows\\Fonts\\tahomabd.ttf"]).is_some()
+}
+
+/// A font file from the system, read once per path list; never shipped.
+fn system_font(paths: &[&'static str]) -> Option<&'static [u8]> {
+    type Read = (Vec<&'static str>, Option<&'static [u8]>);
+    static CACHE: std::sync::Mutex<Vec<Read>> = std::sync::Mutex::new(Vec::new());
+    let mut c = CACHE.lock().ok()?;
+    if let Some((_, f)) = c.iter().find(|(k, _)| k.as_slice() == paths) {
+        return *f;
+    }
+    let f = paths
+        .iter()
+        .find_map(|p| std::fs::read(p).ok())
+        .map(|b| &*Box::leak(b.into_boxed_slice()));
+    c.push((paths.to_vec(), f));
+    f
+}
+
+/// The fonts for a theme: egui's own, the theme's font (if any) in front
+/// of them for proportional text, and a system Japanese font behind as a
+/// fallback for every text style. Builds them only when the font changes.
+///
+/// `ms-sans-serif` is Windows' own Microsoft Sans Serif (the TrueType
+/// MS Sans Serif of 1995), then Tahoma, read from the system at run time.
+pub fn install_fonts(ctx: &egui::Context, font: &str) {
+    let id = egui::Id::new("af2-fonts-installed");
+    if ctx.data(|d| d.get_temp::<String>(id)).as_deref() == Some(font) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, font.to_string()));
+    let mut fonts = egui::FontDefinitions::default();
+    let mut bold = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    if font == "ms-sans-serif" {
+        if let Some(b) = system_font(&[
+            "C:\\Windows\\Fonts\\micross.ttf",
+            "C:\\Windows\\Fonts\\tahoma.ttf",
+        ]) {
+            fonts
+                .font_data
+                .insert("ui95".into(), egui::FontData::from_static(b));
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "ui95".into());
+            bold.insert(0, "ui95".into());
+        }
+        if let Some(b) = system_font(&["C:\\Windows\\Fonts\\tahomabd.ttf"]) {
+            fonts
+                .font_data
+                .insert("ui95-bold".into(), egui::FontData::from_static(b));
+            bold.insert(0, "ui95-bold".into());
+        }
+    }
+    if let Some((bytes, index)) = cjk_font() {
+        let mut data = egui::FontData::from_static(bytes);
+        data.index = index;
+        fonts.font_data.insert("cjk".into(), data);
+        for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(fam).or_default().push("cjk".into());
+        }
+        bold.push("cjk".into());
+    }
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(BOLD.into()), bold);
+    let mut jp = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(i) = jp.iter().position(|f| f == "cjk") {
+        let cjk = jp.remove(i);
+        jp.insert(0, cjk);
+    }
+    fonts.families.insert(egui::FontFamily::Name(JP.into()), jp);
+    ctx.set_fonts(fonts);
+}
+
+/// The text sizes for a theme's font: egui's own, scaled. The 1995 face
+/// is set small, as 8 point UI text was.
+pub fn text_sizes(
+    font: &str,
+    scale: f32,
+) -> std::collections::BTreeMap<egui::TextStyle, egui::FontId> {
+    let mut sizes = egui::Style::default().text_styles;
+    for (style, f) in sizes.iter_mut() {
+        f.size = (f.size * scale).clamp(6.0, 40.0);
+        if font == "ms-sans-serif" && f.family == egui::FontFamily::Proportional {
+            f.size = match style {
+                egui::TextStyle::Heading => 16.0,
+                egui::TextStyle::Small => 10.0,
+                _ => 11.0,
+            } * scale;
+        }
+    }
+    sizes
+}
+
+/// A system Japanese font, read once.
+fn cjk_font() -> Option<(&'static [u8], u32)> {
+    static FONT: std::sync::OnceLock<Option<(&'static [u8], u32)>> = std::sync::OnceLock::new();
+    *FONT.get_or_init(|| {
+        let (bytes, index) = read_cjk_font()?;
+        Some((Box::leak(bytes.into_boxed_slice()), index))
+    })
+}
+
+/// Reads a system Japanese font, so themes' Japanese titles (and Japanese
+/// file names) show. MS Gothic is what Audiform's Mall themes asked for
+/// first.
+fn read_cjk_font() -> Option<(Vec<u8>, u32)> {
     let candidates = [
         ("C:\\Windows\\Fonts\\msgothic.ttc", 0),
         ("C:\\Windows\\Fonts\\YuGothM.ttc", 0),
@@ -335,17 +545,7 @@ pub fn install_fallback_fonts(ctx: &egui::Context) {
         ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
         ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
     ];
-    for (path, index) in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
-            let mut data = egui::FontData::from_owned(bytes);
-            data.index = index;
-            fonts.font_data.insert("cjk".into(), data);
-            for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts.families.entry(fam).or_default().push("cjk".into());
-            }
-            ctx.set_fonts(fonts);
-            return;
-        }
-    }
+    candidates
+        .into_iter()
+        .find_map(|(path, index)| std::fs::read(path).ok().map(|b| (b, index)))
 }

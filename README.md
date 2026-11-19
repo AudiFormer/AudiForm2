@@ -99,8 +99,8 @@ pick one from **View > Theme**. **Save Current Theme As** writes the active
 theme out as a starting point, and any field you leave out falls back to the
 default. See `docs/themes/Ice Cave.af27theme`.
 
-Built-in themes: **Neon Abyss** (the default), **Synth Sunset**, **Phosphor**
-and **Daylight**.
+Built-in themes: **Neon Abyss** (the default), **Synth Sunset** and
+**Phosphor**.
 
 ## Keyboard
 
