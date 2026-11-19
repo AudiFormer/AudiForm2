@@ -558,7 +558,7 @@ mod tests {
     fn densities_and_scales() {
         let ph = set("phosphor").unwrap();
         let gl = set("glass").unwrap();
-        assert_eq!(density(gl, 1.0), 1.25);
+        assert_eq!(density(gl, 1.0), 1.0); // natural size, as Audiform 1 showed it
         assert_eq!(density(ph, 1.0), 1.0);
         assert_eq!(density(ph, 1.3), 1.5);
         assert_eq!(scale_index(1.25), 0);

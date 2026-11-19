@@ -1969,7 +1969,10 @@ impl eframe::App for App {
         if !self.shown_env_tab {
             self.shown_env_tab = true;
             if let Ok(name) = std::env::var("AF2_SHOW_TAB") {
-                if let Some(t) = Tab::ALL.iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(name.trim())) {
+                if let Some(t) = Tab::ALL
+                    .iter()
+                    .find(|t| format!("{t:?}").eq_ignore_ascii_case(name.trim()))
+                {
                     self.show_tab(*t);
                 }
             }

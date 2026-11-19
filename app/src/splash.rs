@@ -454,12 +454,6 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
         let col = mix(deep, [255, 255, 255], rise);
         let alpha = (rise.powf(1.4) * a).clamp(0.0, 1.0);
         let tint = rgba(col, alpha);
-        warped(p, tex.id(), r, 30, 10, |u, v| {
-            let dx = bend * (v * 8.0 + t * 2.6 + u * 3.0).sin();
-            let dy = bend * 0.5 * (u * 6.5 + t * 2.1).cos();
-            let pos = Pos2::new(r.left() + u * r.width() + dx, r.top() + v * r.height() + dy);
-            (pos, Pos2::new(u, v), tint)
-        });
         // As it breaks the surface, ripples spread out over the water:
         // uneven rings that wander, thin out and break up as they go.
         let rt = t - 1.85;
@@ -510,5 +504,12 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
                 }
             }
         }
+        // The title over its own ripples, never under lines.
+        warped(p, tex.id(), r, 30, 10, |u, v| {
+            let dx = bend * (v * 8.0 + t * 2.6 + u * 3.0).sin();
+            let dy = bend * 0.5 * (u * 6.5 + t * 2.1).cos();
+            let pos = Pos2::new(r.left() + u * r.width() + dx, r.top() + v * r.height() + dy);
+            (pos, Pos2::new(u, v), tint)
+        });
     }
 }

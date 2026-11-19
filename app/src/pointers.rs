@@ -49,8 +49,9 @@ pub struct Pointer {
 /// A theme's pointers.
 pub struct Set {
     pub name: &'static str,
-    /// Points per CSS pixel: sizes each set to about the OS cursor's
-    /// 32 px box at 100%.
+    /// Points per CSS pixel. 1.0 everywhere: each pointer at the size its
+    /// picture was drawn, as Audiform 1 showed it (CSS cursors are never
+    /// scaled up).
     pub scale: f32,
     /// Pixel art: scaled nearest-neighbour, in whole screen pixels.
     pub pixel: bool,
@@ -90,7 +91,7 @@ macro_rules! p {
 pub static SETS: [Set; 3] = [
     Set {
         name: "glass",
-        scale: 1.25,
+        scale: 1.0,
         pixel: false,
         pointers: &[
             p!("glass", "arrow", Kind::Arrow, 3, 2),
@@ -126,7 +127,7 @@ pub static SETS: [Set; 3] = [
     },
     Set {
         name: "mall",
-        scale: 1.5,
+        scale: 1.0,
         pixel: false,
         pointers: &[
             p!("mall", "arrow", Kind::Arrow, 2, 1),

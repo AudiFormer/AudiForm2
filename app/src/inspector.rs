@@ -553,8 +553,8 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
                             }
                             continue;
                         } else {
-                            let mut s =
-                                crate::widgets::Slider::new(&mut vals[k], p.min..=p.max).text(&p.name);
+                            let mut s = crate::widgets::Slider::new(&mut vals[k], p.min..=p.max)
+                                .text(&p.name);
                             if !p.unit.is_empty() {
                                 s = s.suffix(format!(" {}", p.unit));
                             }

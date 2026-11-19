@@ -174,7 +174,8 @@ impl<T: Numeric> Widget for Slider<'_, T> {
             let f = to_pos(v, lo, hi, self.log) as f32;
             let x = groove.left() + groove.width() * f;
             if f > 0.0 {
-                let lit = Rect::from_min_max(groove.min, pos2(x, groove.max.y)).shrink2(vec2(0.0, 0.5));
+                let lit =
+                    Rect::from_min_max(groove.min, pos2(x, groove.max.y)).shrink2(vec2(0.0, 0.5));
                 let mut m = egui::Mesh::default();
                 let (a, b) = (lerp(th.accent, th.accent_alt, 0.55), c(th.accent));
                 m.colored_vertex(lit.left_top(), a);
@@ -185,20 +186,32 @@ impl<T: Numeric> Widget for Slider<'_, T> {
                 m.add_triangle(0, 2, 3);
                 p.add(Shape::mesh(m));
                 if th.dark && th.glow > 0.0 {
-                    p.rect_filled(lit.expand(2.0), Rounding::same(3.0), ca(th.accent, (18.0 * th.glow) as u8));
+                    p.rect_filled(
+                        lit.expand(2.0),
+                        Rounding::same(3.0),
+                        ca(th.accent, (18.0 * th.glow) as u8),
+                    );
                 }
             }
             // Ticks at the quarters, quiet.
             for q in [0.25f32, 0.5, 0.75] {
                 let tx = groove.left() + groove.width() * q;
                 p.line_segment(
-                    [pos2(tx, groove.bottom() + 3.0), pos2(tx, groove.bottom() + 5.0)],
+                    [
+                        pos2(tx, groove.bottom() + 3.0),
+                        pos2(tx, groove.bottom() + 5.0),
+                    ],
                     Stroke::new(1.0_f32, ca(th.text_dim, 90)),
                 );
             }
             // The cap.
-            let cap = Rect::from_center_size(pos2(x, rect.center().y), vec2(10.0, (h - 2.0).min(18.0)));
-            p.rect_filled(cap.translate(vec2(1.0, 1.5)), Rounding::same(2.0), Color32::from_black_alpha(80));
+            let cap =
+                Rect::from_center_size(pos2(x, rect.center().y), vec2(10.0, (h - 2.0).min(18.0)));
+            p.rect_filled(
+                cap.translate(vec2(1.0, 1.5)),
+                Rounding::same(2.0),
+                Color32::from_black_alpha(80),
+            );
             let face = lerp(th.panel_raised, th.text, if hot { 0.30 } else { 0.18 });
             p.rect_filled(cap, Rounding::same(if square { 0.0 } else { 2.0 }), face);
             if square {
@@ -207,14 +220,28 @@ impl<T: Numeric> Widget for Slider<'_, T> {
                 p.rect_stroke(
                     cap,
                     Rounding::same(2.0),
-                    Stroke::new(1.0_f32, if hot { c(th.accent) } else { ca(th.border, 240) }),
+                    Stroke::new(
+                        1.0_f32,
+                        if hot {
+                            c(th.accent)
+                        } else {
+                            ca(th.border, 240)
+                        },
+                    ),
                 );
                 if hot && th.glow > 0.0 {
-                    p.rect_stroke(cap.expand(2.0), Rounding::same(3.0), Stroke::new(2.0_f32, ca(th.accent, (50.0 * th.glow) as u8)));
+                    p.rect_stroke(
+                        cap.expand(2.0),
+                        Rounding::same(3.0),
+                        Stroke::new(2.0_f32, ca(th.accent, (50.0 * th.glow) as u8)),
+                    );
                 }
             }
             p.line_segment(
-                [pos2(cap.center().x, cap.top() + 3.0), pos2(cap.center().x, cap.bottom() - 3.0)],
+                [
+                    pos2(cap.center().x, cap.top() + 3.0),
+                    pos2(cap.center().x, cap.bottom() - 3.0),
+                ],
                 Stroke::new(2.0_f32, c(th.accent)),
             );
             if self.show_value {
@@ -252,12 +279,20 @@ mod tests {
 
     #[test]
     fn positions_round_trip_linear_and_log() {
-        for &(lo, hi, log) in &[(-60.0, 12.0, false), (20.0, 20000.0, true), (0.0, 1.0, true), (0.0, 8.0, false)] {
+        for &(lo, hi, log) in &[
+            (-60.0, 12.0, false),
+            (20.0, 20000.0, true),
+            (0.0, 1.0, true),
+            (0.0, 8.0, false),
+        ] {
             for k in 0..=10 {
                 let p = k as f64 / 10.0;
                 let v = from_pos(p, lo, hi, log);
                 let back = to_pos(v, lo, hi, log);
-                assert!((back - p).abs() < 1e-9 || (p == 0.0 && back == 0.0), "{lo} {hi} {log} {p} {back}");
+                assert!(
+                    (back - p).abs() < 1e-9 || (p == 0.0 && back == 0.0),
+                    "{lo} {hi} {log} {p} {back}"
+                );
             }
         }
         assert!((to_pos(632.45, 20.0, 20000.0, true) - 0.5).abs() < 1e-3);

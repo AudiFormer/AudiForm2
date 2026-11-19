@@ -57,6 +57,18 @@ enum Slot {
 /// Decoding runs on its own thread so the window never stalls: until it is
 /// done this returns None and the theme's gradient shows instead. None
 /// too for an unknown name or a picture that will not decode.
+/// Tiling textures repeat; a single picture (a title, the sun, a column's
+/// capital, a backdrop) clamps at its edges, so smoothing at its border
+/// never pulls in the opposite edge as a faint line.
+pub fn wrap_for(name: &str) -> TextureWrapMode {
+    let tiles = ["shaft", "meander", "tiles", "marble", "walnut"];
+    if tiles.iter().any(|t| name.contains(t)) {
+        TextureWrapMode::Repeat
+    } else {
+        TextureWrapMode::ClampToEdge
+    }
+}
+
 pub fn texture(ctx: &Context, name: &str, want_px: f32) -> Option<TextureHandle> {
     let step = [960u32, 1280, 1920, 2560, 3840]
         .into_iter()
@@ -70,7 +82,7 @@ pub fn texture(ctx: &Context, name: &str, want_px: f32) -> Option<TextureHandle>
             match done {
                 Some(pixels) => {
                     let opts = TextureOptions {
-                        wrap_mode: TextureWrapMode::Repeat,
+                        wrap_mode: wrap_for(name),
                         ..TextureOptions::LINEAR
                     };
                     let tex = pixels
@@ -123,6 +135,17 @@ fn decode(b: &[u8], max_w: u32) -> Option<egui::ColorImage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn titles_clamp_and_tiles_repeat() {
+        use egui::TextureWrapMode::*;
+        assert_eq!(super::wrap_for("title-undercurrent"), ClampToEdge);
+        assert_eq!(super::wrap_for("mall-sun"), ClampToEdge);
+        assert_eq!(super::wrap_for("mall-day-real-capital"), ClampToEdge);
+        assert_eq!(super::wrap_for("mall-day-real-shaft"), Repeat);
+        assert_eq!(super::wrap_for("marble-night"), Repeat);
+        assert_eq!(super::wrap_for("mall-night-tiles"), Repeat);
+    }
+
     #[test]
     fn every_picture_decodes_and_shrinks_for_small_screens() {
         for n in [
