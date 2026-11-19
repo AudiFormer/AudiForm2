@@ -17,6 +17,7 @@ mod theme;
 mod ui;
 mod visualizer;
 mod waveform;
+mod workspace;
 
 fn main() -> eframe::Result<()> {
     fx::register();

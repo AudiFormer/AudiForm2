@@ -6,7 +6,7 @@
 //! new place, tabbed with others, split, or floated in its own window.
 
 use egui::{Key, KeyboardShortcut, Modifiers, RichText, Rounding};
-use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use egui_dock::{DockArea, DockState, Style, TabViewer};
 use serde::{Deserialize, Serialize};
 
 use crate::state::{data_dir, Mode, State, Tool};
@@ -75,23 +75,6 @@ impl Tab {
     }
 }
 
-pub fn default_layout() -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Editor, Tab::Mixer, Tab::PianoRoll]);
-    let s = dock.main_surface_mut();
-    let [center, left] = s.split_left(NodeIndex::root(), 0.16, vec![Tab::Files, Tab::Markers]);
-    let [_files, left_mid] = s.split_below(left, 0.42, vec![Tab::Effects, Tab::AiSeparation]);
-    let [_fx, _hist] = s.split_below(left_mid, 0.62, vec![Tab::History]);
-    let [center, _levels] = s.split_below(center, 0.9, vec![Tab::Levels]);
-    let [_editor, right] = s.split_right(center, 0.83, vec![Tab::Phase, Tab::Visualizer]);
-    let [_phase, right_mid] = s.split_below(
-        right,
-        0.38,
-        vec![Tab::Inspector, Tab::Space, Tab::Statistics, Tab::Spectrum],
-    );
-    let [_stats, _range] = s.split_below(right_mid, 0.7, vec![Tab::Selection]);
-    dock
-}
-
 pub struct App {
     pub st: State,
     dock: DockState<Tab>,
@@ -121,8 +104,16 @@ pub struct Caches {
     pub piano: crate::pianoroll::PianoState,
 }
 
-fn layout_path() -> std::path::PathBuf {
-    data_dir().join("layout2.json")
+/// Each workspace keeps its own arrangement, as the user left it.
+fn layout_path(w: crate::workspace::Workspace) -> std::path::PathBuf {
+    data_dir().join(format!("layout3-{}.json", w.key()))
+}
+
+fn load_layout(w: crate::workspace::Workspace) -> DockState<Tab> {
+    std::fs::read_to_string(layout_path(w))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| w.build())
 }
 
 impl App {
@@ -131,10 +122,7 @@ impl App {
         st.theme.apply(&cc.egui_ctx);
         st.theme_changed = false;
         st.open_paths(files);
-        let dock = std::fs::read_to_string(layout_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(default_layout);
+        let dock = load_layout(st.workspace);
         App {
             st,
             dock,
@@ -148,6 +136,24 @@ impl App {
         }
     }
 
+    fn save_layout(&self) {
+        let _ = std::fs::create_dir_all(data_dir());
+        if let Ok(s) = serde_json::to_string(&self.dock) {
+            let _ = std::fs::write(layout_path(self.st.workspace), s);
+        }
+    }
+
+    /// Keeps the current workspace's arrangement and shows another's.
+    fn switch_workspace(&mut self, w: crate::workspace::Workspace) {
+        if w == self.st.workspace {
+            return;
+        }
+        self.save_layout();
+        self.st.workspace = w;
+        self.dock = load_layout(w);
+        let _ = std::fs::write(data_dir().join("workspace.txt"), w.key());
+    }
+
     fn show_tab(&mut self, tab: Tab) {
         if let Some(found) = self.dock.find_tab(&tab) {
             self.dock.set_active_tab(found);
@@ -159,10 +165,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        let _ = std::fs::create_dir_all(data_dir());
-        if let Ok(s) = serde_json::to_string(&self.dock) {
-            let _ = std::fs::write(layout_path(), s);
-        }
+        self.save_layout();
     }
 }
 
@@ -777,8 +780,28 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             ui.separator();
+            ui.menu_button("Workspace", |ui| {
+                for w in crate::workspace::Workspace::ALL {
+                    if ui
+                        .radio(st.workspace == w, w.name())
+                        .on_hover_text(w.about())
+                        .clicked()
+                    {
+                        st.want_workspace = Some(w);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                if ui
+                    .button(format!("Reset \"{}\" to Saved Layout", st.workspace.name()))
+                    .clicked()
+                {
+                    app.dock = st.workspace.build();
+                    ui.close_menu();
+                }
+            });
             if ui.button("Reset Layout").clicked() {
-                app.dock = default_layout();
+                app.dock = st.workspace.build();
                 ui.close_menu();
             }
         });
@@ -822,6 +845,31 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(6.0);
             crate::hud::wordmark(ui, &th, &fx);
+            ui.add_space(18.0);
+            // Workspaces, along the top right as the leading editor has them.
+            for w in crate::workspace::Workspace::ALL.iter().rev() {
+                let on = st.workspace == *w;
+                let text = RichText::new(w.name().to_uppercase())
+                    .size(11.0)
+                    .extra_letter_spacing(1.2)
+                    .color(if on { c(th.accent) } else { c(th.text_dim) });
+                let r = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+                if on {
+                    let y = r.rect.bottom() + 2.0;
+                    ui.painter().line_segment(
+                        [egui::pos2(r.rect.left(), y), egui::pos2(r.rect.right(), y)],
+                        egui::Stroke::new(2.0_f32, c(th.accent)),
+                    );
+                }
+                let r = r.on_hover_text(w.about());
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if r.clicked() {
+                    st.want_workspace = Some(*w);
+                }
+                ui.add_space(6.0);
+            }
         });
     });
 }
@@ -1259,6 +1307,9 @@ impl eframe::App for App {
             });
         if let Some(t) = open_tab {
             self.show_tab(t);
+        }
+        if let Some(w) = self.st.want_workspace.take() {
+            self.switch_workspace(w);
         }
         if self.st.want_piano {
             self.st.want_piano = false;
