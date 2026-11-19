@@ -83,6 +83,8 @@ pub struct Doc {
     pub amp: f32,
     /// The spectral selection (time x frequency shapes).
     pub spec_sel: crate::spectral_select::SpecSel,
+    /// Tags and the markers/chapters found in the file when it was opened.
+    pub info: af27_io::meta::FileInfo,
 }
 
 impl Doc {
@@ -105,6 +107,7 @@ impl Doc {
             spectral: true,
             amp: 1.0,
             spec_sel: Default::default(),
+            info: Default::default(),
         }
     }
 
@@ -174,7 +177,7 @@ pub enum Job {
     /// A file decoding in the background.
     Load {
         path: PathBuf,
-        rx: Receiver<Result<AudioBuffer, String>>,
+        rx: Receiver<Result<af27_io::Opened, String>>,
         /// Put it on this track at this time when done.
         place: Option<(af27_core::TrackId, f64)>,
     },
@@ -595,7 +598,7 @@ impl State {
         let (tx, rx) = channel();
         let p = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(af27_io::decode_file(&p));
+            let _ = tx.send(af27_io::open_file(&p));
         });
         self.jobs.push(Job::Load { path, rx, place });
     }
@@ -615,13 +618,21 @@ impl State {
         });
         for (path, r, place) in done {
             match r {
-                Ok(buf) => {
+                Ok(opened) => {
                     let name = path
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("Audio")
                         .to_string();
+                    if let Some(n) = opened.notice() {
+                        self.toast(format!("{name}: {n}."));
+                    }
+                    let af27_io::Opened { buf, info, .. } = opened;
                     let id = self.add_doc(name, Some(path.clone()), buf);
+                    if let Some(d) = self.docs.iter_mut().find(|d| d.id == id) {
+                        d.markers = file_markers(&info, d.duration());
+                        d.info = info;
+                    }
                     // Session media waiting on this file.
                     let waiting: Vec<MediaId> = self
                         .session
@@ -1719,6 +1730,26 @@ impl State {
         let (frames, rate) = self.scope_frames(sp.size());
         sp.bands(&frames, rate, out);
     }
+}
+
+/// The markers and chapters read from a file, as document markers
+/// (ranges keep their length, clipped to the file). The marker model has
+/// no kinds yet, so cue, range and chapter are told apart only by length;
+/// the original kinds stay in `Doc::info`.
+fn file_markers(info: &af27_io::meta::FileInfo, dur: f64) -> Vec<Marker> {
+    let mut out: Vec<Marker> = info
+        .markers
+        .iter()
+        .filter(|m| m.time.is_finite() && m.time <= dur + 1e-6)
+        .map(|m| Marker {
+            name: m.name.clone(),
+            time: m.time,
+            length: m.length.min((dur - m.time).max(0.0)),
+            ext_id: None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.time.total_cmp(&b.time));
+    out
 }
 
 #[cfg(test)]
