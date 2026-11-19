@@ -1033,7 +1033,7 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                     ui.end_row();
                     if container == Container::Flac {
                         ui.label("Compression");
-                        ui.add(egui::Slider::new(&mut f.flac_level, 0..=8))
+                        ui.add(crate::widgets::Slider::new(&mut f.flac_level, 0..=8))
                             .on_hover_text("0 is fastest, 8 smallest; every level is lossless");
                         ui.end_row();
                     }

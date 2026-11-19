@@ -93,7 +93,7 @@ pub fn effects(ui: &mut egui::Ui, st: &mut State) {
         ui.label(RichText::new("No settings.").color(c(th.text_dim)));
     }
     for (i, p) in specs.iter().enumerate() {
-        let mut slider = egui::Slider::new(&mut vals[i], p.min..=p.max).text(p.name);
+        let mut slider = crate::widgets::Slider::new(&mut vals[i], p.min..=p.max).text(p.name);
         if !p.unit.is_empty() {
             slider = slider.suffix(format!(" {}", p.unit));
         }
@@ -201,7 +201,7 @@ fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
                 });
             vals[k] = (p.min + pick as f32).min(p.max);
         } else {
-            let mut s = egui::Slider::new(&mut vals[k], p.min..=p.max).text(&p.name);
+            let mut s = crate::widgets::Slider::new(&mut vals[k], p.min..=p.max).text(&p.name);
             if !p.unit.is_empty() {
                 s = s.suffix(format!(" {}", p.unit));
             }

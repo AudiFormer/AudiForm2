@@ -43,7 +43,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
             let before = st.session.clone();
             let changed = ui
                 .add(
-                    egui::Slider::new(&mut st.session.master_db, -60.0..=12.0)
+                    crate::widgets::Slider::new(&mut st.session.master_db, -60.0..=12.0)
                         .suffix(" dB")
                         .text("Master"),
                 )
@@ -88,7 +88,7 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         let t = &mut st.session.tracks[ti];
         changed |= ui
             .add(
-                egui::Slider::new(&mut t.volume_db, -60.0..=12.0)
+                crate::widgets::Slider::new(&mut t.volume_db, -60.0..=12.0)
                     .suffix(" dB")
                     .text("Volume"),
             )
@@ -96,7 +96,7 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         if st.session.space.is_none() {
             let mut pan = t.pan * 100.0;
             if ui
-                .add(egui::Slider::new(&mut pan, -100.0..=100.0).text("Pan"))
+                .add(crate::widgets::Slider::new(&mut pan, -100.0..=100.0).text("Pan"))
                 .changed()
             {
                 t.pan = pan / 100.0;
@@ -198,30 +198,30 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             {
                 let p = &mut st.session.tracks[ti].pos;
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.x, -1.0..=1.0).text("Left / right"))
+                    .add(crate::widgets::Slider::new(&mut p.x, -1.0..=1.0).text("Left / right"))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.y, -1.0..=1.0).text("Back / front"))
+                    .add(crate::widgets::Slider::new(&mut p.y, -1.0..=1.0).text("Back / front"))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.z, 0.0..=1.0).text("Height"))
+                    .add(crate::widgets::Slider::new(&mut p.z, 0.0..=1.0).text("Height"))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.size, 0.0..=1.0).text("Size"))
+                    .add(crate::widgets::Slider::new(&mut p.size, 0.0..=1.0).text("Size"))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.width, 0.0..=1.0).text("Width"))
+                    .add(crate::widgets::Slider::new(&mut p.width, 0.0..=1.0).text("Width"))
                     .changed();
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut p.rotation, -180.0..=180.0)
+                        crate::widgets::Slider::new(&mut p.rotation, -180.0..=180.0)
                             .suffix("°")
                             .text("Rotation"),
                     )
                     .changed();
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut p.lfe_db, -96.0..=6.0)
+                        crate::widgets::Slider::new(&mut p.lfe_db, -96.0..=6.0)
                             .suffix(" dB")
                             .text("LFE send"),
                     )
@@ -256,14 +256,14 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                 });
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut i.detune, 0.0..=50.0)
+                        crate::widgets::Slider::new(&mut i.detune, 0.0..=50.0)
                             .suffix(" ct")
                             .text("Detune"),
                     )
                     .changed();
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut i.attack, 0.001..=2.0)
+                        crate::widgets::Slider::new(&mut i.attack, 0.001..=2.0)
                             .logarithmic(true)
                             .suffix(" s")
                             .text("Attack"),
@@ -271,18 +271,18 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                     .changed();
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut i.decay, 0.01..=4.0)
+                        crate::widgets::Slider::new(&mut i.decay, 0.01..=4.0)
                             .logarithmic(true)
                             .suffix(" s")
                             .text("Decay"),
                     )
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut i.sustain, 0.0..=1.0).text("Sustain"))
+                    .add(crate::widgets::Slider::new(&mut i.sustain, 0.0..=1.0).text("Sustain"))
                     .changed();
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut i.release, 0.01..=6.0)
+                        crate::widgets::Slider::new(&mut i.release, 0.01..=6.0)
                             .logarithmic(true)
                             .suffix(" s")
                             .text("Release"),
@@ -290,18 +290,18 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                     .changed();
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut i.cutoff, 40.0..=18_000.0)
+                        crate::widgets::Slider::new(&mut i.cutoff, 40.0..=18_000.0)
                             .logarithmic(true)
                             .suffix(" Hz")
                             .text("Cutoff"),
                     )
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut i.resonance, 0.0..=1.0).text("Resonance"))
+                    .add(crate::widgets::Slider::new(&mut i.resonance, 0.0..=1.0).text("Resonance"))
                     .changed();
                 ch |= ui
                     .add(
-                        egui::Slider::new(&mut i.gain_db, -40.0..=6.0)
+                        crate::widgets::Slider::new(&mut i.gain_db, -40.0..=6.0)
                             .suffix(" dB")
                             .text("Level"),
                     )
@@ -450,7 +450,7 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     let mut db = sf.gain_db;
     let ch = ui
         .add(
-            egui::Slider::new(&mut db, -40.0..=12.0)
+            crate::widgets::Slider::new(&mut db, -40.0..=12.0)
                 .suffix(" dB")
                 .text("Level"),
         )
@@ -554,7 +554,7 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
                             continue;
                         } else {
                             let mut s =
-                                egui::Slider::new(&mut vals[k], p.min..=p.max).text(&p.name);
+                                crate::widgets::Slider::new(&mut vals[k], p.min..=p.max).text(&p.name);
                             if !p.unit.is_empty() {
                                 s = s.suffix(format!(" {}", p.unit));
                             }

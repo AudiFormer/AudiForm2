@@ -1556,7 +1556,7 @@ fn panel(ui: &mut egui::Ui, st: &mut State, v: &mut Visualizer) {
         ui.scope(|ui| {
             ui.spacing_mut().slider_width = 80.0;
             ui.add(
-                egui::Slider::new(&mut v.prefs.sens, 0.4..=2.5)
+                crate::widgets::Slider::new(&mut v.prefs.sens, 0.4..=2.5)
                     .step_by(0.1)
                     .show_value(false),
             );

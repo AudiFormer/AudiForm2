@@ -354,7 +354,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             .on_hover_text("Pull notes to a grid, on the picked notes or all");
         ui.separator();
         ui.add(
-            egui::Slider::new(&mut ps.zoom, 20.0..=400.0)
+            crate::widgets::Slider::new(&mut ps.zoom, 20.0..=400.0)
                 .logarithmic(true)
                 .show_value(false)
                 .text("Zoom"),

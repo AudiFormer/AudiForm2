@@ -699,7 +699,7 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                     let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                     ui.painter().rect_filled(r, 2.0, c(sw));
                     ui.add(
-                        egui::Slider::new(value, 0.0..=359.0)
+                        crate::widgets::Slider::new(value, 0.0..=359.0)
                             .suffix("°")
                             .text(label),
                     );

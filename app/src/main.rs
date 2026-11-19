@@ -36,6 +36,7 @@ mod transport;
 mod ui;
 mod visualizer;
 mod waveform;
+mod widgets;
 mod workspace;
 mod zoom;
 

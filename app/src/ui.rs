@@ -122,6 +122,7 @@ pub struct App {
     /// The docked cards as drawn last frame: their glass goes under them.
     cards: Vec<egui::Rect>,
     crowded: std::collections::HashSet<Tab>,
+    shown_env_tab: bool,
     showing: std::collections::HashSet<Tab>,
     boot_skipped: bool,
     /// Frame pacing for Auto visual effects.
@@ -180,6 +181,7 @@ impl App {
             viewer: Caches::default(),
             cards: Vec::new(),
             crowded: Default::default(),
+            shown_env_tab: false,
             showing: Default::default(),
             boot_skipped: false,
             last_frame: 0.0,
@@ -1022,7 +1024,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                         ui.painter().rect_filled(r, 2.0, c(sw));
                         changed |= ui
-                            .add(egui::Slider::new(value, 0.0..=359.0).suffix("°").text(label))
+                            .add(crate::widgets::Slider::new(value, 0.0..=359.0).suffix("°").text(label))
                             .changed();
                     });
                 }
@@ -1092,15 +1094,15 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     st.themes = crate::theme::load_all(&data_dir().join("themes"));
                     ui.close_menu();
                 }
-                ui.add(egui::Slider::new(&mut st.theme.glow, 0.0..=2.0).text("Glow"));
+                ui.add(crate::widgets::Slider::new(&mut st.theme.glow, 0.0..=2.0).text("Glow"));
                 if ui
-                    .add(egui::Slider::new(&mut st.theme.rounding, 0.0..=14.0).text("Rounding"))
+                    .add(crate::widgets::Slider::new(&mut st.theme.rounding, 0.0..=14.0).text("Rounding"))
                     .changed()
                 {
                     st.theme_changed = true;
                 }
                 if ui
-                    .add(egui::Slider::new(&mut st.theme.font_scale, 0.8..=1.4).text("Text size"))
+                    .add(crate::widgets::Slider::new(&mut st.theme.font_scale, 0.8..=1.4).text("Text size"))
                     .changed()
                 {
                     st.theme_changed = true;
@@ -1114,12 +1116,12 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                         }
                     }
                 });
-                ui.add(egui::Slider::new(&mut st.theme.grid_strength, 0.0..=2.0).text("Grid"));
-                ui.add(egui::Slider::new(&mut st.theme.glass, 0.3..=1.0).text("Glass"));
-                ui.add(egui::Slider::new(&mut st.theme.chamfer, 0.0..=20.0).text("Corner cut"));
-                ui.add(egui::Slider::new(&mut st.theme.scanlines, 0.0..=0.6).text("Scan lines"));
-                ui.add(egui::Slider::new(&mut st.theme.motion, 0.0..=2.0).text("Motion"));
-                ui.add(egui::Slider::new(&mut st.theme.reactive, 0.0..=1.5).text("Reacts to music"));
+                ui.add(crate::widgets::Slider::new(&mut st.theme.grid_strength, 0.0..=2.0).text("Grid"));
+                ui.add(crate::widgets::Slider::new(&mut st.theme.glass, 0.3..=1.0).text("Glass"));
+                ui.add(crate::widgets::Slider::new(&mut st.theme.chamfer, 0.0..=20.0).text("Corner cut"));
+                ui.add(crate::widgets::Slider::new(&mut st.theme.scanlines, 0.0..=0.6).text("Scan lines"));
+                ui.add(crate::widgets::Slider::new(&mut st.theme.motion, 0.0..=2.0).text("Motion"));
+                ui.add(crate::widgets::Slider::new(&mut st.theme.reactive, 0.0..=1.5).text("Reacts to music"));
                 ui.checkbox(&mut st.theme.brackets, "Corner brackets");
                 ui.checkbox(&mut st.theme.intro, "Boot sequence");
                 if !st.theme.columns.is_empty() {
@@ -1319,7 +1321,7 @@ fn spectral_tools(ui: &mut egui::Ui, st: &mut State) {
     }
     if wave && matches!(st.tool, Tool::BrushSelect | Tool::SpotRepair) {
         ui.add(
-            egui::Slider::new(&mut st.brush_px, 4.0..=120.0)
+            crate::widgets::Slider::new(&mut st.brush_px, 4.0..=120.0)
                 .integer()
                 .suffix(" px"),
         )
@@ -1882,7 +1884,7 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
                     }
                 });
                 ui.add(
-                    egui::Slider::new(&mut g.freq, 20.0..=20_000.0)
+                    crate::widgets::Slider::new(&mut g.freq, 20.0..=20_000.0)
                         .logarithmic(true)
                         .suffix(" Hz")
                         .text("Frequency"),
@@ -1897,13 +1899,13 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
             }
             if g.kind != 2 {
                 ui.add(
-                    egui::Slider::new(&mut g.db, -60.0..=0.0)
+                    crate::widgets::Slider::new(&mut g.db, -60.0..=0.0)
                         .suffix(" dB")
                         .text("Level"),
                 );
             }
             ui.add(
-                egui::Slider::new(&mut g.secs, 0.1..=600.0)
+                crate::widgets::Slider::new(&mut g.secs, 0.1..=600.0)
                     .logarithmic(true)
                     .suffix(" s")
                     .text("Duration"),
@@ -1961,6 +1963,16 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::selfshot::tick(ctx, ctx.input(|i| i.time));
+        // For documentation shots: AF2_SHOW_TAB=Inspector (etc.) opens that
+        // panel once at start.
+        if !self.shown_env_tab {
+            self.shown_env_tab = true;
+            if let Ok(name) = std::env::var("AF2_SHOW_TAB") {
+                if let Some(t) = Tab::ALL.iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(name.trim())) {
+                    self.show_tab(*t);
+                }
+            }
+        }
         let __t0 = std::time::Instant::now();
         struct TraceGuard(std::time::Instant, egui::Rect);
         impl Drop for TraceGuard {
@@ -2038,6 +2050,7 @@ impl eframe::App for App {
             th.motion = 0.0;
             th.glow = th.glow.min(0.6);
         }
+        crate::widgets::set_theme(ctx, &th);
         let peak = self.st.meter.0.max(self.st.meter.1);
         self.st.fx.update(ctx, &th, peak);
         let fx = self.st.fx.clone();
