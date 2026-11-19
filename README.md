@@ -126,20 +126,33 @@ Selection · = / - zoom · Esc clear selection.
 
 ## Performance
 
-The mixer runs in blocks with no allocation on the audio thread, and
-setting changes reach it as small fixed-size commands.
+The engine never allocates or locks on the audio thread. Each block,
+every track's own work (its clips or notes, effect chain and fader) is
+spread over a pool of worker threads that the audio thread drives with
+atomics alone, and buses that do not feed each other run side by side
+too. A one-core device simply runs everything on the audio thread.
 
-Like-for-like with Audiform (the same dense session: 48 stereo tracks,
+Like-for-like with Audiform: the same dense session (48 stereo tracks,
 crossfading clips, EQ and compressor on every track, a reverb on every
-third, two reverb buses), on one core of the same PC, 2026-11-19:
+third, two reverb buses), on the same PC, 2026-11-19, with the thread
+count limited to stand in for smaller devices:
 
-| | Real time |
-| --- | --- |
-| Audiform (`cargo test --release --lib bench_dense -- --ignored`) | 32.3x |
-| AudiForm 2 (`cargo test --release -p af27-engine --test bench_dense -- --ignored --nocapture`) | 18.2x |
+| Threads | Audiform | AudiForm 2 |
+| --- | --- | --- |
+| 1 | 6.6x real time | 19.6x |
+| 2 | 12.5x | 37.1x |
+| 4 | 20.5x | 63.3x |
+| 20 | 32.6x | 78.0x |
 
-So the audio engine is not yet faster than Audiform's; closing that gap
-is open work (the reverb and compressor are the largest costs).
+Run them with `AUDIFORM_THREADS=n cargo test --release --lib bench_dense -- --ignored --nocapture`
+(Audiform) and `AF2_THREADS=n cargo test --release -p af27-engine --test bench_dense -- --ignored --nocapture`
+(AudiForm 2).
+
+The UI draws with wgpu (DirectX 12, Vulkan or Metal) and falls back to
+OpenGL by itself where wgpu cannot start. View > Visual Effects picks
+Full, Lite or Auto; Auto drops the moving backdrop, scan lines and heavy
+glow on a device that cannot keep up. The HUD stops animating while the
+window is in the background or minimised.
 
 ## Licence
 

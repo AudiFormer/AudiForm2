@@ -99,6 +99,11 @@ pub struct App {
     /// The docked cards as drawn last frame: their glass goes under them.
     cards: Vec<egui::Rect>,
     boot_skipped: bool,
+    /// Frame pacing for Auto visual effects.
+    last_frame: f64,
+    pace: f32,
+    paced_frames: u32,
+    frame_cpu_ms: f32,
 }
 
 /// What a cached spectrogram was drawn from.
@@ -136,6 +141,10 @@ impl App {
             viewer: Caches::default(),
             cards: Vec::new(),
             boot_skipped: false,
+            last_frame: 0.0,
+            pace: 1.0 / 30.0,
+            paced_frames: 0,
+            frame_cpu_ms: 0.0,
         }
     }
 
@@ -675,6 +684,24 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.checkbox(&mut st.return_on_stop, "Return Playhead on Stop");
             ui.separator();
+            ui.menu_button("Visual Effects", |ui| {
+                for (m, label, tip) in [
+                    (0u8, "Auto", "Full effects, cut back on their own if this device draws slowly"),
+                    (1, "Full", "Every effect, always"),
+                    (2, "Lite", "No moving backdrop, glow or scan lines: lightest on slow or battery-powered devices"),
+                ] {
+                    if ui.radio(st.visuals_mode == m, label).on_hover_text(tip).clicked() {
+                        st.visuals_mode = m;
+                        st.visuals_lite = false;
+                        let _ = std::fs::create_dir_all(data_dir());
+                        let _ = std::fs::write(data_dir().join("visuals.txt"), m.to_string());
+                        ui.close_menu();
+                    }
+                }
+                if st.visuals_mode == 0 && st.visuals_lite {
+                    ui.label(RichText::new("Auto chose Lite for this device").small().color(c(st.theme.text_dim)));
+                }
+            });
             ui.menu_button("Theme", |ui| {
                 let names: Vec<String> = st.themes.iter().map(|t| t.name.clone()).collect();
                 for (i, n) in names.iter().enumerate() {
@@ -1104,7 +1131,29 @@ impl eframe::App for App {
         }
         self.st.tick();
         self.keys(ctx);
-        let th = self.st.theme.clone();
+        // How fast frames really arrive (CPU and GPU together). In Auto, a
+        // device that keeps missing the HUD's pace gets the lighter look.
+        let now = ctx.input(|i| i.time);
+        let gap = (now - self.last_frame).clamp(0.0, 1.0) as f32;
+        self.last_frame = now;
+        let busy_ms = self.frame_cpu_ms;
+        let animating = self.st.theme.motion > 0.0 && self.st.visuals_mode != 2;
+        if animating && gap < 0.5 {
+            self.pace = self.pace * 0.97 + gap.max(busy_ms / 1000.0) * 0.03;
+            self.paced_frames += 1;
+        }
+        if self.st.visuals_mode == 0 && !self.st.visuals_lite && self.paced_frames > 120 && self.pace > 0.055 {
+            self.st.visuals_lite = true;
+            self.st.toast("Visual effects reduced for this device (View > Visual Effects)");
+        }
+        let lite = self.st.visuals_mode == 2 || (self.st.visuals_mode == 0 && self.st.visuals_lite);
+        let mut th = self.st.theme.clone();
+        if lite {
+            th.grid_strength = 0.0;
+            th.scanlines = 0.0;
+            th.motion = 0.0;
+            th.glow = th.glow.min(0.6);
+        }
         let peak = self.st.meter.0.max(self.st.meter.1);
         self.st.fx.update(ctx, &th, peak);
         let fx = self.st.fx.clone();
@@ -1225,6 +1274,7 @@ impl eframe::App for App {
             crate::hud::scanlines(&top, screen, &th, &fx);
         }
         crate::hud::boot(ctx, &th, &fx, &mut self.boot_skipped);
+        self.frame_cpu_ms = __t0.elapsed().as_secs_f32() * 1000.0;
         if self.st.is_playing()
             || self.st.is_recording()
             || !self.st.jobs.is_empty()
@@ -1232,8 +1282,9 @@ impl eframe::App for App {
             || self.st.meter.0 > 0.001
         {
             ctx.request_repaint();
-        } else if fx.animating(&th) {
-            // The HUD keeps moving at a gentle 30 frames a second when idle.
+        } else if fx.animating(&th) && ctx.input(|i| i.viewport().focused.unwrap_or(true) && !i.viewport().minimized.unwrap_or(false)) {
+            // The HUD keeps moving at a gentle 30 frames a second when idle,
+            // only while the window has focus: in the background it rests.
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));

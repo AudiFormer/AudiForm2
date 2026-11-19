@@ -205,6 +205,10 @@ pub struct State {
     pub meter: (f32, f32),
     /// Motion and music state for the HUD chrome.
     pub fx: crate::hud::Fx,
+    /// Visual effects: 0 Auto (cut back when frames are slow), 1 Full, 2 Lite.
+    pub visuals_mode: u8,
+    /// Auto mode decided this device needs the lighter look.
+    pub visuals_lite: bool,
     pub meter_hold: (f32, f32),
 
     pub clipboard: Option<AudioBuffer>,
@@ -303,6 +307,12 @@ impl State {
             return_on_stop: true,
             meter: (0.0, 0.0),
             fx: crate::hud::Fx::default(),
+            visuals_mode: std::fs::read_to_string(data_dir().join("visuals.txt"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .filter(|m: &u8| *m <= 2)
+                .unwrap_or(0),
+            visuals_lite: false,
             meter_hold: (0.0, 0.0),
             clipboard: None,
             effect: Effect::Amplify,

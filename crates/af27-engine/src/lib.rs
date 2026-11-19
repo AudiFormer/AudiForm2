@@ -13,6 +13,7 @@
 //! Position, meters and the Phase Wheel's ring come back through atomics.
 
 pub mod mix;
+pub mod pool;
 pub mod scope;
 pub mod synth;
 

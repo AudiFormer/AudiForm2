@@ -63,12 +63,9 @@ fn music(rate: u32) -> AudioBuffer {
     }
 }
 
-#[test]
-#[ignore]
-fn bench_dense() {
+/// The dense session: `tracks` tracks over `secs` seconds.
+fn dense(tracks: usize, secs: f64) -> (Session, Arc<AudioBuffer>, usize) {
     let rate = 48_000u32;
-    let tracks = env("BENCH_TRACKS", 48);
-    let secs = env("BENCH_SECS", 30) as f64;
     let buf = Arc::new(music(rate));
     let mut s = Session::new("bench", rate, 0);
     let m = s.alloc_id();
@@ -133,6 +130,16 @@ fn bench_dense() {
             at += 8.0;
         }
     }
+    (s, buf, clips)
+}
+
+#[test]
+#[ignore]
+fn bench_dense() {
+    let rate = 48_000u32;
+    let tracks = env("BENCH_TRACKS", 48);
+    let secs = env("BENCH_SECS", 30) as f64;
+    let (s, buf, clips) = dense(tracks, secs);
     let b2 = buf.clone();
     let program = mix_program(&s, &move |_| Some(b2.clone()), rate);
     let t0 = Instant::now();
@@ -169,4 +176,21 @@ fn bench_each_effect() {
         let took = t0.elapsed().as_secs_f64();
         eprintln!("{id}: {:.0}x real time ({:.1} ms per 30 s)", 30.0 / took, took * 1000.0);
     }
+}
+
+/// Spreading tracks over threads changes nothing in the sound.
+#[test]
+fn parallel_mix_matches_serial_exactly() {
+    let rate = 48_000u32;
+    let (s, buf, _) = dense(12, 3.0);
+    let run = |parallel: bool| {
+        let b = buf.clone();
+        let mut m = af27_engine::mix::build(&s, &move |_| Some(b.clone()), rate);
+        m.parallel = parallel;
+        render(af27_engine::Program::Mix(Box::new(m)), rate, 0.0, 3.0)
+    };
+    let a = run(true);
+    let b = run(false);
+    assert_eq!(a.channels, b.channels);
+    assert!(a.channels[0].iter().any(|v| v.abs() > 1e-3));
 }

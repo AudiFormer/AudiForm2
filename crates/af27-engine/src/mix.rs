@@ -26,7 +26,7 @@ use af27_dsp::wide::{build_wide_chain, WideChain};
 
 use crate::synth::{self, Synth};
 
-pub const BLOCK: usize = 256;
+pub const BLOCK: usize = 2048;
 /// Speaker channels at most (7.1.4 is 12).
 pub const MAX_SPEAKERS: usize = 16;
 
@@ -59,6 +59,8 @@ pub struct MixTrack {
     /// Index of the bus track it feeds, or None for the master.
     pub output: Option<usize>,
     pub sends: Vec<MixSend>,
+    /// Has a pre-fader send (so the fader waits for the sends).
+    pub has_pre: bool,
     /// 3D: gains per speaker for the left and right side, and the LFE send.
     pub space_l: [f32; MAX_SPEAKERS],
     pub space_r: [f32; MAX_SPEAKERS],
@@ -87,6 +89,13 @@ pub struct Mix {
     pub metronome: Option<(f64, u32)>,
     ml: Vec<f32>,
     mr: Vec<f32>,
+    /// The audio and MIDI tracks (not buses), whose own work runs in parallel.
+    work: Vec<usize>,
+    /// Buses grouped so none in a group feeds another in it: each group's
+    /// chains run in parallel, groups in order.
+    bus_levels: Vec<Vec<usize>>,
+    /// Spread track work over the engine's threads (false: all on the caller).
+    pub parallel: bool,
 }
 
 /// Stereo at fractional index `x`, folding wide files (see `stereo_frame`).
@@ -138,6 +147,95 @@ pub fn stereo_frame(buf: &AudioBuffer, x: f64) -> (f32, f32) {
             let norm = 1.0 / (1.0 + H + H * pairs);
             (l * norm, r * norm)
         }
+    }
+}
+
+/// Groups the buses into levels: a bus is one level above every earlier
+/// bus that feeds it (by output or send), so the buses within a level are
+/// independent. Feeds to an earlier bus arrive after it has run, as they
+/// always have, and are ignored here.
+fn bus_levels(tracks: &[MixTrack]) -> Vec<Vec<usize>> {
+    let mut level = vec![0usize; tracks.len()];
+    for (b, t) in tracks.iter().enumerate() {
+        if !t.is_bus {
+            continue;
+        }
+        for (a, s) in tracks.iter().enumerate().take(b) {
+            let feeds = s.is_bus && (s.output == Some(b) || s.sends.iter().any(|x| x.bus == b));
+            if feeds {
+                level[b] = level[b].max(level[a] + 1);
+            }
+        }
+    }
+    let top = level.iter().copied().max().unwrap_or(0);
+    let mut out = vec![Vec::new(); top + 1];
+    for (i, t) in tracks.iter().enumerate() {
+        if t.is_bus {
+            out[level[i]].push(i);
+        }
+    }
+    out.retain(|l| !l.is_empty());
+    out
+}
+
+/// A track list shared with the engine's threads for one block.
+#[derive(Clone, Copy)]
+struct TrackPtr(*mut MixTrack);
+// Each thread takes a different track (see `Mix::render`).
+unsafe impl Sync for TrackPtr {}
+unsafe impl Send for TrackPtr {}
+
+impl TrackPtr {
+    /// The `i`th track. Callers keep indices distinct across threads.
+    #[inline]
+    fn get(self, i: usize) -> *mut MixTrack {
+        unsafe { self.0.add(i) }
+    }
+}
+
+/// A track's own sound for one block: silence, then its clips or notes,
+/// then its effect chain. Touches nothing but the track itself.
+fn render_source(t: &mut MixTrack, t0: f64, dt: f64, n: usize) {
+    t.l[..n].fill(0.0);
+    t.r[..n].fill(0.0);
+    if !t.audible {
+        return;
+    }
+    let t1 = t0 + dt * n as f64;
+    for c in &t.clips {
+        if c.start >= t1 || c.start + c.length <= t0 {
+            continue;
+        }
+        read_clip(c, t0, dt, &mut t.l[..n], &mut t.r[..n]);
+    }
+    if let Some(s) = &mut t.synth {
+        s.render(t0, dt, &mut t.l[..n], &mut t.r[..n]);
+    }
+    t.chain.process(&mut t.l[..n], &mut t.r[..n]);
+    // With no pre-fader send, the fader can go on here, in parallel too.
+    if !t.has_pre {
+        apply_fader(t, n);
+    }
+}
+
+#[inline]
+fn apply_fader(t: &mut MixTrack, n: usize) {
+    let (gl, gr) = (t.gain_l, t.gain_r);
+    for (l, r) in t.l[..n].iter_mut().zip(&mut t.r[..n]) {
+        *l *= gl;
+        *r *= gr;
+    }
+}
+
+/// Track `a` to read and track `b` to add into (`a != b`).
+#[inline]
+fn pair(tracks: &mut [MixTrack], a: usize, b: usize) -> (&MixTrack, &mut MixTrack) {
+    if a < b {
+        let (x, y) = tracks.split_at_mut(b);
+        (&x[a], &mut y[0])
+    } else {
+        let (x, y) = tracks.split_at_mut(a);
+        (&y[0], &mut x[b])
     }
 }
 
@@ -336,6 +434,7 @@ pub fn build(
                         })
                     })
                     .collect(),
+                has_pre: t.sends.iter().any(|s| s.pre_fader),
                 space_l,
                 space_r,
                 lfe,
@@ -361,7 +460,20 @@ pub fn build(
     } else {
         &session.master_chain
     };
+    // Start the engine's threads here, on the UI thread, never on the
+    // audio thread.
+    let _ = crate::pool::pool();
+    let work = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !t.is_bus)
+        .map(|(i, _)| i)
+        .collect();
+    let bus_levels = bus_levels(&tracks);
     Mix {
+        bus_levels,
+        work,
+        parallel: true,
         tracks,
         master_chain: build_chain(master_slots, rate, BLOCK),
         master: db_to_gain(session.master_db),
@@ -418,20 +530,13 @@ impl Mix {
     }
 
     fn route(&mut self, ti: usize, n: usize) {
-        let (out, l, r) = {
-            let t = &self.tracks[ti];
-            let mut l = [0.0f32; BLOCK];
-            let mut r = [0.0f32; BLOCK];
-            l[..n].copy_from_slice(&t.l[..n]);
-            r[..n].copy_from_slice(&t.r[..n]);
-            (t.output, l, r)
-        };
+        let out = self.tracks[ti].output;
         match out {
-            Some(bus) if bus > ti || !self.tracks[ti].is_bus => {
-                let b = &mut self.tracks[bus];
-                for i in 0..n {
-                    b.l[i] += l[i];
-                    b.r[i] += r[i];
+            Some(bus) if bus != ti && (bus > ti || !self.tracks[ti].is_bus) => {
+                let (t, b) = pair(&mut self.tracks, ti, bus);
+                for ((bl, br), (l, r)) in b.l[..n].iter_mut().zip(&mut b.r[..n]).zip(t.l[..n].iter().zip(&t.r[..n])) {
+                    *bl += l;
+                    *br += r;
                 }
             }
             _ => match &mut self.space {
@@ -439,19 +544,21 @@ impl Mix {
                     let t = &self.tracks[ti];
                     let ch = sp.channels;
                     for i in 0..n {
+                        let (l, r) = (t.l[i], t.r[i]);
                         let frame = &mut sp.bed[i * ch..(i + 1) * ch];
                         for c in 0..ch.min(MAX_SPEAKERS) {
-                            frame[c] += l[i] * t.space_l[c] + r[i] * t.space_r[c];
+                            frame[c] += l * t.space_l[c] + r * t.space_r[c];
                         }
                         if let Some(lc) = sp.lfe_channel {
-                            frame[lc] += (l[i] + r[i]) * 0.5 * t.lfe;
+                            frame[lc] += (l + r) * 0.5 * t.lfe;
                         }
                     }
                 }
                 None => {
-                    for i in 0..n {
-                        self.ml[i] += l[i];
-                        self.mr[i] += r[i];
+                    let t = &self.tracks[ti];
+                    for ((ml, mr), (l, r)) in self.ml[..n].iter_mut().zip(&mut self.mr[..n]).zip(t.l[..n].iter().zip(&t.r[..n])) {
+                        *ml += l;
+                        *mr += r;
                     }
                 }
             },
@@ -467,31 +574,21 @@ impl Mix {
             if is_pre != pre || bus == ti {
                 continue;
             }
-            let mut l = [0.0f32; BLOCK];
-            let mut r = [0.0f32; BLOCK];
-            l[..n].copy_from_slice(&self.tracks[ti].l[..n]);
-            r[..n].copy_from_slice(&self.tracks[ti].r[..n]);
-            let b = &mut self.tracks[bus];
-            for i in 0..n {
-                b.l[i] += l[i] * g;
-                b.r[i] += r[i] * g;
+            let (t, b) = pair(&mut self.tracks, ti, bus);
+            for ((bl, br), (l, r)) in b.l[..n].iter_mut().zip(&mut b.r[..n]).zip(t.l[..n].iter().zip(&t.r[..n])) {
+                *bl += l * g;
+                *br += r * g;
             }
         }
     }
 
-    fn finish_track(&mut self, ti: usize, n: usize) {
-        {
+    /// After the chain: pre-fader sends, fader (unless `faded`: already
+    /// applied in the parallel stage), post-fader sends, output.
+    fn mix_out(&mut self, ti: usize, n: usize, faded: bool) {
+        if !faded {
+            self.sends(ti, n, true);
             let t = &mut self.tracks[ti];
-            let (l, r) = (&mut t.l[..n], &mut t.r[..n]);
-            t.chain.process(l, r);
-        }
-        self.sends(ti, n, true);
-        {
-            let t = &mut self.tracks[ti];
-            for i in 0..n {
-                t.l[i] *= t.gain_l;
-                t.r[i] *= t.gain_r;
-            }
+            apply_fader(t, n);
         }
         self.sends(ti, n, false);
         self.route(ti, n);
@@ -520,36 +617,56 @@ impl Mix {
                 t.r[..n].fill(0.0);
             }
         }
-        for ti in 0..self.tracks.len() {
-            if self.tracks[ti].is_bus {
-                continue;
+        // Every track's own work (its clips or notes and its effect chain)
+        // is independent of the others, so it is spread over the engine's
+        // threads. Sends and outputs, which add into shared buses, follow
+        // in order on this thread.
+        let work = std::mem::take(&mut self.work);
+        {
+            let tracks = TrackPtr(self.tracks.as_mut_ptr());
+            let job = |k: usize| {
+                // Each index in `work` is a different track, and the pool
+                // runs each `k` exactly once, so these borrows never overlap.
+                let t = unsafe { &mut *tracks.get(work[k]) };
+                render_source(t, t0, dt, n);
+            };
+            if self.parallel && work.len() >= 2 {
+                crate::pool::pool().run(work.len(), &job);
+            } else {
+                (0..work.len()).for_each(job);
             }
-            let t = &mut self.tracks[ti];
-            t.l[..n].fill(0.0);
-            t.r[..n].fill(0.0);
-            if !t.audible {
-                continue;
+        }
+        for &ti in &work {
+            if self.tracks[ti].audible {
+                let faded = !self.tracks[ti].has_pre;
+                self.mix_out(ti, n, faded);
             }
-            let t1 = t0 + dt * n as f64;
-            let (clips, tl, tr) = (&t.clips, &mut t.l, &mut t.r);
-            for c in clips {
-                if c.start >= t1 || c.start + c.length <= t0 {
-                    continue;
+        }
+        self.work = work;
+        let levels = std::mem::take(&mut self.bus_levels);
+        for level in &levels {
+            {
+                let tracks = TrackPtr(self.tracks.as_mut_ptr());
+                let job = |k: usize| {
+                    // Distinct buses, each run once (see above).
+                    let t = unsafe { &mut *tracks.get(level[k]) };
+                    if t.audible {
+                        t.chain.process(&mut t.l[..n], &mut t.r[..n]);
+                    }
+                };
+                if self.parallel && level.len() >= 2 {
+                    crate::pool::pool().run(level.len(), &job);
+                } else {
+                    (0..level.len()).for_each(job);
                 }
-                read_clip(c, t0, dt, &mut tl[..n], &mut tr[..n]);
             }
-            let t = &mut self.tracks[ti];
-            if let Some(s) = &mut t.synth {
-                let (l, r) = (&mut t.l[..n], &mut t.r[..n]);
-                s.render(t0, dt, l, r);
-            }
-            self.finish_track(ti, n);
-        }
-        for ti in 0..self.tracks.len() {
-            if self.tracks[ti].is_bus && self.tracks[ti].audible {
-                self.finish_track(ti, n);
+            for &ti in level {
+                if self.tracks[ti].audible {
+                    self.mix_out(ti, n, false);
+                }
             }
         }
+        self.bus_levels = levels;
         if let Some(sp) = &mut self.space {
             // The master chain on the speakers, before listening or export.
             sp.chain.process(&mut sp.bed[..n * sp.channels]);

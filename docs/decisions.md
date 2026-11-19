@@ -55,3 +55,21 @@
   enforceable. `af27-dts` stays LGPL, which forbids added restrictions.
   The lead's earlier upstream contributions were licensed to AAE under its
   agreement; this licence does not and cannot change that.
+
+## 2026-11-19: AudiForm 2, performance
+
+- **Renamed AudiForm 2** (project lead). Visible name, logo and licence
+  title. Crate names, file extensions and the settings folder keep
+  `af27`/`Audiform27` so nothing saved is lost.
+- **Parallel engine.** A pool of worker threads (one fewer than the
+  cores, at most 15) driven by the audio thread with atomics only: no
+  locks or allocation, unlike rayon (which Audiform uses), whose
+  injection from a foreign thread takes a lock. Workers spin 300 us after
+  a block and then park, so an idle or lightly loaded engine does not
+  burn cores. Parallel and serial mixes are bit-identical (tested).
+- **Internal block raised to 2048 frames** (as Audiform): fewer handoffs
+  per second; a device callback of any size still works.
+- **wgpu renderer with OpenGL fallback.** OpenGL showed a white window on
+  the lead's PC.
+- **Visual Effects Auto/Full/Lite.** Auto watches real frame pacing and
+  drops to Lite on slow devices.
