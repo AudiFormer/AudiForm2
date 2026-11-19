@@ -8,6 +8,7 @@ mod corners;
 mod fx;
 mod fx_menu;
 mod hud;
+mod hwcursor;
 mod inspector;
 mod keymap;
 mod multitrack;

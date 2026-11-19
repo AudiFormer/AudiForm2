@@ -4,7 +4,8 @@
 //! Theme mouse pointers: Audiform's glass, Phosphor pixel and Mall Pastel
 //! pointers (see `assets/pointers/README.md`).
 //!
-//! egui cannot hand the OS a custom cursor picture, so this draws a
+//! On Windows the pictures become real OS cursors (`hwcursor.rs`), which
+//! move with the mouse at no lag. Elsewhere, or if that fails, this draws a
 //! software pointer: at the end of each frame it reads the cursor egui
 //! wants, hides the OS cursor and paints the theme's picture for it on the
 //! top-most layer. The OS cursor comes back as soon as the pointer leaves
@@ -246,10 +247,12 @@ pub fn menu_toggle(ui: &mut egui::Ui) {
 /// Call once at the very end of the frame: swaps the OS cursor for the
 /// theme's pointer while the pointer is over the window.
 pub fn draw(ctx: &Context, theme_pointers: &str) {
-    if !enabled_flag().load(Ordering::Relaxed) {
+    let on = enabled_flag().load(Ordering::Relaxed);
+    let set = set(theme_pointers).filter(|_| on);
+    if crate::hwcursor::frame(ctx, set) {
         return;
     }
-    let Some(set) = set(theme_pointers) else {
+    let Some(set) = set else {
         return;
     };
     let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
@@ -261,12 +264,8 @@ pub fn draw(ctx: &Context, theme_pointers: &str) {
     let p = set.pointer(kind);
     let ppp = ctx.pixels_per_point();
     // Screen pixels per CSS pixel of the picture.
-    let mut density = set.scale * ppp;
-    if set.pixel {
-        // Whole screen pixels per art cell (2 CSS pixels each).
-        density = (density * 2.0).round().max(1.0) / 2.0;
-    }
-    let i = if density <= SCALES[0] as f32 { 0 } else { 1 };
+    let density = crate::hwcursor::density(set, ppp);
+    let i = crate::hwcursor::scale_index(density);
     let Some(tex) = texture(ctx, set, p, i) else {
         return;
     };
