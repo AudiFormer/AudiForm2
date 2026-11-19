@@ -48,6 +48,12 @@ pub enum Cmd {
     MoveTool,
     RazorTool,
     TimeSelectTool,
+    SaveAs,
+    ExportMixdown,
+    ExportStems,
+    BounceTrack,
+    RepeatEffect,
+    RepeatEffectAdjust,
 }
 
 impl Cmd {
@@ -86,6 +92,12 @@ impl Cmd {
         Cmd::MoveTool,
         Cmd::RazorTool,
         Cmd::TimeSelectTool,
+        Cmd::SaveAs,
+        Cmd::ExportMixdown,
+        Cmd::ExportStems,
+        Cmd::BounceTrack,
+        Cmd::RepeatEffect,
+        Cmd::RepeatEffectAdjust,
     ];
 
     pub fn label(self) -> &'static str {
@@ -124,12 +136,23 @@ impl Cmd {
             Cmd::MoveTool => "Move Tool",
             Cmd::RazorTool => "Razor Tool",
             Cmd::TimeSelectTool => "Time Selection Tool",
+            Cmd::SaveAs => "Save Audio As...",
+            Cmd::ExportMixdown => "Export Multitrack Mixdown...",
+            Cmd::ExportStems => "Export Track Stems...",
+            Cmd::BounceTrack => "Bounce Selected Track to New Track",
+            Cmd::RepeatEffect => "Repeat Last Effect",
+            Cmd::RepeatEffectAdjust => "Repeat Last Effect with Changes...",
         }
     }
 
     pub fn group(self) -> &'static str {
         match self {
-            Cmd::NewFile | Cmd::Open | Cmd::Save => "File",
+            Cmd::NewFile
+            | Cmd::Open
+            | Cmd::Save
+            | Cmd::SaveAs
+            | Cmd::ExportMixdown
+            | Cmd::ExportStems => "File",
             Cmd::Undo
             | Cmd::Redo
             | Cmd::Cut
@@ -142,10 +165,14 @@ impl Cmd {
             | Cmd::ClearSelection
             | Cmd::KeyboardShortcuts
             | Cmd::Preferences => "Edit",
-            Cmd::SplitAtPlayhead => "Multitrack",
-            Cmd::Invert | Cmd::Reverse | Cmd::Silence | Cmd::MatchLoudness | Cmd::AutoHeal => {
-                "Effects"
-            }
+            Cmd::SplitAtPlayhead | Cmd::BounceTrack => "Multitrack",
+            Cmd::Invert
+            | Cmd::Reverse
+            | Cmd::Silence
+            | Cmd::MatchLoudness
+            | Cmd::AutoHeal
+            | Cmd::RepeatEffect
+            | Cmd::RepeatEffectAdjust => "Effects",
             Cmd::PlayStop | Cmd::Record | Cmd::Loop | Cmd::ToStart | Cmd::ToEnd => "Transport",
             Cmd::WaveformView
             | Cmd::MultitrackView
@@ -160,7 +187,7 @@ impl Cmd {
     pub fn global(self) -> bool {
         matches!(
             self,
-            Cmd::NewFile | Cmd::Open | Cmd::Save | Cmd::Undo | Cmd::Redo
+            Cmd::NewFile | Cmd::Open | Cmd::Save | Cmd::SaveAs | Cmd::Undo | Cmd::Redo
         )
     }
 
@@ -209,12 +236,24 @@ impl Cmd {
             Cmd::MoveTool => vec![p(K::V)],
             Cmd::RazorTool => vec![p(K::R)],
             Cmd::TimeSelectTool => vec![p(K::T)],
+            Cmd::SaveAs => vec![Binding {
+                shift: true,
+                ..c(K::S)
+            }],
+            Cmd::RepeatEffect => vec![Binding {
+                shift: true,
+                ..p(K::R)
+            }],
+            Cmd::RepeatEffectAdjust => vec![c(K::R)],
             Cmd::Preferences
             | Cmd::Invert
             | Cmd::Reverse
             | Cmd::Silence
             | Cmd::MatchLoudness
-            | Cmd::ZoomFull => Vec::new(),
+            | Cmd::ZoomFull
+            | Cmd::ExportMixdown
+            | Cmd::ExportStems
+            | Cmd::BounceTrack => Vec::new(),
         }
     }
 }

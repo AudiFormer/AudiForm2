@@ -406,6 +406,25 @@ impl App {
             Cmd::MoveTool => st.tool = Tool::Move,
             Cmd::RazorTool => st.tool = Tool::Razor,
             Cmd::TimeSelectTool => st.tool = Tool::TimeSelect,
+            Cmd::SaveAs => crate::export::open_save_as(st),
+            Cmd::ExportMixdown => crate::export::open_mixdown(st),
+            Cmd::ExportStems => crate::export::open_stems(st),
+            Cmd::BounceTrack => crate::export::bounce_track(st),
+            Cmd::RepeatEffect => match st.last_effect.clone() {
+                Some((e, vals)) => {
+                    st.effect_values.insert(e, vals);
+                    apply_now(st, e);
+                }
+                None => st.toast("No effect to repeat yet"),
+            },
+            Cmd::RepeatEffectAdjust => match st.last_effect.clone() {
+                Some((e, vals)) => {
+                    st.effect_values.insert(e, vals);
+                    st.effect = e;
+                    self.show_tab(Tab::Effects);
+                }
+                None => st.toast("No effect to repeat yet"),
+            },
         }
     }
 }
@@ -500,36 +519,11 @@ pub fn open_dialog(st: &mut State) {
 
 fn save(st: &mut State) {
     match st.mode {
-        Mode::Waveform => {
-            let wav_path = st
-                .doc()
-                .and_then(|d| d.path.clone())
-                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")));
-            match wav_path {
-                Some(p) => st.save_doc_as(p, af27_io::WavFormat::Float32),
-                None => save_doc_as(st),
-            }
-        }
+        Mode::Waveform => crate::export::save_in_place(st),
         Mode::Multitrack => match st.session_path.clone() {
             Some(p) => st.save_session_to(p),
             None => save_session_as(st),
         },
-    }
-}
-
-fn save_doc_as(st: &mut State) {
-    let Some(d) = st.doc() else { return };
-    let stem = d
-        .name
-        .rsplit_once('.')
-        .map_or(d.name.as_str(), |(a, _)| a)
-        .to_string();
-    if let Some(p) = rfd::FileDialog::new()
-        .set_file_name(format!("{stem}.wav"))
-        .add_filter("WAV (32-bit float)", &["wav"])
-        .save_file()
-    {
-        st.save_doc_as(p, af27_io::WavFormat::Float32);
     }
 }
 
@@ -597,57 +591,30 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             cmd_item(ui, km, Cmd::Open, "Open...", true, &mut cmd);
             ui.separator();
             cmd_item(ui, km, Cmd::Save, "Save", true, &mut cmd);
-            if ui.button("Save Audio As...").clicked() {
-                save_doc_as(st);
-                ui.close_menu();
-            }
-            ui.menu_button("Save Audio As Format", |ui| {
-                for fmt in af27_io::WavFormat::ALL {
-                    if ui.button(format!("WAV, {}", fmt.label())).clicked() {
-                        if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("WAV", &["wav"])
-                            .save_file()
-                        {
-                            st.save_doc_as(p, fmt);
-                        }
-                        ui.close_menu();
-                    }
-                }
-            });
+            let has_doc = st.doc().is_some();
+            cmd_item(ui, km, Cmd::SaveAs, "Save Audio As...", has_doc, &mut cmd);
             if ui.button("Save Session As...").clicked() {
                 save_session_as(st);
                 ui.close_menu();
             }
             ui.separator();
-            if st.session.space.is_some()
-                && ui
-                    .button("Export 3D Speaker Bed (multichannel WAV)...")
-                    .clicked()
-            {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_file_name(format!("{} Bed.wav", st.session.name))
-                    .add_filter("WAV", &["wav"])
-                    .save_file()
+            ui.menu_button("Export", |ui| {
+                cmd_item(
+                    ui,
+                    km,
+                    Cmd::ExportMixdown,
+                    "Multitrack Mixdown...",
+                    true,
+                    &mut cmd,
+                );
+                cmd_item(ui, km, Cmd::ExportStems, "Track Stems...", true, &mut cmd);
+                if st.session.space.is_some()
+                    && ui.button("3D Speaker Bed (multichannel)...").clicked()
                 {
-                    let (a, b) = st.session_sel.unwrap_or((0.0, st.session.duration()));
-                    let bed = st.render_mix(a, b, true);
-                    match af27_io::write_wav(&p, &bed, af27_io::WavFormat::Pcm24) {
-                        Ok(()) => st.toast(format!("Exported {} channels", bed.num_channels())),
-                        Err(e) => st.error(e),
-                    }
+                    crate::export::open_bed(st);
+                    ui.close_menu();
                 }
-                ui.close_menu();
-            }
-            if ui.button("Export Multitrack Mixdown...").clicked() {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_file_name(format!("{} Mixdown.wav", st.session.name))
-                    .add_filter("WAV", &["wav"])
-                    .save_file()
-                {
-                    st.export_mixdown(p, af27_io::WavFormat::Pcm24);
-                }
-                ui.close_menu();
-            }
+            });
             ui.separator();
             if ui.button("Close File").clicked() {
                 if let Some(id) = st.current {
@@ -727,6 +694,14 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.delete_clip();
                 ui.close_menu();
             }
+            cmd_item(
+                ui,
+                km,
+                Cmd::BounceTrack,
+                "Bounce Selected Track to New Track",
+                st.selected_track.is_some(),
+                &mut cmd,
+            );
             if ui.button("Insert Current File at Playhead").clicked() {
                 if let (Some(d), Some(t)) = (
                     st.current,
@@ -968,6 +943,24 @@ fn effects_menu(
     cmd: &mut Option<Cmd>,
     open_tab: &mut Option<Tab>,
 ) {
+    let last = st.last_effect.as_ref().map(|(e, _)| e.name());
+    let (repeat, adjust) = match last {
+        Some(n) => (format!("Repeat {n}"), format!("Repeat {n} with Changes...")),
+        None => (
+            "Repeat Last Effect".to_string(),
+            "Repeat Last Effect with Changes...".to_string(),
+        ),
+    };
+    cmd_item(ui, km, Cmd::RepeatEffect, &repeat, last.is_some(), cmd);
+    cmd_item(
+        ui,
+        km,
+        Cmd::RepeatEffectAdjust,
+        &adjust,
+        last.is_some(),
+        cmd,
+    );
+    ui.separator();
     let multi = st.mode == Mode::Multitrack;
     // Clips have no rack of their own yet: a clip's track's rack opens.
     let clip_track = st
@@ -1799,6 +1792,8 @@ impl eframe::App for App {
             self.show_tab(Tab::PianoRoll);
         }
         generate_window(ctx, &mut self.st);
+        crate::export::poll(&mut self.st, ctx);
+        crate::export::show(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);
         let th_now = self.st.theme.clone();

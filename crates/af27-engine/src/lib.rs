@@ -556,6 +556,82 @@ fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -
     AudioBuffer::from_interleaved(rate, channels, &inter)
 }
 
+/// Offline render handed out block by block (interleaved), so a long
+/// mixdown can go straight to a file without sitting in memory. `each`
+/// returns false to stop early. Returns the channel count.
+pub fn render_each(
+    program: Program,
+    rate: u32,
+    from: f64,
+    to: f64,
+    bed_out: bool,
+    mut each: impl FnMut(&[f32]) -> bool,
+) -> usize {
+    let channels = match (&program, bed_out) {
+        (Program::Mix(m), true) => m.channels_out(),
+        _ => 2,
+    };
+    let mut v = Voice {
+        program: Some(Box::new(program)),
+        playing: true,
+        t: from,
+        from,
+        to,
+        looping: false,
+    };
+    if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
+        m.reset();
+    }
+    let mut left = ((to - from).max(0.0) * rate as f64).round() as usize;
+    let mut block = vec![0.0f32; BLOCK * channels];
+    while left > 0 {
+        let n = left.min(BLOCK);
+        let chunk = &mut block[..n * channels];
+        chunk.fill(0.0);
+        v.render(chunk, channels, rate as f64, bed_out);
+        if !each(chunk) {
+            break;
+        }
+        left -= n;
+    }
+    channels
+}
+
+/// The channels [`render_each`] hands out for a program.
+pub fn render_channels(program: &Program, bed_out: bool) -> usize {
+    match (program, bed_out) {
+        (Program::Mix(m), true) => m.channels_out(),
+        _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod render_each_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_match_the_whole_render() {
+        let mut b = AudioBuffer::new(48_000, 2, 30_000);
+        for (i, s) in b.channels[0].iter_mut().enumerate() {
+            *s = (i as f32 * 0.01).sin() * 0.5;
+        }
+        let buf = Arc::new(b);
+        let prog = || Program::Buffer {
+            buf: buf.clone(),
+            channel_mask: 0b11,
+        };
+        let whole = render(prog(), 48_000, 0.1, 0.5);
+        let mut got = Vec::new();
+        let ch = render_each(prog(), 48_000, 0.1, 0.5, false, |blk| {
+            got.extend_from_slice(blk);
+            true
+        });
+        assert_eq!(ch, 2);
+        assert_eq!(got.len(), whole.frames() * 2);
+        assert_eq!(AudioBuffer::from_interleaved(48_000, 2, &got), whole);
+    }
+}
+
 /// Offline stereo mixdown (3D sessions as heard: binaural or folded).
 pub fn render(program: Program, rate: u32, from: f64, to: f64) -> AudioBuffer {
     render_with(program, rate, from, to, false)

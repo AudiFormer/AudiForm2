@@ -11,3 +11,7 @@ af27-core.workspace = true
 symphonia.workspace = true
 hound.workspace = true
 af27-dts.workspace = true
+af27-dsp.workspace = true
+serde.workspace = true
+# Apache-2.0, pure Rust FLAC encoder.
+flacenc = { version = "0.5.1", default-features = false }
