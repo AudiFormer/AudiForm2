@@ -1,9 +1,12 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! A Schroeder-style reverb: eight damped feedback combs in parallel
-//! then four allpasses in series, per channel. Delay lengths are the
-//! public-domain Freeverb tunings, scaled to the sample rate.
+//! then four allpasses in series, per side. Delay lengths are the
+//! public-domain Freeverb tunings, scaled to the sample rate; the right
+//! side's lines are a little longer so the tail is wide.
+
+use crate::live::Live;
 
 const COMBS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
 const ALLPASSES: [usize; 4] = [556, 441, 341, 225];
@@ -16,11 +19,15 @@ struct Comb {
 }
 
 impl Comb {
+    #[inline]
     fn tick(&mut self, x: f32, feedback: f32, damp: f32) -> f32 {
         let y = self.buf[self.pos];
         self.store = y * (1.0 - damp) + self.store * damp;
         self.buf[self.pos] = x + self.store * feedback;
-        self.pos = (self.pos + 1) % self.buf.len();
+        self.pos += 1;
+        if self.pos == self.buf.len() {
+            self.pos = 0;
+        }
         y
     }
 }
@@ -31,85 +38,134 @@ struct Allpass {
 }
 
 impl Allpass {
+    #[inline]
     fn tick(&mut self, x: f32) -> f32 {
         let b = self.buf[self.pos];
         let y = b - x;
         self.buf[self.pos] = x + b * 0.5;
-        self.pos = (self.pos + 1) % self.buf.len();
+        self.pos += 1;
+        if self.pos == self.buf.len() {
+            self.pos = 0;
+        }
         y
     }
 }
 
-pub struct Settings {
-    /// 0..1, longer tails as it grows.
-    pub room: f32,
-    /// 0..1, darker tails as it grows.
-    pub damping: f32,
-    /// 0..1 wet share.
-    pub mix: f32,
-    /// 0..1 stereo width of the tail.
-    pub width: f32,
-    pub pre_delay_ms: f32,
+struct Tank {
+    combs: Vec<Comb>,
+    aps: Vec<Allpass>,
 }
 
-/// Processes planar channels in place. Adds `tail` seconds of decay
-/// when `tail_frames` > 0 (the caller extends the buffers first).
-pub fn process(channels: &mut [Vec<f32>], rate: u32, s: &Settings) {
-    let scale = rate as f32 / 44_100.0;
-    let feedback = 0.7 + 0.28 * s.room.clamp(0.0, 1.0);
-    let damp = 0.4 * s.damping.clamp(0.0, 1.0);
-    let n = channels.len();
-    let input_gain = 0.015;
-    let pre = (s.pre_delay_ms.max(0.0) * rate as f32 / 1000.0) as usize;
-    // Mono sum feeds every channel's tank, so the tail is decorrelated
-    // by the spread between left and right tunings.
-    let frames = channels.first().map_or(0, Vec::len);
-    let mono: Vec<f32> = (0..frames)
-        .map(|i| channels.iter().map(|c| c[i]).sum::<f32>() / n.max(1) as f32)
-        .collect();
-    let mut wets: Vec<Vec<f32>> = Vec::with_capacity(n);
-    for ch in 0..n {
-        let off = if ch % 2 == 1 { SPREAD } else { 0 };
-        let mut combs: Vec<Comb> = COMBS
-            .iter()
-            .map(|&d| Comb {
-                buf: vec![0.0; (((d + off) as f32) * scale) as usize + 1],
-                pos: 0,
-                store: 0.0,
-            })
-            .collect();
-        let mut aps: Vec<Allpass> = ALLPASSES
-            .iter()
-            .map(|&d| Allpass {
-                buf: vec![0.0; (((d + off) as f32) * scale) as usize + 1],
-                pos: 0,
-            })
-            .collect();
-        let wet: Vec<f32> = (0..frames)
-            .map(|i| {
-                let x = if i >= pre {
-                    mono[i - pre] * input_gain
-                } else {
-                    0.0
-                };
-                let mut y: f32 = combs.iter_mut().map(|c| c.tick(x, feedback, damp)).sum();
-                for a in &mut aps {
-                    y = a.tick(y);
-                }
-                y
-            })
-            .collect();
-        wets.push(wet);
-    }
-    let w = s.width.clamp(0.0, 1.0);
-    let (wet1, wet2) = (s.mix * (w / 2.0 + 0.5), s.mix * ((1.0 - w) / 2.0));
-    let dry = 1.0 - s.mix;
-    for (ch, c) in channels.iter_mut().enumerate() {
-        let other = if n > 1 { ch ^ 1 } else { ch };
-        let other = other.min(n - 1);
-        for (i, x) in c.iter_mut().enumerate() {
-            *x = *x * dry + wets[ch][i] * wet1 + wets[other][i] * wet2;
+impl Tank {
+    fn new(rate: u32, offset: usize) -> Tank {
+        let scale = rate as f32 / 44_100.0;
+        let len = |d: usize| (((d + offset) as f32) * scale) as usize + 1;
+        Tank {
+            combs: COMBS
+                .iter()
+                .map(|&d| Comb {
+                    buf: vec![0.0; len(d)],
+                    pos: 0,
+                    store: 0.0,
+                })
+                .collect(),
+            aps: ALLPASSES
+                .iter()
+                .map(|&d| Allpass {
+                    buf: vec![0.0; len(d)],
+                    pos: 0,
+                })
+                .collect(),
         }
+    }
+
+    #[inline]
+    fn tick(&mut self, x: f32, feedback: f32, damp: f32) -> f32 {
+        let mut y: f32 = self
+            .combs
+            .iter_mut()
+            .map(|c| c.tick(x, feedback, damp))
+            .sum();
+        for a in &mut self.aps {
+            y = a.tick(y);
+        }
+        y
+    }
+
+    fn clear(&mut self) {
+        for c in &mut self.combs {
+            c.buf.fill(0.0);
+            c.store = 0.0;
+        }
+        for a in &mut self.aps {
+            a.buf.fill(0.0);
+        }
+    }
+}
+
+pub struct Reverb {
+    rate: u32,
+    tanks: [Tank; 2],
+    pre: Vec<f32>,
+    pre_pos: usize,
+    pre_len: usize,
+    feedback: f32,
+    damp: f32,
+    wet1: f32,
+    wet2: f32,
+    dry: f32,
+}
+
+impl Reverb {
+    pub fn new(rate: u32) -> Reverb {
+        Reverb {
+            rate,
+            tanks: [Tank::new(rate, 0), Tank::new(rate, SPREAD)],
+            pre: vec![0.0; rate as usize / 4 + 1],
+            pre_pos: 0,
+            pre_len: 0,
+            feedback: 0.85,
+            damp: 0.2,
+            wet1: 0.25,
+            wet2: 0.0,
+            dry: 0.75,
+        }
+    }
+}
+
+impl Live for Reverb {
+    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        const INPUT: f32 = 0.015;
+        let n = self.pre.len();
+        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+            self.pre[self.pre_pos] = (*a + *b) * 0.5 * INPUT;
+            let x = self.pre[(self.pre_pos + n - self.pre_len) % n];
+            self.pre_pos = (self.pre_pos + 1) % n;
+            let wl = self.tanks[0].tick(x, self.feedback, self.damp);
+            let wr = self.tanks[1].tick(x, self.feedback, self.damp);
+            *a = *a * self.dry + wl * self.wet1 + wr * self.wet2;
+            *b = *b * self.dry + wr * self.wet1 + wl * self.wet2;
+        }
+    }
+
+    /// Room size, damping, mix, width, pre-delay (ms).
+    fn set(&mut self, vals: &[f32]) {
+        let g = |i: usize, d: f32| vals.get(i).copied().unwrap_or(d);
+        self.feedback = 0.7 + 0.28 * g(0, 0.6).clamp(0.0, 1.0);
+        self.damp = 0.4 * g(1, 0.5).clamp(0.0, 1.0);
+        let mix = g(2, 0.25).clamp(0.0, 1.0);
+        let w = g(3, 1.0).clamp(0.0, 1.0);
+        self.wet1 = mix * (w / 2.0 + 0.5);
+        self.wet2 = mix * ((1.0 - w) / 2.0);
+        self.dry = 1.0 - mix;
+        self.pre_len =
+            ((g(4, 10.0).max(0.0) * self.rate as f32 / 1000.0) as usize).min(self.pre.len() - 1);
+    }
+
+    fn reset(&mut self) {
+        self.tanks[0].clear();
+        self.tanks[1].clear();
+        self.pre.fill(0.0);
     }
 }
 
@@ -119,22 +175,15 @@ mod tests {
 
     #[test]
     fn impulse_leaves_a_tail() {
-        let mut ch = vec![vec![0.0f32; 48_000]; 2];
-        ch[0][0] = 1.0;
-        ch[1][0] = 1.0;
-        process(
-            &mut ch,
-            48_000,
-            &Settings {
-                room: 0.8,
-                damping: 0.5,
-                mix: 0.5,
-                width: 1.0,
-                pre_delay_ms: 0.0,
-            },
-        );
-        let late: f32 = ch[0][10_000..20_000].iter().map(|s| s.abs()).sum();
+        let mut rv = Reverb::new(48_000);
+        rv.set(&[0.8, 0.5, 0.5, 1.0, 0.0]);
+        let mut l = vec![0.0f32; 48_000];
+        let mut r = vec![0.0f32; 48_000];
+        l[0] = 1.0;
+        r[0] = 1.0;
+        rv.process(&mut l, &mut r);
+        let late: f32 = l[10_000..20_000].iter().map(|s| s.abs()).sum();
         assert!(late > 0.01);
-        assert!(ch[0].iter().all(|s| s.is_finite() && s.abs() < 2.0));
+        assert!(l.iter().all(|s| s.is_finite() && s.abs() < 2.0));
     }
 }

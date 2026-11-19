@@ -1,16 +1,22 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod fx;
+mod inspector;
 mod multitrack;
 mod panels;
+mod phasewheel;
+mod pianoroll;
+mod space;
 mod state;
 mod theme;
 mod ui;
 mod waveform;
 
 fn main() -> eframe::Result<()> {
+    fx::register();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

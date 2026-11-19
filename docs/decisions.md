@@ -28,3 +28,30 @@
 - **Encrypted `.mogg` files are refused**, not decrypted.
 - **Plain mouse wheel zooms** over the editors (at the pointer). Shift+wheel
   scrolls in time; wheel over the track headers scrolls tracks.
+
+## 2026-11-19: Audiform features, compatibility and licence
+
+- **`.audfrm` is the session format** (project lead: compatibility comes
+  first). It is written losslessly: each object keeps its id from the
+  file, and saving writes only Audiform27's fields over the original
+  object, so automation, stretch, routing and future fields survive.
+  This is better than copying Audiform's internal model into Audiform27:
+  the new engine stays free of old limits, and nothing AAE-derived comes
+  in. Checked against all 75 of the lead's sessions: byte-identical
+  after a load and save.
+- **Audiform27-only data in `.audfrm`**: its own effects are saved as
+  `af27.<id>` slots (Audiform skips them when playing but keeps them when
+  it saves). The synth settings go in `af27_synth` on the track.
+- **The project lead's 3D Space, Phase Wheel and effects are ported.**
+  Provenance was checked file by file (`clean-room.md`). Delay and Echo
+  was dropped: Audiform's own records list it as AAE's.
+- **Live edits.** Fader, pan, mute and solo, effect settings, bypass, 3D
+  positions and instrument settings go to the audio thread as fixed-size
+  commands. Only structural changes rebuild the mix. Each drag is one
+  undo step.
+- **Licence changed to the Audiform27 License 1.0** (project lead): MIT
+  freedoms for everyone except GeekCast Radio Network, LLC and anyone
+  acting for it. It is visible, not hidden, because a hidden term is not
+  enforceable. `af27-dts` stays LGPL, which forbids added restrictions.
+  The lead's earlier upstream contributions were licensed to AAE under its
+  agreement; this licence does not and cannot change that.

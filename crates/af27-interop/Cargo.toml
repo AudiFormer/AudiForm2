@@ -3,10 +3,12 @@ name = "af27-interop"
 description = "Audiform27 project import: .sesx multitrack sessions and Audiform .audfrm / .altaudio"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file = "../../LICENSE"
 authors.workspace = true
 
 [dependencies]
 af27-core.workspace = true
 serde_json.workspace = true
 roxmltree = "0.20"
+af27-dsp = { path = "../af27-dsp" }
+af27-fx = { path = "../af27-fx" }

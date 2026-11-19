@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! The window: menu bar, tool strip, the dockable panel area, transport
@@ -28,10 +28,16 @@ pub enum Tab {
     Statistics,
     Spectrum,
     Selection,
+    Inspector,
+    Space,
+    PianoRoll,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 12] = [
+    pub const ALL: [Tab; 15] = [
+        Tab::Inspector,
+        Tab::Space,
+        Tab::PianoRoll,
         Tab::Editor,
         Tab::Mixer,
         Tab::Files,
@@ -55,23 +61,30 @@ impl Tab {
             Tab::Editor => "Editor",
             Tab::Mixer => "Mixer",
             Tab::Levels => "Levels",
-            Tab::Phase => "Phase Scope",
+            Tab::Phase => "Phase Wheel",
             Tab::Statistics => "Level Statistics",
             Tab::Spectrum => "Spectrum",
             Tab::Selection => "Range",
+            Tab::Inspector => "Inspector",
+            Tab::Space => "3D Space",
+            Tab::PianoRoll => "Piano Roll",
         }
     }
 }
 
 pub fn default_layout() -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Editor, Tab::Mixer]);
+    let mut dock = DockState::new(vec![Tab::Editor, Tab::Mixer, Tab::PianoRoll]);
     let s = dock.main_surface_mut();
     let [center, left] = s.split_left(NodeIndex::root(), 0.16, vec![Tab::Files, Tab::Markers]);
     let [_files, left_mid] = s.split_below(left, 0.42, vec![Tab::Effects, Tab::AiSeparation]);
     let [_fx, _hist] = s.split_below(left_mid, 0.62, vec![Tab::History]);
     let [center, _levels] = s.split_below(center, 0.9, vec![Tab::Levels]);
     let [_editor, right] = s.split_right(center, 0.83, vec![Tab::Phase]);
-    let [_phase, right_mid] = s.split_below(right, 0.38, vec![Tab::Statistics, Tab::Spectrum]);
+    let [_phase, right_mid] = s.split_below(
+        right,
+        0.38,
+        vec![Tab::Inspector, Tab::Space, Tab::Statistics, Tab::Spectrum],
+    );
     let [_stats, _range] = s.split_below(right_mid, 0.7, vec![Tab::Selection]);
     dock
 }
@@ -92,10 +105,13 @@ pub struct Caches {
     pub drag: crate::multitrack::Drag,
     pub wave_drag: Option<crate::waveform::WaveDrag>,
     pub marker_edit: Option<usize>,
+    pub wheel: crate::phasewheel::WheelCache,
+    pub space_drag: Option<usize>,
+    pub piano: crate::pianoroll::PianoState,
 }
 
 fn layout_path() -> std::path::PathBuf {
-    data_dir().join("layout.json")
+    data_dir().join("layout2.json")
 }
 
 impl App {
@@ -163,6 +179,28 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
+        self.ui_inner(ui, tab);
+    }
+
+    fn closeable(&mut self, _tab: &mut Tab) -> bool {
+        true
+    }
+
+    fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
+        match tab {
+            Tab::Editor
+            | Tab::Levels
+            | Tab::Phase
+            | Tab::Spectrum
+            | Tab::PianoRoll
+            | Tab::Space => [false, false],
+            _ => [false, true],
+        }
+    }
+}
+
+impl Viewer<'_> {
+    fn ui_inner(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
         match tab {
             Tab::Editor => match self.st.mode {
                 Mode::Waveform => crate::waveform::editor(ui, self.st, self.caches),
@@ -175,21 +213,13 @@ impl TabViewer for Viewer<'_> {
             Tab::AiSeparation => crate::panels::separation(ui, self.st),
             Tab::History => crate::panels::history(ui, self.st),
             Tab::Levels => crate::panels::levels(ui, self.st),
-            Tab::Phase => crate::panels::phase(ui, self.st),
+            Tab::Phase => crate::phasewheel::panel(ui, self.st, &mut self.caches.wheel),
             Tab::Statistics => crate::panels::statistics(ui, self.st),
             Tab::Spectrum => crate::panels::spectrum(ui, self.st),
             Tab::Selection => crate::panels::range(ui, self.st),
-        }
-    }
-
-    fn closeable(&mut self, _tab: &mut Tab) -> bool {
-        true
-    }
-
-    fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
-        match tab {
-            Tab::Editor | Tab::Levels | Tab::Phase | Tab::Spectrum => [false, false],
-            _ => [false, true],
+            Tab::Inspector => crate::inspector::panel(ui, self.st),
+            Tab::Space => crate::space::panel(ui, self.st, &mut self.caches.space_drag),
+            Tab::PianoRoll => crate::pianoroll::panel(ui, self.st, &mut self.caches.piano),
         }
     }
 }
@@ -384,8 +414,9 @@ fn save_doc_as(st: &mut State) {
 
 fn save_session_as(st: &mut State) {
     if let Some(p) = rfd::FileDialog::new()
-        .set_file_name(format!("{}.af27", st.session.name))
-        .add_filter("Audiform27 session", &["af27"])
+        .set_file_name(format!("{}.audfrm", st.session.name))
+        .add_filter("Audiform session", &["audfrm"])
+        .add_filter("Audiform27 model dump", &["af27"])
         .save_file()
     {
         st.save_session_to(p);
@@ -404,6 +435,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             if ui.button("New Multitrack Session").clicked() {
                 let before = st.session.clone();
                 st.session = af27_core::Session::default();
+                st.session_base = None;
                 st.session_history.push("New session", before);
                 st.session_path = None;
                 st.media_docs.clear();
@@ -442,6 +474,25 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.close_menu();
             }
             ui.separator();
+            if st.session.space.is_some()
+                && ui
+                    .button("Export 3D Speaker Bed (multichannel WAV)...")
+                    .clicked()
+            {
+                if let Some(p) = rfd::FileDialog::new()
+                    .set_file_name(format!("{} Bed.wav", st.session.name))
+                    .add_filter("WAV", &["wav"])
+                    .save_file()
+                {
+                    let (a, b) = st.session_sel.unwrap_or((0.0, st.session.duration()));
+                    let bed = st.render_mix(a, b, true);
+                    match af27_io::write_wav(&p, &bed, af27_io::WavFormat::Pcm24) {
+                        Ok(()) => st.toast(format!("Exported {} channels", bed.num_channels())),
+                        Err(e) => st.error(e),
+                    }
+                }
+                ui.close_menu();
+            }
             if ui.button("Export Multitrack Mixdown...").clicked() {
                 if let Some(p) = rfd::FileDialog::new()
                     .set_file_name(format!("{} Mixdown.wav", st.session.name))
@@ -512,9 +563,24 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.menu_button("Multitrack", |ui| {
-            if ui.button("Add Track").clicked() {
-                st.add_track();
+            if ui.button("Add Audio Track").clicked() {
+                st.add_track_kind(af27_core::TrackKind::Audio);
                 ui.close_menu();
+            }
+            if ui.button("Add Bus Track").clicked() {
+                st.add_track_kind(af27_core::TrackKind::Bus);
+                ui.close_menu();
+            }
+            if ui.button("Add MIDI Track").clicked() {
+                let t = st.add_track_kind(af27_core::TrackKind::Midi);
+                crate::pianoroll::new_clip(st, t, 0.0);
+                ui.close_menu();
+            }
+            ui.separator();
+            let mut m = st.session.tempo.metronome;
+            if ui.checkbox(&mut m, "Metronome").changed() {
+                st.session.tempo.metronome = m;
+                st.live_metronome();
             }
             if ui.button("Split at Playhead     Ctrl+K").clicked() {
                 st.split_at_playhead();
@@ -727,7 +793,42 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             FontId::monospace(22.0),
             c(th.accent),
         );
-        ui.add_space(ui.available_width() / 2.0 - 190.0);
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(st.session.tempo.format(st.position()))
+                    .monospace()
+                    .color(c(th.text_dim)),
+            );
+            ui.horizontal(|ui| {
+                let mut bpm = st.session.tempo.bpm;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut bpm)
+                            .range(20.0..=300.0)
+                            .speed(0.5)
+                            .suffix(" BPM")
+                            .max_decimals(1),
+                    )
+                    .changed()
+                {
+                    st.session.tempo.bpm = bpm;
+                    st.session_version += 1;
+                    st.session_dirty = true;
+                    st.live_metronome();
+                }
+                let mut m = st.session.tempo.metronome;
+                if ui
+                    .toggle_value(&mut m, "♩")
+                    .on_hover_text("Metronome")
+                    .changed()
+                {
+                    st.session.tempo.metronome = m;
+                    st.live_metronome();
+                }
+            });
+        });
+        ui.add_space((ui.available_width() / 2.0 - 120.0).max(0.0));
         let btn = |ui: &mut egui::Ui, s: &str, tip: &str, on: bool, col: [u8; 3]| {
             let b = egui::Button::new(RichText::new(s).size(18.0).color(if on {
                 c(th.background)
@@ -949,7 +1050,7 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
         ui.label(RichText::new("AUDIFORM27").size(28.0).strong().color(c(st.theme.accent)));
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.label("A fast, themeable audio editor written entirely in Rust.");
-        ui.label("Licensed MIT OR Apache-2.0. The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
+        ui.label("Audiform27 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
         ui.label("The sequel to Audiform, by the same project lead.");
     });
     st.show_about = open;
@@ -1024,6 +1125,10 @@ impl eframe::App for App {
             });
         if let Some(t) = open_tab {
             self.show_tab(t);
+        }
+        if self.st.want_piano {
+            self.st.want_piano = false;
+            self.show_tab(Tab::PianoRoll);
         }
         generate_window(ctx, &mut self.st);
         about_window(ctx, &mut self.st);

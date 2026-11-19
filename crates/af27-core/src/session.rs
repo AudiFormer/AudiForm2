@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! The multitrack session: tracks hold clips that point at media items.
@@ -26,6 +26,10 @@ pub struct MediaItem {
     pub duration: f64,
     pub rate: u32,
     pub channels: u16,
+    /// The object's id in an `.audfrm` file it came from, so saving back
+    /// keeps everything Audiform27 does not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,6 +51,10 @@ pub struct Clip {
     pub fade_out: f64,
     #[serde(default)]
     pub muted: bool,
+    /// The object's id in an `.audfrm` file it came from, so saving back
+    /// keeps everything Audiform27 does not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_id: Option<String>,
 }
 
 impl Clip {
@@ -93,11 +101,79 @@ pub struct Track {
     pub clips: Vec<Clip>,
     #[serde(default = "default_height")]
     pub height: f32,
+    #[serde(default)]
+    pub kind: TrackKind,
+    /// Where the track's sound goes: None for the master, or a bus track.
+    #[serde(default)]
+    pub output: Option<TrackId>,
+    #[serde(default)]
+    pub sends: Vec<Send>,
+    /// Effects run in order on the track's sound, before the fader.
+    #[serde(default)]
+    pub chain: Vec<EffectSlot>,
+    /// Where the track sits in a 3D Space session's room.
+    #[serde(default)]
+    pub pos: crate::space::SpacePos,
+    /// MIDI tracks: their clips.
+    #[serde(default)]
+    pub midi: Vec<crate::midi::MidiClip>,
+    /// MIDI tracks: the built-in instrument's settings.
+    #[serde(default)]
+    pub instrument: crate::midi::Instrument,
+    /// The object's id in an `.audfrm` file it came from, so saving back
+    /// keeps everything Audiform27 does not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_id: Option<String>,
 }
 
 fn default_height() -> f32 {
     84.0
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TrackKind {
+    #[default]
+    Audio,
+    /// Sums what other tracks send or output to it.
+    Bus,
+    /// Plays MIDI clips through an instrument.
+    Midi,
+}
+
+/// A send from a track to a bus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Send {
+    pub bus: TrackId,
+    pub level_db: f32,
+    /// Taken before the track's fader (true) or after it.
+    #[serde(default)]
+    pub pre_fader: bool,
+    /// The object's id in an `.audfrm` file it came from, so saving back
+    /// keeps everything Audiform27 does not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_id: Option<String>,
+}
+
+/// One slot of an effect chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectSlot {
+    /// The effect's stable id (see `af27_dsp::Effect::id`).
+    pub effect: String,
+    pub values: Vec<f32>,
+    #[serde(default)]
+    pub bypass: bool,
+    /// Anything else the effect keeps (an amp capture, an impulse
+    /// response file), as the effect's own JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// The object's id in an `.audfrm` file it came from, so saving back
+    /// keeps everything Audiform27 does not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_id: Option<String>,
+}
+
+/// Up to this many effects per chain.
+pub const CHAIN_SLOTS: usize = 16;
 
 impl Track {
     /// Constant-power pan gains (left, right) times the track volume.
@@ -117,6 +193,10 @@ pub struct Marker {
     pub time: f64,
     #[serde(default)]
     pub length: f64,
+    /// The object's id in an `.audfrm` file it came from, so saving back
+    /// keeps everything Audiform27 does not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +212,16 @@ pub struct Session {
     pub markers: Vec<Marker>,
     #[serde(default)]
     pub next_id: u64,
+    /// Effects on the whole mix.
+    #[serde(default)]
+    pub master_chain: Vec<EffectSlot>,
+    /// Some(layout) makes this a 3D Space session.
+    #[serde(default)]
+    pub space: Option<crate::space::SpaceLayout>,
+    #[serde(default)]
+    pub monitor: crate::space::Monitor,
+    #[serde(default)]
+    pub tempo: crate::midi::Tempo,
 }
 
 const PALETTE: [[u8; 3]; 8] = [
@@ -162,6 +252,10 @@ impl Session {
             tracks: Vec::new(),
             markers: Vec::new(),
             next_id: 1,
+            master_chain: Vec::new(),
+            space: None,
+            monitor: Default::default(),
+            tempo: Default::default(),
         };
         for _ in 0..tracks {
             s.add_track();
@@ -176,11 +270,21 @@ impl Session {
     }
 
     pub fn add_track(&mut self) -> TrackId {
+        self.add_track_of(TrackKind::Audio)
+    }
+
+    pub fn add_track_of(&mut self, kind: TrackKind) -> TrackId {
         let id = self.alloc_id();
         let n = self.tracks.len();
+        let count = self.tracks.iter().filter(|t| t.kind == kind).count() + 1;
+        let name = match kind {
+            TrackKind::Audio => format!("Track {}", n + 1),
+            TrackKind::Bus => format!("Bus {count}"),
+            TrackKind::Midi => format!("MIDI {count}"),
+        };
         self.tracks.push(Track {
             id,
-            name: format!("Track {}", n + 1),
+            name,
             volume_db: 0.0,
             pan: 0.0,
             mute: false,
@@ -189,6 +293,14 @@ impl Session {
             color: PALETTE[n % PALETTE.len()],
             clips: Vec::new(),
             height: default_height(),
+            kind,
+            output: None,
+            sends: Vec::new(),
+            chain: Vec::new(),
+            pos: Default::default(),
+            midi: Vec::new(),
+            instrument: Default::default(),
+            ext_id: None,
         });
         id
     }
@@ -225,6 +337,7 @@ impl Session {
             fade_in: 0.0,
             fade_out: 0.0,
             muted: false,
+            ext_id: None,
         });
         Some(id)
     }
@@ -258,13 +371,33 @@ impl Session {
         Some(self.tracks[ti].clips.remove(ci))
     }
 
-    /// End of the last clip, in seconds.
+    /// End of the last clip (audio or MIDI), in seconds.
     pub fn duration(&self) -> f64 {
-        self.tracks
+        let audio = self
+            .tracks
             .iter()
             .flat_map(|t| t.clips.iter())
             .map(Clip::end)
-            .fold(0.0, f64::max)
+            .fold(0.0, f64::max);
+        let midi = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.midi.iter())
+            .map(|c| self.tempo.secs(c.start + c.length))
+            .fold(0.0, f64::max);
+        audio.max(midi)
+    }
+
+    /// Finds a MIDI clip by id: (track index, clip index).
+    pub fn find_midi(&self, id: ClipId) -> Option<(usize, usize)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .find_map(|(ti, t)| t.midi.iter().position(|c| c.id == id).map(|ci| (ti, ci)))
+    }
+
+    pub fn track_index(&self, id: TrackId) -> Option<usize> {
+        self.tracks.iter().position(|t| t.id == id)
     }
 
     pub fn any_solo(&self) -> bool {
@@ -310,6 +443,7 @@ mod tests {
             duration: 10.0,
             rate: 44_100,
             channels: 1,
+            ext_id: None,
         });
         (s, id)
     }
@@ -338,6 +472,7 @@ mod tests {
             name: "Intro".into(),
             time: 1.0,
             length: 0.0,
+            ext_id: None,
         });
         let back = Session::from_json(&s.to_json()).unwrap();
         assert_eq!(back, s);
@@ -364,6 +499,7 @@ mod tests {
             fade_in: 1.0,
             fade_out: 1.0,
             muted: false,
+            ext_id: None,
         };
         assert!((c.gain_at(0.5) - 0.5).abs() < 1e-6);
         assert!((c.gain_at(2.0) - 1.0).abs() < 1e-6);

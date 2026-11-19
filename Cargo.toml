@@ -5,7 +5,6 @@ members = ["crates/*", "app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
 authors = ["The Audiform27 contributors"]
 repository = "https://github.com/nwh212/Audiform27"
 rust-version = "1.80"
@@ -18,6 +17,7 @@ af27-engine = { path = "crates/af27-engine" }
 af27-separation = { path = "crates/af27-separation" }
 af27-interop = { path = "crates/af27-interop" }
 af27-dts = { path = "crates/af27-dts" }
+af27-space = { path = "crates/af27-space" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.5.4", features = ["all"] }

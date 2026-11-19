@@ -3,7 +3,7 @@ name = "audiform27"
 description = "Audiform27: a fast, themeable, all-Rust audio editor"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file = "../LICENSE"
 authors.workspace = true
 
 [[bin]]
@@ -17,6 +17,8 @@ af27-dsp.workspace = true
 af27-engine.workspace = true
 af27-separation.workspace = true
 af27-interop.workspace = true
+af27-fx = { path = "../crates/af27-fx" }
+af27-space.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 eframe.workspace = true

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! The dockable side panels.
@@ -230,10 +230,102 @@ pub fn effects(ui: &mut egui::Ui, st: &mut State) {
     );
     if e.realtime() {
         ui.label(
-            RichText::new("Can run live in a track rack (coming next).")
+            RichText::new("Also runs live: add it to a track in the Inspector.")
                 .size(10.0)
                 .color(c(th.text_dim)),
         );
+    }
+    ui.separator();
+    audiform_effects(ui, st);
+}
+
+/// The ported Audiform effects, applied to the selection.
+fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
+    let th = st.theme.clone();
+    ui.label(
+        RichText::new("Audiform effects")
+            .strong()
+            .color(c(th.accent)),
+    );
+    let reg = af27_fx::registry();
+    let current = st.fx_pick.clone().unwrap_or_else(|| reg[0].id.to_string());
+    egui::ComboBox::from_id_salt("fx-pick")
+        .selected_text(crate::fx::name(&current))
+        .width(ui.available_width() - 8.0)
+        .show_ui(ui, |ui| {
+            for info in &reg {
+                if ui
+                    .selectable_label(
+                        current == info.id,
+                        format!("{} ({})", info.name, info.category),
+                    )
+                    .clicked()
+                {
+                    st.fx_pick = Some(info.id.to_string());
+                }
+            }
+        });
+    let id = st.fx_pick.clone().unwrap_or(current);
+    let controls = crate::fx::controls(&id);
+    let mut vals = st
+        .fx_values
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| crate::fx::defaults(&id));
+    vals.resize(controls.len(), 0.0);
+    for (k, p) in controls.iter().enumerate() {
+        if p.hidden {
+            continue;
+        }
+        if p.toggle {
+            let mut on = vals[k] >= 0.5;
+            ui.checkbox(&mut on, &p.name);
+            vals[k] = if on { 1.0 } else { 0.0 };
+        } else if !p.choices.is_empty() {
+            let cur = (vals[k].round() as usize).min(p.choices.len() - 1);
+            let mut pick = cur;
+            egui::ComboBox::from_label(&p.name)
+                .selected_text(&p.choices[cur])
+                .show_ui(ui, |ui| {
+                    for (ci, cname) in p.choices.iter().enumerate() {
+                        ui.selectable_value(&mut pick, ci, cname);
+                    }
+                });
+            vals[k] = (p.min + pick as f32).min(p.max);
+        } else {
+            let mut s = egui::Slider::new(&mut vals[k], p.min..=p.max).text(&p.name);
+            if !p.unit.is_empty() {
+                s = s.suffix(format!(" {}", p.unit));
+            }
+            if p.log && p.min > 0.0 {
+                s = s.logarithmic(true);
+            }
+            ui.add(s);
+        }
+    }
+    st.fx_values.insert(id.clone(), vals.clone());
+    let apply = egui::Button::new(RichText::new("Apply").strong().color(c(th.background)))
+        .fill(c(th.accent));
+    if ui.add_enabled(st.doc().is_some(), apply).clicked() {
+        let slot = af27_core::EffectSlot {
+            effect: id.clone(),
+            values: vals,
+            bypass: false,
+            data: None,
+            ext_id: None,
+        };
+        if let Some(d) = st.doc_mut() {
+            let r = d.target();
+            if !r.is_empty() {
+                let seg = d.buf.slice(r);
+                if let Some(out) = crate::fx::process_offline(&slot, &seg) {
+                    let mut b = (*d.buf).clone();
+                    b.replace(r, &out);
+                    d.set_buffer(&crate::fx::name(&id), b);
+                }
+            }
+        }
+        st.mode = Mode::Waveform;
     }
 }
 
@@ -585,127 +677,6 @@ pub fn levels(ui: &mut egui::Ui, st: &mut State) {
 
 // ------------------------------------------------------------ Phase scope
 
-/// A short stereo window around the playhead, from the open file or the mix.
-fn window_at_playhead(st: &State, frames: usize) -> Option<(Vec<f32>, Vec<f32>, u32)> {
-    let t = st.position();
-    match st.mode {
-        Mode::Waveform => {
-            let d = st.doc()?;
-            let rate = d.buf.rate;
-            let c0 = ((t * rate as f64) as usize).saturating_sub(frames / 2);
-            let l: Vec<f32> = (c0..c0 + frames).map(|i| d.buf.stereo_at(i).0).collect();
-            let r: Vec<f32> = (c0..c0 + frames).map(|i| d.buf.stereo_at(i).1).collect();
-            Some((l, r, rate))
-        }
-        Mode::Multitrack => {
-            let program = af27_engine::mix_program(&st.session, &|m| st.media_buffer(m));
-            let rate = st.session.rate;
-            let span = frames as f64 / rate as f64;
-            let b = af27_engine::render(
-                &program,
-                rate,
-                (t - span / 2.0).max(0.0),
-                (t - span / 2.0).max(0.0) + span,
-            );
-            Some((b.channels[0].clone(), b.channels[1].clone(), rate))
-        }
-    }
-}
-
-pub fn phase(ui: &mut egui::Ui, st: &mut State) {
-    let th = st.theme.clone();
-    let avail = ui.available_rect_before_wrap();
-    let side = avail.width().min(avail.height() - 26.0).max(40.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(avail.width(), side), Sense::hover());
-    let sq = Rect::from_center_size(rect.center(), vec2(side, side));
-    let p = ui.painter_at(rect);
-    p.rect_filled(sq, Rounding::same(th.rounding), c(th.wave_background));
-    let cen = sq.center();
-    let rad = side * 0.46;
-    p.circle_stroke(cen, rad, Stroke::new(1.0_f32, c(th.grid)));
-    p.line_segment(
-        [pos2(cen.x, sq.top() + 4.0), pos2(cen.x, sq.bottom() - 4.0)],
-        Stroke::new(1.0_f32, c(th.grid)),
-    );
-    p.line_segment(
-        [pos2(sq.left() + 4.0, cen.y), pos2(sq.right() - 4.0, cen.y)],
-        Stroke::new(1.0_f32, c(th.grid)),
-    );
-    for (txt, pos) in [
-        ("M", pos2(cen.x, sq.top() + 10.0)),
-        ("L", pos2(sq.left() + 16.0, sq.top() + 16.0)),
-        ("R", pos2(sq.right() - 16.0, sq.top() + 16.0)),
-    ] {
-        p.text(
-            pos,
-            Align2::CENTER_CENTER,
-            txt,
-            FontId::proportional(10.0),
-            c(th.text_dim),
-        );
-    }
-    let mut corr = 0.0f32;
-    if let Some((l, r, _)) = window_at_playhead(st, 2048) {
-        let peak = l.iter().chain(&r).fold(1e-6f32, |m, s| m.max(s.abs()));
-        let scale = rad / peak.max(0.25);
-        let (mut lr, mut ll, mut rr) = (0.0f32, 0.0f32, 0.0f32);
-        for (i, (&a, &b)) in l.iter().zip(&r).enumerate().step_by(2) {
-            // Mid up, side across: a goniometer.
-            let x = (b - a) * std::f32::consts::FRAC_1_SQRT_2 * scale;
-            let y = (a + b) * std::f32::consts::FRAC_1_SQRT_2 * scale;
-            let fade = (i as f32 / l.len() as f32 * 180.0 + 40.0) as u8;
-            p.circle_filled(pos2(cen.x + x, cen.y - y), 1.1, ca(th.accent, fade));
-            lr += a * b;
-            ll += a * a;
-            rr += b * b;
-        }
-        corr = if ll * rr > 1e-12 {
-            lr / (ll * rr).sqrt()
-        } else {
-            0.0
-        };
-    }
-    ui.add_space(4.0);
-    let (bar, _) = ui.allocate_exact_size(vec2(avail.width(), 14.0), Sense::hover());
-    let p = ui.painter_at(bar);
-    p.rect_filled(bar, Rounding::same(3.0), c(th.wave_background));
-    let x = bar.center().x + corr * bar.width() / 2.0;
-    let col = if corr < 0.0 {
-        c(th.meter_high)
-    } else {
-        c(th.meter_low)
-    };
-    p.rect_filled(
-        Rect::from_min_max(
-            pos2(bar.center().x.min(x), bar.top()),
-            pos2(bar.center().x.max(x), bar.bottom()),
-        ),
-        Rounding::same(3.0),
-        col,
-    );
-    p.text(
-        bar.left_center() + vec2(4.0, 0.0),
-        Align2::LEFT_CENTER,
-        "-1",
-        FontId::proportional(9.0),
-        c(th.text_dim),
-    );
-    p.text(
-        bar.right_center() - vec2(4.0, 0.0),
-        Align2::RIGHT_CENTER,
-        "+1",
-        FontId::proportional(9.0),
-        c(th.text_dim),
-    );
-    p.text(
-        bar.center(),
-        Align2::CENTER_CENTER,
-        format!("{corr:+.2}"),
-        FontId::monospace(9.0),
-        c(th.text),
-    );
-}
-
 // --------------------------------------------------------------- Spectrum
 
 pub fn spectrum(ui: &mut egui::Ui, st: &mut State) {
@@ -714,10 +685,8 @@ pub fn spectrum(ui: &mut egui::Ui, st: &mut State) {
     let (rect, _) = ui.allocate_exact_size(avail.size(), Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, Rounding::same(th.rounding), c(th.wave_background));
-    let Some((l, r, rate)) = window_at_playhead(st, 4096) else {
-        return;
-    };
-    let mono: Vec<f32> = l.iter().zip(&r).map(|(a, b)| (a + b) * 0.5).collect();
+    let (frames, rate) = st.scope_frames(4096);
+    let mono: Vec<f32> = frames.iter().map(|f| (f[0] + f[1]) * 0.5).collect();
     let col = af27_dsp::fft::spectrogram(&mono, 0, mono.len(), 1, 4096);
     let bins = &col[0];
     let ny = rate as f32 / 2.0;
@@ -784,9 +753,8 @@ pub fn statistics(ui: &mut egui::Ui, st: &mut State) {
                 d.buf.slice(d.target())
             }
             Mode::Multitrack => {
-                let program = af27_engine::mix_program(&st.session, &|m| st.media_buffer(m));
                 let (a, b) = st.session_sel.unwrap_or((0.0, st.session.duration()));
-                af27_engine::render(&program, st.session.rate, a, b)
+                st.render_mix(a, b, false)
             }
         };
         st.stats = Some((what.to_string(), af27_dsp::loudness::analyze(&buf)));

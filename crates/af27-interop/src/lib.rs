@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! Opening other editors' projects as Audiform27 sessions.
@@ -14,16 +14,19 @@
 //! when the audio is loaded.
 
 use std::collections::HashMap;
+pub mod audfrm;
+
 use std::path::{Path, PathBuf};
 
 use af27_core::session::{Clip, Marker, MediaItem, Session};
-use serde_json::Value;
 
 /// The result of an import, with anything that could not be carried over.
 #[derive(Debug)]
 pub struct Imported {
     pub session: Session,
     pub notices: Vec<String>,
+    /// The document as read, for lossless saving back (Audiform sessions).
+    pub base: Option<serde_json::Value>,
 }
 
 pub fn import(path: &Path) -> Result<Imported, String> {
@@ -42,7 +45,7 @@ pub fn import(path: &Path) -> Result<Imported, String> {
         .to_string();
     match ext.as_str() {
         "sesx" => sesx(&text, base, &name),
-        "audfrm" | "altaudio" => audfrm(&text, base),
+        "audfrm" | "altaudio" => audfrm::import(&text, base),
         _ => Err(format!(
             "{} is not a session type this app can open.",
             path.display()
@@ -52,7 +55,7 @@ pub fn import(path: &Path) -> Result<Imported, String> {
 
 /// Picks the first of absolute or relative-to-the-session paths that
 /// exists, else the absolute one (shown as missing media).
-fn resolve(abs: Option<&str>, rel: Option<&str>, base: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve(abs: Option<&str>, rel: Option<&str>, base: &Path) -> Option<PathBuf> {
     let a = abs.filter(|s| !s.is_empty()).map(PathBuf::from);
     let r = rel
         .filter(|s| !s.is_empty())
@@ -76,7 +79,7 @@ fn resolve(abs: Option<&str>, rel: Option<&str>, base: &Path) -> Option<PathBuf>
     a.or(r)
 }
 
-fn file_name(p: &Path) -> String {
+pub(crate) fn file_name(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
     let last = s.rsplit('/').next().unwrap_or(&s);
     last.rsplit_once('.').map_or(last, |(a, _)| a).to_string()
@@ -164,6 +167,7 @@ pub fn sesx(text: &str, base: &Path, name: &str) -> Result<Imported, String> {
             duration: 0.0,
             rate: rate_hint,
             channels: 0,
+            ext_id: None,
         });
         files.insert(fid.to_string(), id);
     }
@@ -243,6 +247,7 @@ pub fn sesx(text: &str, base: &Path, name: &str) -> Result<Imported, String> {
                 fade_in: s(fade("fadeIn")),
                 fade_out: s(fade("fadeOut")),
                 muted: cmute >= 0.5,
+                ext_id: None,
             });
         }
         let tr = out.track_mut(tid).unwrap();
@@ -272,6 +277,7 @@ pub fn sesx(text: &str, base: &Path, name: &str) -> Result<Imported, String> {
                     .and_then(|v| v.parse::<f64>().ok())
                     .map(s)
                     .unwrap_or(0.0),
+                ext_id: None,
             });
         }
     }
@@ -294,108 +300,7 @@ pub fn sesx(text: &str, base: &Path, name: &str) -> Result<Imported, String> {
     Ok(Imported {
         session: out,
         notices,
-    })
-}
-
-// ------------------------------------------------------------- .audfrm
-
-pub fn audfrm(text: &str, base: &Path) -> Result<Imported, String> {
-    let v: Value =
-        serde_json::from_str(text).map_err(|e| format!("Not an Audiform session: {e}"))?;
-    let rate = v["sample_rate"].as_u64().unwrap_or(48_000).max(1) as u32;
-    let name = v["name"].as_str().unwrap_or("Audiform Session");
-    let mut out = Session::new(name, rate, 0);
-    let mut notices = Vec::new();
-    let mut media_ids: HashMap<String, (u64, u32)> = HashMap::new();
-    for m in v["media"].as_array().into_iter().flatten() {
-        let key = m["id"].as_str().unwrap_or_default().to_string();
-        let path = resolve(m["path"].as_str(), m["relative_path"].as_str(), base);
-        let mrate = m["sample_rate"].as_u64().unwrap_or(rate as u64).max(1) as u32;
-        let len = m["length"].as_f64().unwrap_or(0.0);
-        let id = out.alloc_id();
-        out.media.push(MediaItem {
-            id,
-            name: path
-                .as_deref()
-                .map(file_name)
-                .unwrap_or_else(|| "Missing file".into()),
-            path,
-            duration: len / mrate as f64,
-            rate: mrate,
-            channels: m["channels"].as_u64().unwrap_or(0) as u16,
-        });
-        media_ids.insert(key, (id, mrate));
-    }
-    let s = |v: f64| v / rate as f64;
-    let mut skipped_fx = 0;
-    for t in v["tracks"].as_array().into_iter().flatten() {
-        let tid = out.add_track();
-        let mut clips = Vec::new();
-        for c in t["clips"].as_array().into_iter().flatten() {
-            let Some(&(media, mrate)) = c["media_id"].as_str().and_then(|k| media_ids.get(k))
-            else {
-                continue;
-            };
-            let src_in = c["source_in"].as_f64().unwrap_or(0.0);
-            let src_out = c["source_out"].as_f64().unwrap_or(src_in);
-            let id = out.alloc_id();
-            skipped_fx += c["effects"]["slots"].as_array().map_or(0, Vec::len);
-            clips.push(Clip {
-                id,
-                media,
-                name: c["name"].as_str().unwrap_or("Clip").to_string(),
-                start: s(c["start"].as_f64().unwrap_or(0.0)),
-                offset: src_in / mrate as f64,
-                length: (src_out - src_in).max(0.0) / mrate as f64,
-                gain_db: c["gain_db"].as_f64().unwrap_or(0.0) as f32,
-                fade_in: s(c["fade_in"]["length"].as_f64().unwrap_or(0.0)),
-                fade_out: s(c["fade_out"]["length"].as_f64().unwrap_or(0.0)),
-                muted: c["muted"].as_bool().unwrap_or(false),
-            });
-        }
-        skipped_fx += t["effects"]["slots"].as_array().map_or(0, Vec::len);
-        let tr = out.track_mut(tid).unwrap();
-        tr.name = t["name"].as_str().unwrap_or("Track").to_string();
-        tr.volume_db = t["volume_db"].as_f64().unwrap_or(0.0) as f32;
-        let pan = t["pan"].as_f64().unwrap_or(0.0);
-        tr.pan = if pan.abs() > 1.0 {
-            (pan / 100.0) as f32
-        } else {
-            pan as f32
-        };
-        tr.mute = t["muted"].as_bool().unwrap_or(false);
-        tr.solo = t["solo"].as_bool().unwrap_or(false);
-        tr.armed = t["record_armed"].as_bool().unwrap_or(false);
-        if let Some(h) = t["height"].as_f64() {
-            tr.height = h as f32;
-        }
-        tr.clips = clips;
-    }
-    for m in v["markers"].as_array().into_iter().flatten() {
-        let pos = m["position"]
-            .as_f64()
-            .or_else(|| m["start"].as_f64())
-            .or_else(|| m["time"].as_f64());
-        if let Some(p) = pos {
-            out.markers.push(Marker {
-                name: m["name"].as_str().unwrap_or("Marker").to_string(),
-                time: s(p),
-                length: s(m["length"]
-                    .as_f64()
-                    .or_else(|| m["duration"].as_f64())
-                    .unwrap_or(0.0)),
-            });
-        }
-    }
-    if v["buses"].as_array().is_some_and(|b| !b.is_empty()) {
-        notices.push("Buses and sends were not carried over yet.".into());
-    }
-    if skipped_fx > 0 {
-        notices.push(format!("{skipped_fx} effect slot(s) were skipped."));
-    }
-    Ok(Imported {
-        session: out,
-        notices,
+        base: None,
     })
 }
 
@@ -450,27 +355,6 @@ mod tests {
         assert!((c.fade_in - 0.1).abs() < 1e-9);
         assert!((c.fade_out - 0.5).abs() < 1e-9);
         assert_eq!(s.media[0].name, "take");
-    }
-
-    #[test]
-    fn reads_an_audfrm() {
-        let text = r#"{"format":"altaudio.session","schema_version":1,"name":"Pod","sample_rate":48000,
-          "media":[{"id":"m1","path":"C:\\x\\voice.flac","relative_path":null,"sample_rate":44100,"channels":1,"length":441000}],
-          "tracks":[{"name":"Host","volume_db":-3.0,"pan":0.0,"muted":false,"solo":false,"height":96,
-            "effects":{"slots":[]},
-            "clips":[{"name":"voice","media_id":"m1","start":96000,"source_in":44100,"source_out":88200,"gain_db":1.5,"muted":false,
-              "fade_in":{"length":4800},"fade_out":{"length":0},"effects":{"slots":[{}]}}]}],
-          "buses":[],"markers":[]}"#;
-        let imp = audfrm(text, Path::new(".")).unwrap();
-        let s = &imp.session;
-        assert_eq!(s.rate, 48_000);
-        assert!((s.media[0].duration - 10.0).abs() < 1e-9);
-        let c = &s.tracks[0].clips[0];
-        assert!((c.start - 2.0).abs() < 1e-9);
-        assert!((c.offset - 1.0).abs() < 1e-9);
-        assert!((c.length - 1.0).abs() < 1e-9);
-        assert!((c.fade_in - 0.1).abs() < 1e-9);
-        assert_eq!(imp.notices.len(), 1);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! Core types shared by every part of Audiform27: planar audio buffers,
@@ -6,9 +6,13 @@
 
 pub mod buffer;
 pub mod history;
+pub mod midi;
 pub mod session;
+pub mod space;
 pub mod time;
 
 pub use buffer::{AudioBuffer, Range};
 pub use history::History;
-pub use session::{Clip, ClipId, Marker, MediaId, MediaItem, Session, Track, TrackId};
+pub use session::{
+    Clip, ClipId, EffectSlot, Marker, MediaId, MediaItem, Send, Session, Track, TrackId, TrackKind,
+};

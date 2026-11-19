@@ -1,0 +1,981 @@
+// SPDX-License-Identifier: LicenseRef-Audiform27
+// Copyright (c) The Audiform27 contributors.
+
+//! Audiform sessions (`.audfrm`, and the older `.altaudio`): read and
+//! written losslessly, so a session can go back and forth between
+//! Audiform and Audiform27.
+//!
+//! How it stays lossless: every object Audiform27 reads keeps its id from
+//! the file (`ext_id`). Saving starts from the document that was opened
+//! (the "base") and, for each object, takes the original by its id and
+//! writes only the fields Audiform27 owns back into it. Everything else
+//! (automation envelopes, clip stretch, slot routing and presets, the
+//! view, libraries, playlist, episode metadata, fields added by later
+//! Audiform versions) passes through untouched. New objects get every
+//! field Audiform requires.
+//!
+//! Effects: Audiform's own effects that Audiform27 also has (`altaudio.X`
+//! with an `af.X` twin) load into Audiform27 and are written back with
+//! their saved settings. Others stay in the chain, in place, silent here
+//! and saved back as they were. Audiform27-only effects are saved as
+//! `af27.<id>` slots, which Audiform skips when playing but keeps when it
+//! saves.
+//!
+//! Units: positions are samples at the session rate (clip start, fades,
+//! markers), source points are samples at the file's own rate, MIDI is in
+//! beats.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use af27_core::midi::{MidiClip, MidiNote};
+use af27_core::session::{Clip, EffectSlot, Marker, MediaItem, Send, Session, TrackKind};
+use af27_core::space::{Monitor, SpaceLayout};
+use serde_json::{json, Map, Value};
+
+use crate::Imported;
+
+pub const FORMAT: &str = "altaudio.session";
+const AF27: &str = "af27.";
+
+/// A fresh random (version 4) UUID.
+pub fn new_uuid() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = t
+        ^ COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
+        ^ (std::process::id() as u64) << 32;
+    let mut next = || {
+        // splitmix64
+        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = x;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let (a, b) = (next(), next());
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&a.to_le_bytes());
+    bytes[8..].copy_from_slice(&b.to_le_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
+}
+
+fn now_iso() -> String {
+    // Seconds since the epoch as an RFC 3339 UTC time, without a date crate.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil from days (Howard Hinnant's public algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
+    )
+}
+
+fn layout_from(s: &str) -> Option<SpaceLayout> {
+    SpaceLayout::ALL.into_iter().find(|l| l.label() == s)
+}
+
+fn hex_color(v: &Value) -> Option<[u8; 3]> {
+    let s = v.as_str()?.strip_prefix('#')?;
+    if s.len() != 6 {
+        return None;
+    }
+    let p = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
+    Some([p(0)?, p(2)?, p(4)?])
+}
+
+/// `altaudio.X` -> `af.X` when Audiform27 has the effect.
+fn fx_id(audiform_id: &str) -> Option<String> {
+    let name = audiform_id.strip_prefix("altaudio.")?;
+    let id = format!("af.{name}");
+    af27_fx::info(&id).map(|_| id)
+}
+
+fn slot_from(v: &Value) -> EffectSlot {
+    let effect = v["effect"].as_str().unwrap_or_default().to_string();
+    let enabled = v["enabled"].as_bool().unwrap_or(true);
+    let ext_id = v["id"].as_str().map(str::to_string);
+    let data = match &v["data"] {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    };
+    if let Some(id) = fx_id(&effect) {
+        let info = af27_fx::info(&id).unwrap();
+        let values = info
+            .params
+            .iter()
+            .map(|p| v["params"][p.key].as_f64().unwrap_or(p.default) as f32)
+            .collect();
+        return EffectSlot {
+            effect: id,
+            values,
+            bypass: !enabled,
+            data,
+            ext_id,
+        };
+    }
+    if let Some(own) = effect.strip_prefix(AF27) {
+        let values = v["params"]["values"]
+            .as_array()
+            .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
+            .unwrap_or_default();
+        return EffectSlot {
+            effect: own.to_string(),
+            values,
+            bypass: !enabled,
+            data,
+            ext_id,
+        };
+    }
+    // An effect Audiform27 does not have: kept by its own id, silent here.
+    EffectSlot {
+        effect,
+        values: Vec::new(),
+        bypass: !enabled,
+        data,
+        ext_id,
+    }
+}
+
+fn chain_from(v: &Value) -> Vec<EffectSlot> {
+    v["slots"]
+        .as_array()
+        .map(|a| a.iter().map(slot_from).collect())
+        .unwrap_or_default()
+}
+
+/// Reads an Audiform session.
+pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
+    let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("Not an Audiform session: {e}"))?;
+    let rate = v["sample_rate"].as_u64().unwrap_or(48_000).max(1) as u32;
+    let mut out = Session::new(v["name"].as_str().unwrap_or("Audiform Session"), rate, 0);
+    let mut notices = Vec::new();
+    let secs = |x: &Value| x.as_f64().unwrap_or(0.0) / rate as f64;
+
+    if let Some(t) = v.get("tempo").filter(|t| t.is_object()) {
+        out.tempo.bpm = t["bpm"].as_f64().unwrap_or(120.0);
+        out.tempo.beats_per_bar = t["beats_per_bar"].as_u64().unwrap_or(4) as u32;
+        if t["changes"].as_array().is_some_and(|c| !c.is_empty()) {
+            notices.push(
+                "Tempo changes are kept in the file; Audiform27 plays the first tempo for now."
+                    .into(),
+            );
+        }
+    }
+    if let Some(sp) = v.get("space").filter(|s| s.is_object()) {
+        out.space = sp["layout"].as_str().and_then(layout_from);
+        out.monitor = match sp["listen"].as_str() {
+            Some("binaural") => Monitor::Binaural,
+            _ => Monitor::StereoFold,
+        };
+    }
+
+    let mut media_ids: HashMap<String, (u64, u32)> = HashMap::new();
+    for m in v["media"].as_array().into_iter().flatten() {
+        let key = m["id"].as_str().unwrap_or_default().to_string();
+        let path = crate::resolve(m["path"].as_str(), m["relative_path"].as_str(), base_dir);
+        let mrate = m["sample_rate"].as_u64().unwrap_or(rate as u64).max(1) as u32;
+        let id = out.alloc_id();
+        out.media.push(MediaItem {
+            id,
+            name: path
+                .as_deref()
+                .map(crate::file_name)
+                .unwrap_or_else(|| "Missing file".into()),
+            path,
+            duration: m["length"].as_f64().unwrap_or(0.0) / mrate as f64,
+            rate: mrate,
+            channels: m["channels"].as_u64().unwrap_or(0) as u16,
+            ext_id: Some(key.clone()),
+        });
+        media_ids.insert(key, (id, mrate));
+    }
+
+    // Tracks first, then buses (as bus tracks); outputs and sends resolve after.
+    let mut by_uuid: HashMap<String, u64> = HashMap::new();
+    let mut pending: Vec<(u64, Value)> = Vec::new();
+    let mut silent_fx = 0usize;
+    let mut envelopes = 0usize;
+    let lists = [
+        (v["tracks"].as_array(), false),
+        (v["buses"].as_array(), true),
+    ];
+    for (list, is_bus) in lists {
+        for t in list.into_iter().flatten() {
+            let kind = if is_bus {
+                TrackKind::Bus
+            } else if t["kind"].as_str() == Some("midi") {
+                TrackKind::Midi
+            } else {
+                TrackKind::Audio
+            };
+            let tid = out.add_track_of(kind);
+            let uuid = t["id"].as_str().unwrap_or_default().to_string();
+            by_uuid.insert(uuid.clone(), tid);
+            pending.push((tid, t.clone()));
+            let mut clips = Vec::new();
+            for c in t["clips"].as_array().into_iter().flatten() {
+                let Some(&(media, mrate)) = c["media_id"].as_str().and_then(|k| media_ids.get(k))
+                else {
+                    continue;
+                };
+                let src_in = c["source_in"].as_f64().unwrap_or(0.0);
+                let src_out = c["source_out"].as_f64().unwrap_or(src_in);
+                envelopes += c["envelopes"].as_array().map_or(0, Vec::len);
+                silent_fx += c["effects"]["slots"].as_array().map_or(0, Vec::len);
+                let id = out.alloc_id();
+                clips.push(Clip {
+                    id,
+                    media,
+                    name: c["name"].as_str().unwrap_or("Clip").to_string(),
+                    start: secs(&c["start"]),
+                    offset: src_in / mrate as f64,
+                    length: (src_out - src_in).max(0.0) / mrate as f64,
+                    gain_db: c["gain_db"].as_f64().unwrap_or(0.0) as f32,
+                    fade_in: secs(&c["fade_in"]["length"]),
+                    fade_out: secs(&c["fade_out"]["length"]),
+                    muted: c["muted"].as_bool().unwrap_or(false),
+                    ext_id: c["id"].as_str().map(str::to_string),
+                });
+            }
+            let midi: Vec<MidiClip> = t["midi_clips"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|m| MidiClip {
+                    id: out.alloc_id(),
+                    name: m["name"].as_str().unwrap_or("MIDI").to_string(),
+                    start: m["start"].as_f64().unwrap_or(0.0),
+                    length: m["length"].as_f64().unwrap_or(4.0),
+                    notes: m["notes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|n| MidiNote {
+                            pitch: n["pitch"].as_u64().unwrap_or(60).min(127) as u8,
+                            start: n["start"].as_f64().unwrap_or(0.0),
+                            length: n["length"].as_f64().unwrap_or(1.0),
+                            velocity: n["velocity"].as_u64().unwrap_or(100).clamp(1, 127) as u8,
+                            channel: n["channel"].as_u64().unwrap_or(0).min(15) as u8,
+                            pan: n["pan"].as_f64().unwrap_or(0.0) as f32,
+                        })
+                        .collect(),
+                    muted: m["muted"].as_bool().unwrap_or(false),
+                    ext_id: m["id"].as_str().map(str::to_string),
+                })
+                .collect();
+            let chain = chain_from(&t["effects"]);
+            silent_fx += chain
+                .iter()
+                .filter(|s| {
+                    s.values.is_empty()
+                        && !s.effect.is_empty()
+                        && af27_dsp::Effect::from_id(&s.effect).is_none()
+                        && af27_fx::info(&s.effect).is_none()
+                })
+                .count();
+            envelopes += t["envelopes"].as_array().map_or(0, Vec::len);
+            let tr = out.track_mut(tid).unwrap();
+            tr.name = t["name"].as_str().unwrap_or("Track").to_string();
+            tr.volume_db = t["volume_db"].as_f64().unwrap_or(0.0) as f32;
+            tr.pan = t["pan"].as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32;
+            tr.mute = t["muted"].as_bool().unwrap_or(false);
+            tr.solo = t["solo"].as_bool().unwrap_or(false);
+            tr.armed = t["record_armed"].as_bool().unwrap_or(false);
+            if let Some(h) = t["height"].as_f64() {
+                tr.height = (h as f32).max(40.0);
+            }
+            if let Some(c) = hex_color(&t["color"]) {
+                tr.color = c;
+            }
+            if let Some(p) = t.get("space").filter(|p| p.is_object()) {
+                tr.pos.x = p["x"].as_f64().unwrap_or(0.0);
+                tr.pos.y = p["y"].as_f64().unwrap_or(1.0);
+                tr.pos.z = p["z"].as_f64().unwrap_or(0.0).max(0.0);
+                tr.pos.size = p["size"].as_f64().unwrap_or(0.0);
+                tr.pos.width = p["width"].as_f64().unwrap_or(1.0);
+                tr.pos.rotation = p["rotation"].as_f64().unwrap_or(0.0);
+                let lfe = p["lfe"].as_f64().unwrap_or(0.0);
+                tr.pos.lfe_db = if lfe > 0.0 { 20.0 * lfe.log10() } else { -96.0 };
+            }
+            if let Some(inst) = t
+                .get("af27_synth")
+                .and_then(|s| serde_json::from_value(s.clone()).ok())
+            {
+                tr.instrument = inst;
+            }
+            tr.clips = clips;
+            tr.midi = midi;
+            tr.chain = chain;
+            tr.ext_id = Some(uuid);
+        }
+    }
+    for (tid, t) in pending {
+        let output = match t["output"]["type"].as_str() {
+            Some("bus") => t["output"]["bus_id"]
+                .as_str()
+                .and_then(|b| by_uuid.get(b))
+                .copied(),
+            _ => None,
+        };
+        let sends: Vec<Send> = t["sends"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                Some(Send {
+                    bus: *by_uuid.get(s["bus_id"].as_str()?)?,
+                    level_db: if s["enabled"].as_bool().unwrap_or(true) {
+                        s["level_db"].as_f64().unwrap_or(0.0) as f32
+                    } else {
+                        -120.0
+                    },
+                    pre_fader: s["pre_fader"].as_bool().unwrap_or(false),
+                    ext_id: s["id"].as_str().map(str::to_string),
+                })
+            })
+            .collect();
+        let tr = out.track_mut(tid).unwrap();
+        tr.output = output;
+        tr.sends = sends;
+    }
+    out.master_db = v["master"]["volume_db"].as_f64().unwrap_or(0.0) as f32;
+    out.master_chain = chain_from(&v["master"]["effects"]);
+    for m in v["markers"].as_array().into_iter().flatten() {
+        out.markers.push(Marker {
+            name: m["name"].as_str().unwrap_or("Marker").to_string(),
+            time: secs(&m["position"]),
+            length: secs(&m["duration"]),
+            ext_id: m["id"].as_str().map(str::to_string),
+        });
+    }
+    if envelopes > 0 {
+        notices.push(format!("{envelopes} automation lane(s) are kept in the session and saved back unchanged; Audiform27 does not play automation yet."));
+    }
+    if silent_fx > 0 {
+        notices.push(format!("{silent_fx} effect(s) Audiform27 does not have stay in their chains, silent here, and are saved back unchanged."));
+    }
+    Ok(Imported {
+        session: out,
+        notices,
+        base: Some(v),
+    })
+}
+
+/// Finds an object by id in `list` (for looking up originals).
+fn by_id<'a>(list: Option<&'a Vec<Value>>, id: Option<&str>) -> Option<&'a Value> {
+    let id = id?;
+    list?.iter().find(|o| o["id"].as_str() == Some(id))
+}
+
+fn obj(v: Value) -> Map<String, Value> {
+    match v {
+        Value::Object(m) => m,
+        _ => Map::new(),
+    }
+}
+
+fn empty_chain() -> Value {
+    json!({"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []})
+}
+
+fn write_chain(slots: &mut [EffectSlot], base_chain: Option<&Value>) -> Value {
+    let mut chain = obj(base_chain.cloned().unwrap_or_else(empty_chain));
+    let base_slots = base_chain.and_then(|c| c["slots"].as_array());
+    let out: Vec<Value> = slots
+        .iter_mut()
+        .map(|s| {
+            let orig = by_id(base_slots, s.ext_id.as_deref());
+            let id = s.ext_id.get_or_insert_with(new_uuid).clone();
+            let mut o = obj(orig.cloned().unwrap_or(Value::Null));
+            o.insert("id".into(), json!(id));
+            o.insert("enabled".into(), json!(!s.bypass));
+            if let Some(info) = af27_fx::info(&s.effect) {
+                o.insert(
+                    "effect".into(),
+                    json!(s.effect.replacen("af.", "altaudio.", 1)),
+                );
+                let mut params = obj(o.get("params").cloned().unwrap_or(Value::Null));
+                for (p, val) in info.params.iter().zip(&s.values) {
+                    params.insert(p.key.into(), json!(*val as f64));
+                }
+                o.insert("params".into(), Value::Object(params));
+                if let Some(d) = &s.data {
+                    o.insert(
+                        "data".into(),
+                        serde_json::from_str(d).unwrap_or_else(|_| json!(d)),
+                    );
+                }
+            } else if orig.is_none() || af27_dsp::Effect::from_id(&s.effect).is_some() {
+                // Audiform27's own effect: a slot Audiform skips but keeps.
+                o.insert("effect".into(), json!(format!("{AF27}{}", s.effect)));
+                o.insert("params".into(), json!({ "values": s.values }));
+            }
+            // Otherwise an effect only Audiform has: its original slot, as is.
+            o.entry("params").or_insert_with(|| json!({}));
+            Value::Object(o)
+        })
+        .collect();
+    chain.insert("slots".into(), Value::Array(out));
+    Value::Object(chain)
+}
+
+/// Writes `session` as an Audiform session. `base` is the document it was
+/// opened from, if any; ids for new objects are filled into `session`, so
+/// later saves keep them.
+pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
+    let mut doc = obj(base.cloned().unwrap_or(Value::Null));
+    let rate = session.rate as f64;
+    let samples = |s: f64| (s * rate).round().max(0.0) as u64;
+    let now = now_iso();
+    doc.entry("format").or_insert_with(|| json!(FORMAT));
+    doc.entry("schema_version").or_insert_with(|| json!(1));
+    doc.entry("id").or_insert_with(|| json!(new_uuid()));
+    doc.insert("name".into(), json!(session.name));
+    doc.insert("sample_rate".into(), json!(session.rate));
+    doc.entry("bit_depth").or_insert_with(|| json!(32));
+    doc.entry("created").or_insert_with(|| json!(now));
+    doc.insert("modified".into(), json!(now));
+    doc.entry("view").or_insert_with(|| json!({"samples_per_pixel": 512.0, "scroll": 0, "scroll_y": 0, "playhead": 0, "selection": null}));
+    doc.entry("modes")
+        .or_insert_with(|| json!({"podcast": false, "voiceover": false}));
+    doc.entry("libraries").or_insert_with(|| json!([]));
+    doc.entry("template_id").or_insert(Value::Null);
+    doc.entry("metadata").or_insert_with(|| json!({"show_id": null, "title": null, "show": null, "episode_number": null, "season_number": null, "description": null, "artist": null, "artwork": null, "explicit": false}));
+
+    // Tempo: the first tempo is Audiform27's; changes and beat unit pass through.
+    let mut tempo = obj(base.map(|b| b["tempo"].clone()).unwrap_or(Value::Null));
+    tempo.insert("bpm".into(), json!(session.tempo.bpm));
+    tempo.insert("beats_per_bar".into(), json!(session.tempo.beats_per_bar));
+    tempo.entry("beat_unit").or_insert_with(|| json!(4));
+    tempo.entry("changes").or_insert_with(|| json!([]));
+    doc.insert("tempo".into(), Value::Object(tempo));
+    match session.space {
+        Some(l) => {
+            let mut sp = obj(base.map(|b| b["space"].clone()).unwrap_or(Value::Null));
+            sp.insert("layout".into(), json!(l.label()));
+            let keep_speakers = sp.get("listen").and_then(Value::as_str) == Some("speakers");
+            if !keep_speakers {
+                sp.insert(
+                    "listen".into(),
+                    json!(match session.monitor {
+                        Monitor::Binaural => "binaural",
+                        Monitor::StereoFold => "stereo",
+                    }),
+                );
+            }
+            doc.insert("space".into(), Value::Object(sp));
+        }
+        None => {
+            doc.remove("space");
+        }
+    }
+
+    // Media.
+    let base_media = base.and_then(|b| b["media"].as_array());
+    let media: Vec<Value> = session
+        .media
+        .iter_mut()
+        .map(|m| {
+            let mut o = obj(by_id(base_media, m.ext_id.as_deref())
+                .cloned()
+                .unwrap_or(Value::Null));
+            let id = m.ext_id.get_or_insert_with(new_uuid).clone();
+            o.insert("id".into(), json!(id));
+            if let Some(p) = &m.path {
+                o.insert("path".into(), json!(p.to_string_lossy()));
+            }
+            o.entry("path").or_insert_with(|| json!(""));
+            o.entry("relative_path").or_insert(Value::Null);
+            o.insert("sample_rate".into(), json!(m.rate));
+            o.insert("channels".into(), json!(m.channels));
+            o.insert(
+                "length".into(),
+                json!((m.duration * m.rate as f64).round() as u64),
+            );
+            Value::Object(o)
+        })
+        .collect();
+    doc.insert("media".into(), Value::Array(media));
+    let media_rate: HashMap<u64, (String, f64)> = session
+        .media
+        .iter()
+        .map(|m| (m.id, (m.ext_id.clone().unwrap_or_default(), m.rate as f64)))
+        .collect();
+
+    // Ids for every track first, so outputs and sends can name buses.
+    for t in &mut session.tracks {
+        t.ext_id.get_or_insert_with(new_uuid);
+    }
+    let uuid_of: HashMap<u64, String> = session
+        .tracks
+        .iter()
+        .map(|t| (t.id, t.ext_id.clone().unwrap()))
+        .collect();
+    let base_tracks = base.and_then(|b| b["tracks"].as_array());
+    let base_buses = base.and_then(|b| b["buses"].as_array());
+    let mut tracks = Vec::new();
+    let mut buses = Vec::new();
+    for t in &mut session.tracks {
+        let is_bus = t.kind == TrackKind::Bus;
+        let orig = by_id(
+            if is_bus { base_buses } else { base_tracks },
+            t.ext_id.as_deref(),
+        )
+        .or_else(|| {
+            by_id(
+                if is_bus { base_tracks } else { base_buses },
+                t.ext_id.as_deref(),
+            )
+        });
+        let mut o = obj(orig.cloned().unwrap_or(Value::Null));
+        o.insert("id".into(), json!(t.ext_id.clone().unwrap()));
+        o.insert("name".into(), json!(t.name));
+        o.entry("channels").or_insert_with(|| json!("stereo"));
+        o.insert("height".into(), json!(t.height.round() as u32));
+        o.insert("volume_db".into(), json!(t.volume_db as f64));
+        o.insert("pan".into(), json!(t.pan as f64));
+        o.insert("muted".into(), json!(t.mute));
+        o.insert("solo".into(), json!(t.solo));
+        o.insert(
+            "output".into(),
+            match t.output.and_then(|b| uuid_of.get(&b)) {
+                Some(b) => json!({"type": "bus", "bus_id": b}),
+                None => json!({"type": "master"}),
+            },
+        );
+        let base_sends = orig.and_then(|x| x["sends"].as_array());
+        let sends: Vec<Value> = t
+            .sends
+            .iter_mut()
+            .filter_map(|s| {
+                let bus = uuid_of.get(&s.bus)?.clone();
+                let mut so = obj(by_id(base_sends, s.ext_id.as_deref())
+                    .cloned()
+                    .unwrap_or(Value::Null));
+                so.insert(
+                    "id".into(),
+                    json!(s.ext_id.get_or_insert_with(new_uuid).clone()),
+                );
+                so.insert("bus_id".into(), json!(bus));
+                so.insert("level_db".into(), json!(s.level_db as f64));
+                so.insert("pre_fader".into(), json!(s.pre_fader));
+                so.entry("pan").or_insert_with(|| json!(0.0));
+                so.entry("enabled").or_insert_with(|| json!(true));
+                Some(Value::Object(so))
+            })
+            .collect();
+        o.insert("sends".into(), Value::Array(sends));
+        o.insert(
+            "effects".into(),
+            write_chain(&mut t.chain, orig.map(|x| &x["effects"])),
+        );
+        o.entry("envelopes").or_insert_with(|| json!([]));
+        if session.space.is_some() {
+            let mut sp = obj(orig.map(|x| x["space"].clone()).unwrap_or(Value::Null));
+            sp.insert("x".into(), json!(t.pos.x));
+            sp.insert("y".into(), json!(t.pos.y));
+            sp.insert("z".into(), json!(t.pos.z));
+            sp.insert("size".into(), json!(t.pos.size));
+            sp.insert("width".into(), json!(t.pos.width));
+            sp.insert("rotation".into(), json!(t.pos.rotation));
+            sp.insert(
+                "lfe".into(),
+                json!(if t.pos.lfe_db <= -60.0 {
+                    0.0
+                } else {
+                    10f64.powf(t.pos.lfe_db / 20.0)
+                }),
+            );
+            o.insert("space".into(), Value::Object(sp));
+        }
+        if is_bus {
+            buses.push(Value::Object(o));
+            continue;
+        }
+        o.entry("role").or_insert_with(|| json!("standard"));
+        o.insert("record_armed".into(), json!(t.armed));
+        o.entry("monitor_input").or_insert_with(|| json!(false));
+        let base_clips = orig.and_then(|x| x["clips"].as_array());
+        let clips: Vec<Value> = t
+            .clips
+            .iter_mut()
+            .map(|c| {
+                let mut co = obj(by_id(base_clips, c.ext_id.as_deref())
+                    .cloned()
+                    .unwrap_or(Value::Null));
+                let (media_uuid, mrate) = media_rate.get(&c.media).cloned().unwrap_or_default();
+                co.insert(
+                    "id".into(),
+                    json!(c.ext_id.get_or_insert_with(new_uuid).clone()),
+                );
+                co.insert("name".into(), json!(c.name));
+                co.insert("media_id".into(), json!(media_uuid));
+                co.insert("start".into(), json!(samples(c.start)));
+                co.insert(
+                    "source_in".into(),
+                    json!((c.offset * mrate).round().max(0.0) as u64),
+                );
+                co.insert(
+                    "source_out".into(),
+                    json!(((c.offset + c.length) * mrate).round().max(0.0) as u64),
+                );
+                co.insert("gain_db".into(), json!(c.gain_db as f64));
+                co.insert("muted".into(), json!(c.muted));
+                co.entry("locked").or_insert_with(|| json!(false));
+                for (key, len) in [("fade_in", c.fade_in), ("fade_out", c.fade_out)] {
+                    let mut f = obj(co.get(key).cloned().unwrap_or(Value::Null));
+                    f.insert("length".into(), json!(samples(len)));
+                    f.entry("shape").or_insert_with(|| json!("linear"));
+                    f.entry("curve").or_insert_with(|| json!(0.0));
+                    co.insert(key.into(), Value::Object(f));
+                }
+                co.entry("envelopes").or_insert_with(|| json!([]));
+                co.entry("effects").or_insert_with(empty_chain);
+                Value::Object(co)
+            })
+            .collect();
+        o.insert("clips".into(), Value::Array(clips));
+        if t.kind == TrackKind::Midi || !t.midi.is_empty() {
+            o.insert("kind".into(), json!("midi"));
+            let base_midi = orig.and_then(|x| x["midi_clips"].as_array());
+            let midi: Vec<Value> = t
+                .midi
+                .iter_mut()
+                .map(|m| {
+                    let mut mo = obj(by_id(base_midi, m.ext_id.as_deref()).cloned().unwrap_or(Value::Null));
+                    mo.insert("id".into(), json!(m.ext_id.get_or_insert_with(new_uuid).clone()));
+                    mo.insert("name".into(), json!(m.name));
+                    mo.insert("start".into(), json!(m.start));
+                    mo.insert("length".into(), json!(m.length));
+                    mo.insert("muted".into(), json!(m.muted));
+                    mo.insert(
+                        "notes".into(),
+                        Value::Array(
+                            m.notes
+                                .iter()
+                                .map(|n| json!({"pitch": n.pitch, "velocity": n.velocity, "start": n.start, "length": n.length, "channel": n.channel, "pan": n.pan}))
+                                .collect(),
+                        ),
+                    );
+                    Value::Object(mo)
+                })
+                .collect();
+            o.insert("midi_clips".into(), Value::Array(midi));
+            o.insert(
+                "af27_synth".into(),
+                serde_json::to_value(t.instrument).unwrap_or(Value::Null),
+            );
+        }
+        tracks.push(Value::Object(o));
+    }
+    doc.insert("tracks".into(), Value::Array(tracks));
+    doc.insert("buses".into(), Value::Array(buses));
+
+    let mut master = obj(base.map(|b| b["master"].clone()).unwrap_or(Value::Null));
+    master.entry("channels").or_insert_with(|| json!("stereo"));
+    master.entry("height").or_insert_with(|| json!(72));
+    master.insert("volume_db".into(), json!(session.master_db as f64));
+    let base_master_fx = base
+        .map(|b| &b["master"]["effects"])
+        .filter(|v| !v.is_null());
+    master.insert(
+        "effects".into(),
+        write_chain(&mut session.master_chain, base_master_fx),
+    );
+    master.entry("envelopes").or_insert_with(|| json!([]));
+    doc.insert("master".into(), Value::Object(master));
+
+    let base_markers = base.and_then(|b| b["markers"].as_array());
+    let markers: Vec<Value> = session
+        .markers
+        .iter_mut()
+        .map(|m| {
+            let mut mo = obj(by_id(base_markers, m.ext_id.as_deref())
+                .cloned()
+                .unwrap_or(Value::Null));
+            mo.insert(
+                "id".into(),
+                json!(m.ext_id.get_or_insert_with(new_uuid).clone()),
+            );
+            mo.insert("name".into(), json!(m.name));
+            mo.entry("kind").or_insert_with(|| json!("cue"));
+            mo.insert("position".into(), json!(samples(m.time)));
+            mo.insert("duration".into(), json!(samples(m.length)));
+            mo.entry("description").or_insert_with(|| json!(""));
+            Value::Object(mo)
+        })
+        .collect();
+    doc.insert("markers".into(), Value::Array(markers));
+    Value::Object(doc)
+}
+
+/// Saves `session` to `path` as an Audiform session, pretty-printed as
+/// Audiform writes it. Returns the document written (the new base).
+pub fn save(session: &mut Session, base: Option<&Value>, path: &Path) -> Result<Value, String> {
+    let doc = export(session, base);
+    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    let tmp: PathBuf = path.with_extension("audfrm.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
+    Ok(doc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session with fields Audiform27 does not use anywhere: they must
+    /// all survive a load and save.
+    const SAMPLE: &str = r##"{
+      "format": "altaudio.session", "schema_version": 1, "id": "11111111-1111-4111-8111-111111111111",
+      "name": "Round Trip", "sample_rate": 48000, "bit_depth": 32,
+      "created": "2026-11-08T05:29:43Z", "modified": "2026-11-08T05:29:43Z",
+      "media": [{"id": "m1", "path": "C:\\x\\voice.wav", "relative_path": null, "sample_rate": 44100, "channels": 2, "length": 441000, "linked": null}],
+      "tracks": [{
+        "id": "t1", "name": "Host", "role": "standard", "host_profile_id": "close_mic", "channels": "stereo", "color": "#ff8800",
+        "height": 96, "volume_db": -3.0, "pan": 0.25, "muted": false, "solo": false, "record_armed": false, "monitor_input": false,
+        "input": {"device": "SSL 2+", "channels": [0, 1]}, "output": {"type": "bus", "bus_id": "b1"},
+        "sends": [{"id": "s1", "bus_id": "b1", "level_db": -12.0, "pan": 0.5, "pre_fader": true, "enabled": true}],
+        "effects": {"enabled": true, "input_gain_db": 1.5, "output_gain_db": -0.5, "mix": 0.8, "slots": [
+          {"id": "fx1", "effect": "altaudio.dynamics", "enabled": true, "params": {"threshold": -20.0, "ratio": 3.0}, "preset": "Podcast Voice"},
+          {"id": "fx2", "effect": "altaudio.stereo_width", "enabled": false, "params": {"pan": 10.0, "width": 150.0}}
+        ]},
+        "clips": [{"id": "c1", "name": "voice", "media_id": "m1", "start": 96000, "source_in": 44100, "source_out": 88200,
+          "gain_db": 1.5, "muted": false, "locked": true, "color": null, "audio_type": "dialogue",
+          "fade_in": {"length": 4800, "shape": "cosine", "curve": 0.3}, "fade_out": {"length": 0, "shape": "linear", "curve": 0.0},
+          "stretch": {"ratio": 1.1, "pitch": -1.0, "keep_pitch": true, "polyphonic": true, "rendered": false},
+          "envelopes": [{"id": "e1", "target": {"type": "volume"}, "enabled": true, "height": 40, "points": [{"position": 0, "value": 0.5, "curve": "linear"}]}],
+          "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}}],
+        "envelopes": [{"id": "e2", "target": {"type": "pan"}, "enabled": true, "height": 40, "points": []}]
+      }],
+      "buses": [{"id": "b1", "name": "Reverb Bus", "channels": "stereo", "height": 72, "volume_db": -6.0, "pan": 0.0, "muted": false, "solo": false,
+        "output": {"type": "master"}, "sends": [], "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}, "envelopes": []}],
+      "master": {"channels": "stereo", "height": 72, "volume_db": -1.0, "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}, "envelopes": []},
+      "markers": [{"id": "k1", "name": "Intro", "kind": "chapter", "position": 48000, "duration": 0, "description": "Cold open", "color": "#ff0000", "chapter": {"url": "https://x"}}],
+      "view": {"samples_per_pixel": 6103.5, "scroll": 10, "scroll_y": 0, "playhead": 3658228, "selection": null},
+      "modes": {"podcast": true, "voiceover": false}, "libraries": [{"path": "D:\\lib"}], "template_id": null,
+      "metadata": {"show_id": null, "title": "Ep 1", "show": "Show", "episode_number": 1, "season_number": null, "description": null, "artist": null, "artwork": null, "explicit": false},
+      "playlist": [{"id": "p1"}],
+      "tempo": {"bpm": 96.0, "beats_per_bar": 3, "beat_unit": 4, "changes": [{"id": "tc1", "bar": 9, "bpm": 120.0, "beats_per_bar": 4, "beat_unit": 4}]},
+      "a_field_from_the_future": {"keep": "me"}
+    }"##;
+
+    #[test]
+    fn reads_everything_audiform27_uses() {
+        let imp = import(SAMPLE, Path::new(".")).unwrap();
+        let s = &imp.session;
+        assert_eq!(s.tracks.len(), 2);
+        let host = &s.tracks[0];
+        let bus = &s.tracks[1];
+        assert_eq!(bus.kind, TrackKind::Bus);
+        assert_eq!(host.output, Some(bus.id));
+        assert_eq!(host.sends[0].bus, bus.id);
+        assert!(host.sends[0].pre_fader);
+        assert_eq!(host.color, [0xff, 0x88, 0x00]);
+        let c = &host.clips[0];
+        assert!(
+            (c.start - 2.0).abs() < 1e-9
+                && (c.offset - 1.0).abs() < 1e-9
+                && (c.length - 1.0).abs() < 1e-9
+        );
+        assert!((c.fade_in - 0.1).abs() < 1e-9);
+        // Audiform's Stereo Width loads as the ported effect, bypassed.
+        let w = &host.chain[1];
+        assert_eq!(w.effect, "af.stereo_width");
+        assert!(w.bypass);
+        // AAE's Dynamics stays in its place.
+        assert_eq!(host.chain[0].effect, "altaudio.dynamics");
+        assert_eq!(s.tempo.bpm, 96.0);
+        assert_eq!(s.tempo.beats_per_bar, 3);
+        assert_eq!(s.markers[0].name, "Intro");
+        assert!((s.master_db + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn saving_back_changes_only_what_was_edited() {
+        let imp = import(SAMPLE, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        // Unchanged: the document comes back the same apart from "modified".
+        let mut out = export(&mut s, Some(&base));
+        let mut want = base.clone();
+        out.as_object_mut().unwrap().remove("modified");
+        want.as_object_mut().unwrap().remove("modified");
+        // Values Audiform27 writes as numbers it read as numbers compare equal.
+        assert_eq!(
+            out,
+            want,
+            "\n--- got\n{}\n--- want\n{}",
+            serde_json::to_string_pretty(&out).unwrap(),
+            serde_json::to_string_pretty(&want).unwrap()
+        );
+        // An edit touches only its own field.
+        s.tracks[0].volume_db = -9.0;
+        s.tracks[0].clips[0].start = 3.0;
+        let out = export(&mut s, Some(&base));
+        assert_eq!(out["tracks"][0]["volume_db"], json!(-9.0));
+        assert_eq!(out["tracks"][0]["clips"][0]["start"], json!(144000));
+        assert_eq!(out["tracks"][0]["clips"][0]["stretch"]["ratio"], json!(1.1));
+        assert_eq!(
+            out["tracks"][0]["clips"][0]["envelopes"][0]["id"],
+            json!("e1")
+        );
+        assert_eq!(
+            out["tracks"][0]["effects"]["slots"][0]["preset"],
+            json!("Podcast Voice")
+        );
+        assert_eq!(out["a_field_from_the_future"]["keep"], json!("me"));
+        assert_eq!(out["tempo"]["changes"][0]["bar"], json!(9));
+    }
+
+    #[test]
+    fn new_objects_get_every_required_field() {
+        let mut s = Session::new("New", 48_000, 1);
+        let bus = s.add_track_of(TrackKind::Bus);
+        s.tracks[0].output = Some(bus);
+        s.tracks[0].chain.push(EffectSlot {
+            effect: "compressor".into(),
+            values: vec![-18.0, 3.0],
+            bypass: false,
+            data: None,
+            ext_id: None,
+        });
+        s.markers.push(Marker {
+            name: "M".into(),
+            time: 1.0,
+            length: 0.0,
+            ext_id: None,
+        });
+        let out = export(&mut s, None);
+        for k in [
+            "format",
+            "schema_version",
+            "id",
+            "name",
+            "sample_rate",
+            "bit_depth",
+            "created",
+            "modified",
+            "media",
+            "tracks",
+            "buses",
+            "master",
+            "markers",
+            "view",
+            "modes",
+            "libraries",
+            "metadata",
+        ] {
+            assert!(out.get(k).is_some(), "missing {k}");
+        }
+        let t = &out["tracks"][0];
+        for k in [
+            "id",
+            "name",
+            "role",
+            "channels",
+            "height",
+            "volume_db",
+            "pan",
+            "muted",
+            "solo",
+            "record_armed",
+            "monitor_input",
+            "output",
+            "sends",
+            "effects",
+            "clips",
+            "envelopes",
+        ] {
+            assert!(t.get(k).is_some(), "track missing {k}");
+        }
+        assert_eq!(t["output"]["type"], json!("bus"));
+        assert_eq!(t["effects"]["slots"][0]["effect"], json!("af27.compressor"));
+        // Ids were given to the session, so the next save keeps them.
+        assert!(s.tracks[0].ext_id.is_some());
+        // And it reads back the same.
+        let again = import(&out.to_string(), Path::new(".")).unwrap().session;
+        assert_eq!(again.tracks[0].chain[0].effect, "compressor");
+        assert_eq!(again.tracks[0].chain[0].values, vec![-18.0, 3.0]);
+        assert_eq!(again.tracks[0].output, Some(again.tracks[1].id));
+    }
+}
+
+/// Round-trips every Audiform session under `AF27_AUDFRM_DIR`:
+/// `cargo test -p af27-interop real_sessions -- --ignored`.
+#[cfg(test)]
+mod real {
+    #[test]
+    #[ignore]
+    fn real_sessions_round_trip_exactly() {
+        let Some(dir) = std::env::var_os("AF27_AUDFRM_DIR") else {
+            return;
+        };
+        let mut n = 0;
+        let mut stack = vec![std::path::PathBuf::from(dir)];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+                if ext != "audfrm" && ext != "altaudio" {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap();
+                let imp = super::import(&text, p.parent().unwrap()).unwrap();
+                let base = imp.base.clone().unwrap();
+                let mut s = imp.session;
+                let mut out = super::export(&mut s, Some(&base));
+                let mut want = base;
+                out.as_object_mut().unwrap().remove("modified");
+                want.as_object_mut().unwrap().remove("modified");
+                // Fields Audiform27 adds that older files did not have.
+                for k in ["tempo"] {
+                    if want.get(k).is_none() {
+                        out.as_object_mut().unwrap().remove(k);
+                    }
+                }
+                assert_eq!(out, want, "{} changed on a load and save", p.display());
+                n += 1;
+            }
+        }
+        eprintln!("{n} sessions round-tripped exactly");
+        assert!(n > 0);
+    }
+}

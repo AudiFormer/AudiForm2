@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! Everything the app knows that is not drawing: open files, the
@@ -234,6 +234,23 @@ pub struct State {
     pub show_about: bool,
     pub last_autosave: Instant,
     pub recording_target: Option<RecordTarget>,
+    /// The MIDI clip open in the Piano Roll.
+    pub piano_clip: Option<af27_core::ClipId>,
+    pub phase: crate::phasewheel::PhasePrefs,
+    /// The last analysis window taken while stopped, and what it was taken at.
+    pub scope_cache: Option<((u64, u64, i64), Vec<[f32; 2]>)>,
+    /// Effect slot open for editing in the Inspector: (track or MASTER, slot).
+    pub open_slot: Option<(u16, usize)>,
+    /// A live-edit drag is under way (one undo step per drag).
+    pub gesture: bool,
+    /// Bring the Piano Roll to the front.
+    pub want_piano: bool,
+    /// The Audiform document the session was opened from (or last saved
+    /// as), so saving keeps everything Audiform27 does not use.
+    pub session_base: Option<serde_json::Value>,
+    /// The Audiform effect picked in the Effects panel, and its settings.
+    pub fx_pick: Option<String>,
+    pub fx_values: HashMap<String, Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,6 +339,15 @@ impl State {
             show_about: false,
             last_autosave: Instant::now(),
             recording_target: None,
+            piano_clip: None,
+            phase: crate::phasewheel::PhasePrefs::load(),
+            scope_cache: None,
+            open_slot: None,
+            gesture: false,
+            want_piano: false,
+            session_base: None,
+            fx_pick: None,
+            fx_values: HashMap::new(),
         }
     }
 
@@ -478,6 +504,7 @@ impl State {
             duration: d.duration(),
             rate: d.buf.rate,
             channels: d.buf.num_channels() as u16,
+            ext_id: None,
         };
         let id = self.session.alloc_id();
         self.session.media.push(MediaItem { id, ..item });
@@ -552,13 +579,28 @@ impl State {
                 .and_then(|t| Session::from_json(&t))
                 .map(|s| (s, Vec::new()))
         } else {
-            af27_interop::import(path).map(|i| (i.session, i.notices))
+            af27_interop::import(path).map(|i| {
+                self.session_base = i.base;
+                (i.session, i.notices)
+            })
         };
+        if ext == "af27" || ext == "sesx" {
+            self.session_base = None;
+        }
         match result {
             Ok((session, notices)) => {
                 self.session = session;
                 self.session_history.clear();
-                self.session_path = (ext == "af27").then(|| path.to_path_buf());
+                // Audiform sessions save back to themselves; a .sesx import
+                // asks for a name on first save.
+                self.session_path =
+                    matches!(ext.as_str(), "af27" | "audfrm" | "altaudio").then(|| {
+                        if ext == "altaudio" {
+                            path.with_extension("audfrm")
+                        } else {
+                            path.to_path_buf()
+                        }
+                    });
                 self.session_dirty = false;
                 self.session_version += 1;
                 self.media_docs.clear();
@@ -599,8 +641,23 @@ impl State {
         }
     }
 
+    /// Saves the session. `.audfrm` (the default) is Audiform's own format,
+    /// written losslessly over what was opened; `.af27` is a plain dump of
+    /// Audiform27's model.
     pub fn save_session_to(&mut self, path: PathBuf) {
-        match std::fs::write(&path, self.session.to_json()) {
+        let is_af27 = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("af27"));
+        let result = if is_af27 {
+            std::fs::write(&path, self.session.to_json()).map_err(|e| e.to_string())
+        } else {
+            af27_interop::audfrm::save(&mut self.session, self.session_base.as_ref(), &path).map(
+                |doc| {
+                    self.session_base = Some(doc);
+                },
+            )
+        };
+        match result {
             Ok(()) => {
                 self.session_path = Some(path.clone());
                 self.session_dirty = false;
@@ -618,7 +675,12 @@ impl State {
         if self.session_dirty {
             let dir = data_dir().join("autosave");
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join("session.af27"), self.session.to_json());
+            let base = self.session_base.clone();
+            let _ = af27_interop::audfrm::save(
+                &mut self.session,
+                base.as_ref(),
+                &dir.join("autosave.audfrm"),
+            );
         }
     }
 
@@ -679,7 +741,10 @@ impl State {
                 Some(d) => af27_engine::buffer_program(d.buf.clone()),
                 None => return,
             },
-            Mode::Multitrack => af27_engine::mix_program(&self.session, &|m| self.media_buffer(m)),
+            Mode::Multitrack => {
+                let rate = self.engine.as_ref().map_or(self.session.rate, |e| e.rate);
+                af27_engine::mix_program(&self.session, &|m| self.media_buffer(m), rate)
+            }
         };
         if let Some(e) = &mut self.engine {
             e.set_program(program);
@@ -1031,6 +1096,7 @@ impl State {
                         name: format!("Marker {n:02}"),
                         time: t,
                         length: 0.0,
+                        ext_id: None,
                     });
                     d.markers.sort_by(|a, b| a.time.total_cmp(&b.time));
                 }
@@ -1042,6 +1108,7 @@ impl State {
                     name: format!("Marker {n:02}"),
                     time: t,
                     length: 0.0,
+                    ext_id: None,
                 });
                 self.session
                     .markers
@@ -1081,6 +1148,12 @@ impl State {
             let before = self.session.clone();
             if self.session.remove_clip(c).is_some() {
                 self.commit_session("Delete clip", before);
+            } else if let Some((ti, ci)) = self.session.find_midi(c) {
+                self.session.tracks[ti].midi.remove(ci);
+                if self.piano_clip == Some(c) {
+                    self.piano_clip = None;
+                }
+                self.commit_session("Delete MIDI clip", before);
             }
         }
     }
@@ -1096,9 +1169,8 @@ impl State {
     }
 
     pub fn export_mixdown(&mut self, path: PathBuf, fmt: af27_io::WavFormat) {
-        let program = af27_engine::mix_program(&self.session, &|m| self.media_buffer(m));
         let (from, to) = self.session_sel.unwrap_or((0.0, self.session.duration()));
-        let buf = af27_engine::render(&program, self.session.rate, from, to);
+        let buf = self.render_mix(from, to, false);
         match af27_io::write_wav(&path, &buf, fmt) {
             Ok(()) => self.toast(format!("Exported {}", path.display())),
             Err(e) => self.error(e),
@@ -1120,5 +1192,173 @@ impl State {
             self.load_file(path, Some((id, 0.0)));
         }
         self.mode = Mode::Multitrack;
+    }
+
+    // ------------------------------------------------------- live edits
+
+    /// Records an undo step for an edit the audio thread already has
+    /// (fader, pan, effect settings, 3D position, instrument): the mix is
+    /// not rebuilt, so effect tails and the playhead carry on.
+    pub fn commit_live(&mut self, label: &str, before: Session) {
+        self.session_history.push(label, before);
+        self.session_dirty = true;
+    }
+
+    /// Sends a track's fader, pan and mute or solo state to the mix.
+    pub fn live_track(&mut self, ti: usize) {
+        let space = self.session.space.is_some();
+        let audible: Vec<bool> = self
+            .session
+            .tracks
+            .iter()
+            .map(|t| self.session.audible(t))
+            .collect();
+        let Some(t) = self.session.tracks.get(ti) else {
+            return;
+        };
+        let (l, r) = af27_engine::track_gains(t, space);
+        if let Some(e) = &mut self.engine {
+            e.set_gains(ti, l, r);
+            // Solo on one track changes what every track does.
+            for (i, a) in audible.into_iter().enumerate() {
+                e.set_audible(i, a);
+            }
+        }
+    }
+
+    pub fn live_master(&mut self) {
+        let g = af27_core::time::db_to_gain(self.session.master_db);
+        if let Some(e) = &mut self.engine {
+            e.set_master(g);
+        }
+    }
+
+    /// The effect chain for a track index, or the master chain for MASTER.
+    pub fn chain_mut(&mut self, track: u16) -> Option<&mut Vec<af27_core::EffectSlot>> {
+        if track == af27_engine::MASTER {
+            Some(&mut self.session.master_chain)
+        } else {
+            self.session
+                .tracks
+                .get_mut(track as usize)
+                .map(|t| &mut t.chain)
+        }
+    }
+
+    pub fn live_slot(&mut self, track: u16, slot: usize) {
+        let Some(s) = self.chain_mut(track).and_then(|c| c.get(slot)).cloned() else {
+            return;
+        };
+        if let Some(e) = &mut self.engine {
+            e.set_param(track, slot, &s.values);
+            e.set_bypass(track, slot, s.bypass);
+        }
+    }
+
+    pub fn live_space(&mut self, ti: usize) {
+        let Some(layout) = self.session.space else {
+            return;
+        };
+        let Some(t) = self.session.tracks.get(ti) else {
+            return;
+        };
+        let stereo = t.kind != af27_core::TrackKind::Audio
+            || t.clips.iter().any(|c| {
+                self.media_buffer(c.media)
+                    .is_some_and(|b| b.num_channels() >= 2)
+            });
+        let (l, r, lfe) = af27_engine::space_gains(layout, &t.pos, stereo);
+        if let Some(e) = &mut self.engine {
+            e.set_space(ti, l, r, lfe);
+        }
+    }
+
+    pub fn live_instrument(&mut self, ti: usize) {
+        let Some(inst) = self.session.tracks.get(ti).map(|t| t.instrument) else {
+            return;
+        };
+        if let Some(e) = &mut self.engine {
+            e.set_instrument(ti, inst);
+        }
+    }
+
+    pub fn live_metronome(&mut self) {
+        let t = self.session.tempo;
+        if let Some(e) = &mut self.engine {
+            e.set_metronome(t.metronome.then_some((t.bpm, t.beats_per_bar)));
+        }
+    }
+
+    pub fn add_track_kind(&mut self, kind: af27_core::TrackKind) -> af27_core::TrackId {
+        let before = self.session.clone();
+        let id = self.session.add_track_of(kind);
+        let n = self.session.tracks.len() - 1;
+        if let Some(t) = self.session.track_mut(id) {
+            t.color = self.theme.track_colors[n % self.theme.track_colors.len().max(1)];
+        }
+        self.commit_session("Add track", before);
+        self.selected_track = Some(id);
+        id
+    }
+
+    /// Renders the session offline at its own rate: stereo as heard, or
+    /// (3D sessions, `bed`) one channel per speaker.
+    pub fn render_mix(&self, from: f64, to: f64, bed: bool) -> AudioBuffer {
+        let program =
+            af27_engine::mix_program(&self.session, &|m| self.media_buffer(m), self.session.rate);
+        if bed {
+            af27_engine::render_bed(program, self.session.rate, from, to)
+        } else {
+            af27_engine::render(program, self.session.rate, from, to)
+        }
+    }
+
+    /// The newest stereo frames heard: the output ring while playing;
+    /// while stopped, the audio just before the playhead (cached).
+    pub fn scope_frames(&mut self, n: usize) -> (Vec<[f32; 2]>, u32) {
+        if self.is_playing() {
+            return (af27_engine::scope::latest(n), af27_engine::scope::rate());
+        }
+        let t = self.cursor();
+        let key = (
+            self.session_version
+                + self.docs.iter().map(|d| d.version).sum::<u64>()
+                + self.mode as u64 * 1_000_000,
+            n as u64,
+            (t * 1000.0) as i64,
+        );
+        let rate = match self.mode {
+            Mode::Waveform => self.doc().map_or(48_000, |d| d.buf.rate),
+            Mode::Multitrack => self.session.rate,
+        };
+        if let Some((k, frames)) = &self.scope_cache {
+            if *k == key {
+                return (frames.clone(), rate);
+            }
+        }
+        let frames: Vec<[f32; 2]> = match self.mode {
+            Mode::Waveform => match self.doc() {
+                Some(d) => {
+                    let end = (t * d.buf.rate as f64) as usize;
+                    let start = end.saturating_sub(n);
+                    (start..start + n)
+                        .map(|i| {
+                            let (l, r) = d.buf.stereo_at(i);
+                            [l, r]
+                        })
+                        .collect()
+                }
+                None => vec![[0.0; 2]; n],
+            },
+            Mode::Multitrack => {
+                let span = n as f64 / rate as f64;
+                let b = self.render_mix((t - span).max(0.0), (t - span).max(0.0) + span, false);
+                (0..b.frames())
+                    .map(|i| [b.channels[0][i], b.channels[1][i]])
+                    .collect()
+            }
+        };
+        self.scope_cache = Some((key, frames.clone()));
+        (frames, rate)
     }
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! The Multitrack editor (tracks of clips on a timeline) and the Mixer.
@@ -25,6 +25,7 @@ pub enum DragKind {
     TrimLeft { clip: ClipId },
     TrimRight { clip: ClipId },
     Select { anchor: f64 },
+    MoveMidi { clip: ClipId, grab: f64 },
 }
 
 #[derive(Default)]
@@ -120,9 +121,48 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         }
     }
 
+    // MIDI clips: (track index, clip id) under a point.
+    let tempo = st.session.tempo;
+    let hit_midi = |st: &State, pp: egui::Pos2| -> Option<(usize, ClipId)> {
+        let ti = track_at(st, lanes.top(), scroll, pp.y)?;
+        let t = tempo.beats(x_to_time(&v, lanes, pp.x));
+        st.session.tracks[ti]
+            .midi
+            .iter()
+            .rev()
+            .find(|c| t >= c.start && t <= c.end())
+            .map(|c| (ti, c.id))
+    };
+    if resp.double_clicked() {
+        if let Some(pp) = resp.interact_pointer_pos() {
+            if let Some((_, id)) = hit_midi(st, pp) {
+                st.piano_clip = Some(id);
+                st.want_piano = true;
+            } else if let Some(ti) = track_at(st, lanes.top(), scroll, pp.y) {
+                if st.session.tracks[ti].kind == af27_core::TrackKind::Midi && lanes.contains(pp) {
+                    let bpb = st.session.tempo.beats_per_bar.max(1) as f64;
+                    let b = (tempo.beats(x_to_time(&v, lanes, pp.x)) / bpb).floor() * bpb;
+                    let id = st.session.tracks[ti].id;
+                    crate::pianoroll::new_clip(st, id, b);
+                }
+            }
+        }
+    }
+
     // Pointer.
     if let Some(pp) = resp.interact_pointer_pos() {
-        if resp.drag_started() && lanes.contains(pp) {
+        if resp.drag_started() && lanes.contains(pp) && st.tool == Tool::Move {
+            if let Some((ti, id)) = hit_midi(st, pp) {
+                let (mti, mci) = st.session.find_midi(id).unwrap();
+                let grab = tempo.beats(x_to_time(&v, lanes, pp.x))
+                    - st.session.tracks[mti].midi[mci].start;
+                st.selected_clip = Some(id);
+                st.selected_track = Some(st.session.tracks[ti].id);
+                drag.before = Some(st.session.clone());
+                drag.kind = Some(DragKind::MoveMidi { clip: id, grab });
+            }
+        }
+        if resp.drag_started() && lanes.contains(pp) && drag.kind.is_none() {
             let t = x_to_time(&v, lanes, pp.x).max(0.0);
             let kind = match (st.tool, hit(st, pp)) {
                 (Tool::Move, Some((ti, id, l, r))) => {
@@ -215,6 +255,14 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     st.session_sel = Some((anchor.min(t), anchor.max(t)));
                     st.session_cursor = anchor.min(t);
                 }
+                Some(DragKind::MoveMidi { clip, grab }) => {
+                    if let Some((ti, ci)) = st.session.find_midi(clip) {
+                        // Whole beats.
+                        let b = (tempo.beats(t) - grab).round();
+                        st.session.tracks[ti].midi[ci].start = b.max(0.0);
+                        st.session_version += 1;
+                    }
+                }
                 None => {}
             }
         }
@@ -226,6 +274,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     DragKind::Move { .. } => "Move clip",
                     DragKind::TrimLeft { .. } | DragKind::TrimRight { .. } => "Trim clip",
                     DragKind::Select { .. } => "Select",
+                    DragKind::MoveMidi { .. } => "Move MIDI clip",
                 };
                 st.commit_session(label, before);
             }
@@ -430,6 +479,77 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 th.glow_rect(&lane_p, cr, th.accent, 0.8);
             }
         }
+        for mc in &tr.midi {
+            let x0 = time_to_x(&v, lanes, tempo.secs(mc.start));
+            let x1 = time_to_x(&v, lanes, tempo.secs(mc.end()));
+            if x1 < lanes.left() || x0 > lanes.right() {
+                continue;
+            }
+            let cr = Rect::from_min_max(
+                pos2(x0, row.top() + 2.0),
+                pos2(x1.max(x0 + 2.0), row.bottom() - 2.0),
+            );
+            let sel = st.selected_clip == Some(mc.id);
+            let rnd = Rounding::same(th.rounding.min(cr.height() / 3.0));
+            lane_p.rect_filled(
+                cr,
+                rnd,
+                ca(tr.color, if heard && !mc.muted { 40 } else { 15 }),
+            );
+            let title = Rect::from_min_size(cr.min, vec2(cr.width(), 15.0));
+            lane_p.rect_filled(
+                title,
+                Rounding {
+                    nw: rnd.nw,
+                    ne: rnd.ne,
+                    sw: 0.0,
+                    se: 0.0,
+                },
+                ca(tr.color, 150),
+            );
+            lane_p.text(
+                title.left_center() + vec2(5.0, 0.0),
+                Align2::LEFT_CENTER,
+                format!("♪ {}", mc.name),
+                FontId::proportional(10.0),
+                c(th.background),
+            );
+            if !mc.notes.is_empty() {
+                let (lo, hi) = mc
+                    .notes
+                    .iter()
+                    .fold((127u8, 0u8), |(a, b), n| (a.min(n.pitch), b.max(n.pitch)));
+                let span = (hi.saturating_sub(lo) as f32).max(12.0);
+                let body = Rect::from_min_max(
+                    pos2(cr.left(), title.bottom() + 2.0),
+                    pos2(cr.right(), cr.bottom() - 2.0),
+                );
+                for n in mc.notes.iter().filter(|n| n.start < mc.length) {
+                    let nx0 = time_to_x(&v, lanes, tempo.secs(mc.start + n.start));
+                    let nx1 = time_to_x(
+                        &v,
+                        lanes,
+                        tempo.secs(mc.start + (n.start + n.length).min(mc.length)),
+                    );
+                    let y =
+                        body.bottom() - (n.pitch - lo) as f32 / span * (body.height() - 3.0) - 3.0;
+                    lane_p.rect_filled(
+                        Rect::from_min_max(pos2(nx0, y), pos2(nx1.max(nx0 + 1.5), y + 3.0)),
+                        Rounding::same(1.0),
+                        crate::pianoroll::channel_color(n.channel),
+                    );
+                }
+            }
+            lane_p.rect_stroke(
+                cr,
+                rnd,
+                if sel {
+                    Stroke::new(2.0_f32, c(th.accent))
+                } else {
+                    Stroke::new(1.0_f32, ca(tr.color, 200))
+                },
+            );
+        }
         // Header.
         head_p.rect_filled(
             head,
@@ -484,7 +604,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if x >= lanes.left() && x <= lanes.right() {
         playhead(&p, x, ruler.top(), lanes.bottom(), &th);
     }
-    if st.session.tracks.iter().all(|t| t.clips.is_empty()) {
+    if st
+        .session
+        .tracks
+        .iter()
+        .all(|t| t.clips.is_empty() && t.midi.is_empty())
+    {
         p.text(
             lanes.center(),
             Align2::CENTER_CENTER,
@@ -558,7 +683,12 @@ fn track_header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
         }
     });
     if changed {
-        st.commit_session("Track settings", before);
+        let down = ui.input(|i| i.pointer.any_down());
+        if !st.gesture {
+            st.commit_live("Track settings", before);
+            st.gesture = down;
+        }
+        st.live_track(ti);
     }
 }
 
@@ -654,7 +784,15 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
                     });
                 });
             if changed {
-                st.commit_session("Mixer", before);
+                let down = ui.input(|i| i.pointer.any_down());
+                if !st.gesture {
+                    st.commit_live("Mixer", before);
+                    st.gesture = down;
+                }
+                for ti in 0..st.session.tracks.len() {
+                    st.live_track(ti);
+                }
+                st.live_master();
             }
         });
     });

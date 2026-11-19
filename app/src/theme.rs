@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! Themes. Every colour, gradient, corner radius and glow the app draws
@@ -48,6 +48,12 @@ pub struct Theme {
     /// 0 = off; 1 = a soft halo around waveforms, playhead and play button.
     pub glow: f32,
     pub font_scale: f32,
+    /// Phase Wheel dot colours, quiet low notes to high notes (None: the
+    /// built-in red to magenta).
+    pub phase_low: Option<Rgb>,
+    pub phase_high: Option<Rgb>,
+    /// Draw the Phase Wheel coarse and blown up, like a low-resolution screen.
+    pub pixel: bool,
 }
 
 pub fn c(rgb: Rgb) -> Color32 {
@@ -118,6 +124,9 @@ impl Theme {
             rounding: 6.0,
             glow: 1.0,
             font_scale: 1.0,
+            phase_low: None,
+            phase_high: None,
+            pixel: false,
         }
     }
 
@@ -178,6 +187,7 @@ impl Theme {
             ],
             meter_low: [60, 255, 120],
             rounding: 2.0,
+            pixel: true,
             ..Theme::neon_abyss()
         }
     }

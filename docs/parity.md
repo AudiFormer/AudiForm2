@@ -22,7 +22,7 @@ our own feature names.
 - ✅ Files · ✅ Markers · ✅ Effects (one effect at a time) · ✅ History · ✅ Levels
 - ✅ Range (selection and view, editable) · ✅ Level Statistics · ✅ Phase Scope with correlation
 - ✅ Spectrum analyzer · ✅ Mixer · ✅ AI Stems (no counterpart in the reference product)
-- 🟡 Effect chain rack: single-effect panel ✅; multi-slot chain per file, clip and track ⬜
+- 🟡 Effect chains: 16 live slots per track, bus and master ✅; per clip ⬜
 - ⬜ Loudness meter (live momentary, short-term, LRA) · ⬜ Loudness matcher for many files
 - ⬜ Repair scanner (clicks, clipping, silence) · ⬜ Batch processor · ⬜ Quick actions / macros
 - ⬜ File browser · ⬜ Metadata editor · ⬜ Track manager · ⬜ Video preview
@@ -34,7 +34,7 @@ our own feature names.
 - ✅ DTS in WAV and raw `.dts` · ✅ unencrypted `.mogg` · ✅ multichannel kept
 - 🟡 Write: WAV 16/24/32f ✅; FLAC, MP3, Ogg, AAC export ⬜
 - ⬜ Raw PCM import · ⬜ APE, AU, IFF/8SVX · ⬜ audio from video files
-- ✅ `.sesx` import · ✅ `.audfrm`/`.altaudio` import · ⬜ `.sesx` export · ⬜ OMF, AAF, FCP XML
+- ✅ `.sesx` import · ✅ `.audfrm`/`.altaudio` read **and write, lossless** · ⬜ `.sesx` export · ⬜ OMF, AAF, FCP XML
 - ⬜ Save session with copies of all media (collect files) · ⬜ session templates
 - ✅ Mixdown export · ⬜ stems export · ⬜ resample / bit-depth / dither options dialog
 
@@ -57,18 +57,18 @@ our own feature names.
 **Filter and EQ**: ✅ Parametric EQ (3 band) · ✅ High/Low-pass · ✅ Notch · ⬜ 5-band parametric with M/S ·
 ⬜ Graphic EQ · ⬜ Drawn FFT filter · ⬜ Precision filters (Bessel, Butterworth, Chebyshev, elliptic)
 
-**Modulation**: ⬜ Chorus · ⬜ Flanger · ⬜ Phaser (eligible to port from Audiform, see clean-room.md)
+**Modulation**: ✅ Chorus · ✅ Flanger · ✅ Phaser · ✅ Double Track (Audiform's Modulation)
 
 **Restoration**: ✅ Noise Reduction (adaptive estimate) · ✅ Hum Remover · ✅ Remove DC Offset ·
 ⬜ Noise reduction from a learned noise profile (the code exists in `af27-dsp::noise::learn`; no UI yet) ·
 ⬜ Declicker · ⬜ Clip restorer · ⬜ Silence remover · ⬜ Auto marker · ⬜ Reverb reducer ·
 ⬜ Hiss remover · ⬜ Learned sound removal · ⬜ Auto phase align
 
-**Reverb**: ✅ Reverb · ⬜ Impulse (convolution) reverb · ⬜ Detailed room reverb · ⬜ Surround reverb
+**Reverb**: ✅ Reverb · ✅ Convolution reverb · ✅ Room, Hall, Plate, Spring and Tape reverb · ⬜ Surround reverb
 
-**Special**: ⬜ Distortion · ⬜ Doppler · ⬜ Amp sim · ⬜ Mastering suite · ⬜ Voice enhancer
+**Special**: ⬜ Distortion · ⬜ Doppler · ✅ Amp sim (neural `.nam`) · ✅ Tube preamp · ⬜ Mastering suite · ✅ Voice strip (Vox Strip)
 
-**Stereo**: ✅ Stereo Width · ⬜ Centre isolate/remove · ⬜ Drawn phase shift
+**Stereo**: ✅ Stereo Width · ✅ Centre isolate/remove · ✅ Drawn phase shift (Phase Curve) · ✅ Channel matrix
 
 **Time and pitch**: ✅ Speed (varispeed) · ⬜ Pitch shift · ⬜ Time stretch (keep pitch) ·
 ⬜ Auto pitch tune · ⬜ Pitch draw · ⬜ Pitch curve
@@ -79,16 +79,16 @@ our own feature names.
 **Plug-ins**: ⬜ VST3 hosting · ⬜ CLAP hosting
 
 ## Multitrack
-- ✅ Audio tracks of any channel count · ⬜ buses · ⬜ sends · ⬜ track outputs
+- ✅ Audio tracks of any channel count · ✅ buses · ✅ pre/post sends · ✅ track outputs · ✅ MIDI tracks with a built-in synth and piano roll · ✅ 3D Space sessions
 - ✅ Mute, solo, arm, volume, pan · ⬜ safe solo · ⬜ monitor input
 - ⬜ Automation lanes and modes (read, write, latch, touch)
 - 🟡 Clips: gain, fades, mute ✅; loop, colour, lock, group, clip effects ⬜
 - ⬜ Clip time stretch · ⬜ auto-length music fit · ⬜ auto duck · ⬜ silence splitter
-- ⬜ Bounce to track · ⬜ punch-in · ⬜ metronome and tempo grid · ⬜ latency compensation
+- ⬜ Bounce to track · ⬜ punch-in · ✅ metronome · 🟡 tempo (one tempo; changes kept in files) · ⬜ latency compensation
 
 ## Analysis and metering
 - ✅ Integrated loudness, true peak, sample peak, RMS, DC offset
-- ✅ Phase scope and correlation · ✅ Spectrum at the playhead · ✅ Peak meters with hold
+- ✅ Phase Wheel and correlation · ✅ Spectrum at the playhead · ✅ Peak meters with hold
 - ⬜ Live loudness meter · ⬜ FFT settings (size, window, scale)
 
 ## Recording and the rest

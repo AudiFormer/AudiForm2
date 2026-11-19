@@ -24,20 +24,36 @@ You can pass files or sessions on the command line, or drop them on the window.
   zoom at the pointer, and a stacked per-channel **spectral display**.
   Cut, copy, paste, crop, delete, insert silence, generate tone, noise or
   silence. Undo and redo with history.
-- **Multitrack editor**: tracks of clips. You can move clips in time and
-  between tracks (with snapping), trim either end, use the razor to split,
-  split at the playhead, drag files in from the Files panel, use clip gain
-  and fades, mute, solo, arm, volume and pan, add markers, select time, and
-  undo everything. There's a **Mixer** with channel strips and a master
-  strip. Mixdown export is WAV.
-- **Effects** (23): Amplify, Normalize, Match Loudness, Fade In and Out,
-  Invert, Reverse, Silence, Remove DC Offset, Parametric EQ, High-Pass and
-  Low-Pass filters, Notch Filter, Hum Remover, Compressor, Limiter (with
-  look-ahead), Noise Gate, De-Esser, Noise Reduction (spectral), Echo,
-  Reverb, Stereo Width and Speed. Every effect has preview.
+- **Multitrack editor**: audio, **bus** and **MIDI** tracks. You can move
+  clips in time and between tracks (with snapping), trim either end, use
+  the razor to split, split at the playhead, drag files in from the Files
+  panel, use clip gain and fades, mute, solo, arm, volume and pan, add
+  markers, select time, and undo everything. Outputs go to the master or a
+  bus, and **pre- or post-fader sends** feed buses. There's a **Mixer**, a
+  tempo with a **metronome**, and mixdown export to WAV.
+- **Effect chains**: 16 slots on every track and bus and on the master.
+  Settings, bypass and order change live while playing, without
+  restarting tails. The **Inspector** panel shows the selected track's
+  output, sends, chain, 3D position and instrument.
+- **3D Space sessions**: place each track in a room (5.1 to 7.1.4) instead
+  of panning it. Listen binaurally on headphones or folded to stereo, and
+  export a multichannel WAV of the speaker bed.
+- **MIDI**: MIDI clips in beats, a **Piano Roll** (16 channel colours,
+  draw, erase, move, resize, velocity and pan lanes, grid snap, Humanize),
+  and a built-in synth (PolyBLEP oscillators, detune, ADSR, resonant filter).
+- **Effects**: 23 built in (Amplify, Normalize, Match Loudness, fades,
+  Invert, Reverse, Silence, DC Offset, Parametric EQ, High- and Low-Pass,
+  Notch, Hum Remover, Compressor, look-ahead Limiter, Noise Gate,
+  De-Esser, spectral Noise Reduction, Echo, Reverb, Stereo Width, Speed),
+  plus the **Audiform effects** carried over with their original tuning:
+  Amp Model (neural `.nam` captures), Tube Preamp, Opto Leveler, Vox
+  Strip, Reverb (Room, Hall, Plate, Spring, Tape), Convolution Reverb,
+  Modulation (Chorus, Flanger, Phaser, Double Track), Center Channel
+  Extractor, Channel Mixer, Stereo Width and Phase Curve.
 - **Analysis**: Level Statistics (integrated LUFS per BS.1770, true peak,
-  sample peak, RMS, DC offset, delivery target checks), a Phase Scope with a
-  correlation meter, a Spectrum analyzer, and Levels meters with peak hold.
+  sample peak, RMS, DC offset, delivery target checks), the **Phase
+  Wheel** (Audiform's, calibrated as it was), a Spectrum analyzer, and
+  Levels meters with peak hold.
 - **AI Stems**: local stem separation through the separation engine. It
   reuses the engine and models an Audiform install already downloaded, so
   nothing is fetched twice. Downloads are on demand and SHA-256 checked.
@@ -63,9 +79,9 @@ You can pass files or sessions on the command line, or drop them on the window.
 
 | Sessions | |
 | --- | --- |
-| `.af27` | Native: versioned JSON |
+| `.audfrm` / `.altaudio` | **The session format.** Read and written losslessly: everything Audiform27 does not use (automation, clip stretch, slot routing and presets, libraries, view, metadata, newer fields) is saved back untouched, so sessions go back and forth between Audiform and Audiform27. All 75 of the lead's real sessions load and save back byte-identical. |
+| `.af27` | A plain dump of Audiform27's own model |
 | `.sesx` | Imports tracks, clips, source in/out, clip gain and mute, fades, track volume, pan, mute, solo, markers and file paths (absolute or relative). Effects and automation are reported as skipped |
-| `.audfrm` / `.altaudio` | Audiform sessions: the same set |
 
 ## Themes
 
@@ -97,14 +113,24 @@ Selection · = / - zoom · Esc clear selection.
 | `af27-engine` | Real-time playback and recording (cpal; lock-free, no allocation on the audio thread) |
 | `af27-interop` | `.sesx` and `.audfrm` import |
 | `af27-separation` | AI stem separation client |
+| `af27-space` | 3D Space: speaker layouts, room panning, binaural listening |
+| `af27-fx` | The Audiform effects |
 | `af27-dts` | DTS Coherent Acoustics core decoder |
 | `app` | The egui application |
 
+## Performance
+
+The mixer runs in blocks with no allocation on the audio thread, and
+setting changes reach it as small fixed-size commands. On one core it
+mixes 32 stereo tracks, each with an EQ and a compressor, plus two reverb
+buses fed by sends and a master limiter, at **about 25 times real time**
+(`cargo test --release -p af27-engine bench -- --ignored --nocapture`).
+
 ## Licence
 
-Audiform27 is dual-licensed **MIT OR Apache-2.0** (`LICENSE-MIT`,
-`LICENSE-APACHE`). There is one exception: `crates/af27-dts` is
-**LGPL-2.1-or-later**, because its decoder is a Rust port of FFmpeg's DTS
-decoder. Because the whole project ships as source, anyone can rebuild it
-with a modified decoder. See `docs/clean-room.md` for where every part comes
-from.
+Audiform27 is under the **Audiform27 License 1.0** (`LICENSE`): MIT-style
+freedoms for everyone except the Excluded Parties it names, who get no
+rights at all. It is source-available rather than OSI open source.
+`crates/af27-dts` is the exception: it is **LGPL-2.1-or-later**, because its
+decoder is a Rust port of FFmpeg's DTS decoder. See `ATTRIBUTION.md` and
+`docs/clean-room.md` for where every part comes from.

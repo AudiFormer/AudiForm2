@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! The built-in effects. Each has a list of parameters (so the UI can
@@ -6,13 +6,9 @@
 //! `process` that turns an input buffer into an output buffer, which may
 //! be a different length (Speed, Reverb tails).
 
-use crate::biquad::{Biquad, Kind};
-use crate::{noise, resample, reverb};
+use crate::{noise, resample};
 use af27_core::time::db_to_gain;
 use af27_core::AudioBuffer;
-
-/// Q of a second-order Butterworth section (maximally flat).
-const BUTTERWORTH_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParamSpec {
@@ -294,7 +290,6 @@ impl Effect {
     pub fn process(self, input: &AudioBuffer, v: &[f32]) -> AudioBuffer {
         let specs = self.params();
         let val = |i: usize| v.get(i).copied().unwrap_or(specs[i].default);
-        let rate = input.rate as f64;
         let mut out = input.clone();
         let frames = out.frames();
         match self {
@@ -335,112 +330,25 @@ impl Effect {
                     c.iter_mut().for_each(|s| *s -= mean as f32);
                 }
             }
-            Effect::ParametricEq => {
-                for c in &mut out.channels {
-                    Biquad::new(
-                        Kind::LowShelf,
-                        rate,
-                        val(0) as f64,
-                        BUTTERWORTH_Q,
-                        val(1) as f64,
-                    )
-                    .run(c);
-                    Biquad::new(
-                        Kind::Peak,
-                        rate,
-                        val(2) as f64,
-                        val(4) as f64,
-                        val(3) as f64,
-                    )
-                    .run(c);
-                    Biquad::new(
-                        Kind::HighShelf,
-                        rate,
-                        val(5) as f64,
-                        BUTTERWORTH_Q,
-                        val(6) as f64,
-                    )
-                    .run(c);
-                }
-            }
-            Effect::HighPass | Effect::LowPass => {
-                let kind = if self == Effect::HighPass {
-                    Kind::HighPass
-                } else {
-                    Kind::LowPass
-                };
-                let stages = val(1).round().clamp(1.0, 4.0) as usize;
-                for c in &mut out.channels {
-                    for _ in 0..stages {
-                        Biquad::new(kind, rate, val(0) as f64, BUTTERWORTH_Q, 0.0).run(c);
-                    }
-                }
-            }
-            Effect::Notch => {
-                for c in &mut out.channels {
-                    Biquad::new(Kind::Notch, rate, val(0) as f64, val(1) as f64, 0.0).run(c);
-                }
-            }
-            Effect::HumRemover => {
-                let n = val(1).round().clamp(1.0, 8.0) as usize;
-                for c in &mut out.channels {
-                    for h in 1..=n {
-                        let f = val(0) as f64 * h as f64;
-                        if f < rate * 0.45 {
-                            Biquad::new(Kind::Notch, rate, f, val(2) as f64, 0.0).run(c);
-                        }
-                    }
-                }
-            }
-            Effect::Compressor => {
-                compress(&mut out, &[val(0), val(1), val(2), val(3), val(4), val(5)])
-            }
-            Effect::Limiter => limit(&mut out, val(0), val(1), val(2), val(3)),
-            Effect::NoiseGate => gate(&mut out, &[val(0), val(1), val(2), val(3), val(4)]),
-            Effect::DeEsser => de_ess(&mut out, val(0), val(1), val(2)),
+            Effect::ParametricEq
+            | Effect::HighPass
+            | Effect::LowPass
+            | Effect::Notch
+            | Effect::HumRemover
+            | Effect::Compressor
+            | Effect::Limiter
+            | Effect::NoiseGate
+            | Effect::DeEsser => run_live(self, &mut out, v),
             Effect::NoiseReduction => {
                 for c in &mut out.channels {
                     let print = noise::estimate(c);
                     noise::reduce(c, &print, val(0) as f64, val(1) as f64);
                 }
             }
-            Effect::Echo => {
-                let d = ((val(0) / 1000.0) as f64 * rate).max(1.0) as usize;
-                let (fb, mix) = (val(1), val(2));
-                for c in &mut out.channels {
-                    let mut line = vec![0.0f32; d];
-                    let mut tone =
-                        Biquad::new(Kind::LowPass, rate, val(3) as f64, BUTTERWORTH_Q, 0.0);
-                    let mut pos = 0;
-                    for s in c.iter_mut() {
-                        let delayed = line[pos];
-                        line[pos] = tone.process((*s + delayed * fb) as f64) as f32;
-                        pos = (pos + 1) % d;
-                        *s = *s * (1.0 - mix) + delayed * mix;
-                    }
-                }
-            }
-            Effect::Reverb => reverb::process(
-                &mut out.channels,
-                input.rate,
-                &reverb::Settings {
-                    room: val(0),
-                    damping: val(1),
-                    mix: val(2),
-                    width: val(3),
-                    pre_delay_ms: val(4),
-                },
-            ),
+            Effect::Echo | Effect::Reverb => run_live(self, &mut out, v),
             Effect::StereoWidth => {
                 if out.num_channels() >= 2 {
-                    let w = val(0);
-                    let (l, r) = out.channels.split_at_mut(1);
-                    for (a, b) in l[0].iter_mut().zip(r[0].iter_mut()) {
-                        let mid = (*a + *b) * 0.5;
-                        let side = (*a - *b) * 0.5 * w;
-                        *a = mid + side;
-                        *b = mid - side;
-                    }
+                    run_live(self, &mut out, v)
                 }
             }
             Effect::Speed => {
@@ -482,156 +390,40 @@ fn shape(x: f32, curve: f32) -> f32 {
     }
 }
 
-fn coeff(ms: f32, rate: f32) -> f32 {
-    if ms <= 0.0 {
-        0.0
-    } else {
-        (-1.0 / (ms * 0.001 * rate)).exp()
+/// Runs an effect's live processor over a whole buffer, a channel pair at
+/// a time (a lone last channel is run as both sides), and takes away the
+/// processor's latency so the result lines up with the input.
+fn run_live(e: Effect, b: &mut AudioBuffer, vals: &[f32]) {
+    let n = b.num_channels();
+    let frames = b.frames();
+    let mut c = 0;
+    while c < n {
+        let Some(mut p) = crate::live::build(e, b.rate, vals) else {
+            return;
+        };
+        let lat = p.latency();
+        let mut l = b.channels[c].clone();
+        let mut r = if c + 1 < n {
+            b.channels[c + 1].clone()
+        } else {
+            l.clone()
+        };
+        l.resize(frames + lat, 0.0);
+        r.resize(frames + lat, 0.0);
+        for (x, y) in l.chunks_mut(4096).zip(r.chunks_mut(4096)) {
+            p.process(x, y);
+        }
+        b.channels[c].copy_from_slice(&l[lat..lat + frames]);
+        if c + 1 < n {
+            b.channels[c + 1].copy_from_slice(&r[lat..lat + frames]);
+        }
+        c += 2;
     }
 }
 
+#[cfg(test)]
 fn level_db(x: f32) -> f32 {
     20.0 * x.max(1e-9).log10()
-}
-
-/// Feed-forward compressor, peak detector, channels linked.
-fn compress(b: &mut AudioBuffer, v: &[f32]) {
-    let (thr, ratio, att, rel, knee, makeup) = (v[0], v[1].max(1.0), v[2], v[3], v[4], v[5]);
-    let rate = b.rate as f32;
-    let (ca, cr) = (coeff(att, rate), coeff(rel, rate));
-    let mut env = 0.0f32;
-    let mk = db_to_gain(makeup);
-    for i in 0..b.frames() {
-        let x = b.channels.iter().map(|c| c[i].abs()).fold(0.0, f32::max);
-        let c = if x > env { ca } else { cr };
-        env = c * env + (1.0 - c) * x;
-        let lv = level_db(env);
-        let over = lv - thr;
-        let reduce = if knee > 0.0 && over.abs() <= knee / 2.0 {
-            (1.0 / ratio - 1.0) * (over + knee / 2.0).powi(2) / (2.0 * knee)
-        } else if over > 0.0 {
-            (1.0 / ratio - 1.0) * over
-        } else {
-            0.0
-        };
-        let g = db_to_gain(reduce) * mk;
-        for ch in &mut b.channels {
-            ch[i] *= g;
-        }
-    }
-}
-
-/// Look-ahead brick-wall limiter: the gain needed for the loudest sample
-/// in the look-ahead window is reached before that sample arrives.
-fn limit(b: &mut AudioBuffer, ceiling_db: f32, boost_db: f32, look_ms: f32, rel_ms: f32) {
-    let rate = b.rate as f32;
-    let ceiling = db_to_gain(ceiling_db);
-    let boost = db_to_gain(boost_db);
-    let look = ((look_ms * 0.001 * rate) as usize).max(1);
-    let cr = coeff(rel_ms, rate);
-    let n = b.frames();
-    // Required gain per frame.
-    let need: Vec<f32> = (0..n)
-        .map(|i| {
-            let x = b.channels.iter().map(|c| c[i].abs()).fold(0.0, f32::max) * boost;
-            if x > ceiling {
-                ceiling / x
-            } else {
-                1.0
-            }
-        })
-        .collect();
-    // Minimum over the next `look` frames (sliding window via deque).
-    let mut target = vec![1.0f32; n];
-    let mut dq: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
-    for i in (0..n).rev() {
-        while dq.back().is_some_and(|&j| need[j] >= need[i]) {
-            dq.pop_back();
-        }
-        dq.push_back(i);
-        while dq.front().is_some_and(|&j| j > i + look) {
-            dq.pop_front();
-        }
-        target[i] = need[*dq.front().unwrap()];
-    }
-    let attack_step = 1.0 / look as f32;
-    let mut g = 1.0f32;
-    for i in 0..n {
-        let t = target[i];
-        if t < g {
-            g = (g - (1.0 - t).max(attack_step) * attack_step).max(t);
-            g = g.min(t.max(g));
-        } else {
-            g = cr * g + (1.0 - cr) * t;
-        }
-        let gg = g.min(need[i]);
-        for ch in &mut b.channels {
-            ch[i] = (ch[i] * boost * gg).clamp(-ceiling, ceiling);
-        }
-    }
-}
-
-fn gate(b: &mut AudioBuffer, v: &[f32]) {
-    let (thr, att, hold, rel, floor) = (db_to_gain(v[0]), v[1], v[2], v[3], db_to_gain(v[4]));
-    let rate = b.rate as f32;
-    let (ca, cr) = (coeff(att, rate), coeff(rel, rate));
-    let hold_n = (hold * 0.001 * rate) as usize;
-    let det = coeff(5.0, rate);
-    let mut env = 0.0f32;
-    let mut g = floor;
-    let mut held = 0usize;
-    for i in 0..b.frames() {
-        let x = b.channels.iter().map(|c| c[i].abs()).fold(0.0, f32::max);
-        env = det * env + (1.0 - det) * x;
-        let open = if env >= thr {
-            held = hold_n;
-            true
-        } else if held > 0 {
-            held -= 1;
-            true
-        } else {
-            false
-        };
-        let t = if open { 1.0 } else { floor };
-        let c = if t > g { ca } else { cr };
-        g = c * g + (1.0 - c) * t;
-        for ch in &mut b.channels {
-            ch[i] *= g;
-        }
-    }
-}
-
-/// Split-band de-esser: a band-pass sidechain drives gain reduction on
-/// the high band only.
-fn de_ess(b: &mut AudioBuffer, freq: f32, thr_db: f32, max_red: f32) {
-    let rate = b.rate as f64;
-    let n = b.frames();
-    let mut side = vec![0.0f32; n];
-    for c in &b.channels {
-        let mut bp = Biquad::new(Kind::BandPass, rate, freq as f64, 1.5, 0.0);
-        for (i, &s) in c.iter().enumerate() {
-            side[i] = side[i].max(bp.process(s as f64).abs() as f32);
-        }
-    }
-    let (ca, cr) = (coeff(1.0, rate as f32), coeff(60.0, rate as f32));
-    let mut env = 0.0f32;
-    let gains: Vec<f32> = side
-        .iter()
-        .map(|&x| {
-            let c = if x > env { ca } else { cr };
-            env = c * env + (1.0 - c) * x;
-            let over = (level_db(env) - thr_db).max(0.0);
-            db_to_gain(-over.min(max_red))
-        })
-        .collect();
-    for c in &mut b.channels {
-        let mut hp = Biquad::new(Kind::HighPass, rate, freq as f64 * 0.7, BUTTERWORTH_Q, 0.0);
-        for (i, s) in c.iter_mut().enumerate() {
-            let high = hp.process(*s as f64) as f32;
-            let low = *s - high;
-            *s = low + high * gains[i];
-        }
-    }
 }
 
 #[cfg(test)]

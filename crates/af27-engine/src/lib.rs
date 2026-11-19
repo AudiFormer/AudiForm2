@@ -1,40 +1,28 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! Real-time playback and recording.
 //!
-//! The UI builds an immutable [`Program`] (a file to play, or a
-//! multitrack mix) and hands it to the audio thread over a lock-free
-//! queue. The audio thread never allocates, locks or frees: programs it
-//! is done with go back over a second queue and are dropped by
-//! [`Engine::collect`] on the UI thread. Position and meters come back
-//! through atomics.
+//! The UI builds a [`Program`] (a file to play, or a multitrack mix with
+//! its effect chains, buses, synths and 3D bed) and hands it to the audio
+//! thread over a lock-free queue. The audio thread never allocates, locks
+//! or frees: programs it is done with go back over a second queue and are
+//! dropped by [`Engine::collect`] on the UI thread. Fader, pan, effect
+//! settings, bypass, 3D positions and instrument settings change live
+//! through small fixed-size commands, so a tweak never restarts a tail.
+//! Position, meters and the Phase Wheel's ring come back through atomics.
+
+pub mod mix;
+pub mod scope;
+pub mod synth;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use af27_core::time::db_to_gain;
 use af27_core::AudioBuffer;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-/// One clip as the mixer sees it.
-#[derive(Clone)]
-pub struct MixClip {
-    pub buf: Arc<AudioBuffer>,
-    pub start: f64,
-    pub offset: f64,
-    pub length: f64,
-    pub gain: f32,
-    pub fade_in: f64,
-    pub fade_out: f64,
-}
-
-#[derive(Clone)]
-pub struct MixTrack {
-    pub gain_l: f32,
-    pub gain_r: f32,
-    pub clips: Vec<MixClip>,
-}
+pub use mix::{space_gains, stereo_frame, track_gains, Mix, BLOCK, MAX_SPEAKERS};
 
 /// What the audio thread plays.
 pub enum Program {
@@ -44,123 +32,192 @@ pub enum Program {
         buf: Arc<AudioBuffer>,
         channel_mask: u8,
     },
-    Mix {
-        master: f32,
-        tracks: Vec<MixTrack>,
-        duration: f64,
-    },
+    Mix(Box<Mix>),
 }
 
+/// The master chain in [`Cmd::Param`] and friends.
+pub const MASTER: u16 = u16::MAX;
+/// Most values one effect takes.
+pub const MAX_VALUES: usize = 24;
+
 enum Cmd {
-    Program(Arc<Program>),
-    /// Play from `from` to `to` seconds, looping if asked.
+    Program(Box<Program>),
     Play {
         from: f64,
         to: f64,
         looping: bool,
     },
     Stop,
+    Gains {
+        track: u16,
+        l: f32,
+        r: f32,
+    },
+    Audible {
+        track: u16,
+        on: bool,
+    },
+    Master(f32),
+    Param {
+        track: u16,
+        slot: u8,
+        n: u8,
+        vals: [f32; MAX_VALUES],
+    },
+    Bypass {
+        track: u16,
+        slot: u8,
+        on: bool,
+    },
+    ChainMix {
+        track: u16,
+        mix: f32,
+    },
+    Space {
+        track: u16,
+        l: [f32; MAX_SPEAKERS],
+        r: [f32; MAX_SPEAKERS],
+        lfe: f32,
+    },
+    Instrument {
+        track: u16,
+        inst: af27_core::midi::Instrument,
+    },
+    Metronome(Option<(f64, u32)>),
 }
 
 struct Shared {
     playing: AtomicBool,
-    /// Playhead in seconds (f64 bits).
     pos: AtomicU64,
     peak_l: AtomicU32,
     peak_r: AtomicU32,
 }
 
-fn store_f64(a: &AtomicU64, v: f64) {
-    a.store(v.to_bits(), Ordering::Relaxed);
-}
-fn load_f64(a: &AtomicU64) -> f64 {
-    f64::from_bits(a.load(Ordering::Relaxed))
-}
 fn store_max_f32(a: &AtomicU32, v: f32) {
-    let cur = f32::from_bits(a.load(Ordering::Relaxed));
-    if v > cur {
+    if v > f32::from_bits(a.load(Ordering::Relaxed)) {
         a.store(v.to_bits(), Ordering::Relaxed);
     }
 }
 
-pub struct Engine {
-    _stream: cpal::Stream,
-    tx: rtrb::Producer<Cmd>,
-    trash: rtrb::Consumer<Arc<Program>>,
-    shared: Arc<Shared>,
-    pub rate: u32,
-    pub device: String,
-    recorder: Option<Recorder>,
-}
-
-/// Linear interpolation into a channel at fractional index `x`.
-#[inline]
-fn sample(c: &[f32], x: f64) -> f32 {
-    if x < 0.0 {
-        return 0.0;
-    }
-    let i = x as usize;
-    let f = (x - i as f64) as f32;
-    match (c.get(i), c.get(i + 1)) {
-        (Some(a), Some(b)) => a + (b - a) * f,
-        (Some(a), None) => *a,
-        _ => 0.0,
-    }
-}
-
-/// One frame as stereo at fractional index `x`. Mono plays on both
-/// sides; more than two channels fold down in WAV channel order
-/// (L R C LFE, then surround pairs) with the centre and surrounds at
-/// -3 dB, LFE left out, scaled so a full-scale bed does not clip.
-#[inline]
-pub fn stereo_frame(buf: &AudioBuffer, x: f64) -> (f32, f32) {
-    let ch = &buf.channels;
-    match ch.len() {
-        0 => (0.0, 0.0),
-        1 => {
-            let m = sample(&ch[0], x);
-            (m, m)
-        }
-        2 => (sample(&ch[0], x), sample(&ch[1], x)),
-        n => {
-            const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
-            let mut l = sample(&ch[0], x);
-            let mut r = sample(&ch[1], x);
-            let c = sample(&ch[2], x) * H;
-            l += c;
-            r += c;
-            let mut pairs = 0.0f32;
-            let mut k = 4;
-            while k < n {
-                l += sample(&ch[k], x) * H;
-                if k + 1 < n {
-                    r += sample(&ch[k + 1], x) * H;
-                }
-                pairs += 1.0;
-                k += 2;
-            }
-            let norm = 1.0 / (1.0 + H + H * pairs.max(0.0));
-            (l * norm, r * norm)
-        }
-    }
-}
-
 struct Voice {
-    program: Option<Arc<Program>>,
+    program: Option<Box<Program>>,
     playing: bool,
     t: f64,
     from: f64,
     to: f64,
     looping: bool,
-    /// Indices of clips active in the current block, per track.
-    active: [(u16, u16); 512],
 }
 
 impl Voice {
-    fn render(&mut self, out: &mut [f32], channels: usize, rate: f64) -> (f32, f32) {
-        out.iter_mut().for_each(|s| *s = 0.0);
-        let (mut pk_l, mut pk_r) = (0.0f32, 0.0f32);
-        let Some(program) = self.program.clone() else {
+    fn apply(&mut self, cmd: Cmd, trash: &mut rtrb::Producer<Box<Program>>) {
+        let mix = match self.program.as_deref_mut() {
+            Some(Program::Mix(m)) => Some(m.as_mut()),
+            _ => None,
+        };
+        match cmd {
+            Cmd::Program(p) => {
+                if let Some(old) = self.program.replace(p) {
+                    if let Err(rtrb::PushError::Full(old)) = trash.push(old) {
+                        // Never free on the audio thread.
+                        std::mem::forget(old);
+                    }
+                }
+            }
+            Cmd::Play { from, to, looping } => {
+                self.t = from;
+                self.from = from;
+                self.to = to;
+                self.looping = looping;
+                self.playing = true;
+                if let Some(Program::Mix(m)) = self.program.as_deref_mut() {
+                    m.reset();
+                }
+            }
+            Cmd::Stop => self.playing = false,
+            Cmd::Gains { track, l, r } => {
+                if let Some(t) = mix.and_then(|m| m.tracks.get_mut(track as usize)) {
+                    t.gain_l = l;
+                    t.gain_r = r;
+                }
+            }
+            Cmd::Audible { track, on } => {
+                if let Some(t) = mix.and_then(|m| m.tracks.get_mut(track as usize)) {
+                    t.audible = on;
+                }
+            }
+            Cmd::Master(g) => {
+                if let Some(m) = mix {
+                    m.master = g;
+                }
+            }
+            Cmd::Param {
+                track,
+                slot,
+                n,
+                vals,
+            } => {
+                if let Some(m) = mix {
+                    let chain = if track == MASTER {
+                        Some(&mut m.master_chain)
+                    } else {
+                        m.tracks.get_mut(track as usize).map(|t| &mut t.chain)
+                    };
+                    if let Some(c) = chain {
+                        c.set(slot as usize, &vals[..n as usize]);
+                    }
+                }
+            }
+            Cmd::Bypass { track, slot, on } => {
+                if let Some(m) = mix {
+                    let chain = if track == MASTER {
+                        Some(&mut m.master_chain)
+                    } else {
+                        m.tracks.get_mut(track as usize).map(|t| &mut t.chain)
+                    };
+                    if let Some(c) = chain {
+                        c.set_bypass(slot as usize, on);
+                    }
+                }
+            }
+            Cmd::ChainMix { track, mix: amount } => {
+                if let Some(m) = mix {
+                    let chain = if track == MASTER {
+                        Some(&mut m.master_chain)
+                    } else {
+                        m.tracks.get_mut(track as usize).map(|t| &mut t.chain)
+                    };
+                    if let Some(c) = chain {
+                        c.mix = amount;
+                    }
+                }
+            }
+            Cmd::Space { track, l, r, lfe } => {
+                if let Some(t) = mix.and_then(|m| m.tracks.get_mut(track as usize)) {
+                    t.space_l = l;
+                    t.space_r = r;
+                    t.lfe = lfe;
+                }
+            }
+            Cmd::Instrument { track, inst } => {
+                if let Some(s) = mix
+                    .and_then(|m| m.tracks.get_mut(track as usize))
+                    .and_then(|t| t.synth.as_mut())
+                {
+                    s.set(inst);
+                }
+            }
+            Cmd::Metronome(m2) => {
+                if let Some(m) = mix {
+                    m.metronome = m2;
+                }
+            }
+        }
+    }
+
+    /// Fills interleaved `out` (`channels` wide) and returns the peaks.
+    fn render(&mut self, out: &mut [f32], channels: usize, rate: f64, bed_out: bool) -> (f32, f32) {
+        out.fill(0.0);
+        let Some(program) = self.program.as_deref_mut() else {
             return (0.0, 0.0);
         };
         if !self.playing {
@@ -168,77 +225,78 @@ impl Voice {
         }
         let dt = 1.0 / rate;
         let frames = out.len() / channels;
-        // Pick the clips touching this block once, not per sample.
-        let mut n_active = 0usize;
-        if let Program::Mix { tracks, .. } = &*program {
-            let t1 = self.t + frames as f64 * dt;
-            'outer: for (ti, tr) in tracks.iter().enumerate() {
-                for (ci, c) in tr.clips.iter().enumerate() {
-                    let wraps = self.looping && t1 > self.to;
-                    if wraps || (c.start < t1 && c.start + c.length > self.t) {
-                        if n_active == self.active.len() {
-                            break 'outer;
-                        }
-                        self.active[n_active] = (ti as u16, ci as u16);
-                        n_active += 1;
-                    }
-                }
+        let width = if bed_out {
+            match program {
+                Program::Mix(m) => m.channels_out(),
+                _ => 2,
             }
-        }
-        for f in 0..frames {
+        } else {
+            2
+        };
+        let mut done = 0;
+        let mut peaks = (0.0f32, 0.0f32);
+        let mut block = [0.0f32; BLOCK * MAX_SPEAKERS];
+        while done < frames && self.playing {
             if self.t >= self.to {
                 if self.looping && self.to > self.from {
                     self.t = self.from;
+                    if let Program::Mix(m) = program {
+                        m.reset();
+                    }
                 } else {
                     self.playing = false;
                     break;
                 }
             }
-            let (l, r) = match &*program {
+            let until_end = (((self.to - self.t) / dt).ceil() as usize).max(1);
+            let n = (frames - done).min(BLOCK).min(until_end);
+            let p = match program {
                 Program::Buffer { buf, channel_mask } => {
-                    let (l, r) = stereo_frame(buf, self.t * buf.rate as f64);
-                    let l = if channel_mask & 1 != 0 { l } else { 0.0 };
-                    let r = if channel_mask & 2 != 0 { r } else { 0.0 };
-                    (l, r)
-                }
-                Program::Mix { master, tracks, .. } => {
-                    let (mut l, mut r) = (0.0f32, 0.0f32);
-                    for &(ti, ci) in &self.active[..n_active] {
-                        let tr = &tracks[ti as usize];
-                        let c = &tr.clips[ci as usize];
-                        let local = self.t - c.start;
-                        if local < 0.0 || local >= c.length {
-                            continue;
-                        }
-                        let mut g = c.gain as f64;
-                        if c.fade_in > 0.0 && local < c.fade_in {
-                            g *= local / c.fade_in;
-                        }
-                        if c.fade_out > 0.0 && c.length - local < c.fade_out {
-                            g *= (c.length - local) / c.fade_out;
-                        }
-                        let x = (c.offset + local) * c.buf.rate as f64;
-                        let (a, b) = stereo_frame(&c.buf, x);
-                        l += a * g as f32 * tr.gain_l;
-                        r += b * g as f32 * tr.gain_r;
+                    let mut pk = (0.0f32, 0.0f32);
+                    for i in 0..n {
+                        let x = (self.t + dt * i as f64) * buf.rate as f64;
+                        let (l, r) = stereo_frame(buf, x);
+                        let l = if *channel_mask & 1 != 0 { l } else { 0.0 };
+                        let r = if *channel_mask & 2 != 0 { r } else { 0.0 };
+                        block[i * 2] = l;
+                        block[i * 2 + 1] = r;
+                        pk = (pk.0.max(l.abs()), pk.1.max(r.abs()));
                     }
-                    (l * master, r * master)
+                    pk
                 }
+                Program::Mix(m) => m.render(self.t, dt, n, &mut block[..n * width], bed_out),
             };
-            pk_l = pk_l.max(l.abs());
-            pk_r = pk_r.max(r.abs());
-            let frame = &mut out[f * channels..(f + 1) * channels];
-            match channels {
-                1 => frame[0] = (l + r) * 0.5,
-                _ => {
-                    frame[0] = l;
-                    frame[1] = r;
+            peaks = (peaks.0.max(p.0), peaks.1.max(p.1));
+            for i in 0..n {
+                let o = &mut out[(done + i) * channels..(done + i + 1) * channels];
+                if bed_out {
+                    o[..width].copy_from_slice(&block[i * width..(i + 1) * width]);
+                } else {
+                    let (l, r) = (block[i * 2], block[i * 2 + 1]);
+                    match channels {
+                        1 => o[0] = (l + r) * 0.5,
+                        _ => {
+                            o[0] = l;
+                            o[1] = r;
+                        }
+                    }
                 }
             }
-            self.t += dt;
+            self.t += dt * n as f64;
+            done += n;
         }
-        (pk_l, pk_r)
+        peaks
     }
+}
+
+pub struct Engine {
+    _stream: cpal::Stream,
+    tx: rtrb::Producer<Cmd>,
+    trash: rtrb::Consumer<Box<Program>>,
+    shared: Arc<Shared>,
+    pub rate: u32,
+    pub device: String,
+    recorder: Option<Recorder>,
 }
 
 impl Engine {
@@ -254,8 +312,9 @@ impl Engine {
             .map_err(|e| format!("The output device gave no format: {e}"))?;
         let rate = config.sample_rate().0;
         let channels = config.channels() as usize;
-        let (tx, mut rx) = rtrb::RingBuffer::<Cmd>::new(256);
-        let (mut trash_tx, trash) = rtrb::RingBuffer::<Arc<Program>>::new(256);
+        scope::set_rate(rate);
+        let (tx, mut rx) = rtrb::RingBuffer::<Cmd>::new(1024);
+        let (mut trash_tx, trash) = rtrb::RingBuffer::<Box<Program>>::new(256);
         let shared = Arc::new(Shared {
             playing: AtomicBool::new(false),
             pos: AtomicU64::new(0f64.to_bits()),
@@ -270,33 +329,19 @@ impl Engine {
             from: 0.0,
             to: 0.0,
             looping: false,
-            active: [(0, 0); 512],
         };
         let mut callback = move |out: &mut [f32]| {
             while let Ok(cmd) = rx.pop() {
-                match cmd {
-                    Cmd::Program(p) => {
-                        if let Some(old) = voice.program.replace(p) {
-                            // If the trash queue is full the old program
-                            // leaks rather than being freed here.
-                            if let Err(rtrb::PushError::Full(old)) = trash_tx.push(old) {
-                                std::mem::forget(old);
-                            }
-                        }
-                    }
-                    Cmd::Play { from, to, looping } => {
-                        voice.t = from;
-                        voice.from = from;
-                        voice.to = to;
-                        voice.looping = looping;
-                        voice.playing = true;
-                    }
-                    Cmd::Stop => voice.playing = false,
+                voice.apply(cmd, &mut trash_tx);
+            }
+            let (l, r) = voice.render(out, channels, rate as f64, false);
+            if voice.playing {
+                for f in out.chunks_exact(channels) {
+                    scope::push(f[0], if channels > 1 { f[1] } else { f[0] });
                 }
             }
-            let (l, r) = voice.render(out, channels, rate as f64);
             sh.playing.store(voice.playing, Ordering::Relaxed);
-            store_f64(&sh.pos, voice.t);
+            sh.pos.store(voice.t.to_bits(), Ordering::Relaxed);
             store_max_f32(&sh.peak_l, l);
             store_max_f32(&sh.peak_r, r);
         };
@@ -338,19 +383,93 @@ impl Engine {
         })
     }
 
+    fn send(&mut self, c: Cmd) {
+        let _ = self.tx.push(c);
+    }
+
     pub fn set_program(&mut self, p: Program) {
-        let _ = self.tx.push(Cmd::Program(Arc::new(p)));
+        self.send(Cmd::Program(Box::new(p)));
     }
 
     /// Plays from `from` up to `to` (None = the end).
     pub fn play(&mut self, from: f64, to: Option<f64>, looping: bool, program_len: f64) {
         let to = to.unwrap_or(program_len).max(from);
-        let _ = self.tx.push(Cmd::Play { from, to, looping });
+        self.send(Cmd::Play { from, to, looping });
         self.shared.playing.store(true, Ordering::Relaxed);
     }
 
     pub fn stop(&mut self) {
-        let _ = self.tx.push(Cmd::Stop);
+        self.send(Cmd::Stop);
+    }
+
+    pub fn set_gains(&mut self, track: usize, l: f32, r: f32) {
+        self.send(Cmd::Gains {
+            track: track as u16,
+            l,
+            r,
+        });
+    }
+
+    pub fn set_audible(&mut self, track: usize, on: bool) {
+        self.send(Cmd::Audible {
+            track: track as u16,
+            on,
+        });
+    }
+
+    pub fn set_master(&mut self, gain: f32) {
+        self.send(Cmd::Master(gain));
+    }
+
+    /// New effect settings for `slot` of a track's chain (or [`MASTER`]).
+    pub fn set_param(&mut self, track: u16, slot: usize, values: &[f32]) {
+        let mut vals = [0.0; MAX_VALUES];
+        let n = values.len().min(MAX_VALUES);
+        vals[..n].copy_from_slice(&values[..n]);
+        self.send(Cmd::Param {
+            track,
+            slot: slot as u8,
+            n: n as u8,
+            vals,
+        });
+    }
+
+    pub fn set_bypass(&mut self, track: u16, slot: usize, on: bool) {
+        self.send(Cmd::Bypass {
+            track,
+            slot: slot as u8,
+            on,
+        });
+    }
+
+    pub fn set_chain_mix(&mut self, track: u16, mix: f32) {
+        self.send(Cmd::ChainMix { track, mix });
+    }
+
+    pub fn set_space(
+        &mut self,
+        track: usize,
+        l: [f32; MAX_SPEAKERS],
+        r: [f32; MAX_SPEAKERS],
+        lfe: f32,
+    ) {
+        self.send(Cmd::Space {
+            track: track as u16,
+            l,
+            r,
+            lfe,
+        });
+    }
+
+    pub fn set_instrument(&mut self, track: usize, inst: af27_core::midi::Instrument) {
+        self.send(Cmd::Instrument {
+            track: track as u16,
+            inst,
+        });
+    }
+
+    pub fn set_metronome(&mut self, m: Option<(f64, u32)>) {
+        self.send(Cmd::Metronome(m));
     }
 
     pub fn is_playing(&self) -> bool {
@@ -358,7 +477,7 @@ impl Engine {
     }
 
     pub fn position(&self) -> f64 {
-        load_f64(&self.shared.pos)
+        f64::from_bits(self.shared.pos.load(Ordering::Relaxed))
     }
 
     /// Peak levels since the last call (left, right), linear.
@@ -385,7 +504,6 @@ impl Engine {
         self.recorder.is_some()
     }
 
-    /// Recorded so far, for a live waveform.
     pub fn recording_len_secs(&self) -> f64 {
         self.recorder.as_ref().map_or(0.0, |r| {
             r.data.len() as f64 / (r.channels.max(1) as f64 * r.rate.max(1) as f64)
@@ -413,77 +531,47 @@ pub fn buffer_program(buf: Arc<AudioBuffer>) -> Program {
     }
 }
 
-/// Builds a mix program from session data and loaded media.
+/// Builds a mix program from session data and loaded media, at `rate`.
 pub fn mix_program(
     session: &af27_core::Session,
     media: &dyn Fn(af27_core::MediaId) -> Option<Arc<AudioBuffer>>,
+    rate: u32,
 ) -> Program {
-    let tracks = session
-        .tracks
-        .iter()
-        .filter(|t| session.audible(t))
-        .map(|t| {
-            let (gain_l, gain_r) = t.gains();
-            MixTrack {
-                gain_l,
-                gain_r,
-                clips: t
-                    .clips
-                    .iter()
-                    .filter(|c| !c.muted)
-                    .filter_map(|c| {
-                        Some(MixClip {
-                            buf: media(c.media)?,
-                            start: c.start,
-                            offset: c.offset,
-                            length: c.length,
-                            gain: db_to_gain(c.gain_db),
-                            fade_in: c.fade_in,
-                            fade_out: c.fade_out,
-                        })
-                    })
-                    .collect(),
-            }
-        })
-        .collect();
-    Program::Mix {
-        master: db_to_gain(session.master_db),
-        tracks,
-        duration: session.duration(),
-    }
+    Program::Mix(Box::new(mix::build(session, media, rate)))
 }
 
-/// Offline mixdown of a program to a buffer at `rate` (for export).
-pub fn render(program: &Program, rate: u32, from: f64, to: f64) -> AudioBuffer {
+fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -> AudioBuffer {
+    let channels = match (&program, bed_out) {
+        (Program::Mix(m), true) => m.channels_out(),
+        _ => 2,
+    };
     let mut v = Voice {
-        program: Some(Arc::new(match program {
-            Program::Buffer { buf, channel_mask } => Program::Buffer {
-                buf: buf.clone(),
-                channel_mask: *channel_mask,
-            },
-            Program::Mix {
-                master,
-                tracks,
-                duration,
-            } => Program::Mix {
-                master: *master,
-                tracks: tracks.clone(),
-                duration: *duration,
-            },
-        })),
+        program: Some(Box::new(program)),
         playing: true,
         t: from,
         from,
         to,
         looping: false,
-        active: [(0, 0); 512],
     };
-    let frames = ((to - from).max(0.0) * rate as f64).round() as usize;
-    let mut inter = vec![0.0f32; frames * 2];
-    for chunk in inter.chunks_mut(2048) {
-        v.render(chunk, 2, rate as f64);
+    if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
+        m.reset();
     }
-    AudioBuffer::from_interleaved(rate, 2, &inter)
+    let frames = ((to - from).max(0.0) * rate as f64).round() as usize;
+    let mut inter = vec![0.0f32; frames * channels];
+    for chunk in inter.chunks_mut(BLOCK * channels) {
+        v.render(chunk, channels, rate as f64, bed_out);
+    }
+    AudioBuffer::from_interleaved(rate, channels, &inter)
+}
+
+/// Offline stereo mixdown (3D sessions as heard: binaural or folded).
+pub fn render(program: Program, rate: u32, from: f64, to: f64) -> AudioBuffer {
+    render_with(program, rate, from, to, false)
+}
+
+/// Offline mixdown of a 3D session's speaker bed, one channel per speaker.
+pub fn render_bed(program: Program, rate: u32, from: f64, to: f64) -> AudioBuffer {
+    render_with(program, rate, from, to, true)
 }
 
 struct Recorder {
@@ -565,51 +653,248 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use af27_core::session::{Clip, MediaItem, Send};
+    use af27_core::{Session, TrackKind};
 
-    #[test]
-    fn surround_folds_without_clipping() {
-        let b = AudioBuffer {
-            rate: 48_000,
-            channels: vec![vec![1.0; 4]; 6],
-        };
-        let (l, r) = stereo_frame(&b, 1.0);
-        assert!(l <= 1.0 + 1e-6 && r <= 1.0 + 1e-6 && l > 0.9);
-        let mono = AudioBuffer {
-            rate: 48_000,
-            channels: vec![vec![0.5; 4]],
-        };
-        assert_eq!(stereo_frame(&mono, 0.0), (0.5, 0.5));
-    }
-
-    #[test]
-    fn offline_mix_places_clips_and_fades() {
+    fn session_with_tone() -> (Session, Arc<AudioBuffer>) {
+        let mut s = Session::new("t", 100, 1);
+        let m = s.alloc_id();
+        s.media.push(MediaItem {
+            id: m,
+            name: "x".into(),
+            path: None,
+            duration: 2.0,
+            rate: 100,
+            channels: 1,
+            ext_id: None,
+        });
         let buf = Arc::new(AudioBuffer {
             rate: 100,
             channels: vec![vec![1.0; 200]],
         });
-        let program = Program::Mix {
-            master: 1.0,
-            tracks: vec![MixTrack {
-                gain_l: 1.0,
-                gain_r: 0.5,
-                clips: vec![MixClip {
-                    buf,
-                    start: 1.0,
-                    offset: 0.0,
-                    length: 1.0,
-                    gain: 1.0,
-                    fade_in: 0.0,
-                    fade_out: 0.5,
-                }],
-            }],
-            duration: 2.0,
-        };
-        let out = render(&program, 100, 0.0, 3.0);
+        s.tracks[0].clips.push(Clip {
+            id: 99,
+            media: m,
+            name: "x".into(),
+            start: 1.0,
+            offset: 0.0,
+            length: 1.0,
+            gain_db: 0.0,
+            fade_in: 0.0,
+            fade_out: 0.5,
+            muted: false,
+            ext_id: None,
+        });
+        (s, buf)
+    }
+
+    #[test]
+    fn offline_mix_places_clips_and_fades() {
+        let (mut s, buf) = session_with_tone();
+        s.tracks[0].pan = 0.5;
+        let b2 = buf.clone();
+        let out = render(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            3.0,
+        );
         assert_eq!(out.frames(), 300);
         assert_eq!(out.channels[0][50], 0.0);
-        assert!((out.channels[0][120] - 1.0).abs() < 1e-6);
-        assert!((out.channels[1][120] - 0.5).abs() < 1e-6);
-        assert!((out.channels[0][175] - 0.5).abs() < 0.03);
+        assert!(out.channels[1][120] > out.channels[0][120]);
+        assert!((out.channels[0][175] / out.channels[0][120] - 0.5).abs() < 0.03);
         assert_eq!(out.channels[0][250], 0.0);
+    }
+
+    #[test]
+    fn sends_and_buses_and_chains() {
+        let (mut s, buf) = session_with_tone();
+        let bus = s.add_track_of(TrackKind::Bus);
+        // Track to the bus only; bus at -6 dB with an Amplify of +6 dB: unity.
+        s.tracks[0].output = Some(bus);
+        let bi = s.track_index(bus).unwrap();
+        s.tracks[bi].volume_db = -6.0206;
+        s.tracks[bi].chain.push(af27_core::EffectSlot {
+            effect: "amplify".into(),
+            values: vec![6.0206],
+            bypass: false,
+            data: None,
+            ext_id: None,
+        });
+        let b2 = buf.clone();
+        let out = render(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        assert!(
+            (out.channels[0][120] - 1.0).abs() < 1e-3,
+            "{}",
+            out.channels[0][120]
+        );
+        // A pre-fader send with the track itself muted by fader still reaches the bus.
+        s.tracks[0].output = None;
+        s.tracks[0].volume_db = -120.0;
+        s.tracks[0].sends.push(Send {
+            bus,
+            level_db: 0.0,
+            pre_fader: true,
+            ext_id: None,
+        });
+        let b2 = buf.clone();
+        let out = render(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        assert!((out.channels[0][120] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_3d_session_exports_every_speaker() {
+        let (mut s, buf) = session_with_tone();
+        s.space = Some(af27_core::space::SpaceLayout::Surround51);
+        // Straight ahead at the centre speaker.
+        s.tracks[0].pos.x = 0.0;
+        s.tracks[0].pos.y = 1.0;
+        let b2 = buf.clone();
+        let bed = render_bed(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        assert_eq!(bed.num_channels(), 6);
+        // Mono source: half from each side, both at the centre speaker.
+        assert!(
+            (bed.channels[2][120] - 1.0).abs() < 1e-3,
+            "{:?}",
+            bed.channels.iter().map(|c| c[120]).collect::<Vec<_>>()
+        );
+        assert!(bed.channels[0][120].abs() < 1e-6);
+        let b2 = buf.clone();
+        let st = render(
+            mix_program(&s, &move |_| Some(b2.clone()), 100),
+            100,
+            0.0,
+            2.0,
+        );
+        assert_eq!(st.num_channels(), 2);
+        assert!(st.channels[0][150].abs() > 0.1);
+    }
+
+    #[test]
+    fn midi_tracks_sound() {
+        let mut s = Session::new("m", 48_000, 0);
+        let t = s.add_track_of(TrackKind::Midi);
+        let ti = s.track_index(t).unwrap();
+        s.tracks[ti].midi.push(af27_core::midi::MidiClip {
+            id: 1,
+            name: "c".into(),
+            start: 0.0,
+            length: 4.0,
+            notes: vec![af27_core::midi::MidiNote {
+                pitch: 60,
+                start: 0.0,
+                length: 1.0,
+                velocity: 100,
+                channel: 0,
+                pan: 0.0,
+            }],
+            muted: false,
+            ext_id: None,
+        });
+        let out = render(mix_program(&s, &|_| None, 48_000), 48_000, 0.0, 1.0);
+        assert!(out.peak() > 0.01);
+    }
+}
+
+/// `cargo test --release -p af27-engine bench -- --ignored --nocapture`
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use af27_core::session::{Clip, MediaItem, Send};
+    use af27_core::{EffectSlot, Session, TrackKind};
+
+    fn slot(id: &str) -> EffectSlot {
+        let e = af27_dsp::Effect::from_id(id).unwrap();
+        EffectSlot {
+            effect: id.into(),
+            values: e.defaults(),
+            bypass: false,
+            data: None,
+            ext_id: None,
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn mix_32_tracks_with_effects() {
+        let rate = 48_000u32;
+        let secs = 60.0;
+        let n = (rate as f64 * secs) as usize;
+        let buf = Arc::new(AudioBuffer {
+            rate,
+            channels: vec![(0..n).map(|i| ((i as f32) * 0.01).sin() * 0.1).collect(); 2],
+        });
+        let mut s = Session::new("bench", rate, 0);
+        let m = s.alloc_id();
+        s.media.push(MediaItem {
+            id: m,
+            name: "x".into(),
+            path: None,
+            duration: secs,
+            rate,
+            channels: 2,
+            ext_id: None,
+        });
+        let verb_a = s.add_track_of(TrackKind::Bus);
+        let verb_b = s.add_track_of(TrackKind::Bus);
+        for b in [verb_a, verb_b] {
+            let i = s.track_index(b).unwrap();
+            s.tracks[i].chain.push(slot("reverb"));
+        }
+        for k in 0..32 {
+            let t = s.add_track();
+            let i = s.track_index(t).unwrap();
+            s.tracks[i].clips.push(Clip {
+                id: 1000 + k,
+                media: m,
+                name: "c".into(),
+                start: 0.0,
+                offset: 0.0,
+                length: secs,
+                gain_db: 0.0,
+                fade_in: 0.1,
+                fade_out: 0.1,
+                muted: false,
+                ext_id: None,
+            });
+            s.tracks[i].chain.push(slot("parametric-eq"));
+            s.tracks[i].chain.push(slot("compressor"));
+            s.tracks[i].sends.push(Send {
+                bus: if k % 2 == 0 { verb_a } else { verb_b },
+                level_db: -12.0,
+                pre_fader: false,
+                ext_id: None,
+            });
+        }
+        s.master_chain.push(slot("limiter"));
+        let b2 = buf.clone();
+        let t0 = std::time::Instant::now();
+        let out = render(
+            mix_program(&s, &move |_| Some(b2.clone()), rate),
+            rate,
+            0.0,
+            secs,
+        );
+        let took = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "32 tracks x (EQ + compressor) + 2 reverb buses + master limiter: {secs} s of audio in {took:.2} s = {:.1}x real time on one core",
+            secs / took
+        );
+        assert_eq!(out.frames(), n);
     }
 }

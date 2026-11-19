@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
 //! Second-order IIR sections with the well-known "Audio EQ Cookbook"
@@ -101,6 +101,21 @@ impl Biquad {
             z1: 0.0,
             z2: 0.0,
         }
+    }
+
+    /// Takes another section's coefficients, keeping this one's state,
+    /// so a filter can be retuned while it plays without a click.
+    pub fn set_coeffs_from(&mut self, o: &Biquad) {
+        self.b0 = o.b0;
+        self.b1 = o.b1;
+        self.b2 = o.b2;
+        self.a1 = o.a1;
+        self.a2 = o.a2;
+    }
+
+    pub fn clear(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
     }
 
     /// Transposed direct form II.
