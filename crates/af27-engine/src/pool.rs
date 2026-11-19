@@ -110,6 +110,13 @@ impl Pool {
             unsafe { (*(data as *const F))(i) }
         }
         let s = &*self.shared;
+        let gen = (s.generation.load(Ordering::Relaxed) + 1) & 0xffff_ffff;
+        // Close the ticket first: it now names the new generation but no
+        // item can be claimed from it. A worker still holding a ticket it
+        // read from the last job fails its compare-exchange from here on, so
+        // it can never claim an item against the new count and closure
+        // written below (which would run a new item early, and twice).
+        s.ticket.store((gen << 32) | 0xffff_ffff, Ordering::SeqCst);
         // No worker reads the job cell now: the last job's items were all
         // reported done before the last `run` returned.
         unsafe {
@@ -118,7 +125,6 @@ impl Pool {
                 call: trampoline::<F>,
             });
         }
-        let gen = (s.generation.load(Ordering::Relaxed) + 1) & 0xffff_ffff;
         s.count.store(n, Ordering::Relaxed);
         s.done.store(0, Ordering::Relaxed);
         s.ticket.store(gen << 32, Ordering::Release);
@@ -245,6 +251,22 @@ mod tests {
         let p = Pool::new(3);
         for round in 0..2000 {
             let n = 1 + round % 37;
+            let hits: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+            p.run(n, &|i| {
+                hits[i].fetch_add(1, Ordering::Relaxed);
+            });
+            assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1), "round {round}");
+        }
+    }
+
+    /// The race that once ran an item twice: many short jobs back to back,
+    /// with more workers than items, so workers are often mid-claim on the
+    /// last job while the next is published.
+    #[test]
+    fn back_to_back_jobs_never_run_an_item_twice() {
+        let p = Pool::new(7);
+        for round in 0..30_000 {
+            let n = 2 + round % 5;
             let hits: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
             p.run(n, &|i| {
                 hits[i].fetch_add(1, Ordering::Relaxed);
