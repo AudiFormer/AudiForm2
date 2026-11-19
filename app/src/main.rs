@@ -13,6 +13,7 @@ mod panels;
 mod phasewheel;
 mod pianoroll;
 mod pictures;
+mod pointers;
 mod separation;
 mod skin;
 mod space;

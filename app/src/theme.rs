@@ -124,6 +124,9 @@ pub struct Theme {
     /// The theme's own splash screen (`mall-day`, `mall-night`,
     /// `undercurrent`), or empty for the standard boot sequence.
     pub splash: String,
+    /// The theme's own mouse pointers (see `pointers.rs`): `glass`,
+    /// `phosphor`, `mall`, or empty for the system's.
+    pub pointers: String,
 }
 
 pub fn c(rgb: Rgb) -> Color32 {
@@ -234,6 +237,7 @@ impl Theme {
             button_on: None,
             realistic: true,
             splash: String::new(),
+            pointers: String::new(),
         }
     }
 
