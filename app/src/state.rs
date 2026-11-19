@@ -239,6 +239,8 @@ pub struct State {
     /// The MIDI clip open in the Piano Roll.
     pub piano_clip: Option<af27_core::ClipId>,
     pub phase: crate::phasewheel::PhasePrefs,
+    /// The Visualizer panel: its choices and its picture.
+    pub viz: crate::visualizer::Visualizer,
     /// The last analysis window taken while stopped, and what it was taken at.
     pub scope_cache: Option<((u64, u64, i64), Vec<[f32; 2]>)>,
     /// Effect slot open for editing in the Inspector: (track or MASTER, slot).
@@ -344,6 +346,7 @@ impl State {
             recording_target: None,
             piano_clip: None,
             phase: crate::phasewheel::PhasePrefs::load(),
+            viz: crate::visualizer::Visualizer::load(),
             scope_cache: None,
             open_slot: None,
             gesture: false,
@@ -1363,5 +1366,13 @@ impl State {
         };
         self.scope_cache = Some((key, frames.clone()));
         (frames, rate)
+    }
+
+    /// Levels in dBFS of `out.len()` bands, 20 Hz to 20 kHz evenly in
+    /// pitch, from the newest frames heard (while stopped, the audio just
+    /// before the playhead), as the Visualizer reads them.
+    pub fn scope_spectrum(&mut self, sp: &mut crate::visualizer::Spectrum, out: &mut [f32]) {
+        let (frames, rate) = self.scope_frames(sp.size());
+        sp.bands(&frames, rate, out);
     }
 }
