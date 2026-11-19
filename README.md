@@ -36,7 +36,8 @@ You can pass files or sessions on the command line, or drop them on the window.
   panel, use clip gain and fades, mute, solo, arm, volume and pan, add
   markers, select time, and undo everything. Outputs go to the master or a
   bus, and **pre- or post-fader sends** feed buses. There's a **Mixer**, a
-  tempo with a **metronome**, and mixdown export to WAV.
+  tempo with a **metronome**, and mixdown, stem and bounce export to WAV
+  or FLAC (any common rate, dither, loudness targets).
 - **Effect chains**: 16 slots on every track and bus and on the master.
   Settings, bypass and order change live while playing, without
   restarting tails. The **Inspector** panel shows the selected track's

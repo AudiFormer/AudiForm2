@@ -5,6 +5,7 @@
 
 mod classic_themes;
 mod corners;
+mod export;
 mod fx;
 mod fx_menu;
 mod hud;

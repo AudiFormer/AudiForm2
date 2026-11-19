@@ -32,11 +32,11 @@ our own feature names.
 ## Formats
 - ✅ Read WAV/BWF/RF64, AIFF, FLAC, MP3, MP2, Ogg, Opus, AAC/M4A/MP4, CAF, MKV/WebM
 - ✅ DTS in WAV and raw `.dts` · ✅ unencrypted `.mogg` · ✅ multichannel kept
-- 🟡 Write: WAV 16/24/32f ✅; FLAC, MP3, Ogg, AAC export ⬜
+- 🟡 Write: WAV 8/16/24/32f with RF64, extensible masks, cue markers and INFO tags ✅; FLAC 16/24 (levels 0–8, Vorbis tags) ✅; MP3 (licence decision), Ogg, AAC export ⬜
 - ⬜ Raw PCM import · ⬜ APE, AU, IFF/8SVX · ⬜ audio from video files
 - ✅ `.sesx` import · ✅ `.audfrm`/`.altaudio` read **and write, lossless** · ⬜ `.sesx` export · ⬜ OMF, AAF, FCP XML
 - ⬜ Save session with copies of all media (collect files) · ⬜ session templates
-- ✅ Mixdown export · ⬜ stems export · ⬜ resample / bit-depth / dither options dialog
+- ✅ Mixdown export (session, time selection, selected clip) · ✅ stems export · ✅ bounce track to new track · ✅ export dialog: rate, channels, depth, dither, FLAC level, loudness target with true-peak ceiling, read-back check
 
 ## Editing tools
 - ✅ Move (clips) · ✅ Razor · ✅ Time selection · ⬜ Slip

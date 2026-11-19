@@ -252,6 +252,10 @@ pub struct State {
     pub meter_hold: (f32, f32),
 
     pub clipboard: Option<AudioBuffer>,
+    /// The export dialog and any export running.
+    pub export: crate::export::ExportUi,
+    /// The last effect applied and its settings, for Repeat Last Effect.
+    pub last_effect: Option<(Effect, Vec<f32>)>,
     pub effect: Effect,
     pub effect_values: HashMap<Effect, Vec<f32>>,
     pub separation: crate::separation::SeparationUi,
@@ -462,6 +466,8 @@ impl State {
             visuals_lite: false,
             meter_hold: (0.0, 0.0),
             clipboard: None,
+            export: Default::default(),
+            last_effect: None,
             effect: Effect::Amplify,
             effect_values: HashMap::new(),
             separation: crate::separation::SeparationUi::load(),
@@ -708,23 +714,6 @@ impl State {
         self.media_docs.retain(|_, d| *d != id);
         if self.current == Some(id) {
             self.current = self.docs.last().map(|d| d.id);
-        }
-    }
-
-    pub fn save_doc_as(&mut self, path: PathBuf, fmt: af27_io::WavFormat) {
-        let Some(doc) = self.doc_mut() else { return };
-        match af27_io::write_wav(&path, &doc.buf, fmt) {
-            Ok(()) => {
-                doc.path = Some(path.clone());
-                doc.name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                doc.dirty = false;
-                let n = doc.name.clone();
-                self.toast(format!("Saved {n}"));
-            }
-            Err(e) => self.error(e),
         }
     }
 
@@ -1300,6 +1289,9 @@ impl State {
 
     pub fn apply_effect(&mut self, e: Effect) {
         let vals = self.effect_values(e);
+        if self.doc().is_some() {
+            self.last_effect = Some((e, vals.clone()));
+        }
         let Some(doc) = self.doc_mut() else {
             self.error("Open a file in the Waveform editor first.");
             return;
@@ -1550,15 +1542,6 @@ impl State {
             t.color = self.theme.track_colors[n % self.theme.track_colors.len().max(1)];
         }
         self.commit_session("Add track", before);
-    }
-
-    pub fn export_mixdown(&mut self, path: PathBuf, fmt: af27_io::WavFormat) {
-        let (from, to) = self.session_sel.unwrap_or((0.0, self.session.duration()));
-        let buf = self.render_mix(from, to, false);
-        match af27_io::write_wav(&path, &buf, fmt) {
-            Ok(()) => self.toast(format!("Exported {}", path.display())),
-            Err(e) => self.error(e),
-        }
     }
 
     // ------------------------------------------------------- live edits
