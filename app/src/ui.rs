@@ -759,6 +759,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     ui.label(RichText::new("Auto chose Lite for this device").small().color(c(st.theme.text_dim)));
                 }
             });
+            crate::pointers::menu_toggle(ui);
             ui.menu_button("Theme Colors", |ui| {
                 ui.label(
                     RichText::new(format!("Your own hues for {}", st.theme_base.name))
@@ -1649,6 +1650,7 @@ impl eframe::App for App {
             crate::hud::scanlines(&top, screen, &th, &fx);
         }
         crate::hud::boot(ctx, &th, &fx, &mut self.boot_skipped);
+        crate::pointers::draw(ctx, &self.st.theme.pointers);
         self.frame_cpu_ms = __t0.elapsed().as_secs_f32() * 1000.0;
         if self.st.is_playing()
             || self.st.is_recording()
