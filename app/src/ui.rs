@@ -91,7 +91,13 @@ impl Tab {
 
 /// A tab's title: spaced capitals, or tighter and smaller when its panel
 /// is crowded.
-fn tab_text(t: &str, compact: bool) -> egui::WidgetText {
+fn tab_text(t: &str, compact: bool, plain: bool) -> egui::WidgetText {
+    if plain {
+        // As a 1995 program titled its tabs: as written, unspaced.
+        return RichText::new(t)
+            .size(if compact { 10.0 } else { 11.0 })
+            .into();
+    }
     let (size, spacing) = if compact { (10.5, 0.3) } else { (11.5, 1.2) };
     RichText::new(t.to_uppercase())
         .size(size)
@@ -168,7 +174,6 @@ fn load_layout(w: crate::workspace::Workspace) -> DockState<Tab> {
 impl App {
     pub fn new(cc: &eframe::CreationContext, files: Vec<std::path::PathBuf>) -> App {
         let mut st = State::new();
-        crate::skin::install_fallback_fonts(&cc.egui_ctx);
         crate::hwcursor::install(cc);
         crate::caustics::install(cc);
         crate::app_icon::install(cc);
@@ -257,6 +262,7 @@ impl TabViewer for Viewer<'_> {
 
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
         let t = tab.title();
+        let plain = crate::retro::on(&self.st.theme);
         if *tab == Tab::Editor {
             let name = match self.st.mode {
                 Mode::Waveform => self
@@ -270,12 +276,12 @@ impl TabViewer for Viewer<'_> {
                     if self.st.session_dirty { " *" } else { "" }
                 ),
             };
-            return tab_text(&format!("{}: {name}", t), self.crowded.contains(tab));
+            return tab_text(&format!("{}: {name}", t), self.crowded.contains(tab), plain);
         }
         if self.crowded.contains(tab) {
-            return tab_text(tab.short_title(), true);
+            return tab_text(tab.short_title(), true, plain);
         }
-        tab_text(t, false)
+        tab_text(t, false, plain)
     }
 
     fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
@@ -1369,12 +1375,14 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
             let mut pick = st.workspace;
             let mut reset = false;
             egui::ComboBox::from_id_salt("af2-workspace")
-                .selected_text(
+                .selected_text(if crate::retro::on(&th) {
+                    RichText::new(st.workspace.name())
+                } else {
                     RichText::new(st.workspace.name().to_uppercase())
                         .size(11.0)
                         .extra_letter_spacing(1.2)
-                        .color(c(th.accent)),
-                )
+                        .color(c(th.accent))
+                })
                 .width(150.0)
                 .show_ui(ui, |ui| {
                     for w in crate::workspace::Workspace::ALL {
@@ -1388,12 +1396,16 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
                 })
                 .response
                 .on_hover_text("Workspace");
-            ui.label(
-                RichText::new("WORKSPACE")
-                    .size(9.5)
-                    .extra_letter_spacing(1.5)
-                    .color(c(th.text_dim)),
-            );
+            if crate::retro::on(&th) {
+                ui.label("Workspace:");
+            } else {
+                ui.label(
+                    RichText::new("WORKSPACE")
+                        .size(9.5)
+                        .extra_letter_spacing(1.5)
+                        .color(c(th.text_dim)),
+                );
+            }
             if pick != st.workspace {
                 st.want_workspace = Some(pick);
             }
@@ -1803,6 +1815,22 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
     });
 }
 
+/// A panel's caption under the `win95` chrome: its shown tab's title, with
+/// the file or session name for the editor.
+fn caption_title(st: &State, tab: Tab) -> String {
+    if tab != Tab::Editor {
+        return tab.title().to_string();
+    }
+    let name = match st.mode {
+        Mode::Waveform => st
+            .doc()
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "(Untitled)".into()),
+        Mode::Multitrack => st.session.name.clone(),
+    };
+    format!("{name} - {}", tab.title())
+}
+
 fn status(ui: &mut egui::Ui, st: &State) {
     ui.horizontal(|ui| {
         let th = &st.theme;
@@ -2076,9 +2104,14 @@ impl eframe::App for App {
                 crate::skin::bar(&bg, strip, &th);
             }
         }
+        let retro = crate::retro::on(&th);
         let frame = |fill: [u8; 3]| {
             egui::Frame::none()
-                .fill(crate::theme::ca(fill, (th.glass * 200.0) as u8))
+                .fill(if retro {
+                    c(th.panel)
+                } else {
+                    crate::theme::ca(fill, (th.glass * 200.0) as u8)
+                })
                 .inner_margin(egui::Margin::symmetric(6.0, 4.0))
         };
 
@@ -2116,12 +2149,30 @@ impl eframe::App for App {
             .frame(frame(th.background))
             .show(ctx, |ui| {
                 crate::skin::bar(ui.painter(), ui.max_rect().expand2(under), &th);
+                if retro {
+                    // A raised tool bar under an etched line.
+                    crate::retro::panel(
+                        ui.painter(),
+                        ui.max_rect().expand2(under),
+                        None,
+                        crate::retro::Edge::ThinRaised,
+                    );
+                }
                 toolbar(ui, &mut self.st)
             });
         egui::TopBottomPanel::bottom("status")
             .frame(frame(th.background))
             .show(ctx, |ui| {
                 crate::skin::bar(ui.painter(), ui.max_rect().expand2(under), &th);
+                if retro {
+                    // The status line in a sunken field.
+                    crate::retro::panel(
+                        ui.painter(),
+                        ui.max_rect().expand2(egui::vec2(3.0, 2.0)),
+                        None,
+                        crate::retro::Edge::ThinSunken,
+                    );
+                }
                 status(ui, &self.st)
             });
 
@@ -2157,6 +2208,26 @@ impl eframe::App for App {
             style.tab.active.text_color = c(t);
             style.tab.focused.text_color = c(t);
         }
+        if retro {
+            // Grey tabs under each window's caption, black titles.
+            style.tab_bar.height = crate::retro::TAB_BAR;
+            style.tab_bar.hline_color = clear;
+            for t in [
+                &mut style.tab.active,
+                &mut style.tab.inactive,
+                &mut style.tab.focused,
+                &mut style.tab.hovered,
+                &mut style.tab.active_with_kb_focus,
+                &mut style.tab.inactive_with_kb_focus,
+                &mut style.tab.focused_with_kb_focus,
+            ] {
+                t.bg_fill = clear;
+                t.text_color = crate::retro::DARK;
+            }
+            style.buttons.close_tab_color = crate::retro::DARK;
+            style.buttons.close_tab_active_color = crate::retro::DARK;
+            style.buttons.add_tab_bg_fill = crate::retro::LIGHT;
+        }
         style.tab.tab_body.bg_fill = clear;
         style.tab.tab_body.stroke = egui::Stroke::NONE;
         style.tab.tab_body.rounding = Rounding::ZERO;
@@ -2168,9 +2239,11 @@ impl eframe::App for App {
 
         let mut open_tab = None;
         let mut tab_rects = Vec::new();
+        let mut tab_shift = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
+                let dock_from = crate::retro::next_shape(ui.ctx(), ui.layer_id());
                 let mut viewer = Viewer {
                     st: &mut self.st,
                     caches: &mut self.viewer,
@@ -2182,6 +2255,7 @@ impl eframe::App for App {
                 DockArea::new(&mut self.dock)
                     .style(style)
                     .show_inside(ui, &mut viewer);
+                let dock_to = crate::retro::next_shape(ui.ctx(), ui.layer_id());
                 // Where dividers meet, drag both at once.
                 crate::corners::corners(ui, &mut self.dock);
                 // The HUD over the cards: edges, brackets, the running light
@@ -2220,6 +2294,26 @@ impl eframe::App for App {
                             self.showing.insert(*t);
                         }
                         crate::hud::frame(p, *rect, &th, &fx, on, serial);
+                        if retro {
+                            let mine: Vec<egui::Rect> = tabs
+                                .iter()
+                                .filter_map(|t| {
+                                    tab_rects.iter().find(|(x, _)| x == t).map(|(_, r)| *r)
+                                })
+                                .collect();
+                            let shown = tabs.get(active.0);
+                            let title = shown.map(|t| caption_title(&self.st, *t));
+                            crate::retro::window(
+                                p,
+                                *rect,
+                                &mine,
+                                shown.and_then(|t| {
+                                    tab_rects.iter().find(|(x, _)| x == t).map(|(_, r)| *r)
+                                }),
+                                title.as_deref().unwrap_or(""),
+                                on,
+                            );
+                        }
                         if tabs.get(active.0) == Some(&Tab::Editor) {
                             crate::skin::lane_art(p, *rect, &th);
                         }
@@ -2232,6 +2326,23 @@ impl eframe::App for App {
                             }
                         }
                     }
+                }
+                if retro {
+                    tab_shift = Some(crate::retro::TabShift {
+                        layer: ui.layer_id(),
+                        from: dock_from,
+                        to: dock_to,
+                        bars: self
+                            .cards
+                            .iter()
+                            .map(|r| {
+                                egui::Rect::from_min_size(
+                                    r.min,
+                                    egui::vec2(r.width(), crate::retro::TAB_BAR),
+                                )
+                            })
+                            .collect(),
+                    });
                 }
             });
         if let Some(t) = open_tab {
@@ -2276,6 +2387,9 @@ impl eframe::App for App {
         }
         crate::hud::boot(ctx, &th, &fx, &mut self.boot_skipped);
         crate::pointers::draw(ctx, &self.st.theme.pointers);
+        if crate::retro::on(&self.st.theme) {
+            crate::retro::restyle(ctx, tab_shift.as_ref());
+        }
         self.frame_cpu_ms = __t0.elapsed().as_secs_f32() * 1000.0;
         if self.st.is_playing()
             || self.st.is_recording()

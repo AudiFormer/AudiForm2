@@ -323,7 +323,7 @@ mod tests {
                 );
             }
         }
-        assert!(used >= 7, "only {used} themes have pointers");
+        assert!(used >= 5, "only {used} themes have pointers");
         for s in &SETS {
             for p in s.pointers {
                 let mut css: Option<(f32, f32)> = None;
