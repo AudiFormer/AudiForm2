@@ -39,8 +39,11 @@ impl View {
             len: dur.max(0.0005),
         }
     }
-    pub fn zoom(&mut self, factor: f64, anchor: f64, total: f64) {
-        let new_len = (self.len * factor).clamp(0.0005, total.max(0.0005));
+    /// Zooms by `factor` around `anchor` (which keeps its place), never
+    /// shorter than `min_len` seconds nor longer than the file.
+    pub fn zoom_min(&mut self, factor: f64, anchor: f64, total: f64, min_len: f64) {
+        let total = total.max(min_len).max(1e-7);
+        let new_len = (self.len * factor).clamp(min_len.min(total), total);
         let frac = ((anchor - self.start) / self.len).clamp(0.0, 1.0);
         self.start = anchor - new_len * frac;
         self.len = new_len;
@@ -49,7 +52,7 @@ impl View {
     /// Keeps the view inside the file: never wider than it, never
     /// scrolled past either end, as in the leading editor.
     pub fn clamp_to(&mut self, total: f64) {
-        let total = total.max(0.0005);
+        let total = total.max(1e-7);
         if !self.len.is_finite() || self.len <= 0.0 {
             self.len = total;
         }
@@ -76,6 +79,8 @@ pub struct Doc {
     pub version: u64,
     /// Spectral display open under the waveform.
     pub spectral: bool,
+    /// Display-only amplitude zoom of the waveform (1 to 16).
+    pub amp: f32,
 }
 
 impl Doc {
@@ -96,6 +101,7 @@ impl Doc {
             markers: Vec::new(),
             version: 1,
             spectral: true,
+            amp: 1.0,
         }
     }
 
@@ -269,6 +275,18 @@ pub struct State {
     pub fx_values: HashMap<String, Vec<f32>>,
     /// Edit > Preferences: the settings saved in `prefs.json`.
     pub prefs: crate::settings::Prefs,
+    /// Zoom preferences (saved as zoom.json).
+    pub zoom: crate::zoom::ZoomPrefs,
+    /// Follow Playhead, and whether a hand-made move let go of it.
+    pub follow: crate::zoom::Follow,
+    /// The spectral display's frequency view, for the run of the app.
+    pub spec: crate::zoom::SpecView,
+    /// Widths in pixels of the Waveform editor's and the Multitrack's
+    /// time areas last frame (for the 32 px per sample zoom limit).
+    pub wave_px: f32,
+    pub session_px: f32,
+    /// Display-only amplitude zoom of the Multitrack's waveforms (1 to 16).
+    pub session_amp: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,6 +450,12 @@ impl State {
             fx_pick: None,
             fx_values: HashMap::new(),
             prefs,
+            zoom: crate::zoom::ZoomPrefs::load(),
+            follow: crate::zoom::Follow::default(),
+            spec: crate::zoom::SpecView::default(),
+            wave_px: 1000.0,
+            session_px: 1000.0,
+            session_amp: 1.0,
         }
     }
 
@@ -784,6 +808,7 @@ impl State {
     }
 
     pub fn set_cursor(&mut self, t: f64) {
+        self.follow.resume();
         match self.mode {
             Mode::Waveform => {
                 if let Some(d) = self.doc_mut() {
@@ -855,6 +880,7 @@ impl State {
             }
         };
         self.play_started_at = from;
+        self.follow.resume();
         let looping = self.looping;
         if let Some(e) = &mut self.engine {
             e.play(from, to, looping, len);
@@ -904,8 +930,9 @@ impl State {
             );
         }
         if self.is_playing() {
-            let follow = self.prefs.follow_playhead;
             let pos = self.engine.as_ref().map_or(0.0, |e| e.position());
+            // The setting, and not let go of by a hand-made move.
+            let follow = self.prefs.follow_playhead && self.follow.active();
             match self.mode {
                 Mode::Waveform => {
                     if let Some(d) = self.doc_mut() {
@@ -928,6 +955,25 @@ impl State {
         self.toasts
             .retain(|t| t.at.elapsed().as_secs_f32() < if t.error { 8.0 } else { 4.0 });
         self.autosave();
+    }
+
+    /// The view was scrolled or zoomed by hand: during playback that
+    /// stops Follow Playhead until playback restarts or the playhead moves.
+    pub fn hand_moved_view(&mut self) {
+        let playing = self.is_playing();
+        self.follow.hand_moved(playing);
+    }
+
+    /// The shortest view in the current mode (32 pixels per sample).
+    pub fn min_view_len(&self) -> f64 {
+        match self.mode {
+            Mode::Waveform => self.doc().map_or(0.0005, |d| {
+                crate::zoom::min_len(self.wave_px, d.buf.rate as f64)
+            }),
+            Mode::Multitrack => {
+                crate::zoom::min_len(self.session_px, self.session.rate.max(1) as f64)
+            }
+        }
     }
 
     pub fn position(&self) -> f64 {
@@ -1450,9 +1496,9 @@ mod view_tests {
     fn the_view_never_runs_past_the_file() {
         let mut v = View::fit(4.12);
         assert_eq!((v.start, v.len), (0.0, 4.12));
-        v.zoom(3.0, 2.0, 4.12);
+        v.zoom_min(3.0, 2.0, 4.12, 0.0005);
         assert!(v.start >= 0.0 && v.start + v.len <= 4.12 + 1e-9);
-        v.zoom(0.25, 4.0, 4.12);
+        v.zoom_min(0.25, 4.0, 4.12, 0.0005);
         v.start = 99.0;
         v.clamp_to(4.12);
         assert!((v.start + v.len - 4.12).abs() < 1e-9, "{v:?}");
