@@ -78,11 +78,13 @@ fn source_keys() -> BTreeSet<String> {
     sources(&app_dir().join("src"), &mut files);
     let mut keys = BTreeSet::new();
     for f in files {
-        if f.ends_with("i18n.rs") || f.ends_with("tests.rs") && f.parent().unwrap().ends_with("i18n") {
+        if f.ends_with("i18n.rs")
+            || f.ends_with("tests.rs") && f.parent().unwrap().ends_with("i18n")
+        {
             continue;
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        for pat in ["tr(\"", "tr!(\"", "mark(\""] {
+        for pat in ["tr(", "tr!(", "mark("] {
             let mut from = 0;
             while let Some(i) = text[from..].find(pat) {
                 let at = from + i;
@@ -91,7 +93,12 @@ fn source_keys() -> BTreeSet<String> {
                 if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     continue;
                 }
-                if let Some(k) = literal(&text[from..]) {
+                // rustfmt may put the literal on the next line.
+                let rest = text[from..].trim_start();
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                if let Some(k) = literal(rest) {
                     keys.insert(k);
                 }
             }
@@ -186,14 +193,22 @@ fn every_language_has_every_key() {
         }
         for (k, v) in &entries {
             if placeholders(k) != placeholders(v) {
-                report.push_str(&format!("\n{code}.lang: placeholders differ in \"{k}\" = \"{v}\"\n"));
+                report.push_str(&format!(
+                    "\n{code}.lang: placeholders differ in \"{k}\" = \"{v}\"\n"
+                ));
             }
         }
         let stale: Vec<&&str> = have.iter().filter(|k| !keys.contains(**k)).collect();
         if !stale.is_empty() {
-            eprintln!("{code}.lang has {} keys no longer used: {stale:?}", stale.len());
+            eprintln!(
+                "{code}.lang has {} keys no longer used: {stale:?}",
+                stale.len()
+            );
         }
-        assert!(header(text, "name").is_some(), "{code}.lang has no @name line");
+        assert!(
+            header(text, "name").is_some(),
+            "{code}.lang has no @name line"
+        );
     }
     assert!(report.is_empty(), "{report}");
 }
@@ -201,7 +216,9 @@ fn every_language_has_every_key() {
 #[test]
 fn template_is_up_to_date() {
     let path = app_dir().join("lang/en.lang");
-    let now = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+    let now = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     assert!(
         now == template(&all_keys()),
         "lang/en.lang is out of date: run `cargo test -p audiform27 write_template -- --ignored`"
@@ -225,7 +242,10 @@ fn files_parse() {
             ("#tag".into(), "t".into()),
         ]
     );
-    assert_eq!(header("@name Español\n", "name").as_deref(), Some("Español"));
+    assert_eq!(
+        header("@name Español\n", "name").as_deref(),
+        Some("Español")
+    );
     for s in ["a = b", "#x\ny", "back\\slash", "@at"] {
         assert_eq!(parse(&format!("{} = v", escape(s)))[0].0, s);
     }

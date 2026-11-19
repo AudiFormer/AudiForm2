@@ -891,7 +891,9 @@ pub fn readout(
             }
         }
         p.text(at, Align2::LEFT_CENTER, text, font, crate::theme::c(digits));
-        return resp.on_hover_text("Click to type a time to move the playhead to");
+        return resp.on_hover_text(crate::i18n::tr(
+            "Click to type a time to move the playhead to",
+        ));
     }
     let pts = chamfer(rect, 5.0);
     gradient_poly(&p, &pts, ca(th.wave_background, 235), ca(th.panel, 235));
@@ -950,7 +952,9 @@ pub fn readout(
             );
         }
     }
-    resp.on_hover_text("Click to type a time to move the playhead to")
+    resp.on_hover_text(crate::i18n::tr(
+        "Click to type a time to move the playhead to",
+    ))
 }
 
 /// The time display's size: as tall as a transport button.
@@ -1367,14 +1371,16 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
         [c + Vec2::new(-half, 38.0), c + Vec2::new(half, 38.0)],
         Stroke::new(8.0_f32, light(th.accent_alt, 0.2 * fade)),
     );
-    let tag = "SIGNAL PATH ONLINE  //  ALL CHANNELS NOMINAL";
-    let n = (((t - 0.9) / 0.7).clamp(0.0, 1.0) * tag.len() as f32) as usize;
+    let tag = crate::i18n::tr("SIGNAL PATH ONLINE  //  ALL CHANNELS NOMINAL");
+    let chars = tag.chars().count();
+    let n = (((t - 0.9) / 0.7).clamp(0.0, 1.0) * chars as f32) as usize;
+    let typed: String = tag.chars().take(n).collect();
     let cursor = if (t * 8.0) as i32 % 2 == 0 { "_" } else { " " };
     spaced(
         &p,
         c + Vec2::new(0.0, 60.0),
         Align2::CENTER_CENTER,
-        &format!("{}{}", &tag[..n], cursor),
+        &format!("{typed}{cursor}"),
         10.0,
         3.0,
         Color32::from_rgba_unmultiplied(th.text_dim[0], th.text_dim[1], th.text_dim[2], a),

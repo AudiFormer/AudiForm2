@@ -9,6 +9,7 @@
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense, Stroke};
 
+use crate::i18n::{mark, tr};
 use crate::state::State;
 use crate::theme::{c, ca};
 use af27_core::midi::{note_name, MidiNote};
@@ -92,9 +93,12 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     let th = st.theme.clone();
     let Some((ti, ci)) = st.piano_clip.and_then(|id| st.session.find_midi(id)) else {
         ui.add_space(8.0);
-        ui.label(RichText::new("No MIDI clip open.").strong());
-        ui.label(RichText::new("Double-click a MIDI clip in the Multitrack editor, or double-click an empty spot on a MIDI track to make one.").color(c(th.text_dim)));
-        if ui.button("➕ New MIDI Track with a 4-bar Clip").clicked() {
+        ui.label(RichText::new(tr("No MIDI clip open.")).strong());
+        ui.label(RichText::new(tr("Double-click a MIDI clip in the Multitrack editor, or double-click an empty spot on a MIDI track to make one.")).color(c(th.text_dim)));
+        if ui
+            .button(tr("➕ New MIDI Track with a 4-bar Clip"))
+            .clicked()
+        {
             let t = st.add_track_kind(af27_core::TrackKind::Midi);
             new_clip(st, t, 0.0);
         }
@@ -109,16 +113,16 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                 .color(c(th.accent)),
         );
         ui.separator();
-        ui.selectable_value(&mut ps.tool, Tool::Draw, "✏ Draw");
-        ui.selectable_value(&mut ps.tool, Tool::Erase, "⌫ Erase");
+        ui.selectable_value(&mut ps.tool, Tool::Draw, tr("✏ Draw"));
+        ui.selectable_value(&mut ps.tool, Tool::Erase, tr("⌫ Erase"));
         ui.separator();
-        egui::ComboBox::from_label("Grid")
+        egui::ComboBox::new("piano_grid", tr("Grid"))
             .selected_text(match ps.grid {
                 g if g == 1.0 => "1/4",
                 g if g == 0.5 => "1/8",
                 g if g == 0.25 => "1/16",
                 g if g == 0.125 => "1/32",
-                _ => "Off",
+                _ => tr("Off"),
             })
             .width(56.0)
             .show_ui(ui, |ui| {
@@ -127,12 +131,12 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                     (0.5, "1/8"),
                     (0.25, "1/16"),
                     (0.125, "1/32"),
-                    (0.0, "Off"),
+                    (0.0, tr("Off")),
                 ] {
                     ui.selectable_value(&mut ps.grid, g, n);
                 }
             });
-        ui.label("Channel");
+        ui.label(tr("Channel"));
         ui.add(
             egui::DragValue::new(&mut ps.channel)
                 .range(0..=15)
@@ -142,11 +146,11 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ui.painter()
             .rect_filled(r, Rounding::same(3.0), channel_color(ps.channel));
         ui.separator();
-        ui.selectable_value(&mut ps.lane, Lane::Velocity, "Velocity");
-        ui.selectable_value(&mut ps.lane, Lane::Pan, "Pan");
+        ui.selectable_value(&mut ps.lane, Lane::Velocity, tr("Velocity"));
+        ui.selectable_value(&mut ps.lane, Lane::Pan, tr("Pan"));
         if ui
-            .button("Humanize")
-            .on_hover_text("Nudge every note's start a little at random")
+            .button(tr("Humanize"))
+            .on_hover_text(tr("Nudge every note's start a little at random"))
             .clicked()
         {
             let before = st.session.clone();
@@ -162,13 +166,13 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                     .round()
                     .clamp(1.0, 127.0) as u8;
             }
-            st.commit_session("Humanize", before);
+            st.commit_session(mark("Humanize"), before);
         }
         ui.add(
             egui::Slider::new(&mut ps.zoom, 20.0..=400.0)
                 .logarithmic(true)
                 .show_value(false)
-                .text("Zoom"),
+                .text(tr("Zoom")),
         );
     });
     let full = ui.available_rect_before_wrap();
@@ -395,7 +399,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ps.drag = None;
         if let Some(b) = ps.before.take() {
             if b != st.session {
-                st.commit_session("Edit notes", b);
+                st.commit_session(mark("Edit notes"), b);
             }
         }
     }
@@ -404,7 +408,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             if let Some((i, _)) = hit(q) {
                 let before = st.session.clone();
                 st.session.tracks[ti].midi[ci].notes.remove(i);
-                st.commit_session("Delete note", before);
+                st.commit_session(mark("Delete note"), before);
             }
         }
     } else if resp.clicked() && ps.tool == Tool::Draw {
@@ -421,7 +425,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                     channel: ps.channel,
                     pan: 0.0,
                 });
-                st.commit_session("Add note", before);
+                st.commit_session(mark("Add note"), before);
             }
         }
     }
@@ -458,8 +462,8 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         lane_r.left_top() - vec2(KEYS_W - 4.0, -2.0),
         Align2::LEFT_TOP,
         match ps.lane {
-            Lane::Velocity => "Velocity",
-            Lane::Pan => "Pan",
+            Lane::Velocity => tr("Velocity"),
+            Lane::Pan => tr("Pan"),
         },
         FontId::proportional(9.0),
         c(th.text_dim),
@@ -524,6 +528,6 @@ pub fn new_clip(st: &mut State, track: af27_core::TrackId, beats: f64) {
         st.piano_clip = Some(id);
         st.selected_clip = Some(id);
         st.want_piano = true;
-        st.commit_session("New MIDI clip", before);
+        st.commit_session(mark("New MIDI clip"), before);
     }
 }

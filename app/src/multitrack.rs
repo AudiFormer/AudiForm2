@@ -345,10 +345,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         if let (Some(kind), Some(before)) = (drag.kind.take(), drag.before.take()) {
             if before != st.session && !matches!(kind, DragKind::Select { .. }) {
                 let label = match kind {
-                    DragKind::Move { .. } => "Move clip",
-                    DragKind::TrimLeft { .. } | DragKind::TrimRight { .. } => "Trim clip",
-                    DragKind::Select { .. } => "Select",
-                    DragKind::MoveMidi { .. } => "Move MIDI clip",
+                    DragKind::Move { .. } => crate::i18n::mark("Move clip"),
+                    DragKind::TrimLeft { .. } | DragKind::TrimRight { .. } => {
+                        crate::i18n::mark("Trim clip")
+                    }
+                    DragKind::Select { .. } => crate::i18n::mark("Select"),
+                    DragKind::MoveMidi { .. } => crate::i18n::mark("Move MIDI clip"),
                 };
                 st.commit_session(label, before);
             }
@@ -362,7 +364,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     (Tool::Razor, Some((_, id, _, _))) => {
                         let before = st.session.clone();
                         if st.session.split_clip(id, t).is_some() {
-                            st.commit_session("Split", before);
+                            st.commit_session(crate::i18n::mark("Split"), before);
                         }
                     }
                     (_, Some((ti, id, _, _))) if lanes.contains(pp) => {
@@ -513,9 +515,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 let path = st.session.media(clip.media).and_then(|m| m.path.clone());
                 let loading = path.as_ref().is_some_and(|p| p.exists());
                 let msg = match (loading, &path) {
-                    (true, _) => "Loading…".to_string(),
-                    (false, Some(p)) => format!("Missing: {}", p.display()),
-                    (false, None) => "Missing media".to_string(),
+                    (true, _) => tr!("Loading…").to_string(),
+                    (false, Some(p)) => tr!("Missing: {0}", p.display()),
+                    (false, None) => tr!("Missing media").to_string(),
                 };
                 lane_p.text(
                     cr.center(),
@@ -651,7 +653,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if add_row.top() < headers.bottom() {
         let r = ui.put(
             add_row.shrink(3.0),
-            egui::Button::new(RichText::new("+ Add Track").color(c(th.text_dim))),
+            egui::Button::new(RichText::new(tr!("+ Add Track")).color(c(th.text_dim))),
         );
         if r.clicked() {
             st.add_track();
@@ -689,7 +691,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         p.text(
             lanes.center(),
             Align2::CENTER_CENTER,
-            "Drag files here from the Files panel, or open a .sesx / .audfrm / .af27 session",
+            tr!("Drag files here from the Files panel, or open a .sesx / .audfrm / .af27 session"),
             FontId::proportional(14.0),
             c(th.text_dim),
         );
@@ -829,7 +831,7 @@ fn vzoom_bar(
         }
         drag.scroll_y = 0.0;
         if before != st.session {
-            st.commit_session("Fit tracks", before);
+            st.commit_session(crate::i18n::mark("Fit tracks"), before);
         }
         return;
     }
@@ -886,7 +888,7 @@ fn vzoom_bar(
         drag.vgrab = None;
         if let Some(before) = drag.before.take() {
             if before != st.session {
-                st.commit_session("Track height", before);
+                st.commit_session(crate::i18n::mark("Track height"), before);
             }
         }
     }
@@ -950,13 +952,19 @@ fn track_header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                     }
                     false
                 };
-            changed |= toggle(ui, &mut tr.mute, "M", th.meter_mid, "Mute");
-            changed |= toggle(ui, &mut tr.solo, "S", th.accent, "Solo");
-            changed |= toggle(ui, &mut tr.armed, "R", th.accent_alt, "Arm for recording");
+            changed |= toggle(ui, &mut tr.mute, "M", th.meter_mid, tr!("Mute"));
+            changed |= toggle(ui, &mut tr.solo, "S", th.accent, tr!("Solo"));
+            changed |= toggle(
+                ui,
+                &mut tr.armed,
+                "R",
+                th.accent_alt,
+                tr!("Arm for recording"),
+            );
         });
         if tr.height >= 60.0 {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Vol").size(10.0).color(c(th.text_dim)));
+                ui.label(RichText::new(tr!("Vol")).size(10.0).color(c(th.text_dim)));
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut tr.volume_db)
@@ -966,7 +974,7 @@ fn track_header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                             .max_decimals(1),
                     )
                     .changed();
-                ui.label(RichText::new("Pan").size(10.0).color(c(th.text_dim)));
+                ui.label(RichText::new(tr!("Pan")).size(10.0).color(c(th.text_dim)));
                 let mut pan = tr.pan * 100.0;
                 if ui
                     .add(
@@ -986,7 +994,7 @@ fn track_header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
     if changed {
         let down = ui.input(|i| i.pointer.any_down());
         if !st.gesture {
-            st.commit_live("Track settings", before);
+            st.commit_live(crate::i18n::mark("Track settings"), before);
             st.gesture = down;
         }
         st.live_track(ti);
@@ -1147,7 +1155,7 @@ fn fader(
         [pos2(cap.left() + 4.0, cy), pos2(cap.right() - 4.0, cy)],
         Stroke::new(2.0_f32, c(th.accent)),
     );
-    resp.on_hover_text("Drag; Shift for fine steps; double-click for 0 dB");
+    resp.on_hover_text(tr!("Drag; Shift for fine steps; double-click for 0 dB"));
     changed
 }
 
@@ -1194,7 +1202,7 @@ fn pan_knob(ui: &mut egui::Ui, pan: &mut f32, th: &crate::theme::Theme) -> bool 
     } else {
         format!("R{:.0}", *pan * 100.0)
     };
-    resp.on_hover_text(format!("Pan {label} (drag; double-click to centre)"));
+    resp.on_hover_text(tr!("Pan {0} (drag; double-click to centre)", label));
     changed
 }
 
@@ -1300,14 +1308,14 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
                 cui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.add_space(((W - 12.0) - 3.0 * 22.0 - 6.0) / 2.0);
-                    changed |= key(ui, &mut tr.mute, "M", th.meter_mid, "Mute", &th);
-                    changed |= key(ui, &mut tr.solo, "S", th.accent, "Solo", &th);
+                    changed |= key(ui, &mut tr.mute, "M", th.meter_mid, tr!("Mute"), &th);
+                    changed |= key(ui, &mut tr.solo, "S", th.accent, tr!("Solo"), &th);
                     changed |= key(
                         ui,
                         &mut tr.armed,
                         "R",
                         th.accent_alt,
-                        "Arm for recording",
+                        tr!("Arm for recording"),
                         &th,
                     );
                 });
@@ -1340,7 +1348,7 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
             ui.painter().text(
                 pos2(rect.center().x, rect.top() + 14.0),
                 Align2::CENTER_CENTER,
-                "MASTER",
+                tr!("MASTER"),
                 FontId::proportional(12.0),
                 c(th.accent),
             );
@@ -1378,7 +1386,7 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
     if changed {
         let down = ui.input(|i| i.pointer.any_down());
         if !st.gesture {
-            st.commit_live("Mixer", before);
+            st.commit_live(crate::i18n::mark("Mixer"), before);
             st.gesture = down;
         }
         for ti in 0..st.session.tracks.len() {

@@ -9,6 +9,7 @@ use egui::{RichText, Rounding};
 use egui_dock::{DockArea, DockState, Style, TabViewer};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
 use crate::keymap::{Cmd, Keymap};
 use crate::state::{data_dir, Mode, State, Tool};
 use crate::theme::c;
@@ -57,34 +58,34 @@ impl Tab {
     /// The title for a crowded tab bar.
     pub fn short_title(self) -> &'static str {
         match self {
-            Tab::Statistics => "Statistics",
-            Tab::Phase => "Phase",
-            Tab::PianoRoll => "Piano",
-            Tab::AiSeparation => "Stems",
-            Tab::Visualizer => "Visuals",
-            Tab::Inspector => "Track",
+            Tab::Statistics => tr("Statistics"),
+            Tab::Phase => tr("Phase"),
+            Tab::PianoRoll => tr("Piano"),
+            Tab::AiSeparation => tr("Stems"),
+            Tab::Visualizer => tr("Visuals"),
+            Tab::Inspector => tr("Track"),
             t => t.title(),
         }
     }
 
     pub fn title(self) -> &'static str {
         match self {
-            Tab::Files => "Files",
-            Tab::Markers => "Markers",
-            Tab::Effects => "Effects",
-            Tab::AiSeparation => "AI Stems",
-            Tab::History => "History",
-            Tab::Editor => "Editor",
-            Tab::Mixer => "Mixer",
-            Tab::Levels => "Levels",
-            Tab::Phase => "Phase Wheel",
-            Tab::Statistics => "Level Statistics",
-            Tab::Spectrum => "Spectrum",
-            Tab::Selection => "Range",
-            Tab::Inspector => "Inspector",
-            Tab::Space => "3D Space",
-            Tab::PianoRoll => "Piano Roll",
-            Tab::Visualizer => "Visualizer",
+            Tab::Files => tr("Files"),
+            Tab::Markers => tr("Markers"),
+            Tab::Effects => tr("Effects"),
+            Tab::AiSeparation => tr("AI Stems"),
+            Tab::History => tr("History"),
+            Tab::Editor => tr("Editor"),
+            Tab::Mixer => tr("Mixer"),
+            Tab::Levels => tr("Levels"),
+            Tab::Phase => tr("Phase Wheel"),
+            Tab::Statistics => tr("Level Statistics"),
+            Tab::Spectrum => tr("Spectrum"),
+            Tab::Selection => tr("Range"),
+            Tab::Inspector => tr("Inspector"),
+            Tab::Space => tr("3D Space"),
+            Tab::PianoRoll => tr("Piano Roll"),
+            Tab::Visualizer => tr("Visualizer"),
         }
     }
 }
@@ -256,7 +257,7 @@ impl TabViewer for Viewer<'_> {
                     .st
                     .doc()
                     .map(|d| format!("{}{}", d.name, if d.dirty { " *" } else { "" }))
-                    .unwrap_or_else(|| "no file".into()),
+                    .unwrap_or_else(|| tr("no file").into()),
                 Mode::Multitrack => format!(
                     "{}{}",
                     self.st.session.name,
@@ -359,7 +360,7 @@ impl App {
             Cmd::Paste => st.edit_paste(),
             Cmd::Crop => st.edit_crop(),
             Cmd::SelectAll => st.select_all(),
-            Cmd::Delete => st.edit_delete("Delete"),
+            Cmd::Delete => st.edit_delete(crate::i18n::mark("Delete")),
             Cmd::AddMarker => st.add_marker(),
             Cmd::ClearSelection => match st.mode {
                 Mode::Waveform => {
@@ -383,7 +384,7 @@ impl App {
                 st.effect = Effect::MatchLoudness;
                 self.show_tab(Tab::Effects);
             }
-            Cmd::AutoHeal => st.toast(AUTO_HEAL_NOTE),
+            Cmd::AutoHeal => st.toast(tr(AUTO_HEAL_NOTE)),
             Cmd::PlayStop => st.toggle_play(),
             Cmd::Record => {
                 if st.is_recording() {
@@ -410,7 +411,8 @@ impl App {
     }
 }
 
-const AUTO_HEAL_NOTE: &str = "Auto Heal is coming: there is no healing effect yet";
+const AUTO_HEAL_NOTE: &str =
+    crate::i18n::mark("Auto Heal is coming: there is no healing effect yet");
 
 /// Runs a no-settings effect on the selection (or the whole file) at once.
 fn apply_now(st: &mut State, e: Effect) {
@@ -489,9 +491,9 @@ pub fn open_dialog(st: &mut State) {
     let mut all: Vec<&str> = AUDIO_FILTER.to_vec();
     all.extend(["af27", "sesx", "audfrm", "altaudio"]);
     if let Some(paths) = rfd::FileDialog::new()
-        .add_filter("Audio and sessions", &all)
-        .add_filter("Audio", AUDIO_FILTER)
-        .add_filter("Sessions", &["af27", "sesx", "audfrm", "altaudio"])
+        .add_filter(tr("Audio and sessions"), &all)
+        .add_filter(tr("Audio"), AUDIO_FILTER)
+        .add_filter(tr("Sessions"), &["af27", "sesx", "audfrm", "altaudio"])
         .pick_files()
     {
         st.open_paths(paths);
@@ -526,7 +528,7 @@ fn save_doc_as(st: &mut State) {
         .to_string();
     if let Some(p) = rfd::FileDialog::new()
         .set_file_name(format!("{stem}.wav"))
-        .add_filter("WAV (32-bit float)", &["wav"])
+        .add_filter(tr("WAV (32-bit float)"), &["wav"])
         .save_file()
     {
         st.save_doc_as(p, af27_io::WavFormat::Float32);
@@ -536,8 +538,8 @@ fn save_doc_as(st: &mut State) {
 fn save_session_as(st: &mut State) {
     if let Some(p) = rfd::FileDialog::new()
         .set_file_name(format!("{}.audfrm", st.session.name))
-        .add_filter("Audiform session", &["audfrm"])
-        .add_filter("AudiForm 2 model dump", &["af27"])
+        .add_filter(tr("Audiform session"), &["audfrm"])
+        .add_filter(tr("AudiForm 2 model dump"), &["af27"])
         .save_file()
     {
         st.save_session_to(p);
@@ -569,11 +571,11 @@ fn disabled_submenu(ui: &mut egui::Ui, label: &str, why: &str) {
     ui.add_enabled_ui(false, |ui| {
         ui.menu_button(label, |_| {})
             .response
-            .on_disabled_hover_text(why);
+            .on_disabled_hover_text(tr(why));
     });
 }
 
-const PLUGIN_NOTE: &str = "Plug-in hosting is coming";
+const PLUGIN_NOTE: &str = crate::i18n::mark("Plug-in hosting is coming");
 
 fn menus(app: &mut App, ui: &mut egui::Ui) {
     let st = &mut app.st;
@@ -581,27 +583,28 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
     let mut open_tab = None;
     let mut cmd: Option<Cmd> = None;
     egui::menu::bar(ui, |ui| {
-        ui.menu_button("File", |ui| {
-            cmd_item(ui, km, Cmd::NewFile, "New Audio File", true, &mut cmd);
-            if ui.button("New Multitrack Session").clicked() {
+        ui.menu_button(tr("File"), |ui| {
+            cmd_item(ui, km, Cmd::NewFile, tr("New Audio File"), true, &mut cmd);
+            if ui.button(tr("New Multitrack Session")).clicked() {
                 let before = st.session.clone();
                 st.session = af27_core::Session::default();
                 st.session_base = None;
-                st.session_history.push("New session", before);
+                st.session_history
+                    .push(crate::i18n::mark("New session"), before);
                 st.session_path = None;
                 st.media_docs.clear();
                 st.session_version += 1;
                 st.mode = Mode::Multitrack;
                 ui.close_menu();
             }
-            cmd_item(ui, km, Cmd::Open, "Open...", true, &mut cmd);
+            cmd_item(ui, km, Cmd::Open, tr("Open..."), true, &mut cmd);
             ui.separator();
-            cmd_item(ui, km, Cmd::Save, "Save", true, &mut cmd);
-            if ui.button("Save Audio As...").clicked() {
+            cmd_item(ui, km, Cmd::Save, tr("Save"), true, &mut cmd);
+            if ui.button(tr("Save Audio As...")).clicked() {
                 save_doc_as(st);
                 ui.close_menu();
             }
-            ui.menu_button("Save Audio As Format", |ui| {
+            ui.menu_button(tr("Save Audio As Format"), |ui| {
                 for fmt in af27_io::WavFormat::ALL {
                     if ui.button(format!("WAV, {}", fmt.label())).clicked() {
                         if let Some(p) = rfd::FileDialog::new()
@@ -614,14 +617,14 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
             });
-            if ui.button("Save Session As...").clicked() {
+            if ui.button(tr("Save Session As...")).clicked() {
                 save_session_as(st);
                 ui.close_menu();
             }
             ui.separator();
             if st.session.space.is_some()
                 && ui
-                    .button("Export 3D Speaker Bed (multichannel WAV)...")
+                    .button(tr("Export 3D Speaker Bed (multichannel WAV)..."))
                     .clicked()
             {
                 if let Some(p) = rfd::FileDialog::new()
@@ -632,13 +635,13 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     let (a, b) = st.session_sel.unwrap_or((0.0, st.session.duration()));
                     let bed = st.render_mix(a, b, true);
                     match af27_io::write_wav(&p, &bed, af27_io::WavFormat::Pcm24) {
-                        Ok(()) => st.toast(format!("Exported {} channels", bed.num_channels())),
+                        Ok(()) => st.toast(tr!("Exported {0} channels", bed.num_channels())),
                         Err(e) => st.error(e),
                     }
                 }
                 ui.close_menu();
             }
-            if ui.button("Export Multitrack Mixdown...").clicked() {
+            if ui.button(tr("Export Multitrack Mixdown...")).clicked() {
                 if let Some(p) = rfd::FileDialog::new()
                     .set_file_name(format!("{} Mixdown.wav", st.session.name))
                     .add_filter("WAV", &["wav"])
@@ -649,17 +652,17 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.close_menu();
             }
             ui.separator();
-            if ui.button("Close File").clicked() {
+            if ui.button(tr("Close File")).clicked() {
                 if let Some(id) = st.current {
                     st.close_doc(id);
                 }
                 ui.close_menu();
             }
-            if ui.button("Exit").clicked() {
+            if ui.button(tr("Exit")).clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
-        ui.menu_button("Edit", |ui| {
+        ui.menu_button(tr("Edit"), |ui| {
             let ul = match st.mode {
                 Mode::Waveform => st
                     .doc()
@@ -667,11 +670,11 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 Mode::Multitrack => st.session_history.undo_label().map(str::to_string),
             };
             let undo = match &ul {
-                Some(l) => format!("Undo {l}"),
-                None => "Undo".to_string(),
+                Some(l) => tr!("Undo {0}", tr(l)),
+                None => tr("Undo").to_string(),
             };
             cmd_item(ui, km, Cmd::Undo, &undo, ul.is_some(), &mut cmd);
-            cmd_item(ui, km, Cmd::Redo, "Redo", true, &mut cmd);
+            cmd_item(ui, km, Cmd::Redo, tr("Redo"), true, &mut cmd);
             ui.separator();
             for c in [
                 Cmd::Cut,
@@ -682,36 +685,43 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 Cmd::SelectAll,
                 Cmd::AddMarker,
             ] {
-                cmd_item(ui, km, c, c.label(), true, &mut cmd);
+                cmd_item(ui, km, c, tr(c.label()), true, &mut cmd);
             }
             ui.separator();
             cmd_item(
                 ui,
                 km,
                 Cmd::KeyboardShortcuts,
-                "Keyboard Shortcuts...",
+                tr("Keyboard Shortcuts..."),
                 true,
                 &mut cmd,
             );
-            cmd_item(ui, km, Cmd::Preferences, "Preferences...", true, &mut cmd);
+            cmd_item(
+                ui,
+                km,
+                Cmd::Preferences,
+                tr("Preferences..."),
+                true,
+                &mut cmd,
+            );
         });
-        ui.menu_button("Multitrack", |ui| {
-            if ui.button("Add Audio Track").clicked() {
+        ui.menu_button(tr("Multitrack"), |ui| {
+            if ui.button(tr("Add Audio Track")).clicked() {
                 st.add_track_kind(af27_core::TrackKind::Audio);
                 ui.close_menu();
             }
-            if ui.button("Add Bus Track").clicked() {
+            if ui.button(tr("Add Bus Track")).clicked() {
                 st.add_track_kind(af27_core::TrackKind::Bus);
                 ui.close_menu();
             }
-            if ui.button("Add MIDI Track").clicked() {
+            if ui.button(tr("Add MIDI Track")).clicked() {
                 let t = st.add_track_kind(af27_core::TrackKind::Midi);
                 crate::pianoroll::new_clip(st, t, 0.0);
                 ui.close_menu();
             }
             ui.separator();
             let mut m = st.session.tempo.metronome;
-            if ui.checkbox(&mut m, "Metronome").changed() {
+            if ui.checkbox(&mut m, tr("Metronome")).changed() {
                 st.session.tempo.metronome = m;
                 st.live_metronome();
             }
@@ -719,15 +729,15 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui,
                 km,
                 Cmd::SplitAtPlayhead,
-                "Split at Playhead",
+                tr("Split at Playhead"),
                 true,
                 &mut cmd,
             );
-            if ui.button("Delete Selected Clip").clicked() {
+            if ui.button(tr("Delete Selected Clip")).clicked() {
                 st.delete_clip();
                 ui.close_menu();
             }
-            if ui.button("Insert Current File at Playhead").clicked() {
+            if ui.button(tr("Insert Current File at Playhead")).clicked() {
                 if let (Some(d), Some(t)) = (
                     st.current,
                     st.selected_track
@@ -739,15 +749,15 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.close_menu();
             }
         });
-        ui.menu_button("Effects", |ui| {
+        ui.menu_button(tr("Effects"), |ui| {
             effects_menu(ui, st, km, &mut cmd, &mut open_tab);
         });
-        ui.menu_button("View", |ui| {
+        ui.menu_button(tr("View"), |ui| {
             for (c, m) in [
                 (Cmd::WaveformView, Mode::Waveform),
                 (Cmd::MultitrackView, Mode::Multitrack),
             ] {
-                let b = egui::Button::new(c.label())
+                let b = egui::Button::new(tr(c.label()))
                     .selected(st.mode == m)
                     .shortcut_text(km.text(c));
                 if ui.add(b).clicked() {
@@ -757,18 +767,18 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.separator();
             if let Some(d) = st.doc_mut() {
-                ui.checkbox(&mut d.spectral, "Spectral Display");
+                ui.checkbox(&mut d.spectral, tr("Spectral Display"));
             }
             for c in [Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomFull] {
                 if ui
-                    .add(egui::Button::new(c.label()).shortcut_text(km.text(c)))
+                    .add(egui::Button::new(tr(c.label())).shortcut_text(km.text(c)))
                     .clicked()
                 {
                     cmd = Some(c);
                 }
             }
             if ui
-                .checkbox(&mut st.return_on_stop, "Return Playhead on Stop")
+                .checkbox(&mut st.return_on_stop, tr("Return Playhead on Stop"))
                 .changed()
             {
                 st.prefs.space_returns = st.return_on_stop;
@@ -777,24 +787,24 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             if ui
                 .add_enabled(
                     st.selection().is_some(),
-                    egui::Button::new("Zoom to Selection"),
+                    egui::Button::new(tr("Zoom to Selection")),
                 )
                 .clicked()
             {
                 zoom_selection(st);
             }
             let mut follow = st.prefs.follow_playhead;
-            if ui.checkbox(&mut follow, "Follow Playhead").changed() {
+            if ui.checkbox(&mut follow, tr("Follow Playhead")).changed() {
                 st.prefs.follow_playhead = follow;
                 st.follow.set_on(follow);
                 st.prefs.save();
             }
             ui.separator();
-            ui.menu_button("Visual Effects", |ui| {
+            ui.menu_button(tr("Visual Effects"), |ui| {
                 for (m, label, tip) in [
-                    (0u8, "Auto", "Full effects, cut back on their own if this device draws slowly"),
-                    (1, "Full", "Every effect, always"),
-                    (2, "Lite", "No moving backdrop, glow or scan lines: lightest on slow or battery-powered devices"),
+                    (0u8, tr("Auto"), tr("Full effects, cut back on their own if this device draws slowly")),
+                    (1, tr("Full"), tr("Every effect, always")),
+                    (2, tr("Lite"), tr("No moving backdrop, glow or scan lines: lightest on slow or battery-powered devices")),
                 ] {
                     if ui.radio(st.visuals_mode == m, label).on_hover_text(tip).clicked() {
                         st.visuals_mode = m;
@@ -805,22 +815,22 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
                 if st.visuals_mode == 0 && st.visuals_lite {
-                    ui.label(RichText::new("Auto chose Lite for this device").small().color(c(st.theme.text_dim)));
+                    ui.label(RichText::new(tr("Auto chose Lite for this device")).small().color(c(st.theme.text_dim)));
                 }
             });
             crate::pointers::menu_toggle(ui);
-            ui.menu_button("Theme Colors", |ui| {
+            ui.menu_button(tr("Theme Colors"), |ui| {
                 ui.label(
-                    RichText::new(format!("Your own hues for {}", st.theme_base.name))
+                    RichText::new(tr!("Your own hues for {0}", st.theme_base.name))
                         .small()
                         .color(c(st.theme.text_dim)),
                 );
                 let mut h = st.hues.unwrap_or_else(|| st.theme_base.hues());
                 let mut changed = false;
                 for (label, value, sat, val) in [
-                    ("Main light", &mut h.primary, 1.0, 1.0),
-                    ("Second light", &mut h.secondary, 0.82, 1.0),
-                    ("Base tint", &mut h.surface, 0.6, 0.35),
+                    (tr("Main light"), &mut h.primary, 1.0, 1.0),
+                    (tr("Second light"), &mut h.secondary, 0.82, 1.0),
+                    (tr("Base tint"), &mut h.surface, 0.6, 0.35),
                 ] {
                     ui.horizontal(|ui| {
                         let sw = crate::theme::from_hsv(*value, sat, val);
@@ -836,23 +846,23 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.horizontal(|ui| {
                     for (name, p, s, u) in [
-                        ("Ice", 187.0, 325.0, 228.0),
-                        ("Toxic", 105.0, 285.0, 150.0),
-                        ("Ember", 22.0, 350.0, 15.0),
-                        ("Ultraviolet", 275.0, 190.0, 260.0),
-                        ("Gold", 45.0, 200.0, 220.0),
+                        (tr("Ice"), 187.0, 325.0, 228.0),
+                        (tr("Toxic"), 105.0, 285.0, 150.0),
+                        (tr("Ember"), 22.0, 350.0, 15.0),
+                        (tr("Ultraviolet"), 275.0, 190.0, 260.0),
+                        (tr("Gold"), 45.0, 200.0, 220.0),
                     ] {
                         if ui.small_button(name).clicked() {
                             st.set_hues(Some(crate::theme::Hues { primary: p, secondary: s, surface: u }));
                         }
                     }
                 });
-                if ui.button("Back to the theme's own colors").clicked() {
+                if ui.button(tr("Back to the theme's own colors")).clicked() {
                     st.set_hues(None);
                     ui.close_menu();
                 }
             });
-            ui.menu_button("Theme", |ui| {
+            ui.menu_button(tr("Theme"), |ui| {
                 let names: Vec<String> = st.themes.iter().map(|t| t.name.clone()).collect();
                 let classic = st.themes.iter().position(|t| t.author == "Audiform");
                 for (i, n) in names.iter().enumerate() {
@@ -862,9 +872,9 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     }
                     if Some(i) == classic {
                         ui.separator();
-                        ui.label(RichText::new("From Audiform").small().color(c(st.theme.text_dim)));
+                        ui.label(RichText::new(tr("From Audiform")).small().color(c(st.theme.text_dim)));
                     }
-                    let label = if st.themes[i].hidden { "Secret Theme" } else { n.as_str() };
+                    let label = if st.themes[i].hidden { tr("Secret Theme") } else { n.as_str() };
                     if ui.radio(on, label).clicked() {
                         let t = st.themes[i].clone();
                         st.set_theme(t);
@@ -874,13 +884,13 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
                 ui.separator();
-                if ui.button("Save Current Theme As...").clicked() {
+                if ui.button(tr("Save Current Theme As...")).clicked() {
                     let dir = data_dir().join("themes");
                     let _ = std::fs::create_dir_all(&dir);
                     if let Some(p) = rfd::FileDialog::new()
                         .set_directory(&dir)
                         .set_file_name(format!("{}.af27theme", st.theme.name))
-                        .add_filter("AudiForm 2 theme", &["af27theme"])
+                        .add_filter(tr("AudiForm 2 theme"), &["af27theme"])
                         .save_file()
                     {
                         let mut t = st.theme.clone();
@@ -893,46 +903,52 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     }
                     ui.close_menu();
                 }
-                if ui.button("Reload Themes").clicked() {
+                if ui.button(tr("Reload Themes")).clicked() {
                     st.themes = crate::theme::load_all(&data_dir().join("themes"));
                     ui.close_menu();
                 }
-                ui.add(egui::Slider::new(&mut st.theme.glow, 0.0..=2.0).text("Glow"));
+                ui.add(egui::Slider::new(&mut st.theme.glow, 0.0..=2.0).text(tr("Glow")));
                 if ui
-                    .add(egui::Slider::new(&mut st.theme.rounding, 0.0..=14.0).text("Rounding"))
+                    .add(egui::Slider::new(&mut st.theme.rounding, 0.0..=14.0).text(tr("Rounding")))
                     .changed()
                 {
                     st.theme_changed = true;
                 }
                 if ui
-                    .add(egui::Slider::new(&mut st.theme.font_scale, 0.8..=1.4).text("Text size"))
+                    .add(egui::Slider::new(&mut st.theme.font_scale, 0.8..=1.4).text(tr("Text size")))
                     .changed()
                 {
                     st.theme_changed = true;
                 }
                 ui.separator();
-                ui.label(RichText::new("HUD").small().color(c(st.theme.text_dim)));
+                ui.label(RichText::new(tr("HUD")).small().color(c(st.theme.text_dim)));
                 ui.horizontal(|ui| {
-                    for g in ["perspective", "hex", "dots", "lines", "none"] {
-                        if ui.selectable_label(st.theme.grid_style == g, g).clicked() {
+                    for g in [
+                        crate::i18n::mark("perspective"),
+                        crate::i18n::mark("hex"),
+                        crate::i18n::mark("dots"),
+                        crate::i18n::mark("lines"),
+                        crate::i18n::mark("none"),
+                    ] {
+                        if ui.selectable_label(st.theme.grid_style == g, tr(g)).clicked() {
                             st.theme.grid_style = g.into();
                         }
                     }
                 });
-                ui.add(egui::Slider::new(&mut st.theme.grid_strength, 0.0..=2.0).text("Grid"));
-                ui.add(egui::Slider::new(&mut st.theme.glass, 0.3..=1.0).text("Glass"));
-                ui.add(egui::Slider::new(&mut st.theme.chamfer, 0.0..=20.0).text("Corner cut"));
-                ui.add(egui::Slider::new(&mut st.theme.scanlines, 0.0..=0.6).text("Scan lines"));
-                ui.add(egui::Slider::new(&mut st.theme.motion, 0.0..=2.0).text("Motion"));
-                ui.add(egui::Slider::new(&mut st.theme.reactive, 0.0..=1.5).text("Reacts to music"));
-                ui.checkbox(&mut st.theme.brackets, "Corner brackets");
-                ui.checkbox(&mut st.theme.intro, "Boot sequence");
+                ui.add(egui::Slider::new(&mut st.theme.grid_strength, 0.0..=2.0).text(tr("Grid")));
+                ui.add(egui::Slider::new(&mut st.theme.glass, 0.3..=1.0).text(tr("Glass")));
+                ui.add(egui::Slider::new(&mut st.theme.chamfer, 0.0..=20.0).text(tr("Corner cut")));
+                ui.add(egui::Slider::new(&mut st.theme.scanlines, 0.0..=0.6).text(tr("Scan lines")));
+                ui.add(egui::Slider::new(&mut st.theme.motion, 0.0..=2.0).text(tr("Motion")));
+                ui.add(egui::Slider::new(&mut st.theme.reactive, 0.0..=1.5).text(tr("Reacts to music")));
+                ui.checkbox(&mut st.theme.brackets, tr("Corner brackets"));
+                ui.checkbox(&mut st.theme.intro, tr("Boot sequence"));
                 if !st.theme.columns.is_empty() {
-                    ui.checkbox(&mut st.theme.realistic, "Realistic marble and tile");
+                    ui.checkbox(&mut st.theme.realistic, tr("Realistic marble and tile"));
                 }
             });
         });
-        ui.menu_button("Window", |ui| {
+        ui.menu_button(tr("Window"), |ui| {
             for t in Tab::ALL {
                 if ui.button(t.title()).clicked() {
                     open_tab = Some(t);
@@ -940,13 +956,13 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             ui.separator();
-            if ui.button("Reset Layout").clicked() {
+            if ui.button(tr("Reset Layout")).clicked() {
                 app.dock = st.workspace.build();
                 ui.close_menu();
             }
         });
-        ui.menu_button("Help", |ui| {
-            if ui.button("About AudiForm 2").clicked() {
+        ui.menu_button(tr("Help"), |ui| {
+            if ui.button(tr("About AudiForm 2")).clicked() {
                 st.show_about = true;
                 ui.close_menu();
             }
@@ -977,12 +993,12 @@ fn effects_menu(
     if ui
         .add_enabled(
             multi && clip_track.is_some(),
-            egui::Button::new("Edit Clip Effects in Effects Rack"),
+            egui::Button::new(tr("Edit Clip Effects in Effects Rack")),
         )
-        .on_hover_text(
+        .on_hover_text(tr(
             "Clips play through their track's rack: this opens the rack of the clip's track",
-        )
-        .on_disabled_hover_text("Select a clip in the Multitrack editor")
+        ))
+        .on_disabled_hover_text(tr("Select a clip in the Multitrack editor"))
         .clicked()
     {
         st.selected_track = clip_track;
@@ -992,9 +1008,9 @@ fn effects_menu(
     if ui
         .add_enabled(
             multi && st.selected_track.is_some(),
-            egui::Button::new("Edit Track Effects in Effects Rack"),
+            egui::Button::new(tr("Edit Track Effects in Effects Rack")),
         )
-        .on_disabled_hover_text("Select a track in the Multitrack editor")
+        .on_disabled_hover_text(tr("Select a track in the Multitrack editor"))
         .clicked()
     {
         *open_tab = Some(Tab::Inspector);
@@ -1002,35 +1018,38 @@ fn effects_menu(
     }
     ui.separator();
     let has_doc = st.doc().is_some();
-    let no_doc = "Open a file in the Waveform editor first";
+    let no_doc = tr("Open a file in the Waveform editor first");
     for c in [Cmd::Invert, Cmd::Reverse, Cmd::Silence] {
-        cmd_item(ui, km, c, c.label(), has_doc, cmd).on_disabled_hover_text(no_doc);
+        cmd_item(ui, km, c, tr(c.label()), has_doc, cmd).on_disabled_hover_text(no_doc);
     }
-    ui.menu_button("Generate", |ui| {
-        if ui.button("Tone or Noise...").clicked() {
+    ui.menu_button(tr("Generate"), |ui| {
+        if ui.button(tr("Tone or Noise...")).clicked() {
             st.generate.open = true;
             ui.close_menu();
         }
-        if ui.button("Silence (5 s)").clicked() {
+        if ui.button(tr("Silence (5 s)")).clicked() {
             let (rate, ch) = st
                 .doc()
                 .map_or((48_000, 2), |d| (d.buf.rate, d.buf.num_channels()));
-            st.insert_buffer("Insert silence", af27_dsp::generate::silence(rate, ch, 5.0));
+            st.insert_buffer(
+                crate::i18n::mark("Insert silence"),
+                af27_dsp::generate::silence(rate, ch, 5.0),
+            );
             ui.close_menu();
         }
     });
     ui.separator();
-    cmd_item(ui, km, Cmd::MatchLoudness, "Match Loudness", true, cmd);
+    cmd_item(ui, km, Cmd::MatchLoudness, tr("Match Loudness"), true, cmd);
     ui.add_enabled(
         false,
-        egui::Button::new("Auto Heal Selection").shortcut_text(km.text(Cmd::AutoHeal)),
+        egui::Button::new(tr("Auto Heal Selection")).shortcut_text(km.text(Cmd::AutoHeal)),
     )
-    .on_disabled_hover_text(AUTO_HEAL_NOTE);
+    .on_disabled_hover_text(tr(AUTO_HEAL_NOTE));
     ui.separator();
     let show = st.prefs.show_effects_on_pick;
     for (cat, items) in crate::fx_menu::categories() {
         if items.is_empty() {
-            disabled_submenu(ui, cat, "Nothing here yet");
+            disabled_submenu(ui, cat, crate::i18n::mark("Nothing here yet"));
             continue;
         }
         ui.menu_button(cat, |ui| {
@@ -1059,8 +1078,8 @@ fn effects_menu(
     ui.separator();
     disabled_submenu(ui, "VST", PLUGIN_NOTE);
     disabled_submenu(ui, "VST 3", PLUGIN_NOTE);
-    ui.add_enabled(false, egui::Button::new("Audio Plug-In Manager..."))
-        .on_disabled_hover_text(PLUGIN_NOTE);
+    ui.add_enabled(false, egui::Button::new(tr("Audio Plug-In Manager...")))
+        .on_disabled_hover_text(tr(PLUGIN_NOTE));
 }
 
 fn toolbar(ui: &mut egui::Ui, st: &mut State) {
@@ -1069,16 +1088,23 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
         let fx = st.fx.clone();
         let th = st.theme.clone();
         let cur = if st.mode == Mode::Waveform { 0 } else { 1 };
-        match crate::hud::segmented(ui, "af27-mode", &["Waveform", "Multitrack"], cur, &th, &fx) {
+        match crate::hud::segmented(
+            ui,
+            "af27-mode",
+            &[tr("Waveform"), tr("Multitrack")],
+            cur,
+            &th,
+            &fx,
+        ) {
             Some(0) => st.mode = Mode::Waveform,
             Some(1) => st.mode = Mode::Multitrack,
             _ => {}
         }
         ui.add_space(14.0);
         for (tool, label, tip) in [
-            (Tool::Move, "↔", "Move (V)"),
-            (Tool::Razor, "✂", "Razor (R)"),
-            (Tool::TimeSelect, "I", "Time Selection (T)"),
+            (Tool::Move, "↔", tr("Move (V)")),
+            (Tool::Razor, "✂", tr("Razor (R)")),
+            (Tool::TimeSelect, "I", tr("Time Selection (T)")),
         ] {
             if ui
                 .selectable_label(st.tool == tool, RichText::new(label).size(16.0))
@@ -1112,14 +1138,14 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
                             .on_hover_text(w.about());
                     }
                     ui.separator();
-                    if ui.button("Reset to Saved Layout").clicked() {
+                    if ui.button(tr("Reset to Saved Layout")).clicked() {
                         reset = true;
                     }
                 })
                 .response
-                .on_hover_text("Workspace");
+                .on_hover_text(tr("Workspace"));
             ui.label(
-                RichText::new("WORKSPACE")
+                RichText::new(tr("WORKSPACE"))
                     .size(9.5)
                     .extra_letter_spacing(1.5)
                     .color(c(th.text_dim)),
@@ -1172,7 +1198,7 @@ fn enter_time(st: &mut State, text: &str) {
         let _ = std::fs::create_dir_all(data_dir());
         let _ = std::fs::write(data_dir().join("theme.txt"), &t.name);
         st.set_theme(t);
-        st.toast("Secret Theme found");
+        st.toast(tr("Secret Theme found"));
     } else if let Some(t) = parse_time(text) {
         st.set_cursor(t);
     }
@@ -1198,11 +1224,11 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         let fx = st.fx.clone();
         let t = format_time(st.position());
         let caption = if st.is_recording() {
-            "REC // TIME"
+            tr("REC // TIME")
         } else if st.is_playing() {
-            "PLAY // TIME"
+            tr("PLAY // TIME")
         } else {
-            "TIME"
+            tr("TIME")
         };
         // Click the time to type one; Enter moves the playhead there.
         if let Some(mut text) = st.time_edit.take() {
@@ -1249,7 +1275,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                     .suffix(" BPM")
                     .max_decimals(1),
             )
-            .on_hover_text("Tempo: drag, or double-click to type")
+            .on_hover_text(tr("Tempo: drag, or double-click to type"))
             .changed()
         {
             st.session.tempo.bpm = bpm;
@@ -1261,7 +1287,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         if crate::hud::transport_button(
             ui,
             crate::hud::Icon::Metronome,
-            "Metronome",
+            tr("Metronome"),
             m,
             th.accent,
             &th,
@@ -1278,17 +1304,17 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         use crate::hud::{transport_button as tb, Icon};
         let playing = st.is_playing();
         let rec = st.is_recording();
-        if tb(ui, Icon::Stop, "Stop", false, th.text, &th).clicked() {
+        if tb(ui, Icon::Stop, tr("Stop"), false, th.text, &th).clicked() {
             if rec {
                 st.stop_recording();
             } else {
                 st.stop();
             }
         }
-        if tb(ui, Icon::Play, "Play (Space)", playing, th.accent, &th).clicked() && !playing {
+        if tb(ui, Icon::Play, tr("Play (Space)"), playing, th.accent, &th).clicked() && !playing {
             st.toggle_play();
         }
-        if tb(ui, Icon::Pause, "Pause", false, th.text, &th).clicked() && playing {
+        if tb(ui, Icon::Pause, tr("Pause"), false, th.text, &th).clicked() && playing {
             // Pause keeps the playhead where it is.
             let at = st.position();
             st.stop();
@@ -1298,7 +1324,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         if tb(
             ui,
             Icon::ToStart,
-            "Move Playhead to Previous (marker, or the start)",
+            tr("Move Playhead to Previous (marker, or the start)"),
             false,
             th.text,
             &th,
@@ -1316,11 +1342,11 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         }
         // Rewind and Fast Forward run while held.
         let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
-        let rw = tb(ui, Icon::Rewind, "Rewind (hold)", false, th.text, &th);
+        let rw = tb(ui, Icon::Rewind, tr("Rewind (hold)"), false, th.text, &th);
         let ff = tb(
             ui,
             Icon::FastForward,
-            "Fast Forward (hold)",
+            tr("Fast Forward (hold)"),
             false,
             th.text,
             &th,
@@ -1335,7 +1361,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         if tb(
             ui,
             Icon::ToEnd,
-            "Move Playhead to Next (marker, or the end)",
+            tr("Move Playhead to Next (marker, or the end)"),
             false,
             th.text,
             &th,
@@ -1354,7 +1380,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         if tb(
             ui,
             Icon::Record,
-            "Record (Shift+Space)",
+            tr("Record (Shift+Space)"),
             rec,
             th.accent_alt,
             &th,
@@ -1368,14 +1394,23 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             }
         }
         let lp = st.looping;
-        if tb(ui, Icon::Loop, "Loop Playback (Ctrl+L)", lp, th.accent, &th).clicked() {
+        if tb(
+            ui,
+            Icon::Loop,
+            tr("Loop Playback (Ctrl+L)"),
+            lp,
+            th.accent,
+            &th,
+        )
+        .clicked()
+        {
             st.looping = !st.looping;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             for (s, tip, f) in [
-                ("⛶", "Zoom Out Full", 0.0),
-                ("−", "Zoom Out (-)", 2.0),
-                ("+", "Zoom In (=)", 0.5),
+                ("⛶", tr("Zoom Out Full"), 0.0),
+                ("−", tr("Zoom Out (-)"), 2.0),
+                ("+", tr("Zoom In (=)"), 0.5),
             ] {
                 if ui
                     .button(RichText::new(s).size(16.0))
@@ -1405,35 +1440,37 @@ fn status(ui: &mut egui::Ui, st: &State) {
             ui.label(RichText::new(&t.text).color(col));
         } else if !st.loading().is_empty() {
             ui.spinner();
-            ui.label(format!("Opening {}", st.loading().join(", ")));
+            ui.label(tr!("Opening {0}", st.loading().join(", ")));
         } else if let Some(e) = &st.engine_error {
             ui.label(RichText::new(e).color(c(th.accent_alt)));
         } else {
-            ui.label(RichText::new("Ready").color(c(th.text_dim)));
+            ui.label(RichText::new(tr("Ready")).color(c(th.text_dim)));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             crate::skin::status_line(ui, th);
             let dim = c(th.text_dim);
             if let Some(e) = &st.engine {
-                ui.label(RichText::new(format!("Out: {} @ {} Hz", e.device, e.rate)).color(dim));
+                ui.label(RichText::new(tr!("Out: {0} @ {1} Hz", e.device, e.rate)).color(dim));
             }
             ui.separator();
             match st.mode {
                 Mode::Waveform => {
                     if let Some(d) = st.doc() {
                         let ch = match d.buf.num_channels() {
-                            1 => "Mono".to_string(),
-                            2 => "Stereo".to_string(),
+                            1 => tr("Mono").to_string(),
+                            2 => tr("Stereo").to_string(),
                             6 => "5.1".to_string(),
                             8 => "7.1".to_string(),
-                            n => format!("{n} ch"),
+                            n => tr!("{0} ch", n),
                         };
                         let mb = (d.buf.frames() * d.buf.num_channels() * 4) as f64 / 1_048_576.0;
                         ui.label(
-                            RichText::new(format!(
-                                "{} Hz • 32-bit float • {ch} • {} • {mb:.1} MB",
+                            RichText::new(tr!(
+                                "{0} Hz • 32-bit float • {1} • {2} • {3} MB",
                                 d.buf.rate,
-                                format_time(d.duration())
+                                ch,
+                                format_time(d.duration()),
+                                format!("{mb:.1}")
                             ))
                             .color(dim),
                         );
@@ -1441,8 +1478,8 @@ fn status(ui: &mut egui::Ui, st: &State) {
                 }
                 Mode::Multitrack => {
                     ui.label(
-                        RichText::new(format!(
-                            "{} Hz session • {} tracks • {}",
+                        RichText::new(tr!(
+                            "{0} Hz session • {1} tracks • {2}",
                             st.session.rate,
                             st.session.tracks.len(),
                             format_time(st.session.duration())
@@ -1457,19 +1494,23 @@ fn status(ui: &mut egui::Ui, st: &State) {
 
 fn generate_window(ctx: &egui::Context, st: &mut State) {
     let mut open = st.generate.open;
-    egui::Window::new("Generate")
+    egui::Window::new(tr("Generate"))
+        .id(egui::Id::new("af27-generate"))
         .open(&mut open)
         .resizable(false)
         .show(ctx, |ui| {
             let g = &mut st.generate;
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut g.kind, 0, "Tone");
-                ui.selectable_value(&mut g.kind, 1, "Noise");
-                ui.selectable_value(&mut g.kind, 2, "Silence");
+                ui.selectable_value(&mut g.kind, 0, tr("Tone"));
+                ui.selectable_value(&mut g.kind, 1, tr("Noise"));
+                ui.selectable_value(&mut g.kind, 2, tr("Silence"));
             });
             if g.kind == 0 {
                 ui.horizontal(|ui| {
-                    for (i, n) in ["Sine", "Square", "Triangle", "Saw"].iter().enumerate() {
+                    for (i, n) in [tr("Sine"), tr("Square"), tr("Triangle"), tr("Saw")]
+                        .iter()
+                        .enumerate()
+                    {
                         ui.selectable_value(&mut g.wave, i, *n);
                     }
                 });
@@ -1477,12 +1518,12 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
                     egui::Slider::new(&mut g.freq, 20.0..=20_000.0)
                         .logarithmic(true)
                         .suffix(" Hz")
-                        .text("Frequency"),
+                        .text(tr("Frequency")),
                 );
             }
             if g.kind == 1 {
                 ui.horizontal(|ui| {
-                    for (i, n) in ["White", "Pink", "Brown"].iter().enumerate() {
+                    for (i, n) in [tr("White"), tr("Pink"), tr("Brown")].iter().enumerate() {
                         ui.selectable_value(&mut g.noise, i, *n);
                     }
                 });
@@ -1491,16 +1532,16 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
                 ui.add(
                     egui::Slider::new(&mut g.db, -60.0..=0.0)
                         .suffix(" dB")
-                        .text("Level"),
+                        .text(tr("Level")),
                 );
             }
             ui.add(
                 egui::Slider::new(&mut g.secs, 0.1..=600.0)
                     .logarithmic(true)
                     .suffix(" s")
-                    .text("Duration"),
+                    .text(tr("Duration")),
             );
-            if ui.button("Insert at Playhead").clicked() {
+            if ui.button(tr("Insert at Playhead")).clicked() {
                 let (rate, ch) = st
                     .doc()
                     .map_or((48_000, 2), |d| (d.buf.rate, d.buf.num_channels()));
@@ -1530,7 +1571,7 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
                     _ => gen::silence(rate, ch, g.secs),
                 };
                 st.mode = Mode::Waveform;
-                st.insert_buffer("Generate", buf);
+                st.insert_buffer(crate::i18n::mark("Generate"), buf);
             }
         });
     st.generate.open = open && st.generate.open;
@@ -1538,14 +1579,14 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
 
 fn about_window(ctx: &egui::Context, st: &mut State) {
     let mut open = st.show_about;
-    egui::Window::new("About AudiForm 2").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+    egui::Window::new(tr("About AudiForm 2")).id(egui::Id::new("af27-about")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(120.0, 120.0), egui::Sense::hover());
         crate::hud::logo_mark(ui.painter(), r, &st.theme, &st.fx, 1.0);
         ui.label(RichText::new("AUDIFORM 2").size(28.0).strong().extra_letter_spacing(6.0).color(c(st.theme.accent)));
-        ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-        ui.label("A fast, themeable audio editor written entirely in Rust.");
-        ui.label("AudiForm 2 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
-        ui.label("The sequel to Audiform, by the same project lead.");
+        ui.label(tr!("Version {0}", env!("CARGO_PKG_VERSION")));
+        ui.label(tr("A fast, themeable audio editor written entirely in Rust."));
+        ui.label(tr("AudiForm 2 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg."));
+        ui.label(tr("The sequel to Audiform, by the same project lead."));
     });
     st.show_about = open;
 }
@@ -1600,8 +1641,9 @@ impl eframe::App for App {
             && self.pace > 0.055
         {
             self.st.visuals_lite = true;
-            self.st
-                .toast("Visual effects reduced for this device (View > Visual Effects)");
+            self.st.toast(tr(
+                "Visual effects reduced for this device (View > Visual Effects)",
+            ));
         }
         let lite = self.st.visuals_mode == 2 || (self.st.visuals_mode == 0 && self.st.visuals_lite);
         let mut th = self.st.theme.clone();
@@ -1757,11 +1799,11 @@ impl eframe::App for App {
                             .iter()
                             .map(|t| {
                                 let title = if *t == Tab::Editor {
-                                    "Editor: a file name.wav"
+                                    format!("{}: a file name.wav", t.title())
                                 } else {
-                                    t.title()
+                                    t.title().to_string()
                                 };
-                                full_tab_width(ui.ctx(), title)
+                                full_tab_width(ui.ctx(), &title)
                             })
                             .sum();
                         if need > rect.width() - 8.0 {

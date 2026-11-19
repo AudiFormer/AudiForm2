@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use egui::{pos2, Color32, Rect, RichText, Sense};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{mark, tr};
 use crate::state::{data_dir, State};
 use crate::theme::{c, Rgb};
 
@@ -246,11 +247,11 @@ pub enum Scheme {
 }
 
 pub const SCHEMES: [(Scheme, &str); 5] = [
-    (Scheme::Theme, "Theme colors"),
-    (Scheme::Rainbow, "Rainbow"),
-    (Scheme::Fire, "Fire"),
-    (Scheme::Ocean, "Ocean"),
-    (Scheme::Aurora, "Aurora"),
+    (Scheme::Theme, mark("Theme colors")),
+    (Scheme::Rainbow, mark("Rainbow")),
+    (Scheme::Fire, mark("Fire")),
+    (Scheme::Ocean, mark("Ocean")),
+    (Scheme::Aurora, mark("Aurora")),
 ];
 
 impl Scheme {
@@ -872,13 +873,13 @@ impl Look {
     }
     pub fn name(self) -> &'static str {
         match self {
-            Look::Lava => "Lava Lamp",
-            Look::Bars => "Bars",
-            Look::Waves => "Waves",
-            Look::Plasma => "Plasma",
-            Look::Ripples => "Ripples",
-            Look::Stars => "Starfield",
-            Look::Radial => "Radial",
+            Look::Lava => mark("Lava Lamp"),
+            Look::Bars => mark("Bars"),
+            Look::Waves => mark("Waves"),
+            Look::Plasma => mark("Plasma"),
+            Look::Ripples => mark("Ripples"),
+            Look::Stars => mark("Starfield"),
+            Look::Radial => mark("Radial"),
         }
     }
     /// The look with this id, or the first.
@@ -1532,27 +1533,27 @@ fn panel(ui: &mut egui::Ui, st: &mut State, v: &mut Visualizer) {
     let dim = c(st.theme.text_dim);
     let before = v.prefs.clone();
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Look").color(dim));
+        ui.label(RichText::new(tr("Look")).color(dim));
         let cur = Look::by_id(&v.prefs.preset);
         egui::ComboBox::from_id_salt("viz-look")
-            .selected_text(cur.name())
+            .selected_text(tr(cur.name()))
             .show_ui(ui, |ui| {
                 for l in LOOKS {
-                    if ui.selectable_label(cur == l, l.name()).clicked() {
+                    if ui.selectable_label(cur == l, tr(l.name())).clicked() {
                         v.prefs.preset = l.id().to_string();
                     }
                 }
             });
-        ui.label(RichText::new("Colors").color(dim));
+        ui.label(RichText::new(tr("Colors")).color(dim));
         egui::ComboBox::from_id_salt("viz-colors")
-            .selected_text(v.prefs.scheme.label())
+            .selected_text(tr(v.prefs.scheme.label()))
             .show_ui(ui, |ui| {
                 for (s, label) in SCHEMES {
-                    ui.selectable_value(&mut v.prefs.scheme, s, label);
+                    ui.selectable_value(&mut v.prefs.scheme, s, tr(label));
                 }
             });
-        ui.label(RichText::new("Reaction").color(dim))
-            .on_hover_text("How strongly the picture reacts to the sound.");
+        ui.label(RichText::new(tr("Reaction")).color(dim))
+            .on_hover_text(tr("How strongly the picture reacts to the sound."));
         ui.scope(|ui| {
             ui.spacing_mut().slider_width = 80.0;
             ui.add(
@@ -1561,8 +1562,8 @@ fn panel(ui: &mut egui::Ui, st: &mut State, v: &mut Visualizer) {
                     .show_value(false),
             );
         });
-        ui.label(RichText::new("Pictures a second").color(dim))
-            .on_hover_text("15 and 30 are lighter on slower computers.");
+        ui.label(RichText::new(tr("Pictures a second")).color(dim))
+            .on_hover_text(tr("15 and 30 are lighter on slower computers."));
         egui::ComboBox::from_id_salt("viz-fps")
             .selected_text(v.prefs.fps.to_string())
             .width(48.0)
@@ -1571,7 +1572,7 @@ fn panel(ui: &mut egui::Ui, st: &mut State, v: &mut Visualizer) {
                     ui.selectable_value(&mut v.prefs.fps, f, f.to_string());
                 }
             });
-        ui.checkbox(&mut v.prefs.auto, "Change every 30 seconds");
+        ui.checkbox(&mut v.prefs.auto, tr("Change every 30 seconds"));
     });
     if v.prefs != before {
         v.prefs.save();

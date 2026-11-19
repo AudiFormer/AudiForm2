@@ -229,11 +229,11 @@ fn enabled_flag() -> &'static AtomicBool {
 pub fn menu_toggle(ui: &mut egui::Ui) {
     let mut on = enabled_flag().load(Ordering::Relaxed);
     if ui
-        .checkbox(&mut on, "Theme Pointers")
-        .on_hover_text(
+        .checkbox(&mut on, crate::i18n::tr("Theme Pointers"))
+        .on_hover_text(crate::i18n::tr(
             "Draw the theme's own mouse pointers. Turn off if the pointer \
              trails behind on this device.",
-        )
+        ))
         .changed()
     {
         enabled_flag().store(on, Ordering::Relaxed);

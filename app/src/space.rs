@@ -8,6 +8,7 @@
 
 use egui::{pos2, vec2, Align2, FontId, Pos2, Rect, RichText, Rounding, Sense, Stroke};
 
+use crate::i18n::{mark, tr};
 use crate::state::State;
 use crate::theme::{c, ca};
 use af27_core::space::{Monitor, SpaceLayout};
@@ -18,12 +19,12 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, dragging: &mut Option<usize>) {
     ui.horizontal_wrapped(|ui| {
         let mut on = st.session.space.is_some();
         if ui
-            .checkbox(&mut on, "3D Space session")
-            .on_hover_text("Place tracks in a room instead of panning them")
+            .checkbox(&mut on, tr("3D Space session"))
+            .on_hover_text(tr("Place tracks in a room instead of panning them"))
             .changed()
         {
             st.session.space = on.then_some(SpaceLayout::Surround51);
-            st.commit_session("3D Space", before.clone());
+            st.commit_session(mark("3D Space"), before.clone());
         }
         if let Some(layout) = st.session.space {
             egui::ComboBox::from_id_salt("layout")
@@ -33,31 +34,31 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, dragging: &mut Option<usize>) {
                     for l in SpaceLayout::ALL {
                         if ui.selectable_label(layout == l, l.label()).clicked() {
                             st.session.space = Some(l);
-                            st.commit_session("Speaker layout", before.clone());
+                            st.commit_session(mark("Speaker layout"), before.clone());
                         }
                     }
                 });
             let m = st.session.monitor;
             egui::ComboBox::from_id_salt("monitor")
                 .selected_text(match m {
-                    Monitor::Binaural => "Headphones (binaural)",
-                    Monitor::StereoFold => "Stereo speakers",
+                    Monitor::Binaural => tr("Headphones (binaural)"),
+                    Monitor::StereoFold => tr("Stereo speakers"),
                 })
                 .show_ui(ui, |ui| {
                     for (v, n) in [
-                        (Monitor::Binaural, "Headphones (binaural)"),
-                        (Monitor::StereoFold, "Stereo speakers"),
+                        (Monitor::Binaural, tr("Headphones (binaural)")),
+                        (Monitor::StereoFold, tr("Stereo speakers")),
                     ] {
                         if ui.selectable_label(m == v, n).clicked() {
                             st.session.monitor = v;
-                            st.commit_session("Monitoring", before.clone());
+                            st.commit_session(mark("Monitoring"), before.clone());
                         }
                     }
                 });
         }
     });
     let Some(layout) = st.session.space else {
-        ui.label(RichText::new("Turn on 3D Space to place each track in a room: 5.1 up to 7.1.4, heard binaurally on headphones or folded to stereo, exported as a multichannel WAV.").color(c(th.text_dim)));
+        ui.label(RichText::new(tr("Turn on 3D Space to place each track in a room: 5.1 up to 7.1.4, heard binaurally on headphones or folded to stereo, exported as a multichannel WAV.")).color(c(th.text_dim)));
         return;
     };
     let avail = ui.available_rect_before_wrap();
@@ -100,7 +101,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, dragging: &mut Option<usize>) {
     p.text(
         room.center() + vec2(0.0, -12.0),
         Align2::CENTER_BOTTOM,
-        "front ▲",
+        tr("front ▲"),
         FontId::proportional(9.0),
         c(th.text_dim),
     );
@@ -204,7 +205,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, dragging: &mut Option<usize>) {
         *dragging = hit;
         if let Some(i) = hit {
             st.selected_track = Some(st.session.tracks[i].id);
-            st.commit_live("Move in 3D", before.clone());
+            st.commit_live(mark("Move in 3D"), before.clone());
         }
     }
     if let (Some(i), Some(q)) = (*dragging, resp.interact_pointer_pos()) {
@@ -230,8 +231,8 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, dragging: &mut Option<usize>) {
             let z = &mut st.session.tracks[i].pos.z;
             *z = (*z + scroll as f64 * 0.002).clamp(0.0, 1.0);
             st.live_space(i);
-            st.commit_live("Height", b);
+            st.commit_live(mark("Height"), b);
         }
     }
-    ui.label(RichText::new("Drag a dot to move a track; scroll over it to raise or lower it. More settings in the Inspector.").size(10.0).color(c(th.text_dim)));
+    ui.label(RichText::new(tr("Drag a dot to move a track; scroll over it to raise or lower it. More settings in the Inspector.")).size(10.0).color(c(th.text_dim)));
 }

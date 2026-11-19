@@ -333,7 +333,10 @@ const JAPANESE: &[(&str, u32)] = &[
     ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
     ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
-    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 0),
+    (
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        0,
+    ),
 ];
 const CHINESE: &[(&str, u32)] = &[
     ("C:/Windows/Fonts/msyh.ttc", 0),
@@ -345,7 +348,10 @@ const CHINESE: &[(&str, u32)] = &[
     // Noto Sans CJK's collection: face 2 is Simplified Chinese.
     ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2),
-    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 2),
+    (
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        2,
+    ),
     ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
 ];
 const KOREAN: &[(&str, u32)] = &[
@@ -356,7 +362,10 @@ const KOREAN: &[(&str, u32)] = &[
     // Face 1 is Korean.
     ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 1),
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 1),
-    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 1),
+    (
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        1,
+    ),
     ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 0),
 ];
 /// Cyrillic and Greek beyond what egui's fonts carry (they cover most of

@@ -8,6 +8,7 @@
 
 use egui::RichText;
 
+use crate::i18n::tr;
 use crate::state::State;
 use crate::theme::c;
 use af27_core::midi::Wave;
@@ -38,23 +39,23 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     match ti {
         Some(ti) => track(ui, st, ti),
         None => {
-            ui.label(RichText::new("MASTER").strong().color(c(th.accent)));
+            ui.label(RichText::new(tr("MASTER")).strong().color(c(th.accent)));
             let before = st.session.clone();
             let changed = ui
                 .add(
                     egui::Slider::new(&mut st.session.master_db, -60.0..=12.0)
                         .suffix(" dB")
-                        .text("Master"),
+                        .text(tr("Master")),
                 )
                 .changed();
             if changed {
                 st.live_master();
             }
-            live_commit(st, ui, "Master level", &before, changed);
+            live_commit(st, ui, tr("Master level"), &before, changed);
             ui.separator();
             chain(ui, st, MASTER);
             ui.label(
-                RichText::new("Select a track to see its settings.")
+                RichText::new(tr("Select a track to see its settings."))
                     .size(10.0)
                     .color(c(th.text_dim)),
             );
@@ -70,14 +71,14 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     ui.horizontal(|ui| {
         let t = &mut st.session.tracks[ti];
         let badge = match kind {
-            TrackKind::Audio => "AUDIO",
-            TrackKind::Bus => "BUS",
+            TrackKind::Audio => tr("AUDIO"),
+            TrackKind::Bus => tr("BUS"),
             TrackKind::Midi => "MIDI",
         };
         ui.label(RichText::new(badge).small().strong().color(c(t.color)));
         ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(ui.available_width()));
     });
-    if ui.small_button("Show Master").clicked() {
+    if ui.small_button(tr("Show Master")).clicked() {
         st.selected_track = None;
         return;
     }
@@ -89,13 +90,13 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             .add(
                 egui::Slider::new(&mut t.volume_db, -60.0..=12.0)
                     .suffix(" dB")
-                    .text("Volume"),
+                    .text(tr("Volume")),
             )
             .changed();
         if st.session.space.is_none() {
             let mut pan = t.pan * 100.0;
             if ui
-                .add(egui::Slider::new(&mut pan, -100.0..=100.0).text("Pan"))
+                .add(egui::Slider::new(&mut pan, -100.0..=100.0).text(tr("Pan")))
                 .changed()
             {
                 t.pan = pan / 100.0;
@@ -106,7 +107,7 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     if changed {
         st.live_track(ti);
     }
-    live_commit(st, ui, "Track level", &before, changed);
+    live_commit(st, ui, tr("Track level"), &before, changed);
 
     // Output and sends (structural: the mix is rebuilt).
     let buses: Vec<(af27_core::TrackId, String)> = st
@@ -120,12 +121,14 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     let out_name = st.session.tracks[ti]
         .output
         .and_then(|o| buses.iter().find(|b| b.0 == o))
-        .map_or("Master".to_string(), |b| b.1.clone());
-    egui::ComboBox::from_label("Output")
+        .map_or(tr("Master").to_string(), |b| b.1.clone());
+    egui::ComboBox::from_label(tr("Output"))
         .selected_text(out_name)
         .show_ui(ui, |ui| {
             let t = &mut st.session.tracks[ti];
-            structural |= ui.selectable_value(&mut t.output, None, "Master").changed();
+            structural |= ui
+                .selectable_value(&mut t.output, None, tr("Master"))
+                .changed();
             for (id, name) in &buses {
                 structural |= ui
                     .selectable_value(&mut t.output, Some(*id), name)
@@ -133,14 +136,14 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             }
         });
     ui.collapsing(
-        format!("Sends ({})", st.session.tracks[ti].sends.len()),
+        tr!("Sends ({0})", st.session.tracks[ti].sends.len()),
         |ui| {
             let mut remove = None;
             for (i, s) in st.session.tracks[ti].sends.iter_mut().enumerate() {
                 let name = buses
                     .iter()
                     .find(|b| b.0 == s.bus)
-                    .map_or("(missing bus)".into(), |b| b.1.clone());
+                    .map_or(tr("(missing bus)").into(), |b| b.1.clone());
                 ui.horizontal(|ui| {
                     ui.label(name);
                     structural |= ui
@@ -151,7 +154,7 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                                 .suffix(" dB"),
                         )
                         .changed();
-                    structural |= ui.checkbox(&mut s.pre_fader, "Pre").changed();
+                    structural |= ui.checkbox(&mut s.pre_fader, tr("Pre")).changed();
                     if ui.small_button("✕").clicked() {
                         remove = Some(i);
                     }
@@ -163,12 +166,12 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             }
             if buses.is_empty() {
                 ui.label(
-                    RichText::new("Add a bus track to send to it.")
+                    RichText::new(tr("Add a bus track to send to it."))
                         .size(10.0)
                         .color(c(th.text_dim)),
                 );
             } else {
-                ui.menu_button("➕ Add Send", |ui| {
+                ui.menu_button(format!("➕ {}", tr("Add Send")), |ui| {
                     for (id, name) in &buses {
                         if ui.button(name).clicked() {
                             st.session.tracks[ti].sends.push(af27_core::Send {
@@ -186,66 +189,66 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         },
     );
     if structural {
-        st.commit_session("Routing", before.clone());
+        st.commit_session(tr("Routing"), before.clone());
     }
 
     // 3D position.
     if let Some(layout) = st.session.space {
-        ui.collapsing(format!("3D position ({})", layout.label()), |ui| {
+        ui.collapsing(tr!("3D position ({0})", layout.label()), |ui| {
             let b2 = st.session.clone();
             let mut ch = false;
             {
                 let p = &mut st.session.tracks[ti].pos;
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.x, -1.0..=1.0).text("Left / right"))
+                    .add(egui::Slider::new(&mut p.x, -1.0..=1.0).text(tr("Left / right")))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.y, -1.0..=1.0).text("Back / front"))
+                    .add(egui::Slider::new(&mut p.y, -1.0..=1.0).text(tr("Back / front")))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.z, 0.0..=1.0).text("Height"))
+                    .add(egui::Slider::new(&mut p.z, 0.0..=1.0).text(tr("Height")))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.size, 0.0..=1.0).text("Size"))
+                    .add(egui::Slider::new(&mut p.size, 0.0..=1.0).text(tr("Size")))
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut p.width, 0.0..=1.0).text("Width"))
+                    .add(egui::Slider::new(&mut p.width, 0.0..=1.0).text(tr("Width")))
                     .changed();
                 ch |= ui
                     .add(
                         egui::Slider::new(&mut p.rotation, -180.0..=180.0)
                             .suffix("°")
-                            .text("Rotation"),
+                            .text(tr("Rotation")),
                     )
                     .changed();
                 ch |= ui
                     .add(
                         egui::Slider::new(&mut p.lfe_db, -96.0..=6.0)
                             .suffix(" dB")
-                            .text("LFE send"),
+                            .text(tr("LFE send")),
                     )
                     .changed();
             }
             if ch {
                 st.live_space(ti);
             }
-            live_commit(st, ui, "3D position", &b2, ch);
+            live_commit(st, ui, tr("3D position"), &b2, ch);
         });
     }
 
     // MIDI instrument.
     if kind == TrackKind::Midi {
-        ui.collapsing("Instrument (built-in synth)", |ui| {
+        ui.collapsing(tr("Instrument (built-in synth)"), |ui| {
             let b2 = st.session.clone();
             let mut ch = false;
             {
                 let i = &mut st.session.tracks[ti].instrument;
                 ui.horizontal(|ui| {
                     for (w, n) in [
-                        (Wave::Sine, "Sine"),
-                        (Wave::Triangle, "Triangle"),
-                        (Wave::Saw, "Saw"),
-                        (Wave::Square, "Square"),
+                        (Wave::Sine, tr("Sine")),
+                        (Wave::Triangle, tr("Triangle")),
+                        (Wave::Saw, tr("Saw")),
+                        (Wave::Square, tr("Square")),
                     ] {
                         ch |= ui.selectable_value(&mut i.wave, w, n).changed();
                     }
@@ -254,7 +257,7 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                     .add(
                         egui::Slider::new(&mut i.detune, 0.0..=50.0)
                             .suffix(" ct")
-                            .text("Detune"),
+                            .text(tr("Detune")),
                     )
                     .changed();
                 ch |= ui
@@ -262,7 +265,7 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                         egui::Slider::new(&mut i.attack, 0.001..=2.0)
                             .logarithmic(true)
                             .suffix(" s")
-                            .text("Attack"),
+                            .text(tr("Attack")),
                     )
                     .changed();
                 ch |= ui
@@ -270,18 +273,18 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                         egui::Slider::new(&mut i.decay, 0.01..=4.0)
                             .logarithmic(true)
                             .suffix(" s")
-                            .text("Decay"),
+                            .text(tr("Decay")),
                     )
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut i.sustain, 0.0..=1.0).text("Sustain"))
+                    .add(egui::Slider::new(&mut i.sustain, 0.0..=1.0).text(tr("Sustain")))
                     .changed();
                 ch |= ui
                     .add(
                         egui::Slider::new(&mut i.release, 0.01..=6.0)
                             .logarithmic(true)
                             .suffix(" s")
-                            .text("Release"),
+                            .text(tr("Release")),
                     )
                     .changed();
                 ch |= ui
@@ -289,24 +292,24 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                         egui::Slider::new(&mut i.cutoff, 40.0..=18_000.0)
                             .logarithmic(true)
                             .suffix(" Hz")
-                            .text("Cutoff"),
+                            .text(tr("Cutoff")),
                     )
                     .changed();
                 ch |= ui
-                    .add(egui::Slider::new(&mut i.resonance, 0.0..=1.0).text("Resonance"))
+                    .add(egui::Slider::new(&mut i.resonance, 0.0..=1.0).text(tr("Resonance")))
                     .changed();
                 ch |= ui
                     .add(
                         egui::Slider::new(&mut i.gain_db, -40.0..=6.0)
                             .suffix(" dB")
-                            .text("Level"),
+                            .text(tr("Level")),
                     )
                     .changed();
             }
             if ch {
                 st.live_instrument(ti);
             }
-            live_commit(st, ui, "Instrument", &b2, ch);
+            live_commit(st, ui, tr("Instrument"), &b2, ch);
         });
     }
     ui.separator();
@@ -317,9 +320,9 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
 fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
     let th = st.theme.clone();
     let title = if track == MASTER {
-        "Master effects"
+        tr("Master effects")
     } else {
-        "Track effects"
+        tr("Track effects")
     };
     ui.label(RichText::new(title).strong().color(c(th.accent)));
     let before = st.session.clone();
@@ -333,14 +336,14 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
             let mut on = !slot.bypass;
             if ui
                 .checkbox(&mut on, "")
-                .on_hover_text("On or bypassed")
+                .on_hover_text(tr("On or bypassed"))
                 .changed()
             {
                 if let Some(s) = st.chain_mut(track).and_then(|c| c.get_mut(i)) {
                     s.bypass = !on;
                 }
                 st.live_slot(track, i);
-                st.commit_live("Bypass", before.clone());
+                st.commit_live(tr("Bypass"), before.clone());
             }
             let label = RichText::new(format!("{} {}", i + 1, name)).color(if slot.bypass {
                 c(th.text_dim)
@@ -351,7 +354,7 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
                 st.open_slot = if open { None } else { Some((track, i)) };
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                if ui.small_button("✕").on_hover_text(tr("Remove")).clicked() {
                     action = Some((i, 0));
                 }
                 if ui.small_button("⬇").clicked() {
@@ -445,7 +448,7 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
         structural = true;
     }
     if slots.len() < af27_core::session::CHAIN_SLOTS {
-        ui.menu_button("➕ Add Effect", |ui| {
+        ui.menu_button(format!("➕ {}", tr("Add Effect")), |ui| {
             for (group, list) in crate::fx::catalog() {
                 ui.menu_button(group, |ui| {
                     for (id, name) in list {
@@ -470,6 +473,6 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
         });
     }
     if structural {
-        st.commit_session("Effect chain", before);
+        st.commit_session(tr("Effect chain"), before);
     }
 }

@@ -6,6 +6,8 @@
 
 use af27_dsp::Effect;
 
+use crate::i18n::{mark, tr};
+
 /// One entry in a category submenu.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
@@ -18,26 +20,27 @@ pub enum Item {
 }
 
 impl Item {
+    /// The name shown, in the current language.
     pub fn name(&self) -> String {
         match self {
-            Item::Builtin(e) => e.name().to_string(),
-            Item::Fx(_, n) => n.clone(),
-            Item::Stems => "AI Stem Separation...".to_string(),
+            Item::Builtin(e) => tr(e.name()).to_string(),
+            Item::Fx(_, n) => tr(n).to_string(),
+            Item::Stems => tr("AI Stem Separation...").to_string(),
         }
     }
 }
 
 pub const CATEGORIES: [&str; 10] = [
-    "Amplitude and Compression",
-    "Delay and Echo",
-    "Diagnostics",
-    "Filter and EQ",
-    "Modulation",
-    "Noise Reduction / Restoration",
-    "Reverb",
-    "Special",
-    "Stereo Imagery",
-    "Time and Pitch",
+    mark("Amplitude and Compression"),
+    mark("Delay and Echo"),
+    mark("Diagnostics"),
+    mark("Filter and EQ"),
+    mark("Modulation"),
+    mark("Noise Reduction / Restoration"),
+    mark("Reverb"),
+    mark("Special"),
+    mark("Stereo Imagery"),
+    mark("Time and Pitch"),
 ];
 
 /// The effects with their own items at the top of the menu.
@@ -86,8 +89,17 @@ fn fx_category(category: &str) -> &'static str {
     }
 }
 
-/// Each category and what is in it, in menu order.
+/// Each category and what is in it, in menu order, the categories named
+/// in the current language (effects are filed by the English names).
 pub fn categories() -> Vec<(&'static str, Vec<Item>)> {
+    categories_en()
+        .into_iter()
+        .map(|(c, v)| (tr(c), v))
+        .collect()
+}
+
+/// [`categories`] with the categories' English names.
+fn categories_en() -> Vec<(&'static str, Vec<Item>)> {
     let mut out: Vec<(&'static str, Vec<Item>)> =
         CATEGORIES.iter().map(|c| (*c, Vec::new())).collect();
     let mut put = |cat: &str, item: Item| {
@@ -116,7 +128,7 @@ mod tests {
 
     #[test]
     fn every_effect_has_a_place() {
-        let cats = categories();
+        let cats = categories_en();
         let items: Vec<&Item> = cats.iter().flat_map(|(_, v)| v.iter()).collect();
         for e in Effect::all() {
             assert!(

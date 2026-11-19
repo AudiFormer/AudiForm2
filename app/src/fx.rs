@@ -8,6 +8,8 @@
 use af27_core::EffectSlot;
 use af27_dsp::live::Live;
 
+use crate::i18n::tr;
+
 /// One control as the Inspector draws it.
 pub struct Control {
     pub name: String,
@@ -23,45 +25,53 @@ pub struct Control {
 }
 
 /// The effects a chain can add, grouped for the Add Effect menu: (group,
-/// [(id, name)]).
+/// [(id, name)]). Groups and names are in the current language, for
+/// showing only; the id is what to keep.
 pub fn catalog() -> Vec<(String, Vec<(String, String)>)> {
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for (group, list) in af27_dsp::effects::GROUPS {
         let live: Vec<_> = list
             .iter()
             .filter(|e| e.realtime())
-            .map(|e| (e.id().to_string(), e.name().to_string()))
+            .map(|e| (e.id().to_string(), tr(e.name()).to_string()))
             .collect();
         if !live.is_empty() {
-            out.push((group.to_string(), live));
+            out.push((tr(group).to_string(), live));
         }
     }
-    let mut fx: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    // Filed by the English category, named in the current language.
+    let mut fx: Vec<(&str, Vec<(String, String)>)> = Vec::new();
     for info in af27_fx::registry() {
-        let g = format!("{} (Audiform)", info.category);
-        match fx.iter_mut().find(|(n, _)| *n == g) {
-            Some((_, v)) => v.push((info.id.to_string(), info.name.to_string())),
-            None => fx.push((g, vec![(info.id.to_string(), info.name.to_string())])),
+        let item = (info.id.to_string(), tr(info.name).to_string());
+        match fx.iter_mut().find(|(n, _)| *n == info.category) {
+            Some((_, v)) => v.push(item),
+            None => fx.push((info.category, vec![item])),
         }
     }
-    out.extend(fx);
+    out.extend(
+        fx.into_iter()
+            .map(|(cat, v)| (tr!("{0} (Audiform)", tr(cat)), v)),
+    );
     out
 }
 
+/// An effect's name, in the current language (for showing only).
 pub fn name(id: &str) -> String {
     if let Some(e) = af27_dsp::Effect::from_id(id) {
-        return e.name().to_string();
+        return tr(e.name()).to_string();
     }
-    af27_fx::info(id).map_or_else(|| id.to_string(), |i| i.name.to_string())
+    af27_fx::info(id).map_or_else(|| id.to_string(), |i| tr(i.name).to_string())
 }
 
+/// An effect's controls, their names, groups and choices in the current
+/// language (for showing only; a control is known by its place).
 pub fn controls(id: &str) -> Vec<Control> {
     if let Some(e) = af27_dsp::Effect::from_id(id) {
         return e
             .params()
             .iter()
             .map(|p| Control {
-                name: p.name.into(),
+                name: tr(p.name).into(),
                 unit: p.unit.into(),
                 min: p.min,
                 max: p.max,
@@ -78,16 +88,16 @@ pub fn controls(id: &str) -> Vec<Control> {
         i.params
             .iter()
             .map(|p| Control {
-                name: p.name.into(),
+                name: tr(p.name).into(),
                 unit: p.unit.into(),
                 min: p.min as f32,
                 max: p.max as f32,
                 default: p.default as f32,
                 log: p.log,
-                choices: p.choices.iter().map(|c| c.to_string()).collect(),
+                choices: p.choices.iter().map(|c| tr(c).to_string()).collect(),
                 toggle: p.toggle,
                 hidden: p.hidden,
-                group: p.group.into(),
+                group: tr(p.group).into(),
             })
             .collect()
     })

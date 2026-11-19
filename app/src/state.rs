@@ -16,6 +16,7 @@ use af27_core::{AudioBuffer, History, MediaId, Range, Session};
 use af27_dsp::{Effect, Peaks};
 use af27_engine::Engine;
 
+use crate::i18n::tr;
 use crate::theme::Theme;
 
 pub type DocId = u64;
@@ -625,7 +626,7 @@ impl State {
         if let Some(m) = self.media_for_doc(doc) {
             if let Some(c) = self.session.add_clip(track, m, at) {
                 self.selected_clip = Some(c);
-                self.commit_session("Add clip", before);
+                self.commit_session(crate::i18n::mark("Add clip"), before);
             }
         }
     }
@@ -639,7 +640,9 @@ impl State {
                 .flat_map(|t| &t.clips)
                 .any(|c| self.media_docs.get(&c.media) == Some(&id));
         if used {
-            self.error("That file is used in the session. Remove its clips first.");
+            self.error(tr(
+                "That file is used in the session. Remove its clips first.",
+            ));
             return;
         }
         self.docs.retain(|d| d.id != id);
@@ -660,7 +663,7 @@ impl State {
                     .unwrap_or_default();
                 doc.dirty = false;
                 let n = doc.name.clone();
-                self.toast(format!("Saved {n}"));
+                self.toast(tr!("Saved {0}", n));
             }
             Err(e) => self.error(e),
         }
@@ -734,12 +737,12 @@ impl State {
                         _ => missing += 1,
                     }
                 }
-                self.toast(format!(
-                    "Opened {}",
+                self.toast(tr!(
+                    "Opened {0}",
                     path.file_name().unwrap_or_default().to_string_lossy()
                 ));
                 if missing > 0 {
-                    self.error(format!("{missing} media file(s) could not be found."));
+                    self.error(tr!("{0} media file(s) could not be found.", missing));
                 }
                 for n in notices {
                     self.toast(n);
@@ -769,9 +772,9 @@ impl State {
             Ok(()) => {
                 self.session_path = Some(path.clone());
                 self.session_dirty = false;
-                self.toast(format!("Saved {}", path.display()));
+                self.toast(tr!("Saved {0}", path.display()));
             }
-            Err(e) => self.error(format!("Could not save the session: {e}")),
+            Err(e) => self.error(tr!("Could not save the session: {0}", e)),
         }
     }
 
@@ -1000,7 +1003,7 @@ impl State {
                 match armed.or(self.selected_track) {
                     Some(t) => RecordTarget::Track(t, self.session_cursor),
                     None => {
-                        self.error("Arm a track (R) to record onto it.");
+                        self.error(tr("Arm a track (R) to record onto it."));
                         return;
                     }
                 }
@@ -1055,7 +1058,7 @@ impl State {
     pub fn apply_effect(&mut self, e: Effect) {
         let vals = self.effect_values(e);
         let Some(doc) = self.doc_mut() else {
-            self.error("Open a file in the Waveform editor first.");
+            self.error(tr("Open a file in the Waveform editor first."));
             return;
         };
         let r = doc.target();
@@ -1103,7 +1106,7 @@ impl State {
 
     pub fn edit_cut(&mut self) {
         self.edit_copy();
-        self.edit_delete("Cut");
+        self.edit_delete(crate::i18n::mark("Cut"));
     }
 
     pub fn edit_paste(&mut self) {
@@ -1124,7 +1127,7 @@ impl State {
         };
         b.insert(at, &c);
         let rate = b.rate as f64;
-        d.set_buffer("Paste", b);
+        d.set_buffer(crate::i18n::mark("Paste"), b);
         d.sel = Some((at as f64 / rate, (at + c.frames()) as f64 / rate));
     }
 
@@ -1132,7 +1135,7 @@ impl State {
         if let Some(d) = self.doc_mut() {
             if d.sel.is_some() {
                 let b = d.buf.slice(d.target());
-                d.set_buffer("Crop", b);
+                d.set_buffer(crate::i18n::mark("Crop"), b);
                 d.sel = None;
                 d.cursor = 0.0;
                 d.view = View::fit(d.duration());
@@ -1247,7 +1250,7 @@ impl State {
                 self.session
                     .markers
                     .sort_by(|a, b| a.time.total_cmp(&b.time));
-                self.commit_session("Add marker", before);
+                self.commit_session(crate::i18n::mark("Add marker"), before);
             }
         }
     }
@@ -1273,7 +1276,7 @@ impl State {
             any |= self.session.split_clip(c, t).is_some();
         }
         if any {
-            self.commit_session("Split", before);
+            self.commit_session(crate::i18n::mark("Split"), before);
         }
     }
 
@@ -1281,13 +1284,13 @@ impl State {
         if let Some(c) = self.selected_clip.take() {
             let before = self.session.clone();
             if self.session.remove_clip(c).is_some() {
-                self.commit_session("Delete clip", before);
+                self.commit_session(crate::i18n::mark("Delete clip"), before);
             } else if let Some((ti, ci)) = self.session.find_midi(c) {
                 self.session.tracks[ti].midi.remove(ci);
                 if self.piano_clip == Some(c) {
                     self.piano_clip = None;
                 }
-                self.commit_session("Delete MIDI clip", before);
+                self.commit_session(crate::i18n::mark("Delete MIDI clip"), before);
             }
         }
     }
@@ -1299,14 +1302,14 @@ impl State {
         if let Some(t) = self.session.track_mut(id) {
             t.color = self.theme.track_colors[n % self.theme.track_colors.len().max(1)];
         }
-        self.commit_session("Add track", before);
+        self.commit_session(crate::i18n::mark("Add track"), before);
     }
 
     pub fn export_mixdown(&mut self, path: PathBuf, fmt: af27_io::WavFormat) {
         let (from, to) = self.session_sel.unwrap_or((0.0, self.session.duration()));
         let buf = self.render_mix(from, to, false);
         match af27_io::write_wav(&path, &buf, fmt) {
-            Ok(()) => self.toast(format!("Exported {}", path.display())),
+            Ok(()) => self.toast(tr!("Exported {0}", path.display())),
             Err(e) => self.error(e),
         }
     }
@@ -1413,7 +1416,7 @@ impl State {
         if let Some(t) = self.session.track_mut(id) {
             t.color = self.theme.track_colors[n % self.theme.track_colors.len().max(1)];
         }
-        self.commit_session("Add track", before);
+        self.commit_session(crate::i18n::mark("Add track"), before);
         self.selected_track = Some(id);
         id
     }

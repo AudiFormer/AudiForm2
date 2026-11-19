@@ -184,10 +184,7 @@ fn load(code: &str) -> Option<&'static Lang> {
     if let Some(l) = map.get(code) {
         return Some(l);
     }
-    let built_in = BUILT_IN
-        .iter()
-        .find(|(c, _)| *c == code)
-        .map(|(_, t)| *t);
+    let built_in = BUILT_IN.iter().find(|(c, _)| *c == code).map(|(_, t)| *t);
     let user = std::fs::read_to_string(user_dir().join(format!("{code}.lang"))).ok();
     if built_in.is_none() && user.is_none() {
         return None;
@@ -274,7 +271,8 @@ fn unescape(s: &str) -> String {
     out
 }
 
-/// Writes `s` as one half of a language file line.
+/// Writes `s` as one half of a language file line (for the template).
+#[cfg(test)]
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {

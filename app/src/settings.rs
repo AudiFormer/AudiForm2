@@ -10,6 +10,7 @@
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Sense};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{mark, tr};
 use crate::keymap::{Binding, Cmd, Keymap};
 use crate::state::{data_dir, State};
 use crate::theme::{c, ca, Hues, Rgb, Theme};
@@ -114,41 +115,41 @@ use crate::zoom::{WheelAnchor, ZoomPrefs};
 // ------------------------------------------------------------ the window
 
 const PAGES: [&str; 18] = [
-    "General",
-    "Appearance",
-    "Audio Devices",
-    "Channel Routing",
-    "Autosave",
-    "Session Media",
-    "Editing",
-    "Effects",
-    "Audio Separation",
-    "Cache and Files",
-    "Markers",
-    "Multitrack",
-    "Clips",
-    "Playback and Recording",
-    "Spectrum Views",
-    "Time Display",
-    "Loudness",
-    "Privacy",
+    mark("General"),
+    mark("Appearance"),
+    mark("Audio Devices"),
+    mark("Channel Routing"),
+    mark("Autosave"),
+    mark("Session Media"),
+    mark("Editing"),
+    mark("Effects"),
+    mark("Audio Separation"),
+    mark("Cache and Files"),
+    mark("Markers"),
+    mark("Multitrack"),
+    mark("Clips"),
+    mark("Playback and Recording"),
+    mark("Spectrum Views"),
+    mark("Time Display"),
+    mark("Loudness"),
+    mark("Privacy"),
 ];
 
 /// What each page will hold that AudiForm 2 cannot do yet.
-fn coming(page: &str) -> &'static [&'static str] {
+fn coming(page: &str) -> Vec<&'static str> {
     match page {
-        "Audio Devices" => &["Choosing the output device for playback, previews and monitoring (falling back to the system default when it is unplugged)."],
-        "Editing" => &["The shape new fades start as: straight, or a curve smooth at both ends."],
-        "Multitrack" => &["Exclusive solo: soloing one track un-solos the others, in one undoable step."],
-        "Clips" => &["Clip auto-crossfade where clips overlap."],
-        "Playback and Recording" => &[
-            "Meter yellow and red levels.",
-            "Recording latency offset, punch-in and pre-roll.",
+        "Audio Devices" => vec![mark("Choosing the output device for playback, previews and monitoring (falling back to the system default when it is unplugged).")],
+        "Editing" => vec![mark("The shape new fades start as: straight, or a curve smooth at both ends.")],
+        "Multitrack" => vec![mark("Exclusive solo: soloing one track un-solos the others, in one undoable step.")],
+        "Clips" => vec![mark("Clip auto-crossfade where clips overlap.")],
+        "Playback and Recording" => vec![
+            mark("Meter yellow and red levels."),
+            mark("Recording latency offset, punch-in and pre-roll."),
         ],
-        "Time Display" => &["The time format (decimal, samples, bars and beats, SMPTE)."],
-        "Loudness" => &["The loudness region and target."],
-        "Cache and Files" => &["Cache sizes, and clearing the waveform drawings (they are rebuilt on demand)."],
-        _ => &[],
+        "Time Display" => vec![mark("The time format (decimal, samples, bars and beats, SMPTE).")],
+        "Loudness" => vec![mark("The loudness region and target.")],
+        "Cache and Files" => vec![mark("Cache sizes, and clearing the waveform drawings (they are rebuilt on demand).")],
+        _ => Vec::new(),
     }
 }
 
@@ -197,6 +198,7 @@ impl Draft {
                 self.intro = base.is_none_or(|t| t.intro);
                 self.realistic = base.is_none_or(|t| t.realistic);
                 self.prefs.colors = d.colors;
+                self.prefs.language = d.language;
             }
             "Autosave" => {
                 self.prefs.autosave = d.autosave;
@@ -273,7 +275,8 @@ impl SettingsUi {
         let size = vec2(820.0, 540.0)
             .min(ctx.screen_rect().size() - vec2(40.0, 60.0))
             .max(vec2(520.0, 360.0));
-        egui::Window::new("Settings")
+        egui::Window::new(tr("Settings"))
+            .id(egui::Id::new("settings-window"))
             .open(&mut window_open)
             .collapsible(false)
             .resizable(false)
@@ -288,7 +291,7 @@ impl SettingsUi {
                         hairline(ui, &th);
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Reset This Page").clicked() {
+                            if ui.button(tr("Reset This Page")).clicked() {
                                 draft.reset_page(PAGES[self.page], st);
                             }
                             ui.with_layout(
@@ -302,10 +305,10 @@ impl SettingsUi {
                                         apply = true;
                                         close = true;
                                     }
-                                    if ui.button("Apply").clicked() {
+                                    if ui.button(tr("Apply")).clicked() {
                                         apply = true;
                                     }
-                                    if ui.button("Cancel").clicked() {
+                                    if ui.button(tr("Cancel")).clicked() {
                                         close = true;
                                     }
                                 },
@@ -322,7 +325,7 @@ impl SettingsUi {
                             .id_salt("settings-nav-scroll")
                             .show(ui, |ui| {
                                 for (i, name) in PAGES.iter().enumerate() {
-                                    if nav_item(ui, name, i == self.page, &th) {
+                                    if nav_item(ui, tr(name), i == self.page, &th) {
                                         self.page = i;
                                     }
                                 }
@@ -337,7 +340,7 @@ impl SettingsUi {
                     }))
                     .show_inside(ui, |ui| {
                         let name = PAGES[self.page];
-                        ui.label(RichText::new(name).size(19.0).color(c(th.text)));
+                        ui.label(RichText::new(tr(name)).size(19.0).color(c(th.text)));
                         ui.add_space(4.0);
                         hairline(ui, &th);
                         ui.add_space(8.0);
@@ -350,14 +353,19 @@ impl SettingsUi {
                                 if !todo.is_empty() {
                                     ui.add_space(10.0);
                                     for t in todo {
-                                        note(ui, &th, &format!("Coming: {t}"));
+                                        note(ui, &th, &tr!("Coming: {0}", tr(t)));
                                     }
                                 }
                             });
                     });
             });
         if apply {
+            let language = st.prefs.language.clone();
             draft.apply(st);
+            if st.prefs.language != language {
+                crate::i18n::set(st.prefs.language.as_deref());
+                crate::skin::install_fallback_fonts(ctx);
+            }
             st.zoom = draft.zoom;
             st.zoom.save();
         }
@@ -374,7 +382,7 @@ impl SettingsUi {
 fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
     match name {
         "General" => {
-            group(ui, th, "Workspace", |ui| {
+            group(ui, th, tr("Workspace"), |ui| {
                 egui::ComboBox::from_id_salt("settings-workspace")
                     .selected_text(d.workspace.name())
                     .width(220.0)
@@ -384,84 +392,84 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                                 .on_hover_text(w.about());
                         }
                     });
-                note(ui, th, "The arrangement of panels the window opens with. Each workspace keeps its own layout as you leave it.");
+                note(ui, th, tr("The arrangement of panels the window opens with. Each workspace keeps its own layout as you leave it."));
             });
-            group(ui, th, "Mouse wheel", |ui| {
+            group(ui, th, tr("Mouse wheel"), |ui| {
                 ui.checkbox(
                     &mut d.zoom.wheel_zooms_waveform,
-                    "The mouse wheel over the waveform zooms in time (Waveform editor; in the Multitrack the wheel zooms over the ruler and scrolls over the tracks)",
+                    tr("The mouse wheel over the waveform zooms in time (Waveform editor; in the Multitrack the wheel zooms over the ruler and scrolls over the tracks)"),
                 );
                 ui.horizontal(|ui| {
-                    ui.label("Each wheel step zooms by");
+                    ui.label(tr("Each wheel step zooms by"));
                     ui.add(
                         egui::DragValue::new(&mut d.zoom.step_percent)
                             .range(2.0..=100.0)
                             .speed(0.5)
                             .max_decimals(0),
                     );
-                    ui.label("% a step");
+                    ui.label(tr("% a step"));
                 });
             });
-            group(ui, th, "Wheel zoom centers on", |ui| {
+            group(ui, th, tr("Wheel zoom centers on"), |ui| {
                 for (a, label) in [
-                    (WheelAnchor::Pointer, "The mouse pointer"),
+                    (WheelAnchor::Pointer, mark("The mouse pointer")),
                     (
                         WheelAnchor::BetweenPointerAndMiddle,
-                        "Between the pointer and the middle of the view (drifts less)",
+                        mark("Between the pointer and the middle of the view (drifts less)"),
                     ),
-                    (WheelAnchor::Playhead, "The playhead"),
+                    (WheelAnchor::Playhead, mark("The playhead")),
                 ] {
-                    ui.radio_value(&mut d.zoom.wheel_anchor, a, label);
+                    ui.radio_value(&mut d.zoom.wheel_anchor, a, tr(label));
                 }
             });
-            group(ui, th, "Draw the window with", |ui| {
+            group(ui, th, tr("Draw the window with"), |ui| {
                 ui.radio_value(
                     &mut d.prefs.renderer,
                     Renderer::Wgpu,
-                    "The graphics card, modern way (DirectX 12, Vulkan or Metal)",
+                    tr("The graphics card, modern way (DirectX 12, Vulkan or Metal)"),
                 );
                 ui.radio_value(
                     &mut d.prefs.renderer,
                     Renderer::Glow,
-                    "OpenGL (for older or virtual graphics drivers)",
+                    tr("OpenGL (for older or virtual graphics drivers)"),
                 );
-                note(ui, th, "Takes effect the next time AudiForm 2 starts. If the modern way cannot start, OpenGL is used on its own.");
+                note(ui, th, tr("Takes effect the next time AudiForm 2 starts. If the modern way cannot start, OpenGL is used on its own."));
             });
         }
         "Appearance" => appearance(ui, d, st, th),
         "Audio Devices" => {
-            group(ui, th, "Output", |ui| {
+            group(ui, th, tr("Output"), |ui| {
                 match (&st.engine, &st.engine_error) {
                     (Some(e), _) => {
-                        info(ui, th, "Device", &e.device);
-                        info(ui, th, "Sample rate", &format!("{} Hz", e.rate));
-                        note(ui, th, "Playback, previews and monitoring use the system's default output device.");
+                        info(ui, th, tr("Device"), &e.device);
+                        info(ui, th, tr("Sample rate"), &format!("{} Hz", e.rate));
+                        note(ui, th, tr("Playback, previews and monitoring use the system's default output device."));
                     }
                     (None, Some(err)) => {
                         ui.label(RichText::new(err).color(c(th.accent_alt)));
                     }
-                    _ => note(ui, th, "No audio output is open."),
+                    _ => note(ui, th, tr("No audio output is open.")),
                 }
             });
         }
         "Autosave" => {
-            group(ui, th, "Autosave", |ui| {
+            group(ui, th, tr("Autosave"), |ui| {
                 ui.checkbox(
                     &mut d.prefs.autosave,
-                    "Save a copy of an unsaved Multitrack session on its own",
+                    tr("Save a copy of an unsaved Multitrack session on its own"),
                 );
                 ui.add_enabled_ui(d.prefs.autosave, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Every");
+                        ui.label(tr("Every"));
                         ui.add(
                             egui::DragValue::new(&mut d.prefs.autosave_minutes)
                                 .range(1..=60)
                                 .speed(0.2),
                         );
                         ui.label(if d.prefs.autosave_minutes == 1 {
-                            "minute"
+                            tr("minute")
                         } else {
-                            "minutes"
+                            tr("minutes")
                         });
                     });
                 });
@@ -469,28 +477,28 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                 note(
                     ui,
                     th,
-                    &format!(
-                        "The copy goes to {}; your own file is never touched.",
+                    &tr!(
+                        "The copy goes to {0}; your own file is never touched.",
                         p.display()
                     ),
                 );
             });
         }
         "Effects" => {
-            group(ui, th, "Effects menu", |ui| {
+            group(ui, th, tr("Effects menu"), |ui| {
                 ui.checkbox(
                     &mut d.prefs.show_effects_on_pick,
-                    "Bring up the Effects panel when you pick an effect from the Effects menu",
+                    tr("Bring up the Effects panel when you pick an effect from the Effects menu"),
                 );
                 note(
                     ui,
                     th,
-                    "Off: the effect is chosen in the Effects panel, ready for when you go to it.",
+                    tr("Off: the effect is chosen in the Effects panel, ready for when you go to it."),
                 );
             });
         }
         "Audio Separation" => {
-            group(ui, th, "Model folders", |ui| {
+            group(ui, th, tr("Model folders"), |ui| {
                 info(ui, th, "AudiForm 2", &st.sep_dirs.own.display().to_string());
                 if let Some(l) = &st.sep_dirs.legacy {
                     info(ui, th, "Audiform", &l.display().to_string());
@@ -498,20 +506,20 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                 note(
                     ui,
                     th,
-                    "Stem separation models are looked for in these folders.",
+                    tr("Stem separation models are looked for in these folders."),
                 );
             });
         }
         "Cache and Files" => {
-            group(ui, th, "Data folder", |ui| {
+            group(ui, th, tr("Data folder"), |ui| {
                 let dir = data_dir();
                 ui.label(RichText::new(dir.display().to_string()).monospace());
-                note(ui, th, "Themes, layouts, keyboard shortcuts, these settings and autosaves are kept here.");
+                note(ui, th, tr("Themes, layouts, keyboard shortcuts, these settings and autosaves are kept here."));
                 ui.horizontal(|ui| {
-                    if ui.button("Copy Path").clicked() {
+                    if ui.button(tr("Copy Path")).clicked() {
                         ui.ctx().copy_text(dir.display().to_string());
                     }
-                    if ui.button("Open Folder").clicked() {
+                    if ui.button(tr("Open Folder")).clicked() {
                         let _ = std::fs::create_dir_all(&dir);
                         let opener = if cfg!(windows) {
                             "explorer"
@@ -526,42 +534,76 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
             });
         }
         "Playback and Recording" => {
-            group(ui, th, "The space bar while playing", |ui| {
+            group(ui, th, tr("The space bar while playing"), |ui| {
                 ui.radio_value(
                     &mut d.prefs.space_returns,
                     true,
-                    "Stops and goes back to where play started",
+                    tr("Stops and goes back to where play started"),
                 );
-                ui.radio_value(&mut d.prefs.space_returns, false, "Pauses where it is");
+                ui.radio_value(&mut d.prefs.space_returns, false, tr("Pauses where it is"));
             });
-            group(ui, th, "While playing", |ui| {
+            group(ui, th, tr("While playing"), |ui| {
                 ui.checkbox(
                     &mut d.prefs.follow_playhead,
-                    "Follow the playhead: the view scrolls along when it reaches the edge",
+                    tr("Follow the playhead: the view scrolls along when it reaches the edge"),
                 );
             });
         }
         _ => {
             if coming(name).is_empty() {
-                note(
-                    ui,
-                    th,
-                    &format!("Settings for {} are coming.", name.to_lowercase()),
-                );
+                note(ui, th, &tr!("Settings for {0} are coming.", tr(name)));
             }
         }
     }
 }
 
+/// The languages there are, read once (a language file added to the
+/// settings folder shows up after a restart).
+fn languages() -> &'static [(String, String)] {
+    static L: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    L.get_or_init(crate::i18n::languages)
+}
+
 fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
-    group(ui, th, "Theme", |ui| {
+    group(ui, th, tr("Language"), |ui| {
+        let langs = languages();
+        let name_of = |code: &str| {
+            langs
+                .iter()
+                .find(|(c, _)| c == code)
+                .map_or(code.to_string(), |(_, n)| n.clone())
+        };
+        let system = tr!(
+            "System default ({0})",
+            name_of(&crate::i18n::system_language())
+        );
+        let shown = match &d.prefs.language {
+            Some(code) => name_of(code),
+            None => system.clone(),
+        };
+        egui::ComboBox::from_id_salt("settings-language")
+            .selected_text(shown)
+            .width(240.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut d.prefs.language, None, system);
+                for (code, name) in langs {
+                    ui.selectable_value(&mut d.prefs.language, Some(code.clone()), name);
+                }
+            });
+        note(
+            ui,
+            th,
+            tr("The language of menus, panels and messages. Shortcut keys stay the same."),
+        );
+    });
+    group(ui, th, tr("Theme"), |ui| {
         let shown = st
             .themes
             .iter()
             .find(|t| t.name == d.theme)
             .map_or(d.theme.clone(), |t| {
                 if t.hidden {
-                    "Secret Theme".into()
+                    tr("Secret Theme").into()
                 } else {
                     t.name.clone()
                 }
@@ -575,7 +617,11 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                     if t.hidden && t.name != d.theme {
                         continue;
                     }
-                    let label = if t.hidden { "Secret Theme" } else { &t.name };
+                    let label = if t.hidden {
+                        tr("Secret Theme")
+                    } else {
+                        &t.name
+                    };
                     ui.selectable_value(&mut d.theme, t.name.clone(), label);
                 }
             });
@@ -594,21 +640,21 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
         .find(|t| t.name == d.theme)
         .cloned()
         .unwrap_or_else(|| st.theme_base.clone());
-    group(ui, th, "Theme colours", |ui| {
+    group(ui, th, tr("Theme colours"), |ui| {
         note(
             ui,
             th,
-            &format!("Turn the colours of {} to your own hues.", base.name),
+            &tr!("Turn the colours of {0} to your own hues.", base.name),
         );
         let mut own = d.hues.is_some();
-        if ui.checkbox(&mut own, "Use my own hues").changed() {
+        if ui.checkbox(&mut own, tr("Use my own hues")).changed() {
             d.hues = own.then(|| base.hues());
         }
         if let Some(h) = &mut d.hues {
             for (label, value, sat, val) in [
-                ("Main light", &mut h.primary, 1.0, 1.0),
-                ("Second light", &mut h.secondary, 0.82, 1.0),
-                ("Base tint", &mut h.surface, 0.6, 0.35),
+                (mark("Main light"), &mut h.primary, 1.0, 1.0),
+                (mark("Second light"), &mut h.secondary, 0.82, 1.0),
+                (mark("Base tint"), &mut h.surface, 0.6, 0.35),
             ] {
                 ui.horizontal(|ui| {
                     let sw = crate::theme::from_hsv(*value, sat, val);
@@ -617,19 +663,19 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                     ui.add(
                         egui::Slider::new(value, 0.0..=359.0)
                             .suffix("°")
-                            .text(label),
+                            .text(tr(label)),
                     );
                 });
             }
             ui.horizontal(|ui| {
                 for (name, p, s, u) in [
-                    ("Ice", 187.0, 325.0, 228.0),
-                    ("Toxic", 105.0, 285.0, 150.0),
-                    ("Ember", 22.0, 350.0, 15.0),
-                    ("Ultraviolet", 275.0, 190.0, 260.0),
-                    ("Gold", 45.0, 200.0, 220.0),
+                    (mark("Ice"), 187.0, 325.0, 228.0),
+                    (mark("Toxic"), 105.0, 285.0, 150.0),
+                    (mark("Ember"), 22.0, 350.0, 15.0),
+                    (mark("Ultraviolet"), 275.0, 190.0, 260.0),
+                    (mark("Gold"), 45.0, 200.0, 220.0),
                 ] {
-                    if ui.small_button(name).clicked() {
+                    if ui.small_button(tr(name)).clicked() {
                         *h = Hues {
                             primary: p,
                             secondary: s,
@@ -640,11 +686,11 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
             });
         }
     });
-    group(ui, th, "Colour overrides", |ui| {
+    group(ui, th, tr("Colour overrides"), |ui| {
         note(
             ui,
             th,
-            "Single colours of your own, laid over whichever theme is on.",
+            tr("Single colours of your own, laid over whichever theme is on."),
         );
         let fresh = match &d.hues {
             Some(h) => base.with_hues(h),
@@ -652,14 +698,14 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
         };
         let o = &mut d.prefs.colors;
         for (label, slot, theirs) in [
-            ("Waveform", &mut o.waveform, fresh.wave_peak),
-            ("Playhead", &mut o.playhead, fresh.playhead),
-            ("Accent", &mut o.accent, fresh.accent),
-            ("Selection", &mut o.selection, fresh.selection),
+            (mark("Waveform"), &mut o.waveform, fresh.wave_peak),
+            (mark("Playhead"), &mut o.playhead, fresh.playhead),
+            (mark("Accent"), &mut o.accent, fresh.accent),
+            (mark("Selection"), &mut o.selection, fresh.selection),
         ] {
             ui.horizontal(|ui| {
                 let mut on = slot.is_some();
-                if ui.checkbox(&mut on, label).changed() {
+                if ui.checkbox(&mut on, tr(label)).changed() {
                     *slot = on.then_some(theirs);
                 }
                 if let Some(col) = slot {
@@ -667,32 +713,36 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                 } else {
                     let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                     ui.painter().rect_filled(r, 2.0, c(theirs));
-                    ui.label(RichText::new("the theme's").small().color(c(th.text_dim)));
+                    ui.label(
+                        RichText::new(tr("the theme's"))
+                            .small()
+                            .color(c(th.text_dim)),
+                    );
                 }
             });
         }
     });
-    group(ui, th, "Visual effects", |ui| {
+    group(ui, th, tr("Visual effects"), |ui| {
         for (m, label) in [
-            (0u8, "Auto: every effect, cut back on its own if this device draws slowly"),
-            (1, "Full: every effect, always"),
-            (2, "Lite: no moving backdrop, glow or scan lines (lightest on slow or battery-powered devices)"),
+            (0u8, mark("Auto: every effect, cut back on its own if this device draws slowly")),
+            (1, mark("Full: every effect, always")),
+            (2, mark("Lite: no moving backdrop, glow or scan lines (lightest on slow or battery-powered devices)")),
         ] {
-            ui.radio_value(&mut d.visuals, m, label);
+            ui.radio_value(&mut d.visuals, m, tr(label));
         }
         if d.visuals == 0 && st.visuals_lite {
-            note(ui, th, "Auto chose Lite for this device.");
+            note(ui, th, tr("Auto chose Lite for this device."));
         }
     });
-    group(ui, th, "Start-up and surfaces", |ui| {
+    group(ui, th, tr("Start-up and surfaces"), |ui| {
         ui.checkbox(
             &mut d.intro,
-            "Play the boot sequence when AudiForm 2 starts",
+            tr("Play the boot sequence when AudiForm 2 starts"),
         );
         if !base.columns.is_empty() {
             ui.checkbox(
                 &mut d.realistic,
-                "Draw the columns and tiles as real marble and glazed ceramic",
+                tr("Draw the columns and tiles as real marble and glazed ceramic"),
             );
         }
     });
@@ -801,7 +851,8 @@ impl ShortcutsUi {
         }
         let mut open = true;
         let mut changed = false;
-        egui::Window::new("Keyboard Shortcuts")
+        egui::Window::new(tr("Keyboard Shortcuts"))
+            .id(egui::Id::new("shortcuts-window"))
             .open(&mut open)
             .collapsible(false)
             .default_size(vec2(560.0, 560.0))
@@ -809,14 +860,14 @@ impl ShortcutsUi {
             .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Search").color(c(th.text_dim)));
+                    ui.label(RichText::new(tr("Search")).color(c(th.text_dim)));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
-                            .hint_text("a command or a key")
+                            .hint_text(tr("a command or a key"))
                             .desired_width(ui.available_width()),
                     );
                 });
-                note(ui, th, "Click a key to change it, then press the new combination. + adds another key; right-click a key to remove it.");
+                note(ui, th, tr("Click a key to change it, then press the new combination. + adds another key; right-click a key to remove it."));
                 ui.add_space(4.0);
                 hairline(ui, th);
                 let conflicts = km.conflicts();
@@ -827,25 +878,25 @@ impl ShortcutsUi {
                         hairline(ui, th);
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Reset to Defaults").clicked() {
+                            if ui.button(tr("Reset to Defaults")).clicked() {
                                 *km = Keymap::default();
                                 self.capture = None;
                                 changed = true;
                             }
                             if !conflicts.is_empty() {
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{} key{} used twice",
-                                        conflicts.len(),
-                                        if conflicts.len() == 1 { "" } else { "s" }
-                                    ))
+                                    RichText::new(if conflicts.len() == 1 {
+                                        tr("1 key used twice").to_string()
+                                    } else {
+                                        tr!("Keys used twice: {0}", conflicts.len())
+                                    })
                                     .color(c(th.accent_alt)),
                                 );
                             }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("Close").clicked() {
+                                    if ui.button(tr("Close")).clicked() {
                                         self.open = false;
                                     }
                                 },
@@ -927,10 +978,10 @@ impl ShortcutsUi {
                     .add(egui::Button::new(
                         RichText::new(b.to_string()).monospace().color(col),
                     ))
-                    .on_hover_text("Click to change; right-click to remove");
+                    .on_hover_text(tr("Click to change; right-click to remove"));
                 if !clash.is_empty() {
                     let names: Vec<&str> = clash.iter().map(|c| c.label()).collect();
-                    r = r.on_hover_text(format!("Also runs: {}", names.join(", ")));
+                    r = r.on_hover_text(tr!("Also runs: {0}", names.join(", ")));
                 }
                 if r.clicked() {
                     r.surrender_focus();
@@ -944,19 +995,19 @@ impl ShortcutsUi {
                 waiting(ui, th);
             } else if ui
                 .small_button("+")
-                .on_hover_text("Add another key")
+                .on_hover_text(tr("Add another key"))
                 .clicked()
             {
                 self.capture = Some((cmd, keys.len()));
             }
             if self.capture.is_some_and(|(c, _)| c == cmd) {
-                if ui.small_button("Cancel").clicked() {
+                if ui.small_button(tr("Cancel")).clicked() {
                     self.capture = None;
                 }
             } else if keys != cmd.defaults().as_slice()
                 && ui
                     .small_button("↺")
-                    .on_hover_text("Back to this command's default keys")
+                    .on_hover_text(tr("Back to this command's default keys"))
                     .clicked()
             {
                 km.reset(cmd);
@@ -973,7 +1024,7 @@ impl ShortcutsUi {
 
 fn waiting(ui: &mut egui::Ui, th: &Theme) {
     ui.add(
-        egui::Button::new(RichText::new("Press keys...").color(c(th.background)))
+        egui::Button::new(RichText::new(tr("Press keys...")).color(c(th.background)))
             .fill(c(th.accent)),
     );
 }

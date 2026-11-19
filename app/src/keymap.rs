@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use egui::{Key, Modifiers};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
+
 /// A command a shortcut can run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Cmd {
@@ -88,48 +90,51 @@ impl Cmd {
         Cmd::TimeSelectTool,
     ];
 
+    /// The name shown, in the current language (the saved map uses the
+    /// variant names instead).
     pub fn label(self) -> &'static str {
         match self {
-            Cmd::NewFile => "New Audio File",
-            Cmd::Open => "Open...",
-            Cmd::Save => "Save",
-            Cmd::Undo => "Undo",
-            Cmd::Redo => "Redo",
-            Cmd::Cut => "Cut",
-            Cmd::Copy => "Copy",
-            Cmd::Paste => "Paste",
-            Cmd::Crop => "Crop",
-            Cmd::SelectAll => "Select All",
-            Cmd::Delete => "Delete",
-            Cmd::AddMarker => "Add Marker",
-            Cmd::ClearSelection => "Deselect",
-            Cmd::KeyboardShortcuts => "Keyboard Shortcuts...",
-            Cmd::Preferences => "Preferences...",
-            Cmd::SplitAtPlayhead => "Split at Playhead",
-            Cmd::Invert => "Invert",
-            Cmd::Reverse => "Reverse",
-            Cmd::Silence => "Silence",
-            Cmd::MatchLoudness => "Match Loudness",
-            Cmd::AutoHeal => "Auto Heal Selection",
-            Cmd::PlayStop => "Play / Stop",
-            Cmd::Record => "Record",
-            Cmd::Loop => "Loop Playback",
-            Cmd::ToStart => "Move Playhead to Start",
-            Cmd::ToEnd => "Move Playhead to End",
-            Cmd::WaveformView => "Waveform Editor",
-            Cmd::MultitrackView => "Multitrack Editor",
-            Cmd::ZoomIn => "Zoom In",
-            Cmd::ZoomOut => "Zoom Out",
-            Cmd::ZoomFull => "Zoom Out Full",
-            Cmd::MoveTool => "Move Tool",
-            Cmd::RazorTool => "Razor Tool",
-            Cmd::TimeSelectTool => "Time Selection Tool",
+            Cmd::NewFile => tr("New Audio File"),
+            Cmd::Open => tr("Open..."),
+            Cmd::Save => tr("Save"),
+            Cmd::Undo => tr("Undo"),
+            Cmd::Redo => tr("Redo"),
+            Cmd::Cut => tr("Cut"),
+            Cmd::Copy => tr("Copy"),
+            Cmd::Paste => tr("Paste"),
+            Cmd::Crop => tr("Crop"),
+            Cmd::SelectAll => tr("Select All"),
+            Cmd::Delete => tr("Delete"),
+            Cmd::AddMarker => tr("Add Marker"),
+            Cmd::ClearSelection => tr("Deselect"),
+            Cmd::KeyboardShortcuts => tr("Keyboard Shortcuts..."),
+            Cmd::Preferences => tr("Preferences..."),
+            Cmd::SplitAtPlayhead => tr("Split at Playhead"),
+            Cmd::Invert => tr("Invert"),
+            Cmd::Reverse => tr("Reverse"),
+            Cmd::Silence => tr("Silence"),
+            Cmd::MatchLoudness => tr("Match Loudness"),
+            Cmd::AutoHeal => tr("Auto Heal Selection"),
+            Cmd::PlayStop => tr("Play / Stop"),
+            Cmd::Record => tr("Record"),
+            Cmd::Loop => tr("Loop Playback"),
+            Cmd::ToStart => tr("Move Playhead to Start"),
+            Cmd::ToEnd => tr("Move Playhead to End"),
+            Cmd::WaveformView => tr("Waveform Editor"),
+            Cmd::MultitrackView => tr("Multitrack Editor"),
+            Cmd::ZoomIn => tr("Zoom In"),
+            Cmd::ZoomOut => tr("Zoom Out"),
+            Cmd::ZoomFull => tr("Zoom Out Full"),
+            Cmd::MoveTool => tr("Move Tool"),
+            Cmd::RazorTool => tr("Razor Tool"),
+            Cmd::TimeSelectTool => tr("Time Selection Tool"),
         }
     }
 
+    /// The heading shown above it, in the current language.
     pub fn group(self) -> &'static str {
         match self {
-            Cmd::NewFile | Cmd::Open | Cmd::Save => "File",
+            Cmd::NewFile | Cmd::Open | Cmd::Save => tr("File"),
             Cmd::Undo
             | Cmd::Redo
             | Cmd::Cut
@@ -141,18 +146,18 @@ impl Cmd {
             | Cmd::AddMarker
             | Cmd::ClearSelection
             | Cmd::KeyboardShortcuts
-            | Cmd::Preferences => "Edit",
-            Cmd::SplitAtPlayhead => "Multitrack",
+            | Cmd::Preferences => tr("Edit"),
+            Cmd::SplitAtPlayhead => tr("Multitrack"),
             Cmd::Invert | Cmd::Reverse | Cmd::Silence | Cmd::MatchLoudness | Cmd::AutoHeal => {
-                "Effects"
+                tr("Effects")
             }
-            Cmd::PlayStop | Cmd::Record | Cmd::Loop | Cmd::ToStart | Cmd::ToEnd => "Transport",
+            Cmd::PlayStop | Cmd::Record | Cmd::Loop | Cmd::ToStart | Cmd::ToEnd => tr("Transport"),
             Cmd::WaveformView
             | Cmd::MultitrackView
             | Cmd::ZoomIn
             | Cmd::ZoomOut
-            | Cmd::ZoomFull => "View",
-            Cmd::MoveTool | Cmd::RazorTool | Cmd::TimeSelectTool => "Tools",
+            | Cmd::ZoomFull => tr("View"),
+            Cmd::MoveTool | Cmd::RazorTool | Cmd::TimeSelectTool => tr("Tools"),
         }
     }
 

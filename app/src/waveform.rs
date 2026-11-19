@@ -16,6 +16,7 @@
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Rounding, Sense, Shape, Stroke};
 
+use crate::i18n::tr;
 use crate::state::{State, View};
 use crate::theme::{c, ca, Theme};
 use crate::ui::Caches;
@@ -284,8 +285,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         empty_state(
             ui,
             &th,
-            "Open or drop an audio file to start",
-            "Ctrl+O to open • WAV, FLAC, MP3, OGG, M4A, AIFF, MOGG, DTS WAV and more",
+            tr("Open or drop an audio file to start"),
+            tr("Ctrl+O to open • WAV, FLAC, MP3, OGG, M4A, AIFF, MOGG, DTS WAV and more"),
         );
         return;
     }
@@ -718,18 +719,18 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
             return;
         }
         let s = &mut st.spec;
-        if ui.button("Zoom In (Frequency)").clicked() {
+        if ui.button(tr("Zoom In (Frequency)")).clicked() {
             s.zoom_step(true, ny);
             ui.close_menu();
         }
-        if ui.button("Zoom Out (Frequency)").clicked() {
+        if ui.button(tr("Zoom Out (Frequency)")).clicked() {
             s.zoom_step(false, ny);
             ui.close_menu();
         }
         if ui
             .add_enabled(
                 s.range.is_some(),
-                egui::Button::new("Zoom Reset (Frequency)"),
+                egui::Button::new(tr("Zoom Reset (Frequency)")),
             )
             .clicked()
         {
@@ -737,11 +738,11 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
             ui.close_menu();
         }
         ui.separator();
-        if ui.radio(!s.notes, "Hertz").clicked() {
+        if ui.radio(!s.notes, tr("Hertz")).clicked() {
             s.notes = false;
             ui.close_menu();
         }
-        if ui.radio(s.notes, "Notes").clicked() {
+        if ui.radio(s.notes, tr("Notes")).clicked() {
             s.notes = true;
             ui.close_menu();
         }
@@ -749,26 +750,26 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
         let full_log = s.log_step == crate::zoom::LOG_STEPS;
         let full_lin = s.log_step == 0;
         if ui
-            .add_enabled(!full_log, egui::Button::new("More Logarithmic"))
+            .add_enabled(!full_log, egui::Button::new(tr("More Logarithmic")))
             .clicked()
         {
             s.more_log();
         }
         if ui
-            .add_enabled(!full_lin, egui::Button::new("More Linear"))
+            .add_enabled(!full_lin, egui::Button::new(tr("More Linear")))
             .clicked()
         {
             s.more_linear();
         }
         if ui
-            .add_enabled(!full_log, egui::Button::new("Full Logarithmic"))
+            .add_enabled(!full_log, egui::Button::new(tr("Full Logarithmic")))
             .clicked()
         {
             s.log_step = crate::zoom::LOG_STEPS;
             ui.close_menu();
         }
         if ui
-            .add_enabled(!full_lin, egui::Button::new("Full Linear"))
+            .add_enabled(!full_lin, egui::Button::new(tr("Full Linear")))
             .clicked()
         {
             s.log_step = 0;
@@ -778,7 +779,7 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
         if ui
             .add_enabled(
                 s.fft < crate::zoom::FFT_MAX,
-                egui::Button::new("Increase Spectral Resolution"),
+                egui::Button::new(tr("Increase Spectral Resolution")),
             )
             .clicked()
         {
@@ -787,14 +788,14 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
         if ui
             .add_enabled(
                 s.fft > crate::zoom::FFT_MIN,
-                egui::Button::new("Decrease Spectral Resolution"),
+                egui::Button::new(tr("Decrease Spectral Resolution")),
             )
             .clicked()
         {
             s.coarser();
         }
         ui.label(
-            egui::RichText::new(format!("Analysis frame: {} samples", s.fft))
+            egui::RichText::new(tr!("Analysis frame: {0} samples", s.fft))
                 .small()
                 .weak(),
         );

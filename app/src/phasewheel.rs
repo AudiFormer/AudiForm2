@@ -21,9 +21,20 @@
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense, Stroke};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{mark, tr};
 use crate::state::{data_dir, State};
 use crate::theme::{c, Rgb};
 use af27_dsp::phase::{analyse, Bin, Signal, RATES, SIZES};
+
+/// The signal names from `af27_dsp::phase::Signal::label`, translated
+/// where they are drawn.
+#[allow(dead_code)]
+const SIGNAL_NAMES: [&str; 4] = [
+    mark("Left"),
+    mark("Right"),
+    mark("Mid (L+R)"),
+    mark("Side (L-R)"),
+];
 
 pub const PHASE_LOW: Rgb = [0xff, 0x2a, 0x2a];
 pub const PHASE_HIGH: Rgb = [0xe0, 0x2a, 0xff];
@@ -401,14 +412,14 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, cache: &mut WheelCache) {
     p.text(
         pos2(mid.x, sq.top() + 11.0),
         Align2::CENTER_BOTTOM,
-        "in phase",
+        tr("in phase"),
         font.clone(),
         lab,
     );
     p.text(
         pos2(mid.x, sq.bottom() - 4.0),
         Align2::CENTER_BOTTOM,
-        "opposite",
+        tr("opposite"),
         font.clone(),
         lab,
     );
@@ -430,50 +441,52 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, cache: &mut WheelCache) {
         p.text(
             wheel_rect.left_top() + vec2(4.0, 2.0),
             Align2::LEFT_TOP,
-            "Stopped: the audio at the playhead.",
+            tr("Stopped: the audio at the playhead."),
             FontId::proportional(10.0),
             c(th.text_dim),
         );
     }
-    let resp = resp
-        .on_hover_text("Right-click for the colors and to show or hide the readouts and settings");
+    let resp = resp.on_hover_text(tr(
+        "Right-click for the colors and to show or hide the readouts and settings",
+    ));
     resp.context_menu(|ui| {
         let label = if roomy {
-            "Show Readouts and Settings"
+            tr("Show Readouts and Settings")
         } else {
-            "Show Readouts and Settings (hidden while the panel is small)"
+            tr("Show Readouts and Settings (hidden while the panel is small)")
         };
         if ui.checkbox(&mut st.phase.details, label).changed() {
             st.phase.save();
         }
-        if ui.button("Colors...").clicked() {
+        if ui.button(tr("Colors...")).clicked() {
             cache.colors_open = true;
             ui.close_menu();
         }
     });
     if cache.colors_open {
         let mut open = true;
-        egui::Window::new("Phase Wheel colors")
+        egui::Window::new(tr("Phase Wheel colors"))
+            .id(egui::Id::new("phase_wheel_colors"))
             .open(&mut open)
             .resizable(false)
             .show(ui.ctx(), |ui| {
                 let mut lo = st.phase.low.unwrap_or(low);
                 let mut hi = st.phase.high.unwrap_or(high);
                 ui.horizontal(|ui| {
-                    ui.label("Low notes (20 Hz)");
+                    ui.label(tr("Low notes (20 Hz)"));
                     if ui.color_edit_button_srgb(&mut lo).changed() {
                         st.phase.low = Some(lo);
                         st.phase.save();
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("High notes (20 kHz)");
+                    ui.label(tr("High notes (20 kHz)"));
                     if ui.color_edit_button_srgb(&mut hi).changed() {
                         st.phase.high = Some(hi);
                         st.phase.save();
                     }
                 });
-                if ui.button("Reset to the theme's colors").clicked() {
+                if ui.button(tr("Reset to the theme's colors")).clicked() {
                     st.phase.low = None;
                     st.phase.high = None;
                     st.phase.save();
@@ -507,7 +520,9 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, cache: &mut WheelCache) {
         ui.label(RichText::new("20 kHz").color(c(th.text_dim)).size(10.0));
     })
     .response
-    .on_hover_text("Dot colors by frequency. Right-click the wheel to change them.");
+    .on_hover_text(tr(
+        "Dot colors by frequency. Right-click the wheel to change them.",
+    ));
     // Correlation.
     let corr = cache.correlation;
     ui.horizontal(|ui| {
@@ -560,29 +575,31 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, cache: &mut WheelCache) {
         ui.label(rt);
     })
     .response
-    .on_hover_text("Correlation: +1 the same in both, 0 unrelated, -1 opposite (cancels in mono)");
+    .on_hover_text(tr(
+        "Correlation: +1 the same in both, 0 unrelated, -1 opposite (cancels in mono)",
+    ));
     // Settings.
     let before = st.phase.clone();
     ui.horizontal_wrapped(|ui| {
         let pick = |ui: &mut egui::Ui, id: &str, v: &mut Sig| {
-            egui::ComboBox::from_id_salt(id).selected_text(v.signal().label()).width(86.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(id).selected_text(tr(v.signal().label())).width(86.0).show_ui(ui, |ui| {
                 for s in Sig::ALL {
-                    ui.selectable_value(v, s, s.signal().label());
+                    ui.selectable_value(v, s, tr(s.signal().label()));
                 }
             });
         };
-        ui.label(RichText::new("Signal").color(c(th.text_dim)));
+        ui.label(RichText::new(tr("Signal")).color(c(th.text_dim)));
         pick(ui, "pw-a", &mut st.phase.a);
-        ui.label(RichText::new("Compare to").color(c(th.text_dim)));
+        ui.label(RichText::new(tr("Compare to")).color(c(th.text_dim)));
         pick(ui, "pw-b", &mut st.phase.b);
-        ui.label(RichText::new("Samples").color(c(th.text_dim)))
-            .on_hover_text("Frames analysed each time. Fewer is lighter on slower computers and reacts faster; more shows low frequencies in finer detail.");
+        ui.label(RichText::new(tr("Samples")).color(c(th.text_dim)))
+            .on_hover_text(tr("Frames analysed each time. Fewer is lighter on slower computers and reacts faster; more shows low frequencies in finer detail."));
         egui::ComboBox::from_id_salt("pw-size").selected_text(st.phase.size.to_string()).width(64.0).show_ui(ui, |ui| {
             for n in SIZES {
                 ui.selectable_value(&mut st.phase.size, n, n.to_string());
             }
         });
-        ui.label(RichText::new("Refresh").color(c(th.text_dim))).on_hover_text("Pictures a second, at most. Lower is lighter on slower computers.");
+        ui.label(RichText::new(tr("Refresh")).color(c(th.text_dim))).on_hover_text(tr("Pictures a second, at most. Lower is lighter on slower computers."));
         egui::ComboBox::from_id_salt("pw-fps").selected_text(format!("{} fps", st.phase.fps)).width(64.0).show_ui(ui, |ui| {
             for r in RATES {
                 ui.selectable_value(&mut st.phase.fps, r, format!("{r} fps"));
@@ -594,9 +611,11 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, cache: &mut WheelCache) {
         cache.still_key = None;
     }
     ui.label(
-        RichText::new("The app plays in stereo, so the choices are left, right, mid and side.")
-            .size(10.0)
-            .color(c(th.text_dim)),
+        RichText::new(tr(
+            "The app plays in stereo, so the choices are left, right, mid and side.",
+        ))
+        .size(10.0)
+        .color(c(th.text_dim)),
     );
 }
 

@@ -29,11 +29,59 @@ use af27_separation::{self as sep, Model, Shared};
 use egui::{Align2, RichText, Stroke};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{mark, tr};
 use crate::state::{data_dir, Job, Mode, State};
 use crate::theme::c;
 
 /// The wording shown wherever something is downloaded.
-pub const CONSENT: &str = "It only pulls the necessary model for demixing; audio separation is handled locally on user hardware and speeds / results depend on that hardware.";
+pub const CONSENT: &str = mark("It only pulls the necessary model for demixing; audio separation is handled locally on user hardware and speeds / results depend on that hardware.");
+
+/// Texts from the separation crate and its model catalog, translated
+/// where they are drawn: tabs, list headings, result (stem) names,
+/// score notes, licences and job progress.
+#[allow(dead_code)]
+const CRATE_TEXTS: [&str; 40] = [
+    mark("Vocals"),
+    mark("Instruments"),
+    mark("Denoise"),
+    mark("Clean and removed noise"),
+    mark("Six stems: vocals, drums, bass, guitar, piano, other"),
+    mark("Single instrument and the rest"),
+    mark("Vocals and instrumental"),
+    mark("Instrumental"),
+    mark("Clean"),
+    mark("Removed noise"),
+    mark("Piano and keys"),
+    mark("Guitar"),
+    mark("Drums"),
+    mark("Bass"),
+    mark("Piano"),
+    mark("Other"),
+    mark("Without keys"),
+    mark("Without guitar"),
+    mark("Without drums"),
+    mark("Without bass"),
+    mark("SDR not published"),
+    mark("from the file name, author's own test"),
+    mark("from the file name; removes more, can take some voice"),
+    mark("no public score"),
+    mark("vocals, MVSep Multisong set"),
+    mark("vocals, Multisong test set"),
+    mark("Starting"),
+    mark("Preparing"),
+    mark("Separating"),
+    mark("Writing results"),
+    mark("Checking the download"),
+    mark("Checking the file"),
+    mark("Unpacking the engine"),
+    mark("Finished"),
+    mark("CC BY-NC 4.0 (non-commercial use), as stated on the author's page."),
+    mark("MIT licence, as stated on the X-LANCE page for the original files."),
+    mark("MIT licence, as stated on the author's page."),
+    mark("No licence is stated for the weights (listed as unknown)."),
+    mark("No licence is stated for the weights; the mirror credits aufr33."),
+    mark("Published freely by the author; no licence is stated for the weights."),
+];
 
 /// What Separate works on.
 #[derive(Clone)]
@@ -212,7 +260,7 @@ pub fn source(st: &State) -> Option<Source> {
                 .map(|d| d.join("Separated"))
                 .unwrap_or_else(|| data_dir().join("Separated"));
             return Some(Source {
-                label: format!("\"{}\" (its whole file)", clip.name),
+                label: tr!("\"{0}\" (its whole file)", clip.name),
                 name: base_name(&media.name),
                 buf,
                 out_dir,
@@ -348,13 +396,13 @@ fn start(st: &mut State, step: Step) {
     ui.cancel = cancel.clone();
     let shared = match &step {
         Step::InstallEngine => {
-            ui.job_title = "Downloading the separation engine".into();
+            ui.job_title = tr("Downloading the separation engine").into();
             let p = shared.clone();
             background(&shared, move || sep::install_engine(&dirs, &cancel, &p));
             shared
         }
         Step::CheckEngine => {
-            ui.job_title = "Checking for an engine update".into();
+            ui.job_title = tr("Checking for an engine update").into();
             let p = shared.clone();
             background(&shared, move || {
                 sep::check_engine_update(&dirs, &cancel, &p).map(|_| ())
@@ -362,7 +410,7 @@ fn start(st: &mut State, step: Step) {
             shared
         }
         Step::DownloadModel(m) => {
-            ui.job_title = format!("Downloading {}", m.name);
+            ui.job_title = tr!("Downloading {0}", m.name);
             let (p, m) = (shared.clone(), m.clone());
             background(&shared, move || {
                 let dest = dirs.own_model_path(&m);
@@ -371,18 +419,21 @@ fn start(st: &mut State, step: Step) {
             shared
         }
         Step::CheckModel(m) => {
-            ui.job_title = format!("Checking {}", m.name);
+            ui.job_title = tr!("Checking {0}", m.name);
             let (p, m) = (shared.clone(), m.clone());
             background(&shared, move || sep::check_model(&dirs, &m, &p).map(|_| ()));
             shared
         }
         Step::Separate(req) => {
-            ui.job_title = format!(
-                "Separating {} with {}{}",
-                req.source.label,
-                req.model.name,
-                if req.gpu { "" } else { " (processor)" }
-            );
+            ui.job_title = if req.gpu {
+                tr!("Separating {0} with {1}", req.source.label, req.model.name)
+            } else {
+                tr!(
+                    "Separating {0} with {1} (processor)",
+                    req.source.label,
+                    req.model.name
+                )
+            };
             sep::spawn(
                 dirs,
                 req.model.clone(),
@@ -438,31 +489,31 @@ pub fn poll(st: &mut State) {
         }
         (Some(Step::InstallEngine), None) => {
             st.separation.engine_update = EngineUpdate::Current;
-            st.toast("The separation engine is installed.");
+            st.toast(tr("The separation engine is installed."));
         }
         (Some(Step::CheckEngine), None) => {
             if flag {
                 st.separation.engine_update = EngineUpdate::Available;
-                st.toast("A newer separation engine is published.");
+                st.toast(tr("A newer separation engine is published."));
             } else {
                 st.separation.engine_update = EngineUpdate::Current;
-                st.toast("The separation engine is up to date.");
+                st.toast(tr("The separation engine is up to date."));
             }
         }
         (Some(Step::DownloadModel(m)), None) => {
             st.separation.stale.remove(&m.id);
-            st.toast(format!("{} is downloaded.", m.name));
+            st.toast(tr!("{0} is downloaded.", m.name));
         }
         (Some(Step::CheckModel(m)), None) => {
             if flag {
                 st.separation.stale.insert(m.id.clone());
-                st.toast(format!(
-                    "{} does not match its published file. Update downloads it again.",
+                st.toast(tr!(
+                    "{0} does not match its published file. Update downloads it again.",
                     m.name
                 ));
             } else {
                 st.separation.stale.remove(&m.id);
-                st.toast(format!("{} matches its published file.", m.name));
+                st.toast(tr!("{0} matches its published file.", m.name));
             }
         }
         (Some(Step::Separate(req)), None) => finished(st, req, outputs),
@@ -478,9 +529,9 @@ fn finished(st: &mut State, req: Request, outputs: Vec<(String, PathBuf)>) {
     for (_, p) in &outputs {
         st.load_file(p.clone(), None);
     }
-    let names: Vec<&str> = outputs.iter().map(|(n, _)| n.as_str()).collect();
-    st.toast(format!(
-        "Separated {} into {}; the results are in the Files panel.",
+    let names: Vec<&str> = outputs.iter().map(|(n, _)| tr(n)).collect();
+    st.toast(tr!(
+        "Separated {0} into {1}; the results are in the Files panel.",
         req.source.label,
         names.join(", ")
     ));
@@ -518,7 +569,7 @@ fn add_tracks(st: &mut State, clips: &[ClipId], media: MediaId, outputs: &[(Stri
             }
         }
     }
-    st.commit_session("Add Separated Tracks", before);
+    st.commit_session(mark("Add Separated Tracks"), before);
     st.mode = Mode::Multitrack;
 }
 
@@ -533,7 +584,9 @@ fn separate(st: &mut State, model: Model) {
     let engine = st.sep_dirs.engine().is_none();
     let missing_model = st.sep_dirs.model(&model).is_none();
     if engine && sep::engine_asset().is_none() {
-        st.error("Audio Separation is not available for this computer yet.");
+        st.error(tr(
+            "Audio Separation is not available for this computer yet.",
+        ));
         return;
     }
     if engine || missing_model {
@@ -604,7 +657,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                     .unwrap_or_default();
                 ui.label(RichText::new(&st.separation.job_title).color(c(th.text)));
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         st.separation.cancel.store(true, Ordering::Relaxed);
                         st.separation.queue.clear();
                     }
@@ -613,17 +666,17 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                         .animate(true);
                     ui.add(if ind { bar } else { bar.show_percentage() });
                 });
-                ui.label(dim(&status));
+                ui.label(dim(tr(&status)));
             } else {
                 let src = source(st);
                 ui.label(match &src {
-                    Some(s) => format!("Separates {}.", s.label),
-                    None => "Open a file in the Waveform editor, or select a clip or a file, to separate it."
+                    Some(s) => tr!("Separates {0}.", s.label),
+                    None => tr("Open a file in the Waveform editor, or select a clip or a file, to separate it.")
                         .into(),
                 });
                 ui.horizontal_wrapped(|ui| {
                     let b = egui::Button::new(
-                        RichText::new("Separate").strong().color(c(th.background)),
+                        RichText::new(tr("Separate")).strong().color(c(th.background)),
                     )
                     .fill(c(th.accent));
                     if ui
@@ -634,14 +687,11 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                             action = Some(Box::new(move |st| separate(st, m)));
                         }
                     }
-                    ui.label(dim(&format!(
-                        "On the {}. Runs on this computer; speed and results depend on your hardware.",
-                        if st.separation.gpu {
-                            "graphics card when it can be used"
-                        } else {
-                            "processor"
-                        }
-                    )));
+                    ui.label(dim(if st.separation.gpu {
+                        tr("On the graphics card when it can be used. Runs on this computer; speed and results depend on your hardware.")
+                    } else {
+                        tr("On the processor. Runs on this computer; speed and results depend on your hardware.")
+                    }));
                 });
             }
         });
@@ -651,9 +701,9 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
         .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(6.0, 4.0)))
         .show_inside(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                ui.label(RichText::new("Separation engine").strong().color(c(th.text_dim)));
+                ui.label(RichText::new(tr("Separation engine")).strong().color(c(th.text_dim)));
                 card(ui, &th, false, |ui| {
-                    ui.label(RichText::new("Engine (runs the models on this computer)").strong());
+                    ui.label(RichText::new(tr("Engine (runs the models on this computer)")).strong());
                     ui.horizontal_wrapped(|ui| match &engine {
                         Some(p) => {
                             let v = st.separation.engine_version.clone().unwrap_or_default();
@@ -661,21 +711,21 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                             if let Ok(meta) = std::fs::metadata(p) {
                                 ui.label(dim(&sep::size_text(meta.len())));
                             }
-                            ui.label(RichText::new(format!("Downloaded, version {v}")).color(c(
+                            ui.label(RichText::new(tr!("Downloaded, version {0}", v)).color(c(
                                 if ok { th.accent } else { th.accent_alt },
                             )));
                             if dirs.is_shared(p) {
-                                ui.label(dim("shared with Audiform"));
+                                ui.label(dim(tr("shared with Audiform")));
                             }
                             let up = st.separation.engine_update;
                             if !ok || up == EngineUpdate::Available {
                                 ui.label(RichText::new(if ok {
-                                    "Update available"
+                                    tr("Update available")
                                 } else {
-                                    "Too old for this version"
+                                    tr("Too old for this version")
                                 })
                                 .color(c(th.accent_alt)));
-                                if ui.add_enabled(!busy, egui::Button::new("Update")).clicked() {
+                                if ui.add_enabled(!busy, egui::Button::new(tr("Update"))).clicked() {
                                     action = Some(Box::new(|st| {
                                         st.separation.ask =
                                             Some(Ask::Download(Step::InstallEngine))
@@ -683,16 +733,16 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                                 }
                             } else {
                                 let label = if up == EngineUpdate::Current {
-                                    "Up to date. Check again"
+                                    tr("Up to date. Check again")
                                 } else {
-                                    "Check for Update"
+                                    tr("Check for Update")
                                 };
                                 if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
                                     action = Some(Box::new(|st| start(st, Step::CheckEngine)));
                                 }
                             }
                             if std::env::var_os("AUDIFORM_SEPARATE").is_none()
-                                && ui.add_enabled(!busy, egui::Button::new("Remove")).clicked()
+                                && ui.add_enabled(!busy, egui::Button::new(tr("Remove"))).clicked()
                             {
                                 action = Some(Box::new(|st| {
                                     st.separation.ask = Some(Ask::RemoveEngine)
@@ -700,9 +750,9 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                             }
                         }
                         None => {
-                            ui.label(dim("About 10 MB"));
+                            ui.label(dim(tr("About 10 MB")));
                             let can = !busy && sep::engine_asset().is_some();
-                            if ui.add_enabled(can, egui::Button::new("Download")).clicked() {
+                            if ui.add_enabled(can, egui::Button::new(tr("Download"))).clicked() {
                                 action = Some(Box::new(|st| {
                                     st.separation.ask = Some(Ask::Download(Step::InstallEngine))
                                 }));
@@ -719,7 +769,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                         let r = ui.add(
                             egui::SelectableLabel::new(
                                 on,
-                                RichText::new(t).color(c(if on { th.text } else { th.text_dim })),
+                                RichText::new(tr(t)).color(c(if on { th.text } else { th.text_dim })),
                             ),
                         );
                         if r.clicked() && !on {
@@ -731,7 +781,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                 ui.separator();
 
                 for (mode, models) in sep::by_mode(catalog.iter().filter(|m| m.category == tab)) {
-                    ui.label(RichText::new(mode).size(11.0).strong().color(c(th.text_dim)));
+                    ui.label(RichText::new(tr(mode)).size(11.0).strong().color(c(th.text_dim)));
                     for m in models {
                         let copies = installed.get(&m.id).cloned().unwrap_or_default();
                         let on = model.as_ref().is_some_and(|x| x.id == m.id);
@@ -746,7 +796,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                             });
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(
-                                    RichText::new(sep::sdr_text(m))
+                                    RichText::new(tr(&sep::sdr_text(m)))
                                         .monospace()
                                         .size(10.0)
                                         .color(c(th.accent)),
@@ -755,7 +805,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                                 if copies.is_empty() {
                                     let can = !busy && sep::engine_asset().is_some();
                                     if ui
-                                        .add_enabled(can, egui::Button::new("Download").small())
+                                        .add_enabled(can, egui::Button::new(tr("Download")).small())
                                         .clicked()
                                     {
                                         let m = m.clone();
@@ -765,13 +815,13 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                                         }));
                                     }
                                 } else {
-                                    ui.label(RichText::new("Downloaded").size(11.0).color(c(th.accent)));
+                                    ui.label(RichText::new(tr("Downloaded")).size(11.0).color(c(th.accent)));
                                     if copies.iter().any(|p| dirs.is_shared(p)) {
-                                        ui.label(dim("shared with Audiform"));
+                                        ui.label(dim(tr("shared with Audiform")));
                                     }
                                     if st.separation.stale.contains(&m.id) {
                                         if ui
-                                            .add_enabled(!busy, egui::Button::new("Update").small())
+                                            .add_enabled(!busy, egui::Button::new(tr("Update")).small())
                                             .clicked()
                                         {
                                             let m = m.clone();
@@ -781,15 +831,15 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                                             }));
                                         }
                                     } else if ui
-                                        .add_enabled(!busy, egui::Button::new("Check").small())
-                                        .on_hover_text("Check the file against its published checksum; offers Update when it no longer matches")
+                                        .add_enabled(!busy, egui::Button::new(tr("Check")).small())
+                                        .on_hover_text(tr("Check the file against its published checksum; offers Update when it no longer matches"))
                                         .clicked()
                                     {
                                         let m = m.clone();
                                         action = Some(Box::new(move |st| start(st, Step::CheckModel(m))));
                                     }
                                     if ui
-                                        .add_enabled(!busy, egui::Button::new("Remove").small())
+                                        .add_enabled(!busy, egui::Button::new(tr("Remove")).small())
                                         .clicked()
                                     {
                                         let m = m.clone();
@@ -804,19 +854,19 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                     ui.add_space(4.0);
                 }
                 if sep::engine_asset().is_none() {
-                    ui.label(dim("Audio Separation is not available for this computer yet."));
+                    ui.label(dim(tr("Audio Separation is not available for this computer yet.")));
                 }
 
                 ui.add_space(4.0);
-                egui::CollapsingHeader::new("Settings")
+                egui::CollapsingHeader::new(tr("Settings"))
                     .id_salt("separation_settings")
                     .show(ui, |ui| {
-                        ui.label(dim("Run separation on"));
+                        ui.label(dim(tr("Run separation on")));
                         let mut gpu = st.separation.gpu;
-                        ui.radio_value(&mut gpu, true, "The graphics card (GPU) when one can be used");
-                        ui.radio_value(&mut gpu, false, "The processor (CPU) only");
+                        ui.radio_value(&mut gpu, true, tr("The graphics card (GPU) when one can be used"));
+                        ui.radio_value(&mut gpu, false, tr("The processor (CPU) only"));
                         let mut overlap = st.separation.overlap;
-                        egui::ComboBox::from_label("Overlap")
+                        egui::ComboBox::new("separation_overlap", tr("Overlap"))
                             .selected_text(overlap_text(overlap))
                             .show_ui(ui, |ui| {
                                 for o in [1, 2, 4, 8] {
@@ -828,11 +878,11 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                             st.separation.overlap = overlap;
                             st.separation.save();
                         }
-                        ui.label(dim("Each moment is separated this many times in overlapping pieces and blended, which hides the seams between pieces. 2 is what the models were measured with."));
-                        ui.label(dim("A graphics card is usually many times faster. If it cannot be used, AudiForm 2 offers the processor instead."));
+                        ui.label(dim(tr("Each moment is separated this many times in overlapping pieces and blended, which hides the seams between pieces. 2 is what the models were measured with.")));
+                        ui.label(dim(tr("A graphics card is usually many times faster. If it cannot be used, AudiForm 2 offers the processor instead.")));
                     });
                 ui.add_space(4.0);
-                ui.label(dim(CONSENT));
+                ui.label(dim(tr(CONSENT)));
             });
         });
 
@@ -844,28 +894,44 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
 
 fn overlap_text(o: u32) -> &'static str {
     match o {
-        1 => "1: fastest",
-        2 => "2: standard",
-        4 => "4: smoother, twice as long",
-        _ => "8: smoothest, four times as long",
+        1 => tr("1: fastest"),
+        2 => tr("2: standard"),
+        4 => tr("4: smoother, twice as long"),
+        _ => tr("8: smoothest, four times as long"),
     }
 }
 
 fn hover(m: &Model) -> String {
+    let outputs = if m.stems.is_empty() {
+        tr!("{0} and {1}", tr(&m.target_name), tr(&m.rest_name))
+    } else {
+        let all = m.output_names();
+        let names: Vec<&str> = all.iter().map(|n| tr(n)).collect();
+        names.join(", ")
+    };
     format!(
-        "{}\n{}\n{}\nBy {}. {}\nScore: {}. Higher is better.\n{}",
+        "{}\n{}\n{}\n{} {}\n{}\n{}",
         m.name,
-        if m.stems.is_empty() {
-            format!("{} and {}", m.target_name, m.rest_name)
-        } else {
-            m.output_names().join(", ")
-        },
+        outputs,
         sep::size_text(m.bytes),
-        m.author,
-        m.licence,
-        m.sdr_note,
+        tr!("By {0}.", m.author),
+        tr(&m.licence),
+        tr!("Score: {0}. Higher is better.", tr(&m.sdr_note)),
         m.page
     )
+}
+
+/// `text`, and when the file is shared with Audiform, the note that
+/// removing it removes Audiform's copy too.
+fn with_shared_note(text: String, shared: bool) -> String {
+    if shared {
+        format!(
+            "{text} {}",
+            tr("It is in Audiform's folder, so Audiform loses it too.")
+        )
+    } else {
+        text
+    }
 }
 
 fn card(ui: &mut egui::Ui, th: &crate::theme::Theme, on: bool, body: impl FnOnce(&mut egui::Ui)) {
@@ -896,82 +962,78 @@ fn dialogs(ctx: &egui::Context, st: &mut State) {
                 parts.push(format!("{} ({})", req.model.name, size(req.model.bytes)));
             }
             if *engine {
-                parts.push("the separation engine (about 10 MB, once)".into());
+                parts.push(tr("the separation engine (about 10 MB, once)").to_string());
             }
+            let what = match parts.as_slice() {
+                [a, b] => tr!("{0} and {1}", a, b),
+                _ => parts.concat(),
+            };
             (
-                "Download first?".to_string(),
-                format!(
-                    "To separate with {}, AudiForm 2 needs to download {} into its own files, where it is kept for next time.\n\n{CONSENT}",
+                tr("Download first?").to_string(),
+                tr!(
+                    "To separate with {0}, AudiForm 2 needs to download {1} into its own files, where it is kept for next time.\n\n{2}",
                     req.model.name,
-                    parts.join(" and ")
+                    what,
+                    tr(CONSENT)
                 ),
-                "Download",
-                "Cancel",
+                tr("Download"),
+                tr("Cancel"),
             )
         }
         Ask::Download(step) => {
             let what = match step {
                 Step::DownloadModel(m) => format!("{} ({})", m.name, size(m.bytes)),
-                _ => "the separation engine (about 10 MB)".into(),
+                _ => tr("the separation engine (about 10 MB)").into(),
             };
             (
-                "Download?".to_string(),
-                format!("AudiForm 2 downloads {what} into its own files, where it is kept for next time.\n\n{CONSENT}"),
-                "Download",
-                "Cancel",
+                tr("Download?").to_string(),
+                tr!("AudiForm 2 downloads {0} into its own files, where it is kept for next time.\n\n{1}", what, tr(CONSENT)),
+                tr("Download"),
+                tr("Cancel"),
             )
         }
         Ask::UseCpu(_) => (
-            "Use the processor?".to_string(),
-            "The graphics card could not be used on this computer. Separate on the processor instead? It is slower. (Settings in this panel can turn the graphics card off.)".to_string(),
-            "Use the Processor",
-            "Cancel",
+            tr("Use the processor?").to_string(),
+            tr("The graphics card could not be used on this computer. Separate on the processor instead? It is slower. (Settings in this panel can turn the graphics card off.)").to_string(),
+            tr("Use the Processor"),
+            tr("Cancel"),
         ),
         Ask::AddTracks { outputs, .. } => {
-            let names: Vec<String> = outputs.iter().map(|(n, _)| n.to_lowercase()).collect();
-            let what = if names.len() == 2 {
-                format!("the {} and {} on two", names[0], names[1])
+            let names: Vec<String> = outputs.iter().map(|(n, _)| tr(n).to_lowercase()).collect();
+            let text = if names.len() == 2 {
+                tr!("Put the {0} and {1} on two new tracks below the clip's track? They copy that track's effects and settings.", names[0], names[1])
             } else {
-                format!("the {} results on {}", names.len(), names.len())
+                tr!("Put the {0} results on {0} new tracks below the clip's track? They copy that track's effects and settings.", names.len())
             };
             (
-                "Add as new tracks?".to_string(),
-                format!("Put {what} new tracks below the clip's track? They copy that track's effects and settings."),
-                "Add Tracks",
-                "Files Only",
+                tr("Add as new tracks?").to_string(),
+                text,
+                tr("Add Tracks"),
+                tr("Files Only"),
             )
         }
         Ask::RemoveModel(m) => {
             let shared = st.sep_dirs.model_copies(m).iter().any(|p| st.sep_dirs.is_shared(p));
             (
-                format!("Remove {}?", m.name),
-                format!(
-                    "This deletes the downloaded model ({}). You can download it again any time.{}",
-                    size(m.bytes),
-                    if shared {
-                        " It is in Audiform's folder, so Audiform loses it too."
-                    } else {
-                        ""
-                    }
+                tr!("Remove {0}?", m.name),
+                with_shared_note(
+                    tr!("This deletes the downloaded model ({0}). You can download it again any time.", size(m.bytes)),
+                    shared,
                 ),
-                "Remove",
-                "Cancel",
+                tr("Remove"),
+                tr("Cancel"),
             )
         }
         Ask::RemoveEngine => {
             let shared = st.sep_dirs.engine().is_some_and(|p| st.sep_dirs.is_shared(&p));
             (
-                "Remove the separation engine?".to_string(),
-                format!(
-                    "This deletes the downloaded separation engine. Your models stay. It is downloaded again when you next separate.{}",
-                    if shared {
-                        " It is in Audiform's folder, so Audiform loses it too."
-                    } else {
-                        ""
-                    }
+                tr("Remove the separation engine?").to_string(),
+                with_shared_note(
+                    tr("This deletes the downloaded separation engine. Your models stay. It is downloaded again when you next separate.").to_string(),
+                    shared,
                 ),
-                "Remove",
-                "Cancel",
+                tr("Remove"),
+                tr("Cancel"),
             )
         }
     };
@@ -1022,14 +1084,14 @@ fn dialogs(ctx: &egui::Context, st: &mut State) {
             } => add_tracks(st, &clips, media, &outputs),
             Ask::RemoveModel(m) => {
                 match sep::remove_model(&st.sep_dirs, &m) {
-                    Ok(()) => st.toast(format!("Removed {}.", m.name)),
+                    Ok(()) => st.toast(tr!("Removed {0}.", m.name)),
                     Err(e) => st.error(e),
                 }
                 st.separation.refresh();
             }
             Ask::RemoveEngine => {
                 match sep::remove_engine(&st.sep_dirs) {
-                    Ok(()) => st.toast("Removed the separation engine."),
+                    Ok(()) => st.toast(tr("Removed the separation engine.")),
                     Err(e) => st.error(e),
                 }
                 st.separation.engine_update = EngineUpdate::Unknown;

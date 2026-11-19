@@ -14,6 +14,7 @@
 
 use egui_dock::{DockState, NodeIndex};
 
+use crate::i18n::tr;
 use crate::ui::Tab;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,23 +35,25 @@ impl Workspace {
         Workspace::Mastering,
     ];
 
+    /// The name shown, in the current language ([`Workspace::key`] is the
+    /// saved one).
     pub fn name(self) -> &'static str {
         match self {
-            Workspace::Default => "Default",
-            Workspace::Music => "Music",
-            Workspace::Mixing => "Mixing",
-            Workspace::FocusedEdit => "Focused Edit",
-            Workspace::Mastering => "Mastering",
+            Workspace::Default => tr("Default"),
+            Workspace::Music => tr("Music"),
+            Workspace::Mixing => tr("Mixing"),
+            Workspace::FocusedEdit => tr("Focused Edit"),
+            Workspace::Mastering => tr("Mastering"),
         }
     }
 
     pub fn about(self) -> &'static str {
         match self {
-            Workspace::Default => "Files, effect rack and History on the left; Editor and Mixer in the middle; analysis on the right; Levels and the selection times along the bottom",
-            Workspace::Music => "Tracks in the middle; effects and History on the left; Phase Wheel, Visualizer and Spectrum together on the right, with 3D Space and AI Stems each in their own panel below",
-            Workspace::Mixing => "The Mixer up front with tall meters; files and markers on the left; the track Inspector on the right",
-            Workspace::FocusedEdit => "As much room as possible for the timeline: files on the left, levels below",
-            Workspace::Mastering => "Loudness statistics, spectrum and Phase Wheel on the right; the effect rack on the left",
+            Workspace::Default => tr("Files, effect rack and History on the left; Editor and Mixer in the middle; analysis on the right; Levels and the selection times along the bottom"),
+            Workspace::Music => tr("Tracks in the middle; effects and History on the left; Phase Wheel, Visualizer and Spectrum together on the right, with 3D Space and AI Stems each in their own panel below"),
+            Workspace::Mixing => tr("The Mixer up front with tall meters; files and markers on the left; the track Inspector on the right"),
+            Workspace::FocusedEdit => tr("As much room as possible for the timeline: files on the left, levels below"),
+            Workspace::Mastering => tr("Loudness statistics, spectrum and Phase Wheel on the right; the effect rack on the left"),
         }
     }
 

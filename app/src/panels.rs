@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use egui::{pos2, vec2, Align2, FontId, Rect, RichText, Rounding, Sense, Shape, Stroke};
 
+use crate::i18n::{mark, tr};
 use crate::state::{Mode, State};
 use crate::theme::{c, ca};
 use crate::ui::{meter_db, Caches, Tab};
@@ -19,15 +20,15 @@ pub fn files(ui: &mut egui::Ui, st: &mut State, _open: &mut Option<Tab>) {
     let th = st.theme.clone();
     ui.horizontal(|ui| {
         if ui
-            .button("🗁 Open")
-            .on_hover_text("Open audio or a session (Ctrl+O)")
+            .button(tr("🗁 Open"))
+            .on_hover_text(tr("Open audio or a session (Ctrl+O)"))
             .clicked()
         {
             crate::ui::open_dialog(st);
         }
         if ui
-            .button("➕ New")
-            .on_hover_text("New empty audio file")
+            .button(tr("➕ New"))
+            .on_hover_text(tr("New empty audio file"))
             .clicked()
         {
             st.new_file(48_000, 2);
@@ -74,12 +75,15 @@ pub fn files(ui: &mut egui::Ui, st: &mut State, _open: &mut Option<Tab>) {
             st.mode = Mode::Waveform;
         }
         r.context_menu(|ui| {
-            if ui.button("Edit in Waveform").clicked() {
+            if ui.button(tr("Edit in Waveform")).clicked() {
                 st.current = Some(id);
                 st.mode = Mode::Waveform;
                 ui.close_menu();
             }
-            if ui.button("Insert into Multitrack at playhead").clicked() {
+            if ui
+                .button(tr("Insert into Multitrack at playhead"))
+                .clicked()
+            {
                 if let Some(t) = st
                     .selected_track
                     .or(st.session.tracks.first().map(|t| t.id))
@@ -90,7 +94,7 @@ pub fn files(ui: &mut egui::Ui, st: &mut State, _open: &mut Option<Tab>) {
                 st.mode = Mode::Multitrack;
                 ui.close_menu();
             }
-            if ui.button("Close").clicked() {
+            if ui.button(tr("Close")).clicked() {
                 close = Some(id);
                 ui.close_menu();
             }
@@ -106,7 +110,9 @@ pub fn files(ui: &mut egui::Ui, st: &mut State, _open: &mut Option<Tab>) {
         });
     }
     if st.docs.is_empty() && st.jobs.is_empty() {
-        ui.label(RichText::new("Drop audio files anywhere in the window.").color(c(th.text_dim)));
+        ui.label(
+            RichText::new(tr("Drop audio files anywhere in the window.")).color(c(th.text_dim)),
+        );
     }
 }
 
@@ -114,7 +120,7 @@ pub fn files(ui: &mut egui::Ui, st: &mut State, _open: &mut Option<Tab>) {
 
 pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     ui.horizontal(|ui| {
-        if ui.button("➕ Add at Playhead (M)").clicked() {
+        if ui.button(tr("➕ Add at Playhead (M)")).clicked() {
             st.add_marker();
         }
     });
@@ -166,13 +172,13 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
 pub fn effects(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     egui::ComboBox::from_id_salt("effect")
-        .selected_text(st.effect.name())
+        .selected_text(tr(st.effect.name()))
         .width(ui.available_width() - 8.0)
         .show_ui(ui, |ui| {
             for (group, list) in GROUPS {
-                ui.label(RichText::new(*group).small().color(c(th.text_dim)));
+                ui.label(RichText::new(tr(group)).small().color(c(th.text_dim)));
                 for e in *list {
-                    ui.selectable_value(&mut st.effect, *e, format!("   {}", e.name()));
+                    ui.selectable_value(&mut st.effect, *e, format!("   {}", tr(e.name())));
                 }
             }
         });
@@ -181,10 +187,10 @@ pub fn effects(ui: &mut egui::Ui, st: &mut State) {
     let specs = e.params();
     ui.add_space(4.0);
     if specs.is_empty() {
-        ui.label(RichText::new("No settings.").color(c(th.text_dim)));
+        ui.label(RichText::new(tr("No settings.")).color(c(th.text_dim)));
     }
     for (i, p) in specs.iter().enumerate() {
-        let mut slider = egui::Slider::new(&mut vals[i], p.min..=p.max).text(p.name);
+        let mut slider = egui::Slider::new(&mut vals[i], p.min..=p.max).text(tr(p.name));
         if !p.unit.is_empty() {
             slider = slider.suffix(format!(" {}", p.unit));
         }
@@ -195,41 +201,40 @@ pub fn effects(ui: &mut egui::Ui, st: &mut State) {
     }
     st.effect_values.insert(e, vals);
     ui.add_space(6.0);
-    let target = match st.doc() {
-        Some(d) if d.sel.is_some() => "selection",
-        Some(_) => "whole file",
-        None => "no file open",
+    let (process, applies) = match st.doc() {
+        Some(d) if d.sel.is_some() => (tr("Process the selection"), tr("Applies to: selection")),
+        Some(_) => (tr("Process the whole file"), tr("Applies to: whole file")),
+        None => (
+            tr("Process the no file open"),
+            tr("Applies to: no file open"),
+        ),
     };
     ui.horizontal(|ui| {
-        let apply = egui::Button::new(RichText::new("Apply").strong().color(c(th.background)))
+        let apply = egui::Button::new(RichText::new(tr("Apply")).strong().color(c(th.background)))
             .fill(c(th.accent));
         if ui
             .add_enabled(st.doc().is_some(), apply)
-            .on_hover_text(format!("Process the {target}"))
+            .on_hover_text(process)
             .clicked()
         {
             st.mode = Mode::Waveform;
             st.apply_effect(e);
         }
         if ui
-            .button("Preview")
-            .on_hover_text("Play the processed selection without changing the file")
+            .button(tr("Preview"))
+            .on_hover_text(tr("Play the processed selection without changing the file"))
             .clicked()
         {
             preview(st);
         }
-        if ui.button("Reset").clicked() {
+        if ui.button(tr("Reset")).clicked() {
             st.effect_values.remove(&e);
         }
     });
-    ui.label(
-        RichText::new(format!("Applies to: {target}"))
-            .size(10.0)
-            .color(c(th.text_dim)),
-    );
+    ui.label(RichText::new(applies).size(10.0).color(c(th.text_dim)));
     if e.realtime() {
         ui.label(
-            RichText::new("Also runs live: add it to a track in the Inspector.")
+            RichText::new(tr("Also runs live: add it to a track in the Inspector."))
                 .size(10.0)
                 .color(c(th.text_dim)),
         );
@@ -242,7 +247,7 @@ pub fn effects(ui: &mut egui::Ui, st: &mut State) {
 fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     ui.label(
-        RichText::new("Audiform effects")
+        RichText::new(tr("Audiform effects"))
             .strong()
             .color(c(th.accent)),
     );
@@ -256,7 +261,7 @@ fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
                 if ui
                     .selectable_label(
                         current == info.id,
-                        format!("{} ({})", info.name, info.category),
+                        format!("{} ({})", tr(info.name), tr(info.category)),
                     )
                     .clicked()
                 {
@@ -303,7 +308,7 @@ fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
         }
     }
     st.fx_values.insert(id.clone(), vals.clone());
-    let apply = egui::Button::new(RichText::new("Apply").strong().color(c(th.background)))
+    let apply = egui::Button::new(RichText::new(tr("Apply")).strong().color(c(th.background)))
         .fill(c(th.accent));
     if ui.add_enabled(st.doc().is_some(), apply).clicked() {
         let slot = af27_core::EffectSlot {
@@ -348,10 +353,10 @@ fn preview(st: &mut State) {
 pub fn history(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     ui.horizontal(|ui| {
-        if ui.button("⟲ Undo").clicked() {
+        if ui.button(tr("⟲ Undo")).clicked() {
             st.undo();
         }
-        if ui.button("⟳ Redo").clicked() {
+        if ui.button(tr("⟳ Redo")).clicked() {
             st.redo();
         }
     });
@@ -365,17 +370,17 @@ pub fn history(ui: &mut egui::Ui, st: &mut State) {
     };
     ui.label(
         RichText::new(if st.mode == Mode::Waveform {
-            "🗁 Open"
+            tr("🗁 Open")
         } else {
-            "☰ Session"
+            tr("☰ Session")
         })
         .color(c(th.text_dim)),
     );
     for l in &labels {
-        ui.label(format!("• {l}"));
+        ui.label(format!("• {}", tr(l)));
     }
     ui.label(
-        RichText::new(format!("{} undo step(s)", labels.len()))
+        RichText::new(tr!("{0} undo step(s)", labels.len()))
             .size(10.0)
             .color(c(th.text_dim)),
     );
@@ -509,20 +514,24 @@ pub fn spectrum(ui: &mut egui::Ui, st: &mut State) {
 pub fn statistics(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     let what = match st.mode {
-        Mode::Waveform => st
-            .doc()
-            .map(|d| if d.sel.is_some() { "selection" } else { "file" }),
+        Mode::Waveform => st.doc().map(|d| {
+            if d.sel.is_some() {
+                mark("selection")
+            } else {
+                mark("file")
+            }
+        }),
         Mode::Multitrack => Some(if st.session_sel.is_some() {
-            "mix selection"
+            mark("mix selection")
         } else {
-            "mix"
+            mark("mix")
         }),
     };
     let Some(what) = what else {
-        ui.label(RichText::new("Open a file to measure it.").color(c(th.text_dim)));
+        ui.label(RichText::new(tr("Open a file to measure it.")).color(c(th.text_dim)));
         return;
     };
-    if ui.button(format!("Scan {what}")).clicked() {
+    if ui.button(tr!("Scan {0}", tr(what))).clicked() {
         let buf = match st.mode {
             Mode::Waveform => {
                 let d = st.doc().unwrap();
@@ -537,7 +546,7 @@ pub fn statistics(ui: &mut egui::Ui, st: &mut State) {
     }
     if let Some((label, s)) = &st.stats {
         ui.label(
-            RichText::new(format!("Last scan: {label}"))
+            RichText::new(tr!("Last scan: {0}", tr(label)))
                 .size(10.0)
                 .color(c(th.text_dim)),
         );
@@ -552,28 +561,33 @@ pub fn statistics(ui: &mut egui::Ui, st: &mut State) {
                 };
                 row(
                     ui,
-                    "Integrated loudness",
+                    tr("Integrated loudness"),
                     s.integrated_lufs
                         .map_or("—".into(), |l| format!("{l:.1} LUFS")),
                 );
-                row(ui, "True peak", format!("{:.1} dBTP", s.true_peak_db));
-                row(ui, "Sample peak", format!("{:.1} dBFS", s.sample_peak_db));
+                row(ui, tr("True peak"), format!("{:.1} dBTP", s.true_peak_db));
+                row(
+                    ui,
+                    tr("Sample peak"),
+                    format!("{:.1} dBFS", s.sample_peak_db),
+                );
                 row(ui, "RMS", format!("{:.1} dBFS", s.rms_db));
-                row(ui, "DC offset", format!("{:.4} %", s.dc_offset * 100.0));
-                row(ui, "Duration", format_time(s.duration));
+                row(ui, tr("DC offset"), format!("{:.4} %", s.dc_offset * 100.0));
+                row(ui, tr("Duration"), format_time(s.duration));
             });
         ui.add_space(4.0);
         if let Some(l) = s.integrated_lufs {
             for (name, target, tp) in [
-                ("Podcast (stereo)", -16.0, -1.0),
-                ("Streaming", -14.0, -1.0),
-                ("Broadcast (EBU R128)", -23.0, -1.0),
+                (mark("Podcast (stereo)"), -16.0, -1.0),
+                (mark("Streaming"), -14.0, -1.0),
+                (mark("Broadcast (EBU R128)"), -23.0, -1.0),
             ] {
                 let ok = (l - target).abs() <= 1.0 && s.true_peak_db <= tp;
                 ui.label(
                     RichText::new(format!(
-                        "{} {name}: {target} LUFS",
-                        if ok { "✔" } else { "•" }
+                        "{} {}: {target} LUFS",
+                        if ok { "✔" } else { "•" },
+                        tr(name)
                     ))
                     .size(10.0)
                     .color(if ok { c(th.meter_low) } else { c(th.text_dim) }),
@@ -598,11 +612,11 @@ pub fn range(ui: &mut egui::Ui, st: &mut State) {
     let mut changed_view = None;
     egui::Grid::new("range").num_columns(4).show(ui, |ui| {
         ui.label("");
-        for h in ["Start", "End", "Duration"] {
-            ui.label(RichText::new(h).size(10.0).color(c(th.text_dim)));
+        for h in [mark("Start"), mark("End"), mark("Duration")] {
+            ui.label(RichText::new(tr(h)).size(10.0).color(c(th.text_dim)));
         }
         ui.end_row();
-        ui.label("Selection");
+        ui.label(tr("Selection"));
         let (mut a, mut b) = sel.unwrap_or((0.0, 0.0));
         let ra = ui.add(
             egui::DragValue::new(&mut a)
@@ -621,7 +635,7 @@ pub fn range(ui: &mut egui::Ui, st: &mut State) {
             changed_sel = Some((a.min(b), a.max(b)));
         }
         ui.end_row();
-        ui.label("View");
+        ui.label(tr("View"));
         let (mut s, mut e) = (view.start, view.start + view.len);
         let rs = ui.add(
             egui::DragValue::new(&mut s)
