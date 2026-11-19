@@ -170,6 +170,7 @@ impl App {
         let mut st = State::new();
         crate::skin::install_fallback_fonts(&cc.egui_ctx);
         crate::hwcursor::install(cc);
+        crate::caustics::install(cc);
         lay_colors(&mut st);
         st.theme.apply(&cc.egui_ctx);
         st.theme_changed = false;
@@ -2048,6 +2049,7 @@ impl eframe::App for App {
             th.grid_strength = 0.0;
             th.scanlines = 0.0;
             th.motion = 0.0;
+            th.caustics = 0.0;
             th.glow = th.glow.min(0.6);
         }
         crate::widgets::set_theme(ctx, &th);

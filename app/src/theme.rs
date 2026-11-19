@@ -84,6 +84,10 @@ pub struct Theme {
     pub picture_veil: f32,
     /// How dark the window's edges fall away (0..1).
     pub vignette: f32,
+    /// Moving caustic light over the backdrop picture, as if seen through
+    /// shallow water (0 = off; see `caustics.rs`).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub caustics: f32,
     /// Listed only while in use; opened by its phrase.
     pub hidden: bool,
     /// SHA-256 (hex) of the lowercase phrase that opens a hidden theme.
@@ -127,6 +131,10 @@ pub struct Theme {
     /// The theme's own mouse pointers (see `pointers.rs`): `glass`,
     /// `phosphor`, `mall`, or empty for the system's.
     pub pointers: String,
+}
+
+fn is_zero(x: &f32) -> bool {
+    *x == 0.0
 }
 
 pub fn c(rgb: Rgb) -> Color32 {
@@ -217,6 +225,7 @@ impl Theme {
             picture_tile: 0.0,
             picture_veil: 0.0,
             vignette: 1.0,
+            caustics: 0.0,
             hidden: false,
             unlock: String::new(),
             columns: String::new(),

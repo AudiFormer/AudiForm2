@@ -63,6 +63,8 @@ impl Fx {
 
     /// True while something on screen is moving on its own.
     pub fn animating(&self, th: &Theme) -> bool {
+        // Caustics (`th.caustics`) move only with `motion` too: still water
+        // needs no frames.
         th.motion > 0.0
     }
 }
@@ -229,6 +231,18 @@ pub fn backdrop(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
                 p.add(Shape::mesh(m));
             }
         }
+    }
+
+    // Light through moving water, playing over the picture.
+    if th.caustics > 0.0 {
+        crate::caustics::paint(
+            p,
+            rect,
+            th,
+            fx.t,
+            th.caustics,
+            crate::caustics::SLOT_BACKDROP,
+        );
     }
 
     // Drifting aurora light, swelling with the music.
