@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod classic_themes;
+mod corners;
 mod fx;
 mod hud;
 mod inspector;

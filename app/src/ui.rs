@@ -1576,6 +1576,8 @@ impl eframe::App for App {
                 DockArea::new(&mut self.dock)
                     .style(style)
                     .show_inside(ui, &mut viewer);
+                // Where dividers meet, drag both at once.
+                crate::corners::corners(ui, &mut self.dock);
                 // The HUD over the cards: edges, brackets, the running light
                 // on the focused card and the light under each active tab.
                 let p = ui.painter();
