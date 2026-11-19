@@ -69,6 +69,9 @@ pub struct Prefs {
     /// Bring the Effects panel up when an effect is picked from the menu.
     pub show_effects_on_pick: bool,
     pub colors: ColorOverrides,
+    /// The interface language's code ("de", "ja", ...); None follows the
+    /// system's language.
+    pub language: Option<String>,
 }
 
 impl Default for Prefs {
@@ -81,6 +84,7 @@ impl Default for Prefs {
             autosave_minutes: 2,
             show_effects_on_pick: true,
             colors: ColorOverrides::default(),
+            language: None,
         }
     }
 }

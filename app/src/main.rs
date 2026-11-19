@@ -3,6 +3,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
 mod classic_themes;
 mod corners;
 mod fx;
@@ -31,10 +33,12 @@ mod workspace;
 fn main() -> eframe::Result<()> {
     fx::register();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+    let prefs = settings::Prefs::load();
+    i18n::set(prefs.language.as_deref());
     // AF2_RENDERER, when set, wins over the choice in Preferences.
     let glow_first = match std::env::var("AF2_RENDERER") {
         Ok(v) => v.eq_ignore_ascii_case("glow"),
-        Err(_) => settings::Prefs::load().renderer == settings::Renderer::Glow,
+        Err(_) => prefs.renderer == settings::Renderer::Glow,
     };
     let first = if glow_first {
         eframe::Renderer::Glow

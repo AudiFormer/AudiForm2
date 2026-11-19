@@ -322,30 +322,98 @@ pub fn status_line(ui: &mut egui::Ui, th: &Theme) {
     );
 }
 
-/// Adds a system Japanese font as a fallback for every text style, so
-/// themes' Japanese titles (and Japanese file names) show. MS Gothic is
-/// what Audiform's Mall themes asked for first.
+/// System fonts for scripts egui's own fonts lack, tried in order for
+/// each script: (path, face index in a collection). Nothing is bundled.
+const JAPANESE: &[(&str, u32)] = &[
+    // MS Gothic first: what Audiform's Mall themes asked for.
+    ("C:/Windows/Fonts/msgothic.ttc", 0),
+    ("C:/Windows/Fonts/YuGothM.ttc", 0),
+    ("C:/Windows/Fonts/meiryo.ttc", 0),
+    ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", 0),
+    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
+    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 0),
+];
+const CHINESE: &[(&str, u32)] = &[
+    ("C:/Windows/Fonts/msyh.ttc", 0),
+    ("C:/Windows/Fonts/Deng.ttf", 0),
+    ("C:/Windows/Fonts/simsun.ttc", 0),
+    ("/System/Library/Fonts/PingFang.ttc", 0),
+    ("/System/Library/Fonts/STHeiti Light.ttc", 0),
+    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+    // Noto Sans CJK's collection: face 2 is Simplified Chinese.
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
+];
+const KOREAN: &[(&str, u32)] = &[
+    ("C:/Windows/Fonts/malgun.ttf", 0),
+    ("C:/Windows/Fonts/gulim.ttc", 0),
+    ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 0),
+    ("/Library/Fonts/AppleGothic.ttf", 0),
+    // Face 1 is Korean.
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 1),
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 1),
+    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 1),
+    ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 0),
+];
+/// Cyrillic and Greek beyond what egui's fonts carry (they cover most of
+/// it already; this fills accented letters and rarer symbols).
+const WIDE_LATIN: &[(&str, u32)] = &[
+    ("C:/Windows/Fonts/segoeui.ttf", 0),
+    ("C:/Windows/Fonts/arial.ttf", 0),
+    ("/System/Library/Fonts/Helvetica.ttc", 0),
+    ("/Library/Fonts/Arial Unicode.ttf", 0),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+    ("/usr/share/fonts/TTF/DejaVuSans.ttf", 0),
+    ("/usr/share/fonts/dejavu/DejaVuSans.ttf", 0),
+];
+
+/// Adds system fonts as fallbacks for every text style, so Japanese,
+/// Chinese, Korean and Cyrillic show (the interface's languages, themes'
+/// Japanese titles, file names). The interface language's script goes
+/// first, so a Chinese interface draws its Han characters with a Chinese
+/// font rather than a Japanese one. Call again when the language changes.
 pub fn install_fallback_fonts(ctx: &egui::Context) {
-    let candidates = [
-        ("C:\\Windows\\Fonts\\msgothic.ttc", 0),
-        ("C:\\Windows\\Fonts\\YuGothM.ttc", 0),
-        ("C:\\Windows\\Fonts\\meiryo.ttc", 0),
-        ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", 0),
-        ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
-        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
-        ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
+    let mut order: Vec<(&str, &[(&str, u32)])> = vec![
+        ("wide", WIDE_LATIN),
+        ("ja", JAPANESE),
+        ("zh", CHINESE),
+        ("ko", KOREAN),
     ];
-    for (path, index) in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
-            let mut data = egui::FontData::from_owned(bytes);
-            data.index = index;
-            fonts.font_data.insert("cjk".into(), data);
-            for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts.families.entry(fam).or_default().push("cjk".into());
-            }
-            ctx.set_fonts(fonts);
-            return;
+    let lang = crate::i18n::current();
+    let first = match lang.as_str() {
+        "zh-CN" => Some("zh"),
+        "ko" => Some("ko"),
+        _ => None,
+    };
+    if let Some(f) = first {
+        if let Some(i) = order.iter().position(|(n, _)| *n == f) {
+            let e = order.remove(i);
+            order.insert(1, e);
         }
     }
+    let mut fonts = egui::FontDefinitions::default();
+    let mut seen: Vec<(&str, u32)> = Vec::new();
+    for (name, candidates) in order {
+        let Some((path, index, bytes)) = candidates
+            .iter()
+            .find_map(|&(p, i)| std::fs::read(p).ok().map(|b| (p, i, b)))
+        else {
+            continue;
+        };
+        if seen.contains(&(path, index)) {
+            continue;
+        }
+        seen.push((path, index));
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = index;
+        fonts.font_data.insert(name.into(), data);
+        for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(fam).or_default().push(name.into());
+        }
+    }
+    ctx.set_fonts(fonts);
 }
