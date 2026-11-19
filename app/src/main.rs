@@ -13,6 +13,7 @@ mod space;
 mod state;
 mod theme;
 mod ui;
+mod visualizer;
 mod waveform;
 
 fn main() -> eframe::Result<()> {
