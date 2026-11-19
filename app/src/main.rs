@@ -6,8 +6,10 @@
 mod classic_themes;
 mod corners;
 mod fx;
+mod fx_menu;
 mod hud;
 mod inspector;
+mod keymap;
 mod multitrack;
 mod panels;
 mod phasewheel;
@@ -15,6 +17,7 @@ mod pianoroll;
 mod pictures;
 mod pointers;
 mod separation;
+mod settings;
 mod skin;
 mod space;
 mod splash;
@@ -28,7 +31,11 @@ mod workspace;
 fn main() -> eframe::Result<()> {
     fx::register();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
-    let glow_first = std::env::var("AF2_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("glow"));
+    // AF2_RENDERER, when set, wins over the choice in Preferences.
+    let glow_first = match std::env::var("AF2_RENDERER") {
+        Ok(v) => v.eq_ignore_ascii_case("glow"),
+        Err(_) => settings::Prefs::load().renderer == settings::Renderer::Glow,
+    };
     let first = if glow_first {
         eframe::Renderer::Glow
     } else {

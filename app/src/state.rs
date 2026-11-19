@@ -267,6 +267,8 @@ pub struct State {
     /// The Audiform effect picked in the Effects panel, and its settings.
     pub fx_pick: Option<String>,
     pub fx_values: HashMap<String, Vec<f32>>,
+    /// Edit > Preferences: the settings saved in `prefs.json`.
+    pub prefs: crate::settings::Prefs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +353,7 @@ impl State {
             Some(h) => theme_base.with_hues(h),
             None => theme_base.clone(),
         };
+        let prefs = crate::settings::Prefs::load();
         let mut session = Session::default();
         for (i, t) in session.tracks.iter_mut().enumerate() {
             t.color = theme.track_colors[i % theme.track_colors.len().max(1)];
@@ -377,7 +380,7 @@ impl State {
             program_key: (Mode::Waveform, 0, 0, 0),
             play_started_at: 0.0,
             looping: false,
-            return_on_stop: true,
+            return_on_stop: prefs.space_returns,
             meter: (0.0, 0.0),
             fx: crate::hud::Fx::default(),
             workspace: crate::workspace::Workspace::from_key(
@@ -428,6 +431,7 @@ impl State {
             session_base: None,
             fx_pick: None,
             fx_values: HashMap::new(),
+            prefs,
         }
     }
 
@@ -748,7 +752,8 @@ impl State {
     }
 
     pub fn autosave(&mut self) {
-        if self.last_autosave.elapsed().as_secs() < 120 {
+        let every = self.prefs.autosave_minutes.max(1) as u64 * 60;
+        if !self.prefs.autosave || self.last_autosave.elapsed().as_secs() < every {
             return;
         }
         self.last_autosave = Instant::now();
@@ -899,12 +904,14 @@ impl State {
             );
         }
         if self.is_playing() {
+            let follow = self.prefs.follow_playhead;
             let pos = self.engine.as_ref().map_or(0.0, |e| e.position());
             match self.mode {
                 Mode::Waveform => {
                     if let Some(d) = self.doc_mut() {
                         d.cursor = pos;
-                        if pos > d.view.start + d.view.len * 0.95 || pos < d.view.start {
+                        if follow && (pos > d.view.start + d.view.len * 0.95 || pos < d.view.start)
+                        {
                             d.view.start = (pos - d.view.len * 0.05).max(0.0);
                         }
                     }
@@ -912,7 +919,7 @@ impl State {
                 Mode::Multitrack => {
                     self.session_cursor = pos;
                     let v = &mut self.session_view;
-                    if pos > v.start + v.len * 0.95 || pos < v.start {
+                    if follow && (pos > v.start + v.len * 0.95 || pos < v.start) {
                         v.start = (pos - v.len * 0.05).max(0.0);
                     }
                 }
