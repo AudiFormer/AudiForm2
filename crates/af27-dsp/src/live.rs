@@ -24,6 +24,17 @@ pub trait Live: Send {
     fn latency(&self) -> usize {
         0
     }
+    /// Processes with a level key: one value per frame, the loudest of
+    /// every channel the effect's copies work on (a speaker bed), so
+    /// copies on different pairs move their gain together. Effects with
+    /// no level detector ignore it.
+    fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], _key: &[f32]) {
+        self.process(l, r);
+    }
+    /// Sets this copy apart from other copies of the same effect on a
+    /// bed's other speaker pairs (copy `k`), so sweeps and tails do not
+    /// move in lockstep. Called once, after building, off the audio thread.
+    fn vary(&mut self, _k: usize) {}
 }
 
 fn v(vals: &[f32], i: usize, d: f32) -> f32 {
@@ -274,8 +285,10 @@ impl Compressor {
     }
 }
 
-impl Live for Compressor {
-    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+impl Compressor {
+    /// `key`: a side-chain level per frame (the loudest speaker of a bed),
+    /// or None to listen to this pair itself.
+    fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<&[f32]>) {
         // The gain computer works in log2 units (dB / 6.0206), so one fast
         // log2 and one fast exp2 per sample do the whole job.
         const PER_DB: f32 = 0.166_096_4;
@@ -286,8 +299,11 @@ impl Live for Compressor {
         let slope = 1.0 / self.ratio - 1.0;
         let curve = if knee > 0.0 { slope / (2.0 * knee) } else { 0.0 };
         let mut env = self.env;
-        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
-            let x = a.abs().max(b.abs());
+        for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+            let x = match key {
+                Some(k) => k.get(i).copied().unwrap_or(0.0).abs(),
+                None => a.abs().max(b.abs()),
+            };
             let c = if x > env { ca } else { cr };
             env = c * env + (1.0 - c) * x;
             if env <= quiet {
@@ -307,6 +323,15 @@ impl Live for Compressor {
             *b *= g;
         }
         self.env = env;
+    }
+}
+
+impl Live for Compressor {
+    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        self.run(l, r, None);
+    }
+    fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], key: &[f32]) {
+        self.run(l, r, Some(key));
     }
     fn set(&mut self, vals: &[f32]) {
         self.thr = v(vals, 0, -18.0);
@@ -357,13 +382,16 @@ impl Limiter {
     }
 }
 
-impl Live for Limiter {
-    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+impl Limiter {
+    fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<&[f32]>) {
         let mask = self.dl.len() - 1;
         let step = 1.0 / self.look as f32;
-        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+        for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
             let (xa, xb) = (*a * self.boost, *b * self.boost);
-            let peak = xa.abs().max(xb.abs());
+            let peak = match key {
+                Some(k) => k[i] * self.boost,
+                None => xa.abs().max(xb.abs()),
+            };
             let need = if peak > self.ceiling {
                 self.ceiling / peak
             } else {
@@ -391,6 +419,15 @@ impl Live for Limiter {
             *b = (self.dr[read] * self.g).clamp(-c, c);
             self.pos = (self.pos + 1) & mask;
         }
+    }
+}
+
+impl Live for Limiter {
+    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        self.run(l, r, None);
+    }
+    fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], key: &[f32]) {
+        self.run(l, r, Some(key));
     }
     fn set(&mut self, vals: &[f32]) {
         self.ceiling = db_to_gain(v(vals, 0, -1.0));
@@ -439,10 +476,13 @@ impl Gate {
     }
 }
 
-impl Live for Gate {
-    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
-        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
-            let x = a.abs().max(b.abs());
+impl Gate {
+    fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<&[f32]>) {
+        for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+            let x = match key {
+                Some(k) => k[i],
+                None => a.abs().max(b.abs()),
+            };
             self.env = self.det * self.env + (1.0 - self.det) * x;
             let open = if self.env >= self.thr {
                 self.held = self.hold_n;
@@ -459,6 +499,15 @@ impl Live for Gate {
             *a *= self.g;
             *b *= self.g;
         }
+    }
+}
+
+impl Live for Gate {
+    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        self.run(l, r, None);
+    }
+    fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], key: &[f32]) {
+        self.run(l, r, Some(key));
     }
     fn set(&mut self, vals: &[f32]) {
         self.thr = db_to_gain(v(vals, 0, -40.0));

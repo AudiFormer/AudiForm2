@@ -395,6 +395,20 @@ fn shape(x: f32, curve: f32) -> f32 {
 /// processor's latency so the result lines up with the input.
 fn run_live(e: Effect, b: &mut AudioBuffer, vals: &[f32]) {
     let n = b.num_channels();
+    if n > 2 {
+        // A surround file: every channel by its speaker (see `wide`).
+        let slot = af27_core::EffectSlot {
+            effect: e.id().into(),
+            values: vals.to_vec(),
+            bypass: false,
+            data: None,
+            ext_id: None,
+        };
+        if let Some(out) = crate::wide::process_buffer(&slot, b, 4096) {
+            *b = out;
+        }
+        return;
+    }
     let frames = b.frames();
     let mut c = 0;
     while c < n {

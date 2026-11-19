@@ -46,6 +46,8 @@ file is the record of how every part of Audiform27 was sourced.
 | `app/src/visualizer.rs` | `panels/visualizer/` (`VisualizerPanel.svelte`, `analysis.ts`, `palette.ts`, `presets/*.ts`; Oct 29) | Created clean (added, not copied), no AAE edits, not in Audiform's ATTRIBUTION. The spectrum feed is Audiform27's own (`af27-dsp` FFT), not Audiform's core |
 | `crates/af27-dts` | `codecs/dts/` (Audiform 0.4.0) | Created clean; the decoder is an FFmpeg port, so the crate is LGPL |
 | `app/src/separation.rs`, `crates/af27-separation` (model grouping and SDR text, engine checksum and update check, removal, GPU fallback, separated tracks) | `panels/separation/SeparationPanel.svelte`, `app/separation-tools.svelte.ts`, `app/separation.ts`, the Audio Separation page of `SettingsDialog.svelte`, `src-tauri/src/separation/{mod,download}.rs`, `commands/separation.rs` (Oct 28) | Each created clean in one commit (`git log -C --find-copies-harder`), no AAE edits, not in Audiform's ATTRIBUTION; behaviour rewritten for egui, no framework code |
+| `crates/af27-dsp/src/wide.rs`: speaker grouping (`groups`, pairs by name, lone speakers, numbered channels by order), the ring order (`ring`), the per-pair copy wrapper with `vary(k)`, the loudest-channel key for linked dynamics, the latency-matched pass for channels left alone, and the STEREO_ONLY / LINKED / SKIP_LFE categories | `dsp/effects/wide.rs` (2ba7bd8 and later, all by Claude) | Created clean, no AAE edits, not in Audiform's ATTRIBUTION. Only the algorithm: rewritten against Audiform27's `Live` trait and `EffectSlot` (no `Processor`, `routing` or `build` from Audiform's AAE-derived framework); the speaker positions behind `ring` come from Audiform27's own table; the lists name Audiform27's effects (see docs/parity.md). Echo's bed form (`Echo::wide`, echo.rs) is not ported: Audiform27's own Echo runs through the generic pair wrapper |
+| `crates/af27-fx`: the bed forms `Reverb::wide`, `ConvolutionReverb::wide`, `Modulation::wide` (with their `Bed`/`ConvBed`/`Decorrelate`/`Feed` parts) and `Processor::vary` | `dsp/effects/{verb,reverb,modulation}.rs` | Same files as the stereo ports above: created clean, no AAE edits (`git log --author=GeekCast` empty), not in ATTRIBUTION |
 
 ## Deliberately left out
 
@@ -58,7 +60,12 @@ file is the record of how every part of Audiform27 was sourced.
   Leveler, the EQs and filters, the noise, hiss and room reducers, click
   and clip repair, pitch, stretch, spectral). Where Audiform27 has these
   features, they are written fresh.
-- `shaped.rs` (Shaped Noise Reducer) and `wide.rs`: both depend on AAE
-  modules.
+- `shaped.rs` (Shaped Noise Reducer): depends on AAE modules. (`wide.rs`
+  is now ported as an algorithm only; see above.)
+- `dynamics.rs`, `eq.rs`, `filters.rs`: edited by GeekCast commits, so
+  nothing from them (including their multichannel handling) is used.
+  Audiform27's Compressor, Limiter, Noise Gate and filters get their
+  multichannel behaviour from Audiform27's own code (a level key in
+  `af27-dsp::live`, the pair wrapper in `af27-dsp::wide`).
 - VST3 hosting (`plughost/`): the lead's own work, but its tests were
   touched by AAE's merge. To be ported separately with those tests left out.

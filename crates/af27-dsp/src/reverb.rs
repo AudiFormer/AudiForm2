@@ -162,6 +162,19 @@ impl Live for Reverb {
             ((g(4, 10.0).max(0.0) * self.rate as f32 / 1000.0) as usize).min(self.pre.len() - 1);
     }
 
+    /// Copy `k` on a speaker bed gets lines a little longer than the
+    /// copy before it, so every speaker pair hears its own tail.
+    fn vary(&mut self, k: usize) {
+        if k == 0 {
+            return;
+        }
+        let off = k * (2 * SPREAD + 13);
+        self.tanks = [
+            Tank::new(self.rate, off),
+            Tank::new(self.rate, off + SPREAD),
+        ];
+    }
+
     fn reset(&mut self) {
         self.tanks[0].clear();
         self.tanks[1].clear();

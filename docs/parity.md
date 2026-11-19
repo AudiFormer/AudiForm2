@@ -64,7 +64,7 @@ our own feature names.
 ⬜ Declicker · ⬜ Clip restorer · ⬜ Silence remover · ⬜ Auto marker · ⬜ Reverb reducer ·
 ⬜ Hiss remover · ⬜ Learned sound removal · ⬜ Auto phase align
 
-**Reverb**: ✅ Reverb · ✅ Convolution reverb · ✅ Room, Hall, Plate, Spring and Tape reverb · ⬜ Surround reverb
+**Reverb**: ✅ Reverb · ✅ Convolution reverb · ✅ Room, Hall, Plate, Spring and Tape reverb · ✅ Surround reverb (the Reverb and Convolution Reverb fill a speaker bed, a different room in every speaker, none in the LFE)
 
 **Special**: ⬜ Distortion · ⬜ Doppler · ✅ Amp sim (neural `.nam`) · ✅ Tube preamp · ⬜ Mastering suite · ✅ Voice strip (Vox Strip)
 
@@ -96,3 +96,24 @@ our own feature names.
 - ⬜ Batch processing · ⬜ macros · ⬜ metadata editing · ⬜ video track
 - ✅ Session autosave every 2 minutes · ⬜ crash-recovery prompt
 - ✅ Themes (beyond the reference product's light/dark slider)
+
+## Effects on surround and 3D Space
+
+Every effect works on a speaker bed (a 3D Space session's master chain,
+run on the speakers before binaural or fold monitoring and before a
+multichannel bed export) and on a surround file in the Waveform editor
+(3.0 up to 7.1.4), as in Audiform. Bus tracks stay stereo.
+
+| How | Effects |
+| --- | --- |
+| Own bed form | Reverb (`af.reverb`), Convolution Reverb (`af.convolution_reverb`), Modulation (`af.modulation`) |
+| Every channel as it is | Amplify, Invert |
+| Copies per speaker pair, gain linked to the loudest channel | Compressor, Limiter, Noise Gate |
+| Copies per speaker pair, LFE left alone (held in time) | Echo, Reverb (built-in), Phase Curve, Amp Model, Tube Preamp, Opto Leveler, Vox Strip (and Modulation, in its bed form) |
+| L and R only | Stereo Width (built-in and `af.stereo_width`), Channel Mixer, Center Channel Extractor |
+| Copies per speaker pair, LFE too | Parametric EQ, High-Pass, Low-Pass, Notch, Hum Remover, Remove DC Offset, De-Esser |
+
+Pairs go by speaker name (L/R, Ls/Rs, Lrs/Rrs, Lss/Rss, Ltf/Rtf, Ltr/Rtr,
+Ltm/Rtm); a lone speaker (C) is fed to both sides and averaged back;
+numbered channels pair by order. Each copy is set apart (`vary`) so
+sweeps and tails do not move in lockstep.

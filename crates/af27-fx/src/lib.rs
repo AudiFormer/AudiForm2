@@ -95,6 +95,31 @@ pub fn build_with(
     })
 }
 
+/// The effects with their own form on a speaker bed (more than two
+/// channels): the Reverb, the Convolution Reverb and Modulation.
+pub const NATIVE_WIDE: [&str; 3] = [verb::ID, reverb::ID, modulation::ID];
+
+/// A running processor for effect `id` over a speaker bed with channels
+/// named `names`, for the effects in [`NATIVE_WIDE`]; it processes
+/// interleaved frames of `names.len()` channels. None for any other
+/// effect (those run as copies per speaker pair; see `af27_dsp::wide`).
+/// Ported from Audiform's `build_wide` native cases (wide.rs).
+pub fn build_wide(
+    id: &str,
+    rate: u32,
+    params: &Params,
+    data: Option<&str>,
+    names: &[String],
+) -> Option<Box<dyn Processor>> {
+    let rate = rate.max(1);
+    Some(match id {
+        verb::ID => Box::new(verb::Reverb::wide(params, rate, names)),
+        reverb::ID => Box::new(reverb::ConvolutionReverb::wide(params, rate, data, names)),
+        modulation::ID => Box::new(modulation::Modulation::wide(params, rate, names)),
+        _ => return None,
+    })
+}
+
 /// Helpers for the effects' tests: a slot like a host keeps one.
 #[cfg(test)]
 pub(crate) mod testing {
@@ -246,6 +271,41 @@ mod tests {
                 );
                 fx.reset();
                 assert!(fx.update(&p) || !fx.update(&p));
+            }
+        }
+    }
+
+    #[test]
+    fn the_bed_lists_name_real_effects() {
+        // af27-dsp keeps the multichannel lists by id; they must match.
+        use af27_dsp::wide::{SKIP_LFE, STEREO_ONLY};
+        for id in [mixer::ID, center::ID, width::WIDTH] {
+            assert!(STEREO_ONLY.contains(&id), "{id}");
+        }
+        for id in [
+            phase_curve::ID,
+            modulation::ID,
+            amp::AMP,
+            tube::PREAMP,
+            tube::OPTO,
+            vocal::VOCAL,
+        ] {
+            assert!(SKIP_LFE.contains(&id), "{id}");
+        }
+        for id in STEREO_ONLY.iter().chain(SKIP_LFE.iter()) {
+            if id.starts_with("af.") {
+                assert!(info(id).is_some(), "{id}");
+            }
+        }
+        let names: Vec<String> = af27_dsp::wide::labels(12);
+        for i in registry() {
+            let p = params_from(i.id, &[]).unwrap();
+            let w = build_wide(i.id, 48_000, &p, None, &names);
+            assert_eq!(w.is_some(), NATIVE_WIDE.contains(&i.id), "{}", i.id);
+            if let Some(mut w) = w {
+                let mut b = vec![0.1f32; 12 * 1024];
+                w.process(&mut b);
+                assert!(b.iter().all(|v| v.is_finite()), "{}", i.id);
             }
         }
     }

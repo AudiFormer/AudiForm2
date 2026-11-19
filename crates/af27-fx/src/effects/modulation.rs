@@ -23,8 +23,12 @@
 //! Rate, depth, feedback, stereo width and the dry and wet levels are
 //! shared; each kind has its own time setting.
 //!
-//! (Audiform also ran this over a speaker bed, one moving copy per
-//! speaker; Audiform27 is stereo only, so that part is not ported.)
+//! On a speaker bed every speaker has its own moving copy, its sweep a
+//! step further round the turn than the speaker before it in the room's
+//! ring, so the movement travels around the listener. Room spread feeds
+//! each copy a share of the neighbouring speakers' sound, so a part in
+//! front shimmers out into the sides and rear too. (The bed form,
+//! [`Modulation::wide`], is ported from Audiform's modulation.rs too.)
 
 use super::{choice, db_to_gain, num, toggle, EffectInfo, Params, Processor};
 
@@ -237,6 +241,18 @@ pub struct Modulation {
     adt_walk: Wander,
     adt_step: f64,
     adt_phase: f64,
+    /// On a speaker bed; None for stereo.
+    bed: Option<Bed>,
+}
+
+/// The speakers a bed's copies work on.
+struct Bed {
+    channels: usize,
+    /// The channels in ring order (no LFE); copy `a` works on `chans[a]`.
+    chans: Vec<usize>,
+    /// This frame's input and wet sound per copy.
+    x: Vec<f32>,
+    w: Vec<f32>,
 }
 
 /// One side of Double Track (the source or its copy): pan gains, drive,
@@ -313,6 +329,21 @@ impl Modulation {
         Self::with_copies(p, sr, 2)
     }
 
+    /// A Modulation over a speaker bed with channels named `names`: it
+    /// processes interleaved frames of `names.len()` channels.
+    pub fn wide(p: &Params, rate: u32, names: &[String]) -> Self {
+        let chans = af27_dsp::wide::ring(names);
+        let n = chans.len().max(1);
+        let mut m = Self::with_copies(p, f64::from(rate.max(1)), n);
+        m.bed = Some(Bed {
+            channels: names.len().max(1),
+            chans,
+            x: vec![0.0; n],
+            w: vec![0.0; n],
+        });
+        m
+    }
+
     fn with_copies(p: &Params, sr: f64, n: usize) -> Self {
         let len = (MAX_MS / 1000.0 * sr) as usize + 8;
         let mut m = Self {
@@ -347,6 +378,7 @@ impl Modulation {
             adt_walk: Wander::new(0x51ed_270b, 0.4, sr),
             adt_step: 0.0,
             adt_phase: 0.0,
+            bed: None,
         };
         m.set(p);
         m
@@ -377,6 +409,45 @@ impl Modulation {
         self.dry = (p.get("dry") / 100.0) as f32;
         self.wet = (p.get("wet") / 100.0) as f32;
         self.spread = (p.get("spread") / 100.0).clamp(0.0, 1.0) as f32;
+    }
+
+    /// Processes interleaved frames over the bed's speakers.
+    fn process_bed(&mut self, buf: &mut [f32]) {
+        let Some(mut bed) = self.bed.take() else {
+            return;
+        };
+        let ch = bed.channels;
+        let n = bed.chans.len();
+        // Copies spread evenly round the turn (chorus a whole turn, the
+        // others half), narrowed by the width.
+        let turn = f64::from(self.width) * if self.kind == 0 { 1.0 } else { 0.5 };
+        // A share of each neighbour's sound, the same loudness overall.
+        let side = 0.5 * self.spread;
+        for f in buf.chunks_exact_mut(ch) {
+            for (a, c) in bed.chans.iter().enumerate() {
+                bed.x[a] = f[*c];
+            }
+            for a in 0..n {
+                let (prev, next) = (bed.x[(a + n - 1) % n], bed.x[(a + 1) % n]);
+                let x = if n > 1 {
+                    bed.x[a] * (1.0 - self.spread) + (prev + next) * side
+                } else {
+                    bed.x[a]
+                };
+                bed.w[a] = self.wet_of(a, x, turn * a as f64 / n as f64);
+            }
+            self.phase += self.step;
+            if self.phase > std::f64::consts::TAU {
+                self.phase -= std::f64::consts::TAU;
+            }
+            // Width: 0 is the same moving copy in every speaker.
+            let mid = bed.w.iter().sum::<f32>() / n.max(1) as f32;
+            for (a, c) in bed.chans.iter().enumerate() {
+                let w = mid + (bed.w[a] - mid) * self.width;
+                f[*c] = f[*c] * self.dry + w * self.wet;
+            }
+        }
+        self.bed = Some(bed);
     }
 
     fn ms(&self, v: f64) -> f64 {
@@ -473,6 +544,10 @@ impl Modulation {
 
 impl Processor for Modulation {
     fn process(&mut self, buf: &mut [f32]) {
+        if self.bed.is_some() {
+            self.process_bed(buf);
+            return;
+        }
         if let Some(a) = self.adt {
             self.process_adt(buf, a);
             return;
@@ -496,7 +571,7 @@ impl Processor for Modulation {
     }
 
     fn latency(&self) -> usize {
-        if self.adt.is_some() {
+        if self.adt.is_some() && self.bed.is_none() {
             self.ms(ADT_MS).round() as usize
         } else {
             0
@@ -518,13 +593,11 @@ impl Processor for Modulation {
         self.set(p);
         true
     }
-}
 
-impl Modulation {
-    /// Sets this copy apart from others of the same effect (Audiform used
-    /// it for the copies on a speaker bed): starts the sweep `k` steps
-    /// round and gives the wander its own seeds.
-    pub fn vary(&mut self, k: usize) {
+    /// Sets this copy apart from others of the same effect (the copies
+    /// on a speaker bed's pairs): starts the sweep `k` steps round and
+    /// gives the wander its own seeds.
+    fn vary(&mut self, k: usize) {
         // An odd fraction of a turn, so no two copies line up.
         self.phase = (k as f64 * 0.382).fract() * std::f64::consts::TAU;
         let sr = self.sr;
@@ -640,6 +713,34 @@ mod tests {
             (sum - 2.0 * std::f32::consts::FRAC_1_SQRT_2).abs() < 0.05,
             "{sum}"
         );
+    }
+
+    #[test]
+    fn on_a_bed_a_sound_in_front_spreads_round_the_room() {
+        let names: Vec<String> = ["L", "R", "C", "LFE", "Ls", "Rs"]
+            .iter()
+            .map(|x| (*x).to_string())
+            .collect();
+        for k in 0..KINDS.len() {
+            let p = params(&[("kind", k as f64), ("dry", 0.0), ("wet", 100.0)]);
+            let mut m = Modulation::wide(&p, R, &names);
+            assert_eq!(m.latency(), 0);
+            let frames = R as usize;
+            let mut b = vec![0.0f32; frames * 6];
+            for (i, f) in b.chunks_exact_mut(6).enumerate() {
+                f[2] = (i as f32 * 440.0 * std::f32::consts::TAU / R as f32).sin() * 0.5;
+            }
+            for c in b.chunks_mut(6 * 256) {
+                m.process(c);
+            }
+            let energy = |c: usize| b.chunks_exact(6).map(|f| f[c] * f[c]).sum::<f32>();
+            assert!(b.iter().all(|v| v.is_finite()));
+            assert!(energy(0) > 1.0 && energy(1) > 1.0, "{k}: reaches L and R");
+            assert!(energy(3) == 0.0, "{k}: LFE left alone");
+            // The copies differ: the room moves, not one copy everywhere.
+            let diff: f32 = b.chunks_exact(6).map(|f| (f[0] - f[1]).abs()).sum();
+            assert!(diff > 10.0, "{k}: copies move on their own: {diff}");
+        }
     }
 }
 
