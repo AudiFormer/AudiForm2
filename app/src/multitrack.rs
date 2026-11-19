@@ -9,7 +9,7 @@
 //! Wheel over the lanes zooms at the pointer; over the headers it
 //! scrolls the tracks; Shift+wheel scrolls in time.
 
-use egui::{pos2, vec2, Align2, FontId, Rect, RichText, Rounding, Sense, Stroke};
+use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense, Stroke};
 
 use crate::state::{DocId, State, Tool, View};
 use crate::theme::{c, ca, lerp};
@@ -692,108 +692,412 @@ fn track_header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
     }
 }
 
+/// Fader travel for a level: 0 at -inf (the bottom), 1 at +12 dB, with
+/// more room around unity where mixing happens, as on a desk.
+fn fader_pos(db: f32) -> f32 {
+    const MAP: [(f32, f32); 8] = [
+        (-90.0, 0.0),
+        (-60.0, 0.04),
+        (-48.0, 0.12),
+        (-24.0, 0.34),
+        (-12.0, 0.52),
+        (-6.0, 0.64),
+        (0.0, 0.78),
+        (12.0, 1.0),
+    ];
+    let db = db.clamp(-90.0, 12.0);
+    for w in MAP.windows(2) {
+        let ((d0, p0), (d1, p1)) = (w[0], w[1]);
+        if db <= d1 {
+            return p0 + (p1 - p0) * (db - d0) / (d1 - d0);
+        }
+    }
+    1.0
+}
+
+fn fader_db(pos: f32) -> f32 {
+    // Invert by bisection: the map is monotonic.
+    let (mut lo, mut hi) = (-90.0f32, 12.0f32);
+    for _ in 0..30 {
+        let mid = 0.5 * (lo + hi);
+        if fader_pos(mid) < pos {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// A tall fader with a dB scale and, if `meter` is given, a stereo meter
+/// beside it. Drag to move (Shift for fine), double-click for 0 dB.
+fn fader(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    db: &mut f32,
+    rect: Rect,
+    th: &crate::theme::Theme,
+    meter: Option<(f32, f32)>,
+) -> bool {
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let p = ui.painter_at(rect.expand(24.0));
+    let track = Rect::from_min_max(
+        pos2(rect.center().x - 2.0, rect.top() + 8.0),
+        pos2(rect.center().x + 2.0, rect.bottom() - 8.0),
+    );
+    let y_of = |d: f32| track.bottom() - fader_pos(d) * track.height();
+    let mut changed = false;
+    if resp.dragged() {
+        let fine = ui.input(|i| i.modifiers.shift);
+        let dy = resp.drag_delta().y * if fine { 0.2 } else { 1.0 };
+        let pos = (fader_pos(*db) - dy / track.height()).clamp(0.0, 1.0);
+        *db = (fader_db(pos) * 10.0).round() / 10.0;
+        changed = true;
+    }
+    if resp.double_clicked() {
+        *db = 0.0;
+        changed = true;
+    }
+    // Scale.
+    for (d, label) in [
+        (12.0, "+12"),
+        (6.0, "+6"),
+        (0.0, "0"),
+        (-6.0, "-6"),
+        (-12.0, "-12"),
+        (-24.0, "-24"),
+        (-48.0, "-48"),
+    ] {
+        let y = y_of(d);
+        let strong = d == 0.0;
+        p.line_segment(
+            [pos2(track.left() - 9.0, y), pos2(track.left() - 3.0, y)],
+            Stroke::new(1.0_f32, ca(th.text_dim, if strong { 220 } else { 120 })),
+        );
+        p.text(
+            pos2(track.left() - 11.0, y),
+            Align2::RIGHT_CENTER,
+            label,
+            FontId::proportional(8.5),
+            ca(th.text_dim, if strong { 230 } else { 150 }),
+        );
+    }
+    p.rect_filled(track, Rounding::same(2.0), c(th.wave_background));
+    p.rect_stroke(
+        track,
+        Rounding::same(2.0),
+        Stroke::new(1.0_f32, ca(th.border, 200)),
+    );
+    // Meter to the right of the groove.
+    if let Some((l, r)) = meter {
+        for (k, v) in [l, r].into_iter().enumerate() {
+            let mdb = crate::ui::meter_db(v);
+            let col = Rect::from_min_max(
+                pos2(track.right() + 8.0 + k as f32 * 6.0, track.top()),
+                pos2(track.right() + 12.0 + k as f32 * 6.0, track.bottom()),
+            );
+            p.rect_filled(col, Rounding::same(1.0), c(th.wave_background));
+            let top = y_of(mdb);
+            let mut y = col.bottom();
+            while y > top {
+                let seg_db = fader_db(((track.bottom() - y) / track.height()).clamp(0.0, 1.0));
+                let y0 = (y - 2.0).max(top);
+                p.rect_filled(
+                    Rect::from_min_max(pos2(col.left(), y0), pos2(col.right(), y)),
+                    Rounding::ZERO,
+                    th.meter_color(seg_db),
+                );
+                y -= 3.0;
+            }
+        }
+    }
+    // The cap.
+    let cy = y_of(*db);
+    let cap = Rect::from_center_size(pos2(track.center().x, cy), vec2(28.0, 14.0));
+    let hot = resp.hovered() || resp.dragged();
+    let square = th.bevel.is_some();
+    p.rect_filled(
+        cap.translate(vec2(1.0, 2.0)),
+        Rounding::same(2.0),
+        Color32::from_black_alpha(90),
+    );
+    p.rect_filled(
+        cap,
+        Rounding::same(if square { 0.0 } else { 2.0 }),
+        lerp(th.panel_raised, th.text, if hot { 0.28 } else { 0.18 }),
+    );
+    if square {
+        crate::skin::bevel(&p, cap, th, false);
+    } else {
+        p.rect_stroke(
+            cap,
+            Rounding::same(2.0),
+            Stroke::new(
+                1.0_f32,
+                if hot {
+                    c(th.accent)
+                } else {
+                    ca(th.border, 230)
+                },
+            ),
+        );
+    }
+    p.line_segment(
+        [pos2(cap.left() + 4.0, cy), pos2(cap.right() - 4.0, cy)],
+        Stroke::new(2.0_f32, c(th.accent)),
+    );
+    resp.on_hover_text("Drag; Shift for fine steps; double-click for 0 dB");
+    changed
+}
+
+/// A pan knob: drag up/down or left/right, double-click to centre.
+fn pan_knob(ui: &mut egui::Ui, pan: &mut f32, th: &crate::theme::Theme) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click_and_drag());
+    let mut changed = false;
+    if resp.dragged() {
+        let d = resp.drag_delta();
+        *pan = (*pan + (d.x - d.y) * 0.01).clamp(-1.0, 1.0);
+        changed = true;
+    }
+    if resp.double_clicked() {
+        *pan = 0.0;
+        changed = true;
+    }
+    let p = ui.painter();
+    let cen = rect.center();
+    let r = 13.0;
+    p.circle_filled(cen, r, lerp(th.panel_raised, th.text, 0.12));
+    p.circle_stroke(cen, r, Stroke::new(1.0_f32, ca(th.border, 230)));
+    // Arc from the top (centre) to the pan position.
+    let to = *pan * 135.0f32.to_radians();
+    let n = 16;
+    let pts: Vec<_> = (0..=n)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + to * i as f32 / n as f32;
+            cen + vec2(a.cos(), a.sin()) * (r + 3.0)
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, c(th.accent))));
+    let a = -std::f32::consts::FRAC_PI_2 + to;
+    p.line_segment(
+        [
+            cen + vec2(a.cos(), a.sin()) * 4.0,
+            cen + vec2(a.cos(), a.sin()) * (r - 2.0),
+        ],
+        Stroke::new(2.0_f32, c(th.text)),
+    );
+    let label = if pan.abs() < 0.005 {
+        "C".to_string()
+    } else if *pan < 0.0 {
+        format!("L{:.0}", -*pan * 100.0)
+    } else {
+        format!("R{:.0}", *pan * 100.0)
+    };
+    resp.on_hover_text(format!("Pan {label} (drag; double-click to centre)"));
+    changed
+}
+
+/// A square mixer key (Mute, Solo, Arm).
+fn key(
+    ui: &mut egui::Ui,
+    on: &mut bool,
+    label: &str,
+    col: [u8; 3],
+    tip: &str,
+    th: &crate::theme::Theme,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 20.0), Sense::click());
+    let p = ui.painter();
+    let square = th.bevel.is_some();
+    let face = if *on {
+        c(col)
+    } else {
+        lerp(
+            th.panel_raised,
+            th.text,
+            if resp.hovered() { 0.12 } else { 0.06 },
+        )
+    };
+    p.rect_filled(rect, Rounding::same(if square { 0.0 } else { 3.0 }), face);
+    if square {
+        crate::skin::bevel(p, rect, th, *on);
+    } else {
+        p.rect_stroke(
+            rect,
+            Rounding::same(3.0),
+            Stroke::new(1.0_f32, ca(th.border, 220)),
+        );
+    }
+    let tc = if *on { c(th.background) } else { c(th.text) };
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(11.0),
+        tc,
+    );
+    if resp.on_hover_text(tip).clicked() {
+        *on = !*on;
+        return true;
+    }
+    false
+}
+
+/// The card behind a strip: solid enough to read over any backdrop.
+fn strip_card(ui: &egui::Ui, rect: Rect, th: &crate::theme::Theme, master: bool) {
+    let p = ui.painter();
+    let fill = if master {
+        lerp(th.panel_raised, th.accent, 0.07)
+    } else {
+        c(th.panel_raised)
+    };
+    let rounding = Rounding::same(if th.bevel.is_some() {
+        0.0
+    } else {
+        th.rounding.min(6.0)
+    });
+    p.rect_filled(
+        rect,
+        rounding,
+        Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 242),
+    );
+    if th.bevel.is_some() {
+        crate::skin::panel(p, rect, th);
+    } else {
+        p.rect_stroke(rect, rounding, Stroke::new(1.0_f32, ca(th.border, 200)));
+    }
+}
+
+/// The Mixer: one full-height strip per track (colour, name, Mute, Solo,
+/// Arm, pan knob, fader with scale, level box) and the master with its
+/// meter, in the leading editor's arrangement.
 pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
+    let before = st.session.clone();
+    let mut changed = false;
+    let avail = ui.available_rect_before_wrap();
+    let h = avail.height().max(260.0);
+    const W: f32 = 92.0;
     egui::ScrollArea::horizontal().show(ui, |ui| {
-        ui.horizontal(|ui| {
-            let before = st.session.clone();
-            let mut changed = false;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             let n = st.session.tracks.len();
             for ti in 0..n {
+                let (rect, _) = ui.allocate_exact_size(vec2(W, h - 4.0), Sense::hover());
+                strip_card(ui, rect, &th, false);
                 let tr = &mut st.session.tracks[ti];
-                egui::Frame::none()
-                    .fill(c(th.panel_raised))
-                    .rounding(Rounding::same(th.rounding))
-                    .inner_margin(6.0)
-                    .show(ui, |ui| {
-                        ui.set_width(78.0);
-                        ui.vertical_centered(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(70.0, 4.0), Sense::hover());
-                            ui.painter()
-                                .rect_filled(r, Rounding::same(2.0), c(tr.color));
-                            ui.label(RichText::new(&tr.name).strong().size(11.0));
-                            let mut pan = tr.pan * 100.0;
-                            if ui
-                                .add(egui::Slider::new(&mut pan, -100.0..=100.0).show_value(false))
-                                .on_hover_text("Pan")
-                                .changed()
-                            {
-                                tr.pan = pan / 100.0;
-                                changed = true;
-                            }
-                            changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut tr.volume_db, -60.0..=12.0)
-                                        .vertical()
-                                        .show_value(false),
-                                )
-                                .changed();
-                            ui.label(
-                                RichText::new(format!("{:+.1} dB", tr.volume_db))
-                                    .monospace()
-                                    .size(10.0),
-                            );
-                            ui.horizontal(|ui| {
-                                changed |= ui.toggle_value(&mut tr.mute, "M").changed();
-                                changed |= ui.toggle_value(&mut tr.solo, "S").changed();
-                            });
-                        });
-                    });
-            }
-            egui::Frame::none()
-                .fill(lerp(th.panel_raised, th.accent, 0.08))
-                .rounding(Rounding::same(th.rounding))
-                .inner_margin(6.0)
-                .show(ui, |ui| {
-                    ui.set_width(90.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("MASTER").strong().color(c(th.accent)));
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(&mut st.session.master_db, -60.0..=12.0)
-                                    .vertical()
-                                    .show_value(false),
-                            )
-                            .changed();
-                        ui.label(
-                            RichText::new(format!("{:+.1} dB", st.session.master_db))
-                                .monospace()
-                                .size(10.0),
-                        );
-                        let (l, r) = st.meter;
-                        let (rect, _) = ui.allocate_exact_size(vec2(30.0, 80.0), Sense::hover());
-                        for (i, v) in [l, r].into_iter().enumerate() {
-                            let db = crate::ui::meter_db(v);
-                            let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-                            let col = Rect::from_min_size(
-                                pos2(rect.left() + i as f32 * 16.0, rect.top()),
-                                vec2(12.0, rect.height()),
-                            );
-                            ui.painter().rect_filled(
-                                col,
-                                Rounding::same(2.0),
-                                c(th.wave_background),
-                            );
-                            let lit = Rect::from_min_max(
-                                pos2(col.left(), col.bottom() - col.height() * f),
-                                col.max,
-                            );
-                            ui.painter()
-                                .rect_filled(lit, Rounding::same(2.0), th.meter_color(db));
-                        }
-                    });
+                let id = egui::Id::new(("mixer-strip", tr.id));
+                let mut cui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect.shrink(6.0))
+                        .layout(egui::Layout::top_down(egui::Align::Center)),
+                );
+                let (cap, _) = cui.allocate_exact_size(vec2(W - 12.0, 4.0), Sense::hover());
+                cui.painter()
+                    .rect_filled(cap, Rounding::same(2.0), c(tr.color));
+                cui.add(egui::Label::new(RichText::new(&tr.name).strong().size(11.0)).truncate());
+                cui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.add_space(((W - 12.0) - 3.0 * 22.0 - 6.0) / 2.0);
+                    changed |= key(ui, &mut tr.mute, "M", th.meter_mid, "Mute", &th);
+                    changed |= key(ui, &mut tr.solo, "S", th.accent, "Solo", &th);
+                    changed |= key(
+                        ui,
+                        &mut tr.armed,
+                        "R",
+                        th.accent_alt,
+                        "Arm for recording",
+                        &th,
+                    );
                 });
-            if changed {
-                let down = ui.input(|i| i.pointer.any_down());
-                if !st.gesture {
-                    st.commit_live("Mixer", before);
-                    st.gesture = down;
-                }
-                for ti in 0..st.session.tracks.len() {
-                    st.live_track(ti);
-                }
-                st.live_master();
+                changed |= pan_knob(&mut cui, &mut tr.pan, &th);
+                // The fader takes the rest, above the level box.
+                let top = cui.cursor().top() + 4.0;
+                let fr = Rect::from_center_size(
+                    pos2(rect.center().x + 6.0, (top + rect.bottom() - 34.0) / 2.0),
+                    vec2(36.0, (rect.bottom() - 34.0 - top).max(40.0)),
+                );
+                changed |= fader(ui, id.with("fader"), &mut tr.volume_db, fr, &th, None);
+                let boxr = Rect::from_min_size(
+                    pos2(rect.center().x - 32.0, rect.bottom() - 28.0),
+                    vec2(64.0, 20.0),
+                );
+                changed |= ui
+                    .put(
+                        boxr,
+                        egui::DragValue::new(&mut tr.volume_db)
+                            .range(-90.0..=12.0)
+                            .speed(0.1)
+                            .suffix(" dB")
+                            .max_decimals(1),
+                    )
+                    .changed();
             }
+            // Master.
+            let (rect, _) = ui.allocate_exact_size(vec2(W + 10.0, h - 4.0), Sense::hover());
+            strip_card(ui, rect, &th, true);
+            ui.painter().text(
+                pos2(rect.center().x, rect.top() + 14.0),
+                Align2::CENTER_CENTER,
+                "MASTER",
+                FontId::proportional(12.0),
+                c(th.accent),
+            );
+            let fr = Rect::from_center_size(
+                pos2(
+                    rect.center().x + 2.0,
+                    (rect.top() + 36.0 + rect.bottom() - 34.0) / 2.0,
+                ),
+                vec2(36.0, (rect.height() - 70.0).max(40.0)),
+            );
+            changed |= fader(
+                ui,
+                egui::Id::new("mixer-master"),
+                &mut st.session.master_db,
+                fr,
+                &th,
+                Some(st.meter),
+            );
+            let boxr = Rect::from_min_size(
+                pos2(rect.center().x - 32.0, rect.bottom() - 28.0),
+                vec2(64.0, 20.0),
+            );
+            changed |= ui
+                .put(
+                    boxr,
+                    egui::DragValue::new(&mut st.session.master_db)
+                        .range(-90.0..=12.0)
+                        .speed(0.1)
+                        .suffix(" dB")
+                        .max_decimals(1),
+                )
+                .changed();
         });
     });
+    if changed {
+        let down = ui.input(|i| i.pointer.any_down());
+        if !st.gesture {
+            st.commit_live("Mixer", before);
+            st.gesture = down;
+        }
+        for ti in 0..st.session.tracks.len() {
+            st.live_track(ti);
+        }
+        st.live_master();
+    }
+}
+
+#[cfg(test)]
+mod mixer_tests {
+    #[test]
+    fn fader_law_round_trips_and_is_monotonic() {
+        let mut last = -1.0;
+        for d in [-90.0f32, -60.0, -30.0, -12.0, -3.0, 0.0, 6.0, 12.0] {
+            let p = super::fader_pos(d);
+            assert!(p > last);
+            last = p;
+            assert!((super::fader_db(p) - d).abs() < 0.05, "{d}");
+        }
+        assert_eq!(super::fader_pos(0.0), 0.78);
+    }
 }

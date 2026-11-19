@@ -158,8 +158,13 @@ pub fn draw_channel(
         }
         p.add(Shape::line(pts.clone(), Stroke::new(1.5_f32, c(centre))));
         if spp < 0.12 {
+            // Sample dots in the bright waveform colour, ringed in the
+            // lane background so they stand out on any theme.
+            let _ = peak;
+            let dot = crate::theme::lerp(centre, [255, 255, 255], 0.35);
             for q in pts {
-                p.circle_filled(q, 2.5, c(peak));
+                p.circle_filled(q, 3.4, c(th.wave_background));
+                p.circle_filled(q, 2.6, dot);
             }
         }
         return;
