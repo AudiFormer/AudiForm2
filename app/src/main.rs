@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod classic_themes;
 mod fx;
 mod hud;
 mod inspector;
@@ -10,8 +11,11 @@ mod multitrack;
 mod panels;
 mod phasewheel;
 mod pianoroll;
+mod pictures;
 mod separation;
+mod skin;
 mod space;
+mod splash;
 mod state;
 mod theme;
 mod ui;
@@ -23,7 +27,11 @@ fn main() -> eframe::Result<()> {
     fx::register();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
     let glow_first = std::env::var("AF2_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("glow"));
-    let first = if glow_first { eframe::Renderer::Glow } else { eframe::Renderer::Wgpu };
+    let first = if glow_first {
+        eframe::Renderer::Glow
+    } else {
+        eframe::Renderer::Wgpu
+    };
     match run(first, files.clone()) {
         // A machine whose graphics driver has no DirectX 12 / Vulkan (old
         // or virtual machines) still gets a window, through OpenGL.

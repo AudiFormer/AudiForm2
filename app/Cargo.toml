@@ -24,4 +24,6 @@ serde_json.workspace = true
 eframe.workspace = true
 egui.workspace = true
 rfd.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+sha2 = "0.10"
 egui_dock = { version = "0.14", features = ["serde"] }

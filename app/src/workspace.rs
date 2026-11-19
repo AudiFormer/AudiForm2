@@ -91,7 +91,8 @@ impl Workspace {
                 let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.17, vec![Files, Markers]);
-                let [_files, rack] = s.split_below(left, 0.36, vec![Inspector, Effects, AiSeparation]);
+                let [_files, rack] =
+                    s.split_below(left, 0.36, vec![Inspector, Effects, AiSeparation]);
                 let [_rack, _history] = s.split_below(rack, 0.7, vec![History]);
                 let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
@@ -103,13 +104,15 @@ impl Workspace {
                 let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.17, vec![Files, Markers]);
-                let [_files, rack] = s.split_below(left, 0.36, vec![Inspector, Effects, Statistics]);
+                let [_files, rack] =
+                    s.split_below(left, 0.36, vec![Inspector, Effects, Statistics]);
                 let [_rack, _history] = s.split_below(rack, 0.7, vec![History]);
                 let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
                 // The scopes share one panel; 3D Space and AI Stems each
                 // have their own below it.
-                let [_editor, right] = s.split_right(centre, 0.76, vec![Phase, Visualizer, Spectrum]);
+                let [_editor, right] =
+                    s.split_right(centre, 0.76, vec![Phase, Visualizer, Spectrum]);
                 let [_scopes, lower] = s.split_below(right, 0.42, vec![Space]);
                 let [_space, _stems] = s.split_below(lower, 0.55, vec![AiSeparation]);
                 d
@@ -127,7 +130,8 @@ impl Workspace {
             Workspace::FocusedEdit => {
                 let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
                 let s = d.main_surface_mut();
-                let [centre, _left] = s.split_left(NodeIndex::root(), 0.13, vec![Files, Markers, History]);
+                let [centre, _left] =
+                    s.split_left(NodeIndex::root(), 0.13, vec![Files, Markers, History]);
                 let [_editor, bottom] = s.split_below(centre, 0.88, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.8, vec![Selection]);
                 d
@@ -135,7 +139,8 @@ impl Workspace {
             Workspace::Mastering => {
                 let mut d = DockState::new(vec![Editor, Mixer]);
                 let s = d.main_surface_mut();
-                let [centre, left] = s.split_left(NodeIndex::root(), 0.18, vec![Inspector, Effects]);
+                let [centre, left] =
+                    s.split_left(NodeIndex::root(), 0.18, vec![Inspector, Effects]);
                 let [_rack, _files] = s.split_below(left, 0.62, vec![Files, History]);
                 let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);

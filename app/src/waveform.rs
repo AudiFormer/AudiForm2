@@ -389,6 +389,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     }
 
     let pos = st.position();
+    {
+        // Whatever moved the view this frame, it stays inside the file.
+        let d = st.doc_mut().unwrap();
+        let dur = d.duration();
+        d.view.clamp_to(dur);
+    }
     let d = st.doc().unwrap();
     let v = d.view;
     let dur = d.duration();

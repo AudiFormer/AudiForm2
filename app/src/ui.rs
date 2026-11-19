@@ -14,7 +14,7 @@ use crate::theme::c;
 use af27_core::time::{format_time, gain_to_db};
 use af27_dsp::effects::GROUPS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum Tab {
     Files,
     Markers,
@@ -53,6 +53,19 @@ impl Tab {
         Tab::Spectrum,
         Tab::Selection,
     ];
+    /// The title for a crowded tab bar.
+    pub fn short_title(self) -> &'static str {
+        match self {
+            Tab::Statistics => "Statistics",
+            Tab::Phase => "Phase",
+            Tab::PianoRoll => "Piano",
+            Tab::AiSeparation => "Stems",
+            Tab::Visualizer => "Visuals",
+            Tab::Inspector => "Track",
+            t => t.title(),
+        }
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Tab::Files => "Files",
@@ -75,12 +88,40 @@ impl Tab {
     }
 }
 
+/// A tab's title: spaced capitals, or tighter and smaller when its panel
+/// is crowded.
+fn tab_text(t: &str, compact: bool) -> egui::WidgetText {
+    let (size, spacing) = if compact { (10.5, 0.3) } else { (11.5, 1.2) };
+    RichText::new(t.to_uppercase())
+        .size(size)
+        .extra_letter_spacing(spacing)
+        .into()
+}
+
+/// About how wide a full-size tab is: its spaced title, padding and close
+/// button.
+fn full_tab_width(ctx: &egui::Context, title: &str) -> f32 {
+    let up = title.to_uppercase();
+    let w = ctx.fonts(|f| {
+        f.layout_no_wrap(
+            up.clone(),
+            egui::FontId::proportional(11.5),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x
+    });
+    w + up.chars().count() as f32 * 1.2 + 44.0
+}
+
 pub struct App {
     pub st: State,
     dock: DockState<Tab>,
     pub viewer: Caches,
     /// The docked cards as drawn last frame: their glass goes under them.
     cards: Vec<egui::Rect>,
+    crowded: std::collections::HashSet<Tab>,
+    showing: std::collections::HashSet<Tab>,
     boot_skipped: bool,
     /// Frame pacing for Auto visual effects.
     last_frame: f64,
@@ -119,6 +160,7 @@ fn load_layout(w: crate::workspace::Workspace) -> DockState<Tab> {
 impl App {
     pub fn new(cc: &eframe::CreationContext, files: Vec<std::path::PathBuf>) -> App {
         let mut st = State::new();
+        crate::skin::install_fallback_fonts(&cc.egui_ctx);
         st.theme.apply(&cc.egui_ctx);
         st.theme_changed = false;
         st.open_paths(files);
@@ -128,6 +170,8 @@ impl App {
             dock,
             viewer: Caches::default(),
             cards: Vec::new(),
+            crowded: Default::default(),
+            showing: Default::default(),
             boot_skipped: false,
             last_frame: 0.0,
             pace: 1.0 / 30.0,
@@ -174,6 +218,10 @@ struct Viewer<'a> {
     caches: &'a mut Caches,
     open_tab: &'a mut Option<Tab>,
     tab_rects: &'a mut Vec<(Tab, egui::Rect)>,
+    /// Tabs in panels too narrow for their full titles, and the tabs
+    /// on show in each panel (as of the last frame).
+    crowded: &'a std::collections::HashSet<Tab>,
+    showing: &'a std::collections::HashSet<Tab>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -194,15 +242,12 @@ impl TabViewer for Viewer<'_> {
                     if self.st.session_dirty { " *" } else { "" }
                 ),
             };
-            return RichText::new(format!("{}: {name}", t.to_uppercase()))
-                .size(11.5)
-                .extra_letter_spacing(1.2)
-                .into();
+            return tab_text(&format!("{}: {name}", t), self.crowded.contains(tab));
         }
-        RichText::new(t.to_uppercase())
-            .size(11.5)
-            .extra_letter_spacing(1.2)
-            .into()
+        if self.crowded.contains(tab) {
+            return tab_text(tab.short_title(), true);
+        }
+        tab_text(t, false)
     }
 
     fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
@@ -213,8 +258,9 @@ impl TabViewer for Viewer<'_> {
         self.ui_inner(ui, tab);
     }
 
-    fn closeable(&mut self, _tab: &mut Tab) -> bool {
-        true
+    fn closeable(&mut self, tab: &mut Tab) -> bool {
+        // In a crowded panel only the tab on show keeps its close button.
+        !self.crowded.contains(tab) || self.showing.contains(tab)
     }
 
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
@@ -758,8 +804,18 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.menu_button("Theme", |ui| {
                 let names: Vec<String> = st.themes.iter().map(|t| t.name.clone()).collect();
+                let classic = st.themes.iter().position(|t| t.author == "Audiform");
                 for (i, n) in names.iter().enumerate() {
-                    if ui.radio(st.theme.name == *n, n).clicked() {
+                    let on = st.theme_base.name == *n;
+                    if st.themes[i].hidden && !on {
+                        continue;
+                    }
+                    if Some(i) == classic {
+                        ui.separator();
+                        ui.label(RichText::new("From Audiform").small().color(c(st.theme.text_dim)));
+                    }
+                    let label = if st.themes[i].hidden { "Secret Theme" } else { n.as_str() };
+                    if ui.radio(on, label).clicked() {
                         let t = st.themes[i].clone();
                         st.set_theme(t);
                         let _ = std::fs::create_dir_all(data_dir());
@@ -821,6 +877,9 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.add(egui::Slider::new(&mut st.theme.reactive, 0.0..=1.5).text("Reacts to music"));
                 ui.checkbox(&mut st.theme.brackets, "Corner brackets");
                 ui.checkbox(&mut st.theme.intro, "Boot sequence");
+                if !st.theme.columns.is_empty() {
+                    ui.checkbox(&mut st.theme.realistic, "Realistic marble and tile");
+                }
             });
         });
         ui.menu_button("Window", |ui| {
@@ -875,7 +934,10 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(6.0);
-            crate::hud::wordmark(ui, &th, &fx);
+            // A theme with its own title shows it in the menu bar instead.
+            if th.title_text.is_empty() && th.title_picture.is_empty() {
+                crate::hud::wordmark(ui, &th, &fx);
+            }
             ui.add_space(18.0);
             // The workspace, chosen from one drop-down in the top right.
             let mut pick = st.workspace;
@@ -890,7 +952,8 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
                 .width(150.0)
                 .show_ui(ui, |ui| {
                     for w in crate::workspace::Workspace::ALL {
-                        ui.selectable_value(&mut pick, w, w.name()).on_hover_text(w.about());
+                        ui.selectable_value(&mut pick, w, w.name())
+                            .on_hover_text(w.about());
                     }
                     ui.separator();
                     if ui.button("Reset to Saved Layout").clicked() {
@@ -915,10 +978,57 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
     });
 }
 
+/// Reads a typed time: `h:mm:ss.mmm`, `m:ss.mmm` or plain seconds.
+pub fn parse_time(text: &str) -> Option<f64> {
+    let mut secs = 0.0;
+    for part in text.trim().split(':') {
+        let v: f64 = part.trim().parse().ok()?;
+        if !v.is_finite() || v < 0.0 {
+            return None;
+        }
+        secs = secs * 60.0 + v;
+    }
+    Some(secs)
+}
+
+/// The hidden theme a phrase opens, if it is one. As in Audiform, only
+/// letters are ever hashed, so ordinary times never are.
+pub fn theme_for_phrase<'a>(
+    themes: &'a [crate::theme::Theme],
+    text: &str,
+) -> Option<&'a crate::theme::Theme> {
+    use sha2::{Digest, Sha256};
+    let t = text.trim().to_lowercase();
+    if t.is_empty() || !t.chars().all(|c| c.is_ascii_lowercase()) {
+        return None;
+    }
+    let hash: String = Sha256::digest(t.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    themes.iter().find(|th| th.hidden && th.unlock == hash)
+}
+
+/// What Enter in the time display does: open a hidden theme for its
+/// phrase, or move the playhead to the time typed.
+fn enter_time(st: &mut State, text: &str) {
+    if let Some(t) = theme_for_phrase(&st.themes, text).cloned() {
+        let _ = std::fs::create_dir_all(data_dir());
+        let _ = std::fs::write(data_dir().join("theme.txt"), &t.name);
+        st.set_theme(t);
+        st.toast("Secret Theme found");
+    } else if let Some(t) = parse_time(text) {
+        st.set_cursor(t);
+    }
+}
+
 /// The markers of what the editor shows, in time order.
 fn marker_times(st: &State) -> Vec<f64> {
     let mut v: Vec<f64> = match st.mode {
-        Mode::Waveform => st.doc().map(|d| d.markers.iter().map(|m| m.time).collect()).unwrap_or_default(),
+        Mode::Waveform => st
+            .doc()
+            .map(|d| d.markers.iter().map(|m| m.time).collect())
+            .unwrap_or_default(),
         Mode::Multitrack => st.session.markers.iter().map(|m| m.time).collect(),
     };
     v.sort_by(|a, b| a.total_cmp(b));
@@ -938,50 +1048,73 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         } else {
             "TIME"
         };
-        crate::hud::readout(ui, &t, caption, &th, &fx, st.meter);
-        ui.add_space(8.0);
-        ui.vertical(|ui| {
-            ui.label(
+        // Click the time to type one; Enter moves the playhead there.
+        if let Some(mut text) = st.time_edit.take() {
+            let r = ui.add_sized(
+                crate::hud::READOUT,
+                egui::TextEdit::singleline(&mut text)
+                    .font(egui::FontId::monospace(15.0))
+                    .text_color(c(th.accent))
+                    .vertical_align(egui::Align::Center),
+            );
+            if !r.has_focus() && !r.lost_focus() {
+                r.request_focus();
+            }
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if r.lost_focus() || escape {
+                if enter {
+                    enter_time(st, &text);
+                }
+            } else {
+                st.time_edit = Some(text);
+            }
+        } else if crate::hud::readout(ui, &t, caption, &th, &fx, st.meter).clicked() {
+            st.time_edit = Some(format_time(st.cursor()));
+        }
+        ui.add_space(6.0);
+        // Bars and beats, the tempo and the metronome, all on the one row
+        // and as tall as the buttons.
+        ui.add_sized(
+            egui::vec2(64.0, 26.0),
+            egui::Label::new(
                 egui::RichText::new(st.session.tempo.format(st.position()))
                     .monospace()
                     .color(c(th.text_dim)),
-            );
-            ui.horizontal(|ui| {
-                let mut bpm = st.session.tempo.bpm;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut bpm)
-                            .range(20.0..=300.0)
-                            .speed(0.5)
-                            .suffix(" BPM")
-                            .max_decimals(1),
-                    )
-                    .changed()
-                {
-                    st.session.tempo.bpm = bpm;
-                    st.session_version += 1;
-                    st.session_dirty = true;
-                    st.live_metronome();
-                }
-                let mut m = st.session.tempo.metronome;
-                if crate::hud::button(
-                    ui,
-                    crate::hud::Icon::Metronome,
-                    "Metronome",
-                    m,
-                    th.accent,
-                    &th,
-                    &fx,
-                    false,
-                )
-                .clicked()
-                {
-                    m = !m;
-                    st.session.tempo.metronome = m;
-                    st.live_metronome();
-                }
-            });
-        });
+            ),
+        );
+        let mut bpm = st.session.tempo.bpm;
+        if ui
+            .add_sized(
+                egui::vec2(78.0, 26.0),
+                egui::DragValue::new(&mut bpm)
+                    .range(20.0..=300.0)
+                    .speed(0.5)
+                    .suffix(" BPM")
+                    .max_decimals(1),
+            )
+            .on_hover_text("Tempo: drag, or double-click to type")
+            .changed()
+        {
+            st.session.tempo.bpm = bpm;
+            st.session_version += 1;
+            st.session_dirty = true;
+            st.live_metronome();
+        }
+        let m = st.session.tempo.metronome;
+        if crate::hud::transport_button(
+            ui,
+            crate::hud::Icon::Metronome,
+            "Metronome",
+            m,
+            th.accent,
+            &th,
+        )
+        .clicked()
+        {
+            st.session.tempo.metronome = !m;
+            st.live_metronome();
+        }
         ui.add_space(14.0);
         // The transport, in the order and style long-time editors expect:
         // Stop, Play, Pause, previous, Rewind, Fast Forward, next, Record,
@@ -1006,15 +1139,36 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             st.set_cursor(at);
         }
         let marks = marker_times(st);
-        if tb(ui, Icon::ToStart, "Move Playhead to Previous (marker, or the start)", false, th.text, &th).clicked() {
+        if tb(
+            ui,
+            Icon::ToStart,
+            "Move Playhead to Previous (marker, or the start)",
+            false,
+            th.text,
+            &th,
+        )
+        .clicked()
+        {
             let now = st.cursor();
-            let t = marks.iter().rev().copied().find(|&m| m < now - 1e-3).unwrap_or(0.0);
+            let t = marks
+                .iter()
+                .rev()
+                .copied()
+                .find(|&m| m < now - 1e-3)
+                .unwrap_or(0.0);
             st.set_cursor(t);
         }
         // Rewind and Fast Forward run while held.
         let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
         let rw = tb(ui, Icon::Rewind, "Rewind (hold)", false, th.text, &th);
-        let ff = tb(ui, Icon::FastForward, "Fast Forward (hold)", false, th.text, &th);
+        let ff = tb(
+            ui,
+            Icon::FastForward,
+            "Fast Forward (hold)",
+            false,
+            th.text,
+            &th,
+        );
         for (r, dir) in [(&rw, -1.0), (&ff, 1.0)] {
             if r.is_pointer_button_down_on() && !playing {
                 let now = st.cursor();
@@ -1022,13 +1176,35 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                 ui.ctx().request_repaint();
             }
         }
-        if tb(ui, Icon::ToEnd, "Move Playhead to Next (marker, or the end)", false, th.text, &th).clicked() {
+        if tb(
+            ui,
+            Icon::ToEnd,
+            "Move Playhead to Next (marker, or the end)",
+            false,
+            th.text,
+            &th,
+        )
+        .clicked()
+        {
             let now = st.cursor();
             let end = st.program_len();
-            let t = marks.iter().copied().find(|&m| m > now + 1e-3).unwrap_or(end);
+            let t = marks
+                .iter()
+                .copied()
+                .find(|&m| m > now + 1e-3)
+                .unwrap_or(end);
             st.set_cursor(t);
         }
-        if tb(ui, Icon::Record, "Record (Shift+Space)", rec, th.accent_alt, &th).clicked() {
+        if tb(
+            ui,
+            Icon::Record,
+            "Record (Shift+Space)",
+            rec,
+            th.accent_alt,
+            &th,
+        )
+        .clicked()
+        {
             if rec {
                 st.stop_recording();
             } else {
@@ -1080,6 +1256,7 @@ fn status(ui: &mut egui::Ui, st: &State) {
             ui.label(RichText::new("Ready").color(c(th.text_dim)));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::skin::status_line(ui, th);
             let dim = c(th.text_dim);
             if let Some(e) = &st.engine {
                 ui.label(RichText::new(format!("Out: {} @ {} Hz", e.device, e.rate)).color(dim));
@@ -1224,7 +1401,11 @@ impl eframe::App for App {
         impl Drop for TraceGuard {
             fn drop(&mut self) {
                 if std::env::var_os("AF2_TRACE").is_some() {
-                    eprintln!("frame {:?} {:.2} ms", self.1, self.0.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!(
+                        "frame {:?} {:.2} ms",
+                        self.1,
+                        self.0.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
             }
         }
@@ -1256,9 +1437,14 @@ impl eframe::App for App {
             self.pace = self.pace * 0.97 + gap.max(busy_ms / 1000.0) * 0.03;
             self.paced_frames += 1;
         }
-        if self.st.visuals_mode == 0 && !self.st.visuals_lite && self.paced_frames > 120 && self.pace > 0.055 {
+        if self.st.visuals_mode == 0
+            && !self.st.visuals_lite
+            && self.paced_frames > 120
+            && self.pace > 0.055
+        {
             self.st.visuals_lite = true;
-            self.st.toast("Visual effects reduced for this device (View > Visual Effects)");
+            self.st
+                .toast("Visual effects reduced for this device (View > Visual Effects)");
         }
         let lite = self.st.visuals_mode == 2 || (self.st.visuals_mode == 0 && self.st.visuals_lite);
         let mut th = self.st.theme.clone();
@@ -1279,6 +1465,9 @@ impl eframe::App for App {
             crate::hud::backdrop(&bg, screen, &th, &fx);
             for r in &self.cards {
                 crate::hud::glass(&bg, *r, &th);
+                // Tab strips on the theme's marble.
+                let strip = egui::Rect::from_min_max(r.min, egui::pos2(r.right(), r.top() + 26.0));
+                crate::skin::bar(&bg, strip, &th);
             }
         }
         let frame = |fill: [u8; 3]| {
@@ -1287,15 +1476,48 @@ impl eframe::App for App {
                 .inner_margin(egui::Margin::symmetric(6.0, 4.0))
         };
 
+        // The theme's columns run the full height, so they come first.
+        crate::skin::columns(ctx, &th);
+        if th.checker.is_some() {
+            egui::TopBottomPanel::top("skin-checker")
+                .exact_height(crate::skin::checker_height(&th))
+                .show_separator_line(false)
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| {
+                    crate::skin::checker(ui.painter(), ui.max_rect(), &th)
+                });
+        }
+        let under = egui::vec2(6.0, 4.0);
         egui::TopBottomPanel::top("menu")
             .frame(frame(th.background))
-            .show(ctx, |ui| menus(self, ui));
+            .show(ctx, |ui| {
+                crate::skin::bar(ui.painter(), ui.max_rect().expand2(under), &th);
+                ui.horizontal(|ui| {
+                    crate::skin::title(ui, &th);
+                    menus(self, ui);
+                });
+            });
+        if !th.columns.is_empty() {
+            egui::TopBottomPanel::top("skin-meander")
+                .exact_height(crate::skin::MEANDER)
+                .show_separator_line(false)
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| {
+                    crate::skin::meander(ui.painter(), ui.max_rect(), &th)
+                });
+        }
         egui::TopBottomPanel::top("tools")
             .frame(frame(th.background))
-            .show(ctx, |ui| toolbar(ui, &mut self.st));
+            .show(ctx, |ui| {
+                crate::skin::bar(ui.painter(), ui.max_rect().expand2(under), &th);
+                toolbar(ui, &mut self.st)
+            });
         egui::TopBottomPanel::bottom("status")
             .frame(frame(th.background))
-            .show(ctx, |ui| status(ui, &self.st));
+            .show(ctx, |ui| {
+                crate::skin::bar(ui.painter(), ui.max_rect().expand2(under), &th);
+                status(ui, &self.st)
+            });
 
         let mut style = Style::from_egui(ctx.style().as_ref());
         let clear = egui::Color32::TRANSPARENT;
@@ -1325,6 +1547,10 @@ impl eframe::App for App {
         style.tab.inactive.text_color = c(th.text_dim);
         style.tab.hovered.text_color = c(th.text);
         style.tab.hovered.bg_fill = crate::theme::ca(th.accent, 10);
+        if let Some(t) = th.tab_active {
+            style.tab.active.text_color = c(t);
+            style.tab.focused.text_color = c(t);
+        }
         style.tab.tab_body.bg_fill = clear;
         style.tab.tab_body.stroke = egui::Stroke::NONE;
         style.tab.tab_body.rounding = Rounding::ZERO;
@@ -1344,6 +1570,8 @@ impl eframe::App for App {
                     caches: &mut self.viewer,
                     open_tab: &mut open_tab,
                     tab_rects: &mut tab_rects,
+                    crowded: &self.crowded,
+                    showing: &self.showing,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
@@ -1353,16 +1581,46 @@ impl eframe::App for App {
                 let p = ui.painter();
                 let focused = self.dock.focused_leaf().map(|(_, n)| n.0);
                 self.cards.clear();
+                self.crowded.clear();
+                self.showing.clear();
                 let mut serial = 0;
                 for (i, node) in self.dock.main_surface().iter().enumerate() {
-                    if let egui_dock::Node::Leaf { rect, tabs, active, .. } = node {
+                    if let egui_dock::Node::Leaf {
+                        rect, tabs, active, ..
+                    } = node
+                    {
                         serial += 1;
                         let on = focused == Some(i);
                         self.cards.push(*rect);
+                        // Would the full titles fit? If not, this panel's
+                        // tabs go compact next frame.
+                        let need: f32 = tabs
+                            .iter()
+                            .map(|t| {
+                                let title = if *t == Tab::Editor {
+                                    "Editor: a file name.wav"
+                                } else {
+                                    t.title()
+                                };
+                                full_tab_width(ui.ctx(), title)
+                            })
+                            .sum();
+                        if need > rect.width() - 8.0 {
+                            self.crowded.extend(tabs.iter().copied());
+                        }
+                        if let Some(t) = tabs.get(active.0) {
+                            self.showing.insert(*t);
+                        }
                         crate::hud::frame(p, *rect, &th, &fx, on, serial);
+                        if tabs.get(active.0) == Some(&Tab::Editor) {
+                            crate::skin::lane_art(p, *rect, &th);
+                        }
                         if let Some(t) = tabs.get(active.0) {
                             if let Some((_, r)) = tab_rects.iter().find(|(x, _)| x == t) {
-                                crate::hud::tab_light(p, *r, &th, &fx, on);
+                                let r = r.intersect(rect.shrink2(egui::vec2(1.0, 0.0)));
+                                if r.width() > 2.0 {
+                                    crate::hud::tab_light(p, r, &th, &fx, on);
+                                }
                             }
                         }
                     }
@@ -1399,7 +1657,11 @@ impl eframe::App for App {
             || self.st.meter.0 > 0.001
         {
             ctx.request_repaint();
-        } else if fx.animating(&th) && ctx.input(|i| i.viewport().focused.unwrap_or(true) && !i.viewport().minimized.unwrap_or(false)) {
+        } else if fx.animating(&th)
+            && ctx.input(|i| {
+                i.viewport().focused.unwrap_or(true) && !i.viewport().minimized.unwrap_or(false)
+            })
+        {
             // The HUD keeps moving at a gentle 30 frames a second when idle,
             // only while the window has focus: in the background it rests.
             ctx.request_repaint_after(std::time::Duration::from_millis(33));

@@ -36,14 +36,25 @@ impl View {
     pub fn fit(dur: f64) -> View {
         View {
             start: 0.0,
-            len: dur.max(0.5) * 1.02,
+            len: dur.max(0.0005),
         }
     }
     pub fn zoom(&mut self, factor: f64, anchor: f64, total: f64) {
-        let new_len = (self.len * factor).clamp(0.0005, (total * 1.5).max(1.0));
+        let new_len = (self.len * factor).clamp(0.0005, total.max(0.0005));
         let frac = ((anchor - self.start) / self.len).clamp(0.0, 1.0);
-        self.start = (anchor - new_len * frac).max(0.0);
+        self.start = anchor - new_len * frac;
         self.len = new_len;
+        self.clamp_to(total);
+    }
+    /// Keeps the view inside the file: never wider than it, never
+    /// scrolled past either end, as in the leading editor.
+    pub fn clamp_to(&mut self, total: f64) {
+        let total = total.max(0.0005);
+        if !self.len.is_finite() || self.len <= 0.0 {
+            self.len = total;
+        }
+        self.len = self.len.min(total);
+        self.start = self.start.clamp(0.0, total - self.len);
     }
 }
 
@@ -208,6 +219,8 @@ pub struct State {
     /// The workspace on screen, and one the toolbar asked to switch to.
     pub workspace: crate::workspace::Workspace,
     pub want_workspace: Option<crate::workspace::Workspace>,
+    /// What is being typed into the time display, while it is.
+    pub time_edit: Option<String>,
     pub reset_workspace: bool,
     /// Visual effects: 0 Auto (cut back when frames are slow), 1 Full, 2 Lite.
     pub visuals_mode: u8,
@@ -270,7 +283,10 @@ pub enum RecordTarget {
 }
 
 fn hues_path(theme: &str) -> std::path::PathBuf {
-    let safe: String = theme.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+    let safe: String = theme
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
     data_dir().join("hues").join(format!("{safe}.json"))
 }
 
@@ -368,6 +384,7 @@ impl State {
                 &std::fs::read_to_string(data_dir().join("workspace.txt")).unwrap_or_default(),
             ),
             want_workspace: None,
+            time_edit: None,
             reset_workspace: false,
             visuals_mode: std::fs::read_to_string(data_dir().join("visuals.txt"))
                 .ok()
@@ -1415,5 +1432,22 @@ impl State {
     pub fn scope_spectrum(&mut self, sp: &mut crate::visualizer::Spectrum, out: &mut [f32]) {
         let (frames, rate) = self.scope_frames(sp.size());
         sp.bands(&frames, rate, out);
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::View;
+
+    #[test]
+    fn the_view_never_runs_past_the_file() {
+        let mut v = View::fit(4.12);
+        assert_eq!((v.start, v.len), (0.0, 4.12));
+        v.zoom(3.0, 2.0, 4.12);
+        assert!(v.start >= 0.0 && v.start + v.len <= 4.12 + 1e-9);
+        v.zoom(0.25, 4.0, 4.12);
+        v.start = 99.0;
+        v.clamp_to(4.12);
+        assert!((v.start + v.len - 4.12).abs() < 1e-9, "{v:?}");
     }
 }
