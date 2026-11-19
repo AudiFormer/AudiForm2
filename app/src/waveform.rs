@@ -3,8 +3,16 @@
 
 //! The Waveform editor: one file, every channel stacked, an overview bar,
 //! a time ruler with markers, and an optional spectral display under the
-//! waveform. Drag to select time, click to place the playhead, mouse
-//! wheel zooms at the pointer, Shift+wheel scrolls.
+//! waveform. Drag to select time, click to place the playhead.
+//!
+//! Wheel (see [`crate::zoom`]): over the waveform and the spectrum it
+//! zooms time (around the pointer, between the pointer and the middle, or
+//! the playhead, per the zoom preferences; or scrolls when wheel zoom is
+//! off); over the ruler and the overview it always zooms toward the
+//! pointer; Shift+wheel scrolls in time; Ctrl+wheel always zooms time;
+//! Alt+wheel zooms the waveform's amplitude (display only, up to 16x).
+//! Over the spectrum's frequency scale the wheel zooms the frequencies;
+//! a right-click on the spectrum offers its zoom, scale and resolution.
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Rounding, Sense, Shape, Stroke};
 
@@ -122,7 +130,9 @@ pub fn draw_channel(
     v: &View,
     th: &Theme,
     tint: Option<[u8; 3]>,
+    amp: f32,
 ) {
+    let amp = amp.clamp(1.0, crate::zoom::MAX_AMP);
     let mid = rect.center().y;
     let half = rect.height() * 0.46;
     let w = rect.width().max(1.0) as usize;
@@ -147,7 +157,8 @@ pub fn draw_channel(
         let pts: Vec<Pos2> = (a..b)
             .map(|i| {
                 let t = i as f64 / rate as f64;
-                pos2(time_to_x(v, rect, t), mid - data[i].clamp(-1.5, 1.5) * half)
+                let s = (data[i] * amp).clamp(-1.08, 1.08);
+                pos2(time_to_x(v, rect, t), mid - s * half)
             })
             .collect();
         if th.glow > 0.0 {
@@ -157,8 +168,8 @@ pub fn draw_channel(
             ));
         }
         p.add(Shape::line(pts.clone(), Stroke::new(1.5_f32, c(centre))));
-        if spp < 0.12 {
-            // Sample dots in the bright waveform colour, ringed in the
+        if spp <= 1.0 / 6.0 {
+            // Samples 6+ pixels apart: sample dots in the bright waveform colour, ringed in the
             // lane background so they stand out on any theme.
             let _ = peak;
             let dot = crate::theme::lerp(centre, [255, 255, 255], 0.35);
@@ -181,6 +192,7 @@ pub fn draw_channel(
             break;
         }
         let (lo, hi) = peaks.range(data, ch, s0, s1);
+        let (lo, hi) = (lo * amp, hi * amp);
         let xf = rect.left() + x as f32;
         let yt = mid - hi.clamp(-1.0, 1.0) * half;
         let yb = mid - lo.clamp(-1.0, 1.0) * half;
@@ -222,7 +234,7 @@ fn spectrogram_texture(
         (d.view.len * 100_000.0) as i64,
         cols,
         rows_per_ch,
-        st.theme.name.clone() + &format!("{:?}", st.theme.spectrum),
+        st.theme.name.clone() + &format!("{:?}{:?}", st.theme.spectrum, st.spec),
     );
     if let Some((tex, k)) = &caches.spectro {
         if *k == key {
@@ -233,18 +245,26 @@ fn spectrogram_texture(
     let start = (d.view.start * rate) as usize;
     let end = ((d.view.start + d.view.len) * rate) as usize;
     let nch = d.buf.num_channels().min(8);
-    let size = 2048;
+    let size = st.spec.fft;
+    let ny = rate / 2.0;
+    let bins = size / 2;
+    // Each row's place between bins, top row the highest frequency, on
+    // the view's range and scale.
+    let row_bins: Vec<(usize, f32)> = (0..rows_per_ch)
+        .map(|y| {
+            let pos = 1.0 - (y as f64 + 0.5) / rows_per_ch as f64;
+            let f = st.spec.freq_at(pos, ny);
+            let b = (f / ny * bins as f64).clamp(0.0, (bins - 1) as f64);
+            (b.floor() as usize, b.fract() as f32)
+        })
+        .collect();
     let mut img = egui::ColorImage::new([cols, rows_per_ch * nch], Color32::BLACK);
     for ch in 0..nch {
         let spec = af27_dsp::fft::spectrogram(&d.buf.channels[ch], start, end, cols, size);
-        let bins = size / 2;
         for (x, col) in spec.iter().enumerate() {
-            for y in 0..rows_per_ch {
-                // Top row is the highest frequency; a gentle curve gives
-                // the low end more room.
-                let f = 1.0 - (y as f32 + 0.5) / rows_per_ch as f32;
-                let bin = ((f.powf(1.6)) * (bins - 1) as f32) as usize;
-                let db = col[bin.min(bins - 1)];
+            for (y, &(b, fr)) in row_bins.iter().enumerate() {
+                let b1 = (b + 1).min(bins - 1);
+                let db = col[b] + (col[b1] - col[b]) * fr;
                 let level = ((db + 110.0) / 100.0).clamp(0.0, 1.0);
                 let [r, g, b] = st.theme.spectrum_color(level);
                 img[(x, ch * rows_per_ch + y)] = Color32::from_rgb(r, g, b);
@@ -305,23 +325,20 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     };
 
     // Interaction first so drawing shows this frame's state.
+    st.wave_px = body.width();
     let hover = resp.hover_pos();
     if let Some(hp) = hover {
-        let (scroll, zoomd, shift) =
-            ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.shift));
-        let d = st.doc_mut().unwrap();
-        let dur = d.duration();
-        if zoomd != 1.0 {
-            let t = x_to_time(&d.view, body, hp.x);
-            d.view.zoom(1.0 / zoomd as f64, t, dur);
-        } else if scroll.y != 0.0 && !shift {
-            let t = x_to_time(&d.view, body, hp.x);
-            d.view.zoom((-scroll.y as f64 * 0.004).exp(), t, dur);
-        } else if scroll.y != 0.0 || scroll.x != 0.0 {
-            let dx = if shift { scroll.y } else { scroll.x };
-            d.view.start = (d.view.start - dx as f64 / body.width() as f64 * d.view.len).max(0.0);
-        }
+        let input = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers));
+        let areas = Areas {
+            overview,
+            ruler,
+            body,
+            wave: wave_area,
+            spec: spec_area,
+        };
+        wheel(st, &areas, hp, input);
     }
+    let mut moved_by_hand = false;
     {
         let d = st.doc_mut().unwrap();
         let dur = d.duration();
@@ -353,6 +370,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             if resp.dragged() {
                 match drag {
                     WaveDrag::Overview => {
+                        moved_by_hand = true;
                         let t = ((pp.x - overview.left()) / overview.width()) as f64 * dur;
                         d.view.start = (t - d.view.len / 2.0).max(0.0);
                     }
@@ -378,6 +396,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 if overview.contains(pp) {
                     let t = ((pp.x - overview.left()) / overview.width()) as f64 * dur;
                     d.view.start = (t - d.view.len / 2.0).max(0.0);
+                    moved_by_hand = true;
                 } else {
                     d.cursor = x_to_time(&d.view, body, pp.x).clamp(0.0, dur);
                     d.sel = None;
@@ -388,9 +407,19 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             d.sel = Some((0.0, dur));
         }
     }
+    if moved_by_hand {
+        st.hand_moved_view();
+    }
     let was_playing = st.is_playing();
-    if resp.clicked() && was_playing {
+    let on_overview = resp
+        .interact_pointer_pos()
+        .is_some_and(|pp| overview.contains(pp));
+    if resp.clicked() && was_playing && !on_overview {
         st.play();
+    }
+    // Right-click on the spectrum: its view menu.
+    if let Some(sa) = spec_area {
+        spectrum_menu(ui, st, &resp, sa);
     }
 
     let pos = st.position();
@@ -421,6 +450,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         &ov,
         &th,
         None,
+        1.0,
     );
     let vx0 = time_to_x(&ov, overview, v.start);
     let vx1 = time_to_x(&ov, overview, v.start + v.len);
@@ -466,6 +496,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             &v,
             &th,
             None,
+            d.amp,
         );
         let label = channel_name(nch, ch);
         p.text(
@@ -475,9 +506,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             FontId::proportional(10.0),
             c(th.text_dim),
         );
-        // dB scale at the right edge.
+        // dB scale at the right edge (following the amplitude zoom).
         for db in [-6.0f32, -12.0, -24.0] {
-            let g = 10f32.powf(db / 20.0) * lane.height() * 0.46;
+            let g = 10f32.powf(db / 20.0) * d.amp * lane.height() * 0.46;
+            if g > lane.height() * 0.5 {
+                continue;
+            }
             for y in [lane.center().y - g, lane.center().y + g] {
                 p.line_segment(
                     [pos2(lane.right() - 6.0, y), pos2(lane.right(), y)],
@@ -490,7 +524,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     // Spectral display.
     if let Some(sa) = spec_area {
         let cols = ((sa.width() / 2.0) as usize).clamp(32, 1024);
-        let rows = 192;
+        let rows = ((sa.height() / nch.min(8) as f32) as usize).clamp(64, 512);
         if let Some(tex) = spectrogram_texture(ui, st, caches, cols, rows) {
             p.image(
                 tex.id(),
@@ -501,24 +535,27 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         }
         let d = st.doc().unwrap();
         let lane_h = sa.height() / nch.min(8) as f32;
-        let ny = d.buf.rate as f32 / 2.0;
+        let ny = d.buf.rate as f64 / 2.0;
+        let scale = Rect::from_min_max(pos2(sa.right() - SCALE_W, sa.top()), sa.max);
+        p.rect_filled(scale, Rounding::ZERO, ca(th.panel, 150));
         for ch in 0..nch.min(8) {
             let lane = Rect::from_min_size(
                 pos2(sa.left(), sa.top() + lane_h * ch as f32),
                 vec2(sa.width(), lane_h),
             );
-            for khz in [1.0f32, 5.0, 10.0, 15.0, 20.0] {
-                let f = khz * 1000.0 / ny;
-                if f >= 1.0 {
-                    continue;
-                }
-                let y = lane.bottom() - f.powf(1.0 / 1.6) * lane.height();
+            for (f, label) in st.spec.ticks(ny, lane.height(), 14.0) {
+                let y = lane.bottom() - st.spec.pos(f, ny) as f32 * lane.height();
+                p.line_segment(
+                    [pos2(lane.right() - 4.0, y), pos2(lane.right(), y)],
+                    Stroke::new(1.0_f32, ca(th.text, 150)),
+                );
+                let y = y.clamp(lane.top() + 6.0, lane.bottom() - 6.0);
                 p.text(
-                    pos2(lane.right() - 4.0, y),
+                    pos2(lane.right() - 6.0, y),
                     Align2::RIGHT_CENTER,
-                    format!("{khz}k"),
+                    label,
                     FontId::proportional(9.0),
-                    ca(th.text, 150),
+                    ca(th.text, 190),
                 );
             }
             if ch > 0 {
@@ -577,6 +614,191 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             );
         }
     }
+}
+
+/// Width of the spectrum's frequency scale at its right edge.
+const SCALE_W: f32 = 44.0;
+
+/// The Waveform editor's parts, for the wheel.
+struct Areas {
+    overview: Rect,
+    ruler: Rect,
+    body: Rect,
+    wave: Rect,
+    spec: Option<Rect>,
+}
+
+/// The mouse wheel over the Waveform editor (the rules are in the module
+/// notes at the top).
+fn wheel(
+    st: &mut State,
+    a: &Areas,
+    hp: Pos2,
+    (scroll, zoomd, m): (egui::Vec2, f32, egui::Modifiers),
+) {
+    let prefs = st.zoom;
+    let pos = st.position();
+    let min = st.min_view_len();
+    let ctrl = if zoomd != 1.0 {
+        crate::zoom::ctrl_points(zoomd)
+    } else {
+        0.0
+    };
+    let on_top = a.overview.contains(hp) || a.ruler.contains(hp);
+    let on_scale = a
+        .spec
+        .is_some_and(|sa| sa.contains(hp) && hp.x >= sa.right() - SCALE_W);
+    let Some(d) = st.doc_mut() else { return };
+    let dur = d.duration();
+    // The time under the pointer: on the overview, its place in the file.
+    let pointer_t = if a.overview.contains(hp) {
+        ((hp.x - a.overview.left()) / a.overview.width()) as f64 * dur
+    } else {
+        x_to_time(&d.view, a.body, hp.x)
+    };
+    let anchor = if on_top {
+        pointer_t
+    } else {
+        crate::zoom::anchor_time(prefs.wheel_anchor, pointer_t, &d.view, pos)
+    };
+    let mut moved = false;
+    if ctrl != 0.0 {
+        d.view.zoom_min(prefs.wheel_factor(ctrl), anchor, dur, min);
+        moved = true;
+    } else if scroll.y != 0.0 {
+        if on_scale && !m.alt {
+            // Frequency zoom: the frequency under the pointer stays put.
+            let sa = a.spec.unwrap_or(a.body);
+            let nch = d.buf.num_channels().clamp(1, 8);
+            let lane_h = sa.height() / nch as f32;
+            let k = (((hp.y - sa.top()) / lane_h).floor() as usize).min(nch - 1);
+            let bottom = sa.top() + lane_h * (k + 1) as f32;
+            let frac = ((bottom - hp.y) / lane_h).clamp(0.0, 1.0) as f64;
+            let ny = d.buf.rate as f64 / 2.0;
+            let f = st.spec.freq_at(frac, ny);
+            st.spec.zoom(prefs.wheel_factor(scroll.y), f, ny);
+            return;
+        } else if m.alt {
+            if a.wave.contains(hp) {
+                let f = 1.0 / prefs.wheel_factor(scroll.y) as f32;
+                d.amp = (d.amp * f).clamp(1.0, crate::zoom::MAX_AMP);
+            }
+        } else if on_top || prefs.wheel_zooms_waveform {
+            d.view
+                .zoom_min(prefs.wheel_factor(scroll.y), anchor, dur, min);
+            moved = true;
+        } else {
+            d.view.start -= scroll.y as f64 / a.body.width() as f64 * d.view.len;
+            d.view.clamp_to(dur);
+            moved = true;
+        }
+    }
+    if scroll.x != 0.0 && !m.alt {
+        // Shift+wheel (egui turns it sideways) or a sideways swipe.
+        d.view.start -= scroll.x as f64 / a.body.width() as f64 * d.view.len;
+        d.view.clamp_to(dur);
+        moved = true;
+    }
+    if moved {
+        st.hand_moved_view();
+    }
+}
+
+/// The spectrum's right-click menu: frequency zoom, scale, resolution.
+fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect) {
+    let id = egui::Id::new("af27-spectrum-menu");
+    if resp.secondary_clicked() {
+        let on = resp.interact_pointer_pos().is_some_and(|p| sa.contains(p));
+        ui.data_mut(|d| d.insert_temp(id, on));
+    }
+    let ny = st.doc().map_or(24_000.0, |d| d.buf.rate as f64 / 2.0);
+    resp.context_menu(|ui| {
+        if !ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+            ui.close_menu();
+            return;
+        }
+        let s = &mut st.spec;
+        if ui.button("Zoom In (Frequency)").clicked() {
+            s.zoom_step(true, ny);
+            ui.close_menu();
+        }
+        if ui.button("Zoom Out (Frequency)").clicked() {
+            s.zoom_step(false, ny);
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(
+                s.range.is_some(),
+                egui::Button::new("Zoom Reset (Frequency)"),
+            )
+            .clicked()
+        {
+            s.reset_zoom();
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.radio(!s.notes, "Hertz").clicked() {
+            s.notes = false;
+            ui.close_menu();
+        }
+        if ui.radio(s.notes, "Notes").clicked() {
+            s.notes = true;
+            ui.close_menu();
+        }
+        ui.separator();
+        let full_log = s.log_step == crate::zoom::LOG_STEPS;
+        let full_lin = s.log_step == 0;
+        if ui
+            .add_enabled(!full_log, egui::Button::new("More Logarithmic"))
+            .clicked()
+        {
+            s.more_log();
+        }
+        if ui
+            .add_enabled(!full_lin, egui::Button::new("More Linear"))
+            .clicked()
+        {
+            s.more_linear();
+        }
+        if ui
+            .add_enabled(!full_log, egui::Button::new("Full Logarithmic"))
+            .clicked()
+        {
+            s.log_step = crate::zoom::LOG_STEPS;
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(!full_lin, egui::Button::new("Full Linear"))
+            .clicked()
+        {
+            s.log_step = 0;
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                s.fft < crate::zoom::FFT_MAX,
+                egui::Button::new("Increase Spectral Resolution"),
+            )
+            .clicked()
+        {
+            s.finer();
+        }
+        if ui
+            .add_enabled(
+                s.fft > crate::zoom::FFT_MIN,
+                egui::Button::new("Decrease Spectral Resolution"),
+            )
+            .clicked()
+        {
+            s.coarser();
+        }
+        ui.label(
+            egui::RichText::new(format!("Analysis frame: {} samples", s.fft))
+                .small()
+                .weak(),
+        );
+    });
 }
 
 pub fn channel_name(n: usize, ch: usize) -> &'static str {

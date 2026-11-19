@@ -109,35 +109,7 @@ impl Prefs {
     }
 }
 
-/// Where wheel zoom centres.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WheelAnchor {
-    #[default]
-    Pointer,
-    Between,
-    Playhead,
-}
-
-/// PLACEHOLDER for the wheel-zoom settings being added on the `wt/zoom`
-/// branch (as `State` fields saved to `data_dir()/zoom.json`). The
-/// General page shows these controls; at merge, bind them to those
-/// `State` fields instead and delete this struct.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ZoomPrefs {
-    pub wheel_zooms: bool,
-    pub step_pct: f32,
-    pub anchor: WheelAnchor,
-}
-
-impl Default for ZoomPrefs {
-    fn default() -> ZoomPrefs {
-        ZoomPrefs {
-            wheel_zooms: true,
-            step_pct: 17.0,
-            anchor: WheelAnchor::Pointer,
-        }
-    }
-}
+use crate::zoom::{WheelAnchor, ZoomPrefs};
 
 // ------------------------------------------------------------ the window
 
@@ -277,8 +249,6 @@ pub struct SettingsUi {
     pub open: bool,
     page: usize,
     draft: Option<Draft>,
-    /// See [`ZoomPrefs`]: joined to the zoom branch's `State` fields at merge.
-    pub zoom: ZoomPrefs,
 }
 
 impl SettingsUi {
@@ -296,7 +266,7 @@ impl SettingsUi {
         let mut draft = self
             .draft
             .take()
-            .unwrap_or_else(|| Draft::from(st, self.zoom));
+            .unwrap_or_else(|| Draft::from(st, st.zoom));
         let mut window_open = true;
         let mut close = false;
         let mut apply = false;
@@ -388,7 +358,8 @@ impl SettingsUi {
             });
         if apply {
             draft.apply(st);
-            self.zoom = draft.zoom;
+            st.zoom = draft.zoom;
+            st.zoom.save();
         }
         if close || !window_open {
             self.open = false;
@@ -417,13 +388,13 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
             });
             group(ui, th, "Mouse wheel", |ui| {
                 ui.checkbox(
-                    &mut d.zoom.wheel_zooms,
+                    &mut d.zoom.wheel_zooms_waveform,
                     "The mouse wheel over the waveform zooms in time (Waveform editor; in the Multitrack the wheel zooms over the ruler and scrolls over the tracks)",
                 );
                 ui.horizontal(|ui| {
                     ui.label("Each wheel step zooms by");
                     ui.add(
-                        egui::DragValue::new(&mut d.zoom.step_pct)
+                        egui::DragValue::new(&mut d.zoom.step_percent)
                             .range(2.0..=100.0)
                             .speed(0.5)
                             .max_decimals(0),
@@ -435,12 +406,12 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                 for (a, label) in [
                     (WheelAnchor::Pointer, "The mouse pointer"),
                     (
-                        WheelAnchor::Between,
+                        WheelAnchor::BetweenPointerAndMiddle,
                         "Between the pointer and the middle of the view (drifts less)",
                     ),
                     (WheelAnchor::Playhead, "The playhead"),
                 ] {
-                    ui.radio_value(&mut d.zoom.anchor, a, label);
+                    ui.radio_value(&mut d.zoom.wheel_anchor, a, label);
                 }
             });
             group(ui, th, "Draw the window with", |ui| {

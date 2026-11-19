@@ -29,6 +29,7 @@ mod ui;
 mod visualizer;
 mod waveform;
 mod workspace;
+mod zoom;
 
 fn main() -> eframe::Result<()> {
     fx::register();
