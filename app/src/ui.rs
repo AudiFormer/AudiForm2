@@ -1037,6 +1037,9 @@ fn effects_menu(
             ui.close_menu();
         }
     });
+    ui.menu_button("Spectrum", |ui| {
+        crate::spectral_select::effects_submenu(ui, st)
+    });
     ui.separator();
     cmd_item(ui, km, Cmd::MatchLoudness, "Match Loudness", true, cmd);
     ui.add_enabled(
@@ -1081,6 +1084,54 @@ fn effects_menu(
         .on_disabled_hover_text(PLUGIN_NOTE);
 }
 
+/// The spectral selection tools (Waveform editor only) and the brush size.
+fn spectral_tools(ui: &mut egui::Ui, st: &mut State) {
+    ui.separator();
+    let wave = st.mode == Mode::Waveform;
+    for (tool, label, tip) in [
+        (
+            Tool::BoxSelect,
+            "Box",
+            "Box Select: drag a rectangle in the spectrum (Shift adds)",
+        ),
+        (
+            Tool::LassoSelect,
+            "Lasso",
+            "Lasso Select: draw around a sound in the spectrum (Shift adds)",
+        ),
+        (
+            Tool::BrushSelect,
+            "Brush",
+            "Brush Select: paint over a sound in the spectrum (Shift adds)",
+        ),
+        (
+            Tool::SpotRepair,
+            "Spot",
+            "Spot Repair: paint over a sound; it is repaired when you let go",
+        ),
+    ] {
+        if ui
+            .add_enabled(
+                wave,
+                egui::SelectableLabel::new(st.tool == tool, RichText::new(label).size(12.5)),
+            )
+            .on_hover_text(tip)
+            .on_disabled_hover_text("Spectral tools work in the Waveform editor")
+            .clicked()
+        {
+            st.choose_tool(tool);
+        }
+    }
+    if wave && matches!(st.tool, Tool::BrushSelect | Tool::SpotRepair) {
+        ui.add(
+            egui::Slider::new(&mut st.brush_px, 4.0..=120.0)
+                .integer()
+                .suffix(" px"),
+        )
+        .on_hover_text("Brush size");
+    }
+}
+
 fn toolbar(ui: &mut egui::Ui, st: &mut State) {
     ui.horizontal(|ui| {
         ui.add_space(4.0);
@@ -1106,6 +1157,7 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
                 st.tool = tool;
             }
         }
+        spectral_tools(ui, st);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(6.0);
             // A theme with its own title shows it in the menu bar instead.
@@ -1532,6 +1584,9 @@ fn status(ui: &mut egui::Ui, st: &State) {
                 c(th.text)
             };
             ui.label(RichText::new(&t.text).color(col));
+        } else if let Some(p) = crate::spectral_select::progress(st) {
+            ui.spinner();
+            ui.label(format!("Spectral edit {:.0}%", p * 100.0));
         } else if !st.loading().is_empty() {
             ui.spinner();
             ui.label(format!("Opening {}", st.loading().join(", ")));
@@ -1947,6 +2002,7 @@ impl eframe::App for App {
             || self.st.is_recording()
             || !self.st.jobs.is_empty()
             || self.st.separation.job.is_some()
+            || self.st.spectral_job.is_some()
             || self.st.meter.0 > 0.001
         {
             ctx.request_repaint();
