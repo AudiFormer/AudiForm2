@@ -70,8 +70,10 @@ pub fn fast_log2(x: f32) -> f32 {
 #[inline]
 pub fn fast_exp2(x: f32) -> f32 {
     let x = x.clamp(-126.0, 126.0);
-    // Round, so the series only covers -0.5..0.5, where it is tightest.
-    let i = x.round();
+    // Round to the nearest integer by truncating a positive number (one
+    // instruction; f32::round is a library call), so the series only
+    // covers -0.5..0.5, where it is tightest.
+    let i = ((x + 256.5) as i32 - 256) as f32;
     let f = x - i;
     let p = 1.0
         + f * (0.693_147_2
@@ -289,40 +291,38 @@ impl Compressor {
     /// `key`: a side-chain level per frame (the loudest speaker of a bed),
     /// or None to listen to this pair itself.
     fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<&[f32]>) {
-        // The gain computer works in log2 units (dB / 6.0206), so one fast
-        // log2 and one fast exp2 per sample do the whole job.
-        const PER_DB: f32 = 0.166_096_4;
-        let (ca, cr, quiet, makeup) = (self.ca, self.cr, self.quiet, self.makeup);
-        let thr = self.thr * PER_DB;
-        let knee = self.knee * PER_DB;
-        let half = knee * 0.5;
-        let slope = 1.0 / self.ratio - 1.0;
-        let curve = if knee > 0.0 { slope / (2.0 * knee) } else { 0.0 };
-        let mut env = self.env;
+        // Two copies of the loop, so the common case has no per-sample test.
+        match key {
+            Some(k) => self.run_with(l, r, |i, _, _| k.get(i).copied().unwrap_or(0.0).abs()),
+            None => self.run_with(l, r, |_, a, b| a.abs().max(b.abs())),
+        }
+    }
+
+    #[inline(always)]
+    fn run_with(&mut self, l: &mut [f32], r: &mut [f32], level: impl Fn(usize, f32, f32) -> f32) {
         for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-            let x = match key {
-                Some(k) => k.get(i).copied().unwrap_or(0.0).abs(),
-                None => a.abs().max(b.abs()),
-            };
-            let c = if x > env { ca } else { cr };
-            env = c * env + (1.0 - c) * x;
-            if env <= quiet {
-                *a *= makeup;
-                *b *= makeup;
+            let x = level(i, *a, *b);
+            let c = if x > self.env { self.ca } else { self.cr };
+            self.env = c * self.env + (1.0 - c) * x;
+            if self.env <= self.quiet {
+                *a *= self.makeup;
+                *b *= self.makeup;
                 continue;
             }
-            let over = fast_log2(env) - thr;
-            let reduce = if over < half {
-                // Inside the soft knee (below it was handled above).
-                curve * (over + half) * (over + half)
+            // 20·log10(x) = 6.0206·log2(x), with the fast log2 and exp2.
+            let over = 6.020_6 * fast_log2(self.env) - self.thr;
+            let k = self.knee;
+            let reduce = if k > 0.0 && over.abs() <= k / 2.0 {
+                (1.0 / self.ratio - 1.0) * (over + k / 2.0).powi(2) / (2.0 * k)
+            } else if over > 0.0 {
+                (1.0 / self.ratio - 1.0) * over
             } else {
-                slope * over
+                0.0
             };
-            let g = fast_exp2(reduce) * makeup;
+            let g = fast_exp2(reduce * 0.166_096_4) * self.makeup;
             *a *= g;
             *b *= g;
         }
-        self.env = env;
     }
 }
 

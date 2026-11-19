@@ -437,7 +437,7 @@ fn save_session_as(st: &mut State) {
     if let Some(p) = rfd::FileDialog::new()
         .set_file_name(format!("{}.audfrm", st.session.name))
         .add_filter("Audiform session", &["audfrm"])
-        .add_filter("Audiform27 model dump", &["af27"])
+        .add_filter("AudiForm 2 model dump", &["af27"])
         .save_file()
     {
         st.save_session_to(p);
@@ -693,7 +693,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     if let Some(p) = rfd::FileDialog::new()
                         .set_directory(&dir)
                         .set_file_name(format!("{}.af27theme", st.theme.name))
-                        .add_filter("Audiform27 theme", &["af27theme"])
+                        .add_filter("AudiForm 2 theme", &["af27theme"])
                         .save_file()
                     {
                         let mut t = st.theme.clone();
@@ -756,7 +756,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.menu_button("Help", |ui| {
-            if ui.button("About Audiform27").clicked() {
+            if ui.button("About AudiForm 2").clicked() {
                 st.show_about = true;
                 ui.close_menu();
             }
@@ -1064,11 +1064,13 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
 
 fn about_window(ctx: &egui::Context, st: &mut State) {
     let mut open = st.show_about;
-    egui::Window::new("About Audiform27").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-        ui.label(RichText::new("AUDIFORM27").size(28.0).strong().color(c(st.theme.accent)));
+    egui::Window::new("About AudiForm 2").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(120.0, 120.0), egui::Sense::hover());
+        crate::hud::logo_mark(ui.painter(), r, &st.theme, &st.fx, 1.0);
+        ui.label(RichText::new("AUDIFORM 2").size(28.0).strong().extra_letter_spacing(6.0).color(c(st.theme.accent)));
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.label("A fast, themeable audio editor written entirely in Rust.");
-        ui.label("Audiform27 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
+        ui.label("AudiForm 2 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
         ui.label("The sequel to Audiform, by the same project lead.");
     });
     st.show_about = open;
@@ -1076,6 +1078,16 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let __t0 = std::time::Instant::now();
+        struct TraceGuard(std::time::Instant, egui::Rect);
+        impl Drop for TraceGuard {
+            fn drop(&mut self) {
+                if std::env::var_os("AF2_TRACE").is_some() {
+                    eprintln!("frame {:?} {:.2} ms", self.1, self.0.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+        }
+        let _trace = TraceGuard(__t0, ctx.screen_rect());
         if self.st.theme_changed {
             self.st.theme.apply(ctx);
             self.st.theme_changed = false;

@@ -104,7 +104,7 @@ impl Theme {
     pub fn zero_point() -> Theme {
         Theme {
             name: "Zero Point".into(),
-            author: "Audiform27".into(),
+            author: "AudiForm 2".into(),
             dark: true,
             background: [3, 4, 10],
             panel: [8, 11, 24],
@@ -154,8 +154,8 @@ impl Theme {
             backdrop_bottom: [1, 1, 5],
             grid_style: "perspective".into(),
             grid_glow: [40, 120, 255],
-            grid_strength: 1.0,
-            glass: 0.82,
+            grid_strength: 1.4,
+            glass: 0.7,
             chamfer: 9.0,
             brackets: true,
             scanlines: 0.05,
@@ -205,7 +205,7 @@ impl Theme {
     pub fn neon_abyss() -> Theme {
         Theme {
             name: "Neon Abyss".into(),
-            author: "Audiform27".into(),
+            author: "AudiForm 2".into(),
             dark: true,
             background: [7, 8, 14],
             panel: [13, 15, 25],

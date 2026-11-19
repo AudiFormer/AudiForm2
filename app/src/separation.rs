@@ -829,7 +829,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
                             st.separation.save();
                         }
                         ui.label(dim("Each moment is separated this many times in overlapping pieces and blended, which hides the seams between pieces. 2 is what the models were measured with."));
-                        ui.label(dim("A graphics card is usually many times faster. If it cannot be used, Audiform27 offers the processor instead."));
+                        ui.label(dim("A graphics card is usually many times faster. If it cannot be used, AudiForm 2 offers the processor instead."));
                     });
                 ui.add_space(4.0);
                 ui.label(dim(CONSENT));
@@ -901,7 +901,7 @@ fn dialogs(ctx: &egui::Context, st: &mut State) {
             (
                 "Download first?".to_string(),
                 format!(
-                    "To separate with {}, Audiform27 needs to download {} into its own files, where it is kept for next time.\n\n{CONSENT}",
+                    "To separate with {}, AudiForm 2 needs to download {} into its own files, where it is kept for next time.\n\n{CONSENT}",
                     req.model.name,
                     parts.join(" and ")
                 ),
@@ -916,7 +916,7 @@ fn dialogs(ctx: &egui::Context, st: &mut State) {
             };
             (
                 "Download?".to_string(),
-                format!("Audiform27 downloads {what} into its own files, where it is kept for next time.\n\n{CONSENT}"),
+                format!("AudiForm 2 downloads {what} into its own files, where it is kept for next time.\n\n{CONSENT}"),
                 "Download",
                 "Cancel",
             )

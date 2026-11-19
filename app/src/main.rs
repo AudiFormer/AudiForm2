@@ -23,10 +23,17 @@ fn main() -> eframe::Result<()> {
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Audiform27")
+            .with_title("AudiForm 2")
             .with_inner_size([1600.0, 940.0])
             .with_min_inner_size([900.0, 560.0])
             .with_drag_and_drop(true),
+        // wgpu (DirectX 12, Vulkan or Metal) presents reliably on more
+        // machines than OpenGL; AF2_RENDERER=glow switches back.
+        renderer: if std::env::var("AF2_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("glow")) {
+            eframe::Renderer::Glow
+        } else {
+            eframe::Renderer::Wgpu
+        },
         ..Default::default()
     };
     eframe::run_native(

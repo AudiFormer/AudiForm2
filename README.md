@@ -1,4 +1,10 @@
-# Audiform27
+# AudiForm 2
+
+![AudiForm 2](assets/logo/audiform2-logo-dark.svg)
+
+(Working name until 2026-11-19: Audiform27. The crates, the `.af27`
+and `.af27theme` extensions and the settings folder keep that name so
+nothing saved is lost.)
 
 A fast, themeable audio editor written entirely in Rust. It's the sequel to
 [Audiform](https://github.com/nwh212/Audiform), rebuilt from scratch.
@@ -121,14 +127,23 @@ Selection · = / - zoom · Esc clear selection.
 ## Performance
 
 The mixer runs in blocks with no allocation on the audio thread, and
-setting changes reach it as small fixed-size commands. On one core it
-mixes 32 stereo tracks, each with an EQ and a compressor, plus two reverb
-buses fed by sends and a master limiter, at **about 25 times real time**
-(`cargo test --release -p af27-engine bench -- --ignored --nocapture`).
+setting changes reach it as small fixed-size commands.
+
+Like-for-like with Audiform (the same dense session: 48 stereo tracks,
+crossfading clips, EQ and compressor on every track, a reverb on every
+third, two reverb buses), on one core of the same PC, 2026-11-19:
+
+| | Real time |
+| --- | --- |
+| Audiform (`cargo test --release --lib bench_dense -- --ignored`) | 32.3x |
+| AudiForm 2 (`cargo test --release -p af27-engine --test bench_dense -- --ignored --nocapture`) | 18.2x |
+
+So the audio engine is not yet faster than Audiform's; closing that gap
+is open work (the reverb and compressor are the largest costs).
 
 ## Licence
 
-Audiform27 is under the **Audiform27 License 1.0** (`LICENSE`): MIT-style
+Audiform27 is under the **AudiForm 2 License 1.0** (`LICENSE`): MIT-style
 freedoms for everyone except the Excluded Parties it names, who get no
 rights at all. It is source-available rather than OSI open source.
 `crates/af27-dts` is the exception: it is **LGPL-2.1-or-later**, because its

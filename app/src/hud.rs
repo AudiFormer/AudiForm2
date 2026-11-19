@@ -376,7 +376,7 @@ pub fn frame(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool, serial
             p.text(
                 rect.right_bottom() - Vec2::new(8.0, 4.0),
                 Align2::RIGHT_BOTTOM,
-                format!("AF27-{serial:02}"),
+                format!("AF2-{serial:02}"),
                 FontId::monospace(8.0),
                 ca(th.text_dim, 70),
             );
@@ -694,35 +694,146 @@ pub fn segmented(ui: &mut Ui, id: &str, labels: &[&str], current: usize, th: &Th
     clicked
 }
 
-/// The wordmark, with a shimmer of light passing across it.
+/// The AudiForm 2 mark, drawn into the square `rect`: a broken frame,
+/// an A with one solid leg and one leg in knocked-aside spectral slices,
+/// a laser crossbar that fires out through the frame, and an outlined 2
+/// split into the theme's two colours. `reveal` (0..1) builds it up, for
+/// the boot sequence; the slices jolt on a beat.
+pub fn logo_mark(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, reveal: f32) {
+    let s = rect.width() / 512.0;
+    let at = |x: f32, y: f32| rect.left_top() + Vec2::new(x * s, y * s);
+    let white = Color32::from_rgb(242, 248, 255);
+    let a = |k: f32| (reveal.clamp(0.0, 1.0) * k * 255.0) as u8;
+    let fade = |c: Color32, k: f32| {
+        let [r, g, b, _] = c.to_array();
+        Color32::from_rgba_unmultiplied(r, g, b, a(k))
+    };
+    let w = (2.0 * s).max(1.0);
+    // The frame, broken where the laser leaves it.
+    let bar_y: f32 = 304.0;
+    let tile: [(f32, f32); 6] = [(60.0, 60.0), (404.0, 60.0), (452.0, 108.0), (452.0, 452.0), (108.0, 452.0), (60.0, 404.0)];
+    for k in 0..tile.len() {
+        let (x0, y0) = tile[k];
+        let (x1, y1) = tile[(k + 1) % tile.len()];
+        // The left and right sides have a gap at the crossbar.
+        if (x0 - x1).abs() < 0.1 && (y0.min(y1)..y0.max(y1)).contains(&bar_y) {
+            let gap = 16.0;
+            let (lo, hi) = (y0.min(y1), y0.max(y1));
+            p.line_segment([at(x0, lo), at(x0, bar_y - gap)], Stroke::new(w * 1.2, fade(white, 0.9)));
+            p.line_segment([at(x0, bar_y + gap), at(x0, hi)], Stroke::new(w * 1.2, fade(white, 0.9)));
+        } else {
+            p.line_segment([at(x0, y0), at(x1, y1)], Stroke::new(w * 1.2, fade(white, 0.9)));
+        }
+    }
+    let br = Stroke::new(w * 1.5, fade(crate::theme::c(th.accent), 1.0));
+    p.add(Shape::line(vec![at(48.0, 84.0), at(48.0, 48.0), at(84.0, 48.0)], br));
+    p.add(Shape::line(vec![at(464.0, 428.0), at(464.0, 464.0), at(428.0, 464.0)], br));
+    // The 2, outlined, in the two colours, a little apart.
+    let two = |dx: f32, dy: f32| -> Vec<Pos2> {
+        let mut pts = Vec::new();
+        let (cx, cy, r) = (362.0, 214.0 + 0.0, 54.0);
+        for k in 0..=24 {
+            let ang = std::f32::consts::PI + k as f32 / 24.0 * std::f32::consts::PI * 1.25;
+            pts.push(at(cx + r * ang.cos() + dx, cy + r * ang.sin() + dy));
+        }
+        pts.push(at(318.0 + dx, 372.0 + dy));
+        pts.push(at(426.0 + dx, 372.0 + dy));
+        pts
+    };
+    let tw = (11.0 * s).max(1.5);
+    p.add(Shape::line(two(6.0, 4.0), Stroke::new(tw, light(th.accent_alt, 0.9 * reveal))));
+    p.add(Shape::line(two(-3.0, -2.0), Stroke::new(tw, light(th.accent, 0.95 * reveal))));
+    // The A.
+    let (apex_y, foot_y, apex_x, lf, rf, half) = (104.0f32, 404.0f32, 256.0f32, 146.0f32, 366.0f32, 27.0f32);
+    let cl = |y: f32| apex_x - (y - apex_y) * (apex_x - lf) / (foot_y - apex_y);
+    let cr = |y: f32| apex_x + (y - apex_y) * (rf - apex_x) / (foot_y - apex_y);
+    let left = |dx: f32| {
+        vec![
+            at(apex_x - 22.0 + dx, apex_y),
+            at(apex_x + 22.0 + dx, apex_y),
+            at(cl(foot_y) + half + dx, foot_y),
+            at(cl(foot_y) - half + dx, foot_y),
+        ]
+    };
+    let jolt = fx.pulse * 14.0;
+    let offsets = [0.0, 10.0, -7.0, 18.0, -12.0, 4.0, 26.0, -4.0];
+    let slices = |dx: f32| -> Vec<Vec<Pos2>> {
+        let mut out = Vec::new();
+        let mut y = apex_y + 14.0;
+        for (k, off) in offsets.iter().enumerate() {
+            if y >= foot_y {
+                break;
+            }
+            let (y0, y1) = (y, (y + 31.0).min(foot_y));
+            let o = off + dx + if k % 2 == 0 { jolt } else { -jolt };
+            out.push(vec![
+                at(cr(y0) - half + o, y0),
+                at(cr(y0) + half + o, y0),
+                at(cr(y1) + half + o, y1),
+                at(cr(y1) - half + o, y1),
+            ]);
+            y += 37.0;
+        }
+        out
+    };
+    for (rgb, dx) in [(th.accent_alt, 4.0), (th.accent, -4.0)] {
+        let col = light(rgb, 0.7 * reveal);
+        p.add(Shape::convex_polygon(left(dx), col, Stroke::NONE));
+        for sl in slices(dx) {
+            p.add(Shape::convex_polygon(sl, col, Stroke::NONE));
+        }
+    }
+    p.add(Shape::convex_polygon(left(0.0), fade(white, 1.0), Stroke::NONE));
+    for sl in slices(0.0) {
+        p.add(Shape::convex_polygon(sl, fade(white, 1.0), Stroke::NONE));
+    }
+    // The laser crossbar fires out through the frame.
+    let reach = 24.0 + (476.0 - 24.0) * ((reveal - 0.3) / 0.7).clamp(0.0, 1.0);
+    if reach > 30.0 {
+        let k = 1.0 + fx.pulse * 0.6;
+        p.line_segment([at(24.0, bar_y), at(reach, bar_y)], Stroke::new(14.0 * s, light(th.accent_alt, 0.25 * k)));
+        p.line_segment([at(24.0, bar_y), at(reach, bar_y)], Stroke::new(5.0 * s, crate::theme::c(th.accent_alt)));
+        p.line_segment([at(24.0, bar_y), at(reach, bar_y)], Stroke::new((1.5 * s).max(1.0), Color32::WHITE));
+        let d = 12.0;
+        p.add(Shape::convex_polygon(
+            vec![at(reach + 12.0, bar_y), at(reach, bar_y - d), at(reach - 12.0, bar_y), at(reach, bar_y + d)],
+            crate::theme::c(th.accent_alt),
+            Stroke::new(w, Color32::WHITE),
+        ));
+    }
+}
+
+/// The wordmark: the mark, then AUDIFORM with light passing across it and
+/// a raised 2 split into the theme's two colours.
 pub fn wordmark(ui: &mut Ui, th: &Theme, fx: &Fx) {
-    let text = "AUDIFORM27";
-    let size = 15.0;
+    let text = "AUDIFORM";
+    let size = 14.0;
     let spacing = 4.0;
     let font = FontId::monospace(size);
     let cw = ui.painter().layout_no_wrap("M".into(), font.clone(), Color32::WHITE).size().x + spacing;
     let w = cw * text.len() as f32;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w + 8.0, 22.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w + 58.0, 26.0), Sense::hover());
     let p = ui.painter_at(rect.expand(20.0));
+    logo_mark(&p, Rect::from_min_size(rect.left_top() + Vec2::new(0.0, -1.0), Vec2::splat(28.0)), th, fx, 1.0);
+    let x0 = rect.left() + 34.0;
     let sweep = (fx.t * 0.35).fract() * 1.8 - 0.4;
     for (i, ch) in text.chars().enumerate() {
         let f = i as f32 / text.len() as f32;
         let shine = (1.0 - ((f - sweep).abs() * 6.0)).max(0.0);
-        let base = crate::theme::lerp(th.accent, th.accent_alt, f);
-        let col = if shine > 0.0 {
-            let b = base.to_array();
-            let m = |x: u8| (x as f32 + (255.0 - x as f32) * shine) as u8;
-            Color32::from_rgb(m(b[0]), m(b[1]), m(b[2]))
-        } else {
-            base
-        };
-        let pos = Pos2::new(rect.left() + 4.0 + i as f32 * cw, rect.center().y);
-        if th.glow > 0.0 {
-            p.text(pos, Align2::LEFT_CENTER, ch, FontId::monospace(size + 1.0), light(mix(th.accent, th.accent_alt, f), 0.25 * th.glow * (0.6 + shine)));
+        let base = crate::theme::lerp(th.text, [255, 255, 255], 0.2);
+        let b = base.to_array();
+        let m = |x: u8| (x as f32 + (255.0 - x as f32) * shine) as u8;
+        let col = Color32::from_rgb(m(b[0]), m(b[1]), m(b[2]));
+        let pos = Pos2::new(x0 + i as f32 * cw, rect.center().y);
+        if th.glow > 0.0 && shine > 0.0 {
+            p.text(pos, Align2::LEFT_CENTER, ch, FontId::monospace(size + 1.0), light(th.accent, 0.4 * th.glow * shine));
         }
         p.text(pos, Align2::LEFT_CENTER, ch, font.clone(), col);
     }
-    resp.on_hover_text("Audiform27");
+    let two = Pos2::new(x0 + w + 2.0, rect.center().y - 4.0);
+    p.text(two + Vec2::new(1.5, 1.0), Align2::LEFT_CENTER, "2", FontId::monospace(size + 4.0), light(th.accent_alt, 0.9));
+    p.text(two - Vec2::new(1.0, 0.5), Align2::LEFT_CENTER, "2", FontId::monospace(size + 4.0), light(th.accent, 0.9));
+    resp.on_hover_text("AudiForm 2");
 }
 
 /// The boot sequence over the whole window for the first moments. Returns
@@ -759,7 +870,8 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
         p.line_segment([Pos2::new(x, c.y - len), Pos2::new(x, c.y + len)], Stroke::new(1.0_f32, light(th.grid_glow, 0.12 * fade)));
     }
     // The wordmark decodes letter by letter.
-    let word = "AUDIFORM27";
+    logo_mark(&p, Rect::from_center_size(c - Vec2::new(0.0, 150.0), Vec2::splat(180.0)), th, fx, (t / 1.0).min(1.0) * fade);
+    let word = "AUDIFORM 2";
     let glyphs = b"#%&@$<>/\\|+*=01";
     let mut shown = String::new();
     for (i, ch) in word.chars().enumerate() {
