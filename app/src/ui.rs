@@ -167,6 +167,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, files: Vec<std::path::PathBuf>) -> App {
         let mut st = State::new();
         crate::skin::install_fallback_fonts(&cc.egui_ctx);
+        crate::hwcursor::install(cc);
         lay_colors(&mut st);
         st.theme.apply(&cc.egui_ctx);
         st.theme_changed = false;
