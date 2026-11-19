@@ -338,6 +338,14 @@ impl App {
         if ctx.wants_keyboard_input() {
             return;
         }
+        // Ctrl+= / Ctrl+- zoom the timeline (taken before egui's own
+        // whole-window zoom sees them).
+        if shortcut(ctx, cmd, Key::Equals) || shortcut(ctx, cmd, Key::Plus) {
+            zoom(st, 0.5);
+        }
+        if shortcut(ctx, cmd, Key::Minus) {
+            zoom(st, 2.0);
+        }
         if shortcut(ctx, cmd, Key::A) {
             st.select_all();
         }
@@ -420,23 +428,57 @@ impl App {
     }
 }
 
+/// Zoom In / Zoom Out: the playhead keeps its place (the middle of the
+/// view when the playhead is out of view).
 pub fn zoom(st: &mut State, f: f64) {
-    let anchor = st.position();
+    let pos = st.position();
+    let min = st.min_view_len();
+    st.hand_moved_view();
     match st.mode {
         Mode::Waveform => {
             if let Some(d) = st.doc_mut() {
                 let dur = d.duration();
-                d.view.zoom(f, anchor, dur);
+                let anchor = crate::zoom::button_anchor(&d.view, pos);
+                d.view.zoom_min(f, anchor, dur, min);
             }
         }
         Mode::Multitrack => {
             let dur = st.session.duration().max(30.0);
-            st.session_view.zoom(f, anchor, dur);
+            let anchor = crate::zoom::button_anchor(&st.session_view, pos);
+            st.session_view.zoom_min(f, anchor, dur, min);
+        }
+    }
+}
+
+/// Zoom to Selection: the selection fills the view.
+fn zoom_selection(st: &mut State) {
+    let Some((a, b)) = st.selection() else { return };
+    let min = st.min_view_len();
+    st.hand_moved_view();
+    let fit = |v: &mut crate::state::View, total: f64| {
+        let len = (b - a).max(min);
+        *v = crate::state::View {
+            start: (a + b) / 2.0 - len / 2.0,
+            len,
+        };
+        v.clamp_to(total);
+    };
+    match st.mode {
+        Mode::Waveform => {
+            if let Some(d) = st.doc_mut() {
+                let dur = d.duration();
+                fit(&mut d.view, dur);
+            }
+        }
+        Mode::Multitrack => {
+            let dur = st.session.duration().max(30.0);
+            fit(&mut st.session_view, dur);
         }
     }
 }
 
 fn zoom_full(st: &mut State) {
+    st.hand_moved_view();
     match st.mode {
         Mode::Waveform => {
             if let Some(d) = st.doc_mut() {
@@ -738,6 +780,19 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             }
             if ui.button("Zoom Out Full").clicked() {
                 zoom_full(st);
+            }
+            if ui
+                .add_enabled(
+                    st.selection().is_some(),
+                    egui::Button::new("Zoom to Selection"),
+                )
+                .clicked()
+            {
+                zoom_selection(st);
+            }
+            let mut follow = st.follow.on;
+            if ui.checkbox(&mut follow, "Follow Playhead").changed() {
+                st.follow.set_on(follow);
             }
             ui.checkbox(&mut st.return_on_stop, "Return Playhead on Stop");
             ui.separator();
