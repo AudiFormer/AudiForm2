@@ -19,6 +19,11 @@
 //! engine and models an existing Audiform install already downloaded, so
 //! nothing is fetched twice. `AUDIFORM_SEPARATE` points at a local engine
 //! build for development.
+//!
+//! The model list grouping and score text, the engine checksum check and
+//! update check, and removal are ported from Audiform's Audio Separation
+//! (`src-tauri/src/separation/`, `src/app/separation.ts`; the project
+//! lead's own files, see docs/clean-room.md).
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -289,9 +294,17 @@ pub fn parse_line(line: &str) -> Line {
 #[derive(Debug, Default)]
 pub struct Progress {
     pub fraction: f32,
+    /// The size is not known yet (the engine download): show a busy bar.
+    pub indeterminate: bool,
     pub status: String,
     pub done: bool,
     pub error: Option<String>,
+    /// The engine said `error gpu`: the graphics card could not be used,
+    /// so the caller can offer the processor instead.
+    pub gpu_error: bool,
+    /// A yes or no answer from a check (an engine update is published, a
+    /// model file no longer matches its pinned checksum).
+    pub flag: bool,
     /// (stem name, file) once finished.
     pub outputs: Vec<(String, PathBuf)>,
 }
@@ -440,7 +453,13 @@ fn run(
     });
     let mut finished = false;
     let mut failure = None;
+    // Once the engine has said it is done (or failed), it gets a few
+    // seconds to exit on its own, then it is stopped: it never lingers.
+    let mut ended_at: Option<std::time::Instant> = None;
     loop {
+        if ended_at.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
+            let _ = child.kill();
+        }
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
@@ -450,13 +469,19 @@ fn run(
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(line) => match parse_line(&line) {
                 Line::Progress(f) => set(p, |g| g.fraction = f.clamp(0.0, 1.0) * 0.95),
-                Line::Done => finished = true,
-                Line::Error { gpu: true, message } => {
-                    failure = Some(format!(
-                        "The graphics card could not be used ({message}). Turn off Use GPU and try again."
-                    ))
+                Line::Done => {
+                    finished = true;
+                    ended_at.get_or_insert_with(std::time::Instant::now);
                 }
-                Line::Error { message, .. } => failure = Some(message),
+                Line::Error { gpu: true, message } => {
+                    set(p, |g| g.gpu_error = true);
+                    failure = Some(format!("The graphics card could not be used ({message})."));
+                    ended_at.get_or_insert_with(std::time::Instant::now);
+                }
+                Line::Error { message, .. } => {
+                    failure = Some(message);
+                    ended_at.get_or_insert_with(std::time::Instant::now);
+                }
                 Line::Other(_) => {}
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -465,9 +490,12 @@ fn run(
     }
     let status = child.wait().map_err(|e| e.to_string())?;
     if let Some(f) = failure {
+        let _ = std::fs::remove_dir_all(&work);
         return Err(f);
     }
-    if !finished || !status.success() {
+    // A clean exit after `done`, or one stopped by the grace period above.
+    if !finished || (!status.success() && ended_at.is_none()) {
+        let _ = std::fs::remove_dir_all(&work);
         let said = stderr_text
             .lock()
             .map(|s| s.trim().to_string())
@@ -521,8 +549,7 @@ pub fn download(
     p: &Shared,
     total: u64,
 ) -> Result<(), String> {
-    const HOSTS: [&str; 2] = ["https://github.com/", "https://huggingface.co/"];
-    if !HOSTS.iter().any(|h| url.starts_with(h)) {
+    if !allowed(url) {
         return Err("That download is not from an allowed site.".into());
     }
     if let Some(d) = dest.parent() {
@@ -583,12 +610,17 @@ pub fn download(
         }
         let got = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         set(p, |g| {
+            g.indeterminate = total == 0;
             g.fraction = if total > 0 {
                 (got as f32 / total as f32).min(1.0)
             } else {
                 0.0
             };
-            g.status = format!("Downloading: {} of {} MB", got >> 20, total >> 20);
+            g.status = if total > 0 {
+                format!("{} of {}", size_text(got), size_text(total))
+            } else {
+                size_text(got)
+            };
         });
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
@@ -619,13 +651,210 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Where downloads may come from: Audiform's own releases (the engine)
+/// and the model authors' own pages.
+pub fn allowed(url: &str) -> bool {
+    const HOSTS: [&str; 2] = ["https://github.com/", "https://huggingface.co/"];
+    HOSTS.iter().any(|h| url.starts_with(h))
+}
+
+/// The checksum in a published `.sha256` file (`<hex>` or `<hex>  name`),
+/// lowercased. None unless it is 64 hex digits.
+pub fn parse_sha256(text: &str) -> Option<String> {
+    let first = text.split_whitespace().next()?;
+    (first.len() == 64 && first.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| first.to_ascii_lowercase())
+}
+
+/// Whether the published engine differs from the installed one, from the
+/// installed record (`engine.sha256`, written at install) and the
+/// published checksum file. An engine with no record counts as out of
+/// date, as in Audiform.
+pub fn engine_update_available(installed_record: &str, published: &str) -> bool {
+    match parse_sha256(published) {
+        Some(latest) => parse_sha256(installed_record).as_deref() != Some(latest.as_str()),
+        None => false,
+    }
+}
+
+/// Human file sizes: "102 MB", "1.2 GB".
+pub fn size_text(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_000_000.0;
+    if mb >= 1000.0 {
+        format!("{:.1} GB", mb / 1000.0)
+    } else if mb >= 1.0 {
+        format!("{mb:.0} MB")
+    } else {
+        format!("{} KB", (bytes / 1000).max(1))
+    }
+}
+
+/// The tabs of the model list, in order. Every catalog category is one.
+pub const TABS: [&str; 3] = ["Vocals", "Instruments", "Denoise"];
+
+/// What a model gives, for the headings in the list.
+pub fn mode_label(m: &Model) -> &'static str {
+    match m.category.as_str() {
+        "Denoise" => "Clean and removed noise",
+        _ if m.stems.len() > 2 => "Six stems: vocals, drums, bass, guitar, piano, other",
+        "Instruments" => "Single instrument and the rest",
+        _ => "Vocals and instrumental",
+    }
+}
+
+/// Models grouped by mode in first-seen order, best published score first
+/// within each, unscored last (as Audiform's list).
+pub fn by_mode<'a>(
+    models: impl IntoIterator<Item = &'a Model>,
+) -> Vec<(&'static str, Vec<&'a Model>)> {
+    let mut groups: Vec<(&'static str, Vec<&'a Model>)> = Vec::new();
+    for m in models {
+        let label = mode_label(m);
+        match groups.iter_mut().find(|(l, _)| *l == label) {
+            Some((_, v)) => v.push(m),
+            None => groups.push((label, vec![m])),
+        }
+    }
+    for (_, v) in &mut groups {
+        v.sort_by(|a, b| {
+            b.sdr
+                .unwrap_or(-1.0)
+                .partial_cmp(&a.sdr.unwrap_or(-1.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    groups
+}
+
+/// "SDR 11.00 dB", or "SDR not published". A several-stem model lists
+/// each stem's score.
+pub fn sdr_text(m: &Model) -> String {
+    if !m.stems.is_empty() {
+        let parts: Vec<String> = m
+            .stems
+            .iter()
+            .map(|s| format!("{} {:.1}", s.name.to_lowercase(), s.sdr))
+            .collect();
+        return format!("SDR {} dB", parts.join(", "));
+    }
+    match m.sdr {
+        Some(v) => format!("SDR {v:.2} dB"),
+        None => "SDR not published".into(),
+    }
+}
+
+impl Dirs {
+    /// Every downloaded copy of `m` (Audiform27's own and Audiform's).
+    pub fn model_copies(&self, m: &Model) -> Vec<PathBuf> {
+        self.search_roots()
+            .into_iter()
+            .map(|r| r.join("models").join(format!("{}.ckpt", m.id)))
+            .filter(|p| p.is_file())
+            .collect()
+    }
+
+    /// Whether `path` is in Audiform's folder (so removing it affects
+    /// Audiform too).
+    pub fn is_shared(&self, path: &Path) -> bool {
+        self.legacy.as_ref().is_some_and(|l| path.starts_with(l))
+    }
+
+    /// The installed record beside an engine.
+    pub fn engine_record(engine: &Path) -> PathBuf {
+        engine.with_file_name("engine.sha256")
+    }
+}
+
+/// Removes every downloaded copy of a model.
+pub fn remove_model(dirs: &Dirs, m: &Model) -> Result<(), String> {
+    for p in dirs.model_copies(m) {
+        std::fs::remove_file(&p).map_err(|e| format!("Could not remove {}: {e}", p.display()))?;
+    }
+    Ok(())
+}
+
+/// Removes the installed engine (every copy found, not a development
+/// build named by `AUDIFORM_SEPARATE`) and its install records.
+pub fn remove_engine(dirs: &Dirs) -> Result<(), String> {
+    for r in dirs.search_roots() {
+        let exe = r.join("engine").join(Dirs::engine_file());
+        if exe.is_file() {
+            std::fs::remove_file(&exe)
+                .map_err(|e| format!("Could not remove {}: {e}", exe.display()))?;
+        }
+        let _ = std::fs::remove_file(Dirs::engine_record(&exe));
+    }
+    Ok(())
+}
+
+/// Asks whether a newer engine is published: fetches only the small
+/// checksum file. Sets `flag` on the progress when one is.
+pub fn check_engine_update(dirs: &Dirs, cancel: &AtomicBool, p: &Shared) -> Result<bool, String> {
+    let asset = engine_asset().ok_or("Audio Separation is not available for this computer yet.")?;
+    let engine = dirs
+        .engine()
+        .ok_or("The separation engine is not installed.")?;
+    let tmp = dirs.own.join("engine").join("latest.sha256");
+    download(
+        &format!("{}.sha256", engine_url(asset)),
+        &tmp,
+        "",
+        cancel,
+        p,
+        0,
+    )?;
+    let latest = std::fs::read_to_string(&tmp).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&tmp);
+    if parse_sha256(&latest).is_none() {
+        return Err("The published engine checksum could not be read.".into());
+    }
+    let mine = std::fs::read_to_string(Dirs::engine_record(&engine)).unwrap_or_default();
+    let newer = engine_update_available(&mine, &latest);
+    set(p, |g| g.flag = newer);
+    Ok(newer)
+}
+
+/// Checks a downloaded model against its pinned checksum. Sets `flag` when
+/// it no longer matches (the catalog moved to a new file, or it was
+/// damaged), so the panel offers Update.
+pub fn check_model(dirs: &Dirs, m: &Model, p: &Shared) -> Result<bool, String> {
+    let path = dirs
+        .model(m)
+        .ok_or_else(|| format!("{} is not downloaded.", m.name))?;
+    if m.sha256.is_empty() {
+        return Ok(false);
+    }
+    set(p, |g| {
+        g.indeterminate = true;
+        g.status = "Checking the file".into();
+    });
+    let stale = !sha256_file(&path)?.eq_ignore_ascii_case(&m.sha256);
+    set(p, |g| g.flag = stale);
+    Ok(stale)
+}
+
 /// Downloads and unpacks the engine into Audiform27's own folder, using
-/// the system `tar` (bsdtar ships with Windows 10+ and reads zip).
+/// the system `tar` (bsdtar ships with Windows 10+ and reads zip). The zip
+/// is checked against the `.sha256` file published beside it, and that
+/// checksum is kept as `engine.sha256` so Check for Update can compare.
 pub fn install_engine(dirs: &Dirs, cancel: &AtomicBool, p: &Shared) -> Result<(), String> {
-    let asset = engine_asset().ok_or("No separation engine is published for this computer yet.")?;
+    let asset = engine_asset().ok_or("Audio Separation is not available for this computer yet.")?;
     let dir = dirs.own.join("engine");
     let zip = dirs.own.join(asset);
-    download(&engine_url(asset), &zip, "", cancel, p, 0)?;
+    let sum_path = dir.join(format!("{asset}.sha256"));
+    download(
+        &format!("{}.sha256", engine_url(asset)),
+        &sum_path,
+        "",
+        cancel,
+        p,
+        0,
+    )?;
+    let sum_text = std::fs::read_to_string(&sum_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&sum_path);
+    let expected =
+        parse_sha256(&sum_text).ok_or("The published engine checksum could not be read.")?;
+    download(&engine_url(asset), &zip, &expected, cancel, p, 0)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     set(p, |g| g.status = "Unpacking the engine".into());
     let mut cmd = Command::new("tar");
@@ -642,6 +871,7 @@ pub fn install_engine(dirs: &Dirs, cancel: &AtomicBool, p: &Shared) -> Result<()
     if !ok.success() || !dirs.own_engine_path().is_file() {
         return Err("The engine download could not be unpacked.".into());
     }
+    let _ = std::fs::write(Dirs::engine_record(&dirs.own_engine_path()), &expected);
     Ok(())
 }
 
@@ -704,6 +934,189 @@ mod tests {
         assert!(engine_is_new_enough("1.0"));
         assert!(!engine_is_new_enough("0.1.9"));
         assert!(!engine_is_new_enough("junk"));
+    }
+
+    fn test_catalog() -> Vec<Model> {
+        catalog(&Dirs {
+            own: std::env::temp_dir().join("af27-none"),
+            legacy: None,
+        })
+    }
+
+    #[test]
+    fn every_model_has_a_pinned_download_on_an_allowed_host() {
+        for m in test_catalog() {
+            assert!(allowed(&m.url), "{}", m.id);
+            assert!(parse_sha256(&m.sha256).is_some(), "{}", m.id);
+            assert!(m.bytes > 0 && m.spec["arch"].is_string(), "{}", m.id);
+            assert!(TABS.contains(&m.category.as_str()), "{}", m.id);
+        }
+        assert!(allowed("https://huggingface.co/a/b/resolve/main/m.ckpt"));
+        assert!(!allowed("http://github.com/x"));
+        assert!(!allowed("https://github.com.evil.example/x"));
+    }
+
+    #[test]
+    fn tabs_hold_the_three_modes() {
+        let c = test_catalog();
+        let tab = |t: &str| by_mode(c.iter().filter(|m| m.category == t));
+        let vocals = tab("Vocals");
+        assert_eq!(vocals.len(), 1);
+        assert_eq!(vocals[0].0, "Vocals and instrumental");
+        // Best score first.
+        assert_eq!(vocals[0].1[0].id, "mel-roformer-deux");
+        let inst = tab("Instruments");
+        let labels: Vec<_> = inst.iter().map(|g| g.0).collect();
+        assert!(labels[0].starts_with("Six stems"));
+        assert!(labels[1].starts_with("Single instrument"));
+        let singles: Vec<_> = inst[1].1.iter().map(|m| m.target_name.as_str()).collect();
+        for want in ["Bass", "Drums", "Guitar", "Piano and keys"] {
+            assert!(singles.contains(&want), "{want}");
+        }
+        let six = &inst[0].1[0];
+        let mut names = six.output_names();
+        names.sort();
+        assert_eq!(
+            names,
+            ["Bass", "Drums", "Guitar", "Other", "Piano", "Vocals"]
+        );
+    }
+
+    #[test]
+    fn scores_read_as_published() {
+        let c = test_catalog();
+        let get = |id: &str| c.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(sdr_text(get("bs-polarformer")), "SDR 11.00 dB");
+        assert_eq!(sdr_text(get("xlance-bass")), "SDR not published");
+        assert!(sdr_text(get("bs-roformer-sw")).starts_with("SDR bass 14.6, drums 14.1"));
+        assert_eq!(size_text(102_410_301), "102 MB");
+        assert_eq!(size_text(913_106_900), "913 MB");
+        assert_eq!(size_text(1_500_000_000), "1.5 GB");
+    }
+
+    #[test]
+    fn checksum_files_and_engine_updates() {
+        let h = "668559afdb7760fa72298cc5052e73923c7df753f900112cfc76b5524348364f";
+        assert_eq!(
+            parse_sha256(&format!("{}  x.zip\n", h.to_uppercase())),
+            Some(h.into())
+        );
+        assert_eq!(parse_sha256("nope"), None);
+        assert_eq!(parse_sha256(""), None);
+        assert!(!engine_update_available(h, h));
+        assert!(engine_update_available(h, &"0".repeat(64)));
+        // No record: out of date. Unreadable published file: no claim.
+        assert!(engine_update_available("", h));
+        assert!(!engine_update_available(h, "<html>"));
+    }
+
+    #[test]
+    fn six_stem_job_writes_one_file_per_stem_in_model_order() {
+        let c = test_catalog();
+        let m = c.iter().find(|m| m.id == "bs-roformer-sw").unwrap();
+        let outs: Vec<PathBuf> = (0..6).map(|k| PathBuf::from(format!("o{k}.wav"))).collect();
+        let j = job(
+            m,
+            Path::new("m.ckpt"),
+            Path::new("in.wav"),
+            &outs,
+            false,
+            None,
+        );
+        let files = j["outputs"].as_array().unwrap();
+        assert_eq!(files.len(), 6);
+        assert_eq!(files[3]["stems"], json!([3]));
+        assert!(files[3].get("rest").is_none());
+        assert_eq!(j["device"], "cpu");
+        assert_eq!(
+            m.output_names(),
+            ["Bass", "Drums", "Other", "Vocals", "Guitar", "Piano"]
+        );
+        assert_eq!(
+            parse_line("error bad file"),
+            Line::Error {
+                gpu: false,
+                message: "bad file".into()
+            }
+        );
+        assert_eq!(parse_line("progress x"), Line::Other("progress x".into()));
+    }
+
+    #[test]
+    fn remove_finds_every_copy() {
+        let root = std::env::temp_dir().join(format!("af27-sep-test-{}", std::process::id()));
+        let dirs = Dirs {
+            own: root.join("own"),
+            legacy: Some(root.join("legacy")),
+        };
+        let c = test_catalog();
+        let m = &c[0];
+        for r in dirs.search_roots() {
+            std::fs::create_dir_all(r.join("models")).unwrap();
+            std::fs::write(r.join("models").join(format!("{}.ckpt", m.id)), b"x").unwrap();
+        }
+        let copies = dirs.model_copies(m);
+        assert_eq!(copies.len(), 2);
+        assert!(dirs.is_shared(&copies[1]) && !dirs.is_shared(&copies[0]));
+        remove_model(&dirs, m).unwrap();
+        assert!(dirs.model(m).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Runs a real separation of a few seconds of tones with the installed
+    /// engine and the first catalog model already downloaded, on the
+    /// processor. Needs an installed engine and model; downloads nothing:
+    /// `cargo test -p af27-separation -- --ignored live`.
+    ///
+    /// As of engine 0.2.0 (2026-11-19) this fails on purpose: the engine
+    /// answers "This engine works only with Audiform: it is not compatible
+    /// with the program that started it." Audiform27 surfaces that message
+    /// as is; an engine build that accepts Audiform27 is the project
+    /// lead's call.
+    #[test]
+    #[ignore]
+    fn live_separation_with_the_installed_engine() {
+        let dirs = Dirs::detect();
+        let c = catalog(&dirs);
+        let m = c
+            .iter()
+            .find(|m| dirs.model(m).is_some())
+            .expect("a downloaded model")
+            .clone();
+        let rate = 44_100;
+        let frames = rate as usize * 4;
+        let mut buf = AudioBuffer::new(rate, 2, frames);
+        for (i, s) in buf.channels[0].iter_mut().enumerate() {
+            *s = 0.2 * (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin();
+        }
+        buf.channels[1] = buf.channels[0].clone();
+        let out = std::env::temp_dir().join(format!("af27-live-{}", std::process::id()));
+        let p = spawn(
+            dirs,
+            m.clone(),
+            Arc::new(buf),
+            "tone".into(),
+            out.clone(),
+            false,
+            Some(1),
+            Arc::new(AtomicBool::new(false)),
+        );
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if p.lock().unwrap().done {
+                break;
+            }
+        }
+        let g = p.lock().unwrap();
+        assert!(g.error.is_none(), "{:?}", g.error);
+        assert_eq!(g.outputs.len(), m.output_names().len());
+        for (_, f) in &g.outputs {
+            let b = af27_io::decode_file(f).unwrap();
+            assert_eq!(b.frames(), frames);
+            assert_eq!(b.rate, rate);
+        }
+        eprintln!("separated with {}: {:?}", m.id, g.outputs);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod multitrack;
 mod panels;
 mod phasewheel;
 mod pianoroll;
+mod separation;
 mod space;
 mod state;
 mod theme;

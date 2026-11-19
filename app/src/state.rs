@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::Instant;
@@ -166,19 +166,6 @@ pub struct Toast {
     pub error: bool,
 }
 
-#[derive(Default)]
-pub struct SeparationUi {
-    pub model: Option<String>,
-    pub gpu: bool,
-    pub overlap: u32,
-    pub job: Option<af27_separation::Shared>,
-    pub job_kind: String,
-    pub cancel: Arc<AtomicBool>,
-    pub engine_version: Option<String>,
-    /// Stems from the last run, ready to add to the session.
-    pub last_outputs: Vec<(String, PathBuf)>,
-}
-
 pub struct GenerateUi {
     pub open: bool,
     pub kind: usize,
@@ -221,7 +208,7 @@ pub struct State {
     pub clipboard: Option<AudioBuffer>,
     pub effect: Effect,
     pub effect_values: HashMap<Effect, Vec<f32>>,
-    pub separation: SeparationUi,
+    pub separation: crate::separation::SeparationUi,
     pub sep_dirs: af27_separation::Dirs,
     pub generate: GenerateUi,
 
@@ -315,11 +302,7 @@ impl State {
             clipboard: None,
             effect: Effect::Amplify,
             effect_values: HashMap::new(),
-            separation: SeparationUi {
-                gpu: true,
-                overlap: 2,
-                ..Default::default()
-            },
+            separation: crate::separation::SeparationUi::load(),
             sep_dirs: af27_separation::Dirs::detect(),
             generate: GenerateUi {
                 open: false,
@@ -479,7 +462,7 @@ impl State {
             .collect()
     }
 
-    fn link_media(&mut self, media: MediaId, doc: DocId) {
+    pub fn link_media(&mut self, media: MediaId, doc: DocId) {
         let Some(d) = self.doc_by_id(doc) else { return };
         let (dur, rate, ch) = (d.duration(), d.buf.rate, d.buf.num_channels() as u16);
         if let Some(m) = self.session.media.iter_mut().find(|m| m.id == media) {
@@ -804,6 +787,7 @@ impl State {
     /// Called every frame: follow the playhead, meters, jobs.
     pub fn tick(&mut self) {
         self.poll_jobs();
+        crate::separation::poll(self);
         self.sync_program();
         if let Some(e) = &mut self.engine {
             e.collect();
@@ -1175,23 +1159,6 @@ impl State {
             Ok(()) => self.toast(format!("Exported {}", path.display())),
             Err(e) => self.error(e),
         }
-    }
-
-    /// Opens the separated stems and puts each on a new track.
-    pub fn stems_to_tracks(&mut self) {
-        let outs = self.separation.last_outputs.clone();
-        for (name, path) in outs {
-            let before = self.session.clone();
-            let id = self.session.add_track();
-            let n = self.session.tracks.len() - 1;
-            if let Some(t) = self.session.track_mut(id) {
-                t.name = name;
-                t.color = self.theme.track_colors[n % self.theme.track_colors.len().max(1)];
-            }
-            self.commit_session("Add stem track", before);
-            self.load_file(path, Some((id, 0.0)));
-        }
-        self.mode = Mode::Multitrack;
     }
 
     // ------------------------------------------------------- live edits
