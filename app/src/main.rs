@@ -35,7 +35,9 @@ fn main() -> eframe::Result<()> {
     fx::register();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
     let prefs = settings::Prefs::load();
-    i18n::set(prefs.language.as_deref());
+    // AF2_LANG (a language code), when set, wins over Preferences.
+    let lang = std::env::var("AF2_LANG").ok().or(prefs.language.clone());
+    i18n::set(lang.as_deref());
     // AF2_RENDERER, when set, wins over the choice in Preferences.
     let glow_first = match std::env::var("AF2_RENDERER") {
         Ok(v) => v.eq_ignore_ascii_case("glow"),

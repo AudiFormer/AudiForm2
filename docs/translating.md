@@ -8,7 +8,10 @@ Built in: English, Español, Français, Deutsch, Português (Brasil),
 Italiano, 日本語, 한국어, 简体中文 and Русский. To pick one, go to
 **Edit > Preferences > Appearance > Language**. The change applies
 immediately. The default, *System default*, follows the operating
-system's display language and falls back to English.
+system's display language and falls back to English. To try a language
+for one run without changing the setting, start AudiForm 2 with the
+environment variable `AF2_LANG` set to its code (for example
+`AF2_LANG=ja`).
 
 ## The file format
 

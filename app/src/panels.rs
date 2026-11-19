@@ -204,10 +204,7 @@ pub fn effects(ui: &mut egui::Ui, st: &mut State) {
     let (process, applies) = match st.doc() {
         Some(d) if d.sel.is_some() => (tr("Process the selection"), tr("Applies to: selection")),
         Some(_) => (tr("Process the whole file"), tr("Applies to: whole file")),
-        None => (
-            tr("Process the no file open"),
-            tr("Applies to: no file open"),
-        ),
+        None => (tr("Process: no file open"), tr("Applies to: no file open")),
     };
     ui.horizontal(|ui| {
         let apply = egui::Button::new(RichText::new(tr("Apply")).strong().color(c(th.background)))
