@@ -278,6 +278,8 @@ pub struct State {
     pub show_about: bool,
     pub last_autosave: Instant,
     pub recording_target: Option<RecordTarget>,
+    /// Where recordings come from, per track.
+    pub rec_inputs: crate::record_input::RecordInputs,
     /// The MIDI clip open in the Piano Roll.
     pub piano_clip: Option<af27_core::ClipId>,
     pub phase: crate::phasewheel::PhasePrefs,
@@ -505,6 +507,7 @@ impl State {
             show_about: false,
             last_autosave: Instant::now(),
             recording_target: None,
+            rec_inputs: Default::default(),
             piano_clip: None,
             phase: crate::phasewheel::PhasePrefs::load(),
             viz: crate::visualizer::Visualizer::load(),
@@ -1157,6 +1160,14 @@ impl State {
         self.sync_program();
         if let Some(e) = &mut self.engine {
             e.collect();
+            for text in e.take_recording_errors() {
+                let at = Instant::now();
+                self.toasts.push(Toast {
+                    text,
+                    at,
+                    error: true,
+                });
+            }
             let (l, r) = e.take_peaks();
             let rec = e.recording_level();
             let (l, r) = if e.is_recording() { (rec, rec) } else { (l, r) };
@@ -1263,8 +1274,9 @@ impl State {
                 }
             }
         };
+        let sources = crate::record_input::begin(self, target);
         let Some(e) = &mut self.engine else { return };
-        match e.start_recording() {
+        match e.start_recording_from(&sources) {
             Ok(()) => {
                 self.recording_target = Some(target);
                 if matches!(target, RecordTarget::Track(..)) {
@@ -1277,31 +1289,17 @@ impl State {
 
     pub fn stop_recording(&mut self) {
         let Some(e) = &mut self.engine else { return };
-        let Some(buf) = e.stop_recording() else {
+        let takes = e.stop_recording_all();
+        if takes.is_empty() {
             return;
-        };
+        }
         let reached = e.position();
         e.stop();
         if self.transport_live {
             self.finish(reached);
         }
-        let n = self.docs.len() + 1;
-        let dir = data_dir().join("recordings");
-        let _ = std::fs::create_dir_all(&dir);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let path = dir.join(format!("Recording {stamp}.wav"));
-        let saved = af27_io::write_wav(&path, &buf, af27_io::WavFormat::Float32).is_ok();
-        let id = self.add_doc(format!("Recording {n}"), saved.then_some(path), buf);
-        match self.recording_target.take() {
-            Some(RecordTarget::Track(t, at)) => self.place_doc(id, t, at),
-            _ => {
-                self.current = Some(id);
-                self.mode = Mode::Waveform;
-            }
-        }
+        let target = self.recording_target.take();
+        crate::record_input::finish(self, takes, target);
     }
 
     // ------------------------------------------------- waveform editing

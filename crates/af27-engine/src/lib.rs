@@ -12,6 +12,7 @@
 //! through small fixed-size commands, so a tweak never restarts a tail.
 //! Position, meters and the Phase Wheel's ring come back through atomics.
 
+pub mod capture;
 pub mod mix;
 pub mod pool;
 pub mod scope;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 use af27_core::AudioBuffer;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+pub use capture::{AudioApp, CaptureSupport, OutputDevice, RecordSource};
 pub use mix::{space_gains, stereo_frame, track_gains, Mix, BLOCK, MAX_SPEAKERS};
 pub use transport::{Plan, Region};
 
@@ -124,7 +126,7 @@ struct Shared {
     peak_r: AtomicU32,
 }
 
-fn store_max_f32(a: &AtomicU32, v: f32) {
+pub(crate) fn store_max_f32(a: &AtomicU32, v: f32) {
     if v > f32::from_bits(a.load(Ordering::Relaxed)) {
         a.store(v.to_bits(), Ordering::Relaxed);
     }
@@ -374,7 +376,7 @@ pub struct Engine {
     shared: Arc<Shared>,
     pub rate: u32,
     pub device: String,
-    recorder: Option<Recorder>,
+    recorders: Vec<Recorder>,
 }
 
 impl Engine {
@@ -460,7 +462,7 @@ impl Engine {
             shared,
             rate,
             device: name,
-            recorder: None,
+            recorders: Vec::new(),
         })
     }
 
@@ -631,37 +633,78 @@ impl Engine {
     /// Frees programs the audio thread has finished with. Call every frame.
     pub fn collect(&mut self) {
         while self.trash.pop().is_ok() {}
-        if let Some(r) = &mut self.recorder {
+        for r in &mut self.recorders {
             r.drain();
         }
     }
 
+    /// Records from the default input device.
     pub fn start_recording(&mut self) -> Result<(), String> {
-        self.recorder = Some(Recorder::new()?);
+        self.start_recording_from(&[RecordSource::Input])
+    }
+
+    /// Records each source at once (a game on one track, a voice chat on
+    /// another). All or nothing: if one fails to open, none run.
+    pub fn start_recording_from(&mut self, sources: &[RecordSource]) -> Result<(), String> {
+        let mut recs = Vec::with_capacity(sources.len());
+        for s in sources {
+            let r = Recorder::new(s).map_err(|e| match s {
+                RecordSource::Input => e,
+                _ => format!("{}: {e}", s.label()),
+            })?;
+            recs.push(r);
+        }
+        self.recorders = recs;
         Ok(())
     }
 
     pub fn is_recording(&self) -> bool {
-        self.recorder.is_some()
+        !self.recorders.is_empty()
     }
 
     pub fn recording_len_secs(&self) -> f64 {
-        self.recorder.as_ref().map_or(0.0, |r| {
-            r.data.len() as f64 / (r.channels.max(1) as f64 * r.rate.max(1) as f64)
-        })
+        self.recorders
+            .iter()
+            .map(|r| r.data.len() as f64 / (r.channels.max(1) as f64 * r.rate.max(1) as f64))
+            .fold(0.0, f64::max)
     }
 
     pub fn recording_level(&self) -> f32 {
-        self.recorder
-            .as_ref()
-            .map_or(0.0, |r| f32::from_bits(r.peak.swap(0, Ordering::Relaxed)))
+        self.recorders
+            .iter()
+            .map(|r| f32::from_bits(r.peak.swap(0, Ordering::Relaxed)))
+            .fold(0.0, f32::max)
     }
 
-    pub fn stop_recording(&mut self) -> Option<AudioBuffer> {
-        let mut r = self.recorder.take()?;
-        r.drain();
-        Some(AudioBuffer::from_interleaved(r.rate, r.channels, &r.data))
+    /// Problems a running capture hit (a device went away), taken once.
+    pub fn take_recording_errors(&mut self) -> Vec<String> {
+        self.recorders
+            .iter_mut()
+            .filter_map(|r| r.take_error())
+            .collect()
     }
+
+    /// Stops recording and returns the first source's take.
+    pub fn stop_recording(&mut self) -> Option<AudioBuffer> {
+        self.stop_recording_all().into_iter().next().map(|t| t.buf)
+    }
+
+    /// Stops recording and returns one take per source, in the order
+    /// they were given.
+    pub fn stop_recording_all(&mut self) -> Vec<Take> {
+        std::mem::take(&mut self.recorders)
+            .into_iter()
+            .map(Recorder::finish)
+            .collect()
+    }
+}
+
+/// One recorded source.
+pub struct Take {
+    pub source: RecordSource,
+    pub buf: AudioBuffer,
+    /// What went wrong while recording, or a note such as a fallback.
+    pub note: Option<String>,
 }
 
 /// Program for a buffer playing both sides.
@@ -789,17 +832,49 @@ pub fn render_bed(program: Program, rate: u32, from: f64, to: f64) -> AudioBuffe
     render_with(program, rate, from, to, true)
 }
 
+enum Backend {
+    Device(#[allow(dead_code)] cpal::Stream),
+    Loopback(capture::LoopbackCapture),
+}
+
 struct Recorder {
-    _stream: cpal::Stream,
+    backend: Backend,
+    source: RecordSource,
     rx: rtrb::Consumer<f32>,
     data: Vec<f32>,
     rate: u32,
     channels: usize,
     peak: Arc<AtomicU32>,
+    errors: Vec<String>,
 }
 
 impl Recorder {
-    fn new() -> Result<Recorder, String> {
+    fn new(source: &RecordSource) -> Result<Recorder, String> {
+        if source.is_system() {
+            Self::loopback(source)
+        } else {
+            Self::input()
+        }
+    }
+
+    fn loopback(source: &RecordSource) -> Result<Recorder, String> {
+        // Ten seconds of 192 kHz stereo: the UI drains every frame.
+        let (tx, rx) = rtrb::RingBuffer::<f32>::new(192_000 * 2 * 10);
+        let peak = Arc::new(AtomicU32::new(0));
+        let cap = capture::LoopbackCapture::open(source, tx, peak.clone())?;
+        Ok(Recorder {
+            rate: cap.rate,
+            channels: 2,
+            backend: Backend::Loopback(cap),
+            source: source.clone(),
+            rx,
+            data: Vec::new(),
+            peak,
+            errors: Vec::new(),
+        })
+    }
+
+    fn input() -> Result<Recorder, String> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -849,18 +924,45 @@ impl Recorder {
             .play()
             .map_err(|e| format!("Could not start recording: {e}"))?;
         Ok(Recorder {
-            _stream: stream,
+            backend: Backend::Device(stream),
+            source: RecordSource::Input,
             rx,
             data: Vec::new(),
             rate,
             channels,
             peak,
+            errors: Vec::new(),
         })
     }
 
     fn drain(&mut self) {
         while let Ok(s) = self.rx.pop() {
             self.data.push(s);
+        }
+    }
+
+    fn take_error(&mut self) -> Option<String> {
+        match &self.backend {
+            Backend::Loopback(c) => c.take_error().inspect(|e| self.errors.push(e.clone())),
+            Backend::Device(_) => None,
+        }
+    }
+
+    fn finish(mut self) -> Take {
+        let mut note = None;
+        if let Backend::Loopback(c) = &mut self.backend {
+            c.stop();
+            note = c.note.clone();
+        }
+        let _ = self.take_error();
+        self.drain();
+        if let Some(e) = self.errors.last() {
+            note = Some(e.clone());
+        }
+        Take {
+            buf: AudioBuffer::from_interleaved(self.rate, self.channels, &self.data),
+            source: self.source,
+            note,
         }
     }
 }

@@ -18,6 +18,7 @@ mod phasewheel;
 mod pianoroll;
 mod pictures;
 mod pointers;
+mod record_input;
 mod ruler;
 mod selfshot;
 mod separation;

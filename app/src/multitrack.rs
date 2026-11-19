@@ -1069,6 +1069,10 @@ fn track_header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
             changed |= toggle(ui, &mut tr.solo, "S", th.accent, "Solo");
             changed |= toggle(ui, &mut tr.armed, "R", th.accent_alt, "Arm for recording");
         });
+        if tr.height >= 76.0 {
+            let id = tr.id;
+            ui.horizontal(|ui| crate::record_input::track_input(ui, &mut st.rec_inputs, id));
+        }
         if tr.height >= 60.0 {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Vol").size(10.0).color(c(th.text_dim)));

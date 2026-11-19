@@ -1589,6 +1589,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                 st.start_recording();
             }
         }
+        crate::record_input::default_input(ui, &mut st.rec_inputs);
         // Loop / Skip: one mode, the time selection is the range.
         use crate::transport::PlayMode;
         let mode = st.play_mode();
