@@ -293,13 +293,13 @@ fn channel_map_from(c: &Value) -> Option<Vec<ChannelSend>> {
     )
 }
 
-/// Lanes Audiform has no envelope for (mute and send automation): kept
-/// in the object's own `af27_lanes` list, which Audiform keeps but does
-/// not read.
+/// Lanes Audiform has no envelope for (mute, send and rack control
+/// automation): kept in the object's own `af27_lanes` list, which
+/// Audiform keeps but does not read.
 fn is_own(t: &LaneTarget) -> bool {
     matches!(
         t,
-        LaneTarget::Mute | LaneTarget::SendLevel(_) | LaneTarget::SendPan(_)
+        LaneTarget::Mute | LaneTarget::SendLevel(_) | LaneTarget::SendPan(_) | LaneTarget::Rack(_)
     )
 }
 
@@ -863,9 +863,10 @@ fn auto_lanes_to(
                     }),
                     LaneTarget::Space(p) => json!({"type": "space", "param": p}),
                     // Kept apart in `af27_lanes` (see `split_own`); never here.
-                    LaneTarget::Mute | LaneTarget::SendLevel(_) | LaneTarget::SendPan(_) => {
-                        Value::Null
-                    }
+                    LaneTarget::Mute
+                    | LaneTarget::SendLevel(_)
+                    | LaneTarget::SendPan(_)
+                    | LaneTarget::Rack(_) => Value::Null,
                 };
                 o.insert("target".into(), target);
                 o.insert("enabled".into(), json!(l.enabled));
@@ -3350,6 +3351,57 @@ mod carry_over {
         assert!(t0.get("prerender").is_none());
         assert!(t0.get("af27_lanes").is_none());
         assert_eq!(t0["input"], Value::Null);
+    }
+
+    #[test]
+    fn rack_lanes_ride_in_the_own_lists_and_untouched_files_stay_the_same() {
+        use af27_core::automation::RackParam;
+        let imp = import(super::tests::SAMPLE, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        // Untouched: the same text.
+        let mut plain = s.clone();
+        assert_eq!(strip(export(&mut plain, Some(&base))), strip(base.clone()));
+        let (ti, ci) = s
+            .tracks
+            .iter()
+            .enumerate()
+            .find_map(|(i, t)| (!t.clips.is_empty()).then_some((i, 0)))
+            .unwrap();
+        let mut mix = Lane::new(LaneTarget::Rack(RackParam::Mix));
+        mix.points = vec![AutoPoint {
+            time: 0.25,
+            value: 0.5,
+            curve: Curve::Linear,
+        }];
+        let mut power = Lane::new(LaneTarget::Rack(RackParam::Power));
+        power.points = vec![AutoPoint {
+            time: 1.0,
+            value: 0.0,
+            curve: Curve::Hold,
+        }];
+        s.tracks[ti].clips[ci].props.lanes.push(mix.clone());
+        s.tracks[ti].lanes.push(power.clone());
+        let out = export(&mut s, Some(&base));
+        let co = &out["tracks"][ti]["clips"][ci];
+        assert_eq!(co["af27_lanes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            co["envelopes"],
+            base["tracks"][ti]["clips"][ci]["envelopes"]
+        );
+        assert_eq!(out["tracks"][ti]["af27_lanes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            out["tracks"][ti]["envelopes"],
+            base["tracks"][ti]["envelopes"]
+        );
+        let text = serde_json::to_string_pretty(&out).unwrap();
+        let back = import(&text, Path::new(".")).unwrap();
+        assert!(back.session.tracks[ti].clips[ci].props.lanes.contains(&mix));
+        assert!(back.session.tracks[ti].lanes.contains(&power));
+        // A second save of what was read back changes nothing.
+        let base2 = back.base.clone().unwrap();
+        let mut s2 = back.session;
+        assert_eq!(strip(export(&mut s2, Some(&base2))), strip(base2));
     }
 
     #[test]

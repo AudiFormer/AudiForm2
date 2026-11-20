@@ -48,7 +48,7 @@
 
 use std::sync::Arc;
 
-use af27_core::automation::{LanePoint, LaneTarget, SILENT_DB};
+use af27_core::automation::{Lane, LanePoint, LaneTarget, RackParam, SILENT_DB};
 use af27_core::session::{balance, fader_gain};
 use af27_core::time::db_to_gain;
 use af27_core::{AudioBuffer, Session, TrackKind};
@@ -109,6 +109,8 @@ pub struct ClipFx {
     pub meter: Arc<RackMeter>,
     /// Effect lanes, in clip time.
     lanes: Vec<FxLane>,
+    /// The rack's own control lanes, in clip time.
+    rack: RackLanes,
     l: Vec<f32>,
     r: Vec<f32>,
     /// The chain's latency in frames: the clip is read this far ahead.
@@ -171,6 +173,7 @@ impl ClipFx {
             chain,
             meter: Default::default(),
             lanes,
+            rack: RackLanes::of(&c.props.lanes),
             l: vec![0.0; BLOCK],
             r: vec![0.0; BLOCK],
             running: false,
@@ -257,6 +260,64 @@ pub enum LaneKind {
     Effect { slot: u8, param: u8 },
 }
 
+/// A rack's own control lanes (each empty when it has none playing):
+/// input and output gain (dB), dry/wet mix (0..1) and power (on at 0.5
+/// and above).
+#[derive(Default)]
+struct RackLanes {
+    input: Vec<LanePoint>,
+    output: Vec<LanePoint>,
+    mix: Vec<LanePoint>,
+    power: Vec<LanePoint>,
+}
+
+impl RackLanes {
+    /// The playing rack lanes among `lanes` (the first of each kind).
+    fn of(lanes: &[Lane]) -> RackLanes {
+        let mut r = RackLanes::default();
+        for l in lanes.iter().filter(|l| l.plays()) {
+            let LaneTarget::Rack(p) = l.target else {
+                continue;
+            };
+            let v = match p {
+                RackParam::Input => &mut r.input,
+                RackParam::Output => &mut r.output,
+                RackParam::Mix => &mut r.mix,
+                RackParam::Power => &mut r.power,
+            };
+            if v.is_empty() {
+                *v = l.points.clone();
+            }
+        }
+        r
+    }
+
+    fn is_empty(&self) -> bool {
+        self.input.is_empty()
+            && self.output.is_empty()
+            && self.mix.is_empty()
+            && self.power.is_empty()
+    }
+
+    /// Sets `chain`'s rack controls to the lanes' values at `t`. No
+    /// allocation.
+    fn apply(&self, chain: &mut Chain, t: f64) {
+        use af27_core::automation::value_at;
+        if let Some(db) = value_at(&self.input, t) {
+            chain.input = db_to_gain(db as f32);
+        }
+        if let Some(db) = value_at(&self.output, t) {
+            chain.output = db_to_gain(db as f32);
+        }
+        if let Some(m) = value_at(&self.mix, t) {
+            chain.mix = m.clamp(0.0, 1.0) as f32;
+        }
+        if let Some(on) = value_at(&self.power, t) {
+            chain.bypass = on < 0.5;
+        }
+    }
+}
+
 struct FxLane {
     slot: usize,
     param: usize,
@@ -275,6 +336,7 @@ struct StripAuto {
     vol_live: bool,
     pan_live: bool,
     fx: Vec<FxLane>,
+    rack: RackLanes,
 }
 
 impl StripAuto {
@@ -285,7 +347,7 @@ impl StripAuto {
         !self.pan.is_empty() && !self.pan_live
     }
     fn plays_fx(&self) -> bool {
-        self.fx.iter().any(|f| !f.live)
+        self.fx.iter().any(|f| !f.live) || !self.rack.is_empty()
     }
 }
 
@@ -694,6 +756,9 @@ fn run_chain(t: &mut MixTrack, tracks: TrackPtr, n: usize, tin: f64, dt: f64) {
         meter,
         ..
     } = &mut *t;
+    if let Some(a) = auto.as_deref() {
+        a.rack.apply(chain, tin);
+    }
     let in_gain = if chain.bypass { 1.0 } else { chain.input };
     peak_into(&meter.input, &l[..n], &r[..n], in_gain);
     for tap in taps.iter_mut().flatten() {
@@ -709,6 +774,7 @@ fn run_chain(t: &mut MixTrack, tracks: TrackPtr, n: usize, tin: f64, dt: f64) {
         let b = (a + step).min(n);
         if let Some(au) = fx.as_deref_mut() {
             let at = tin + dt * a as f64;
+            au.rack.apply(chain, at);
             for f in au.fx.iter_mut().filter(|f| !f.live) {
                 if let (Some(v), Some(slot)) = (
                     af27_core::automation::value_at(&f.points, at),
@@ -783,6 +849,7 @@ fn clip_through_fx(c: &MixClip, fx: &mut ClipFx, ts: f64, dt: f64, l: &mut [f32]
         chain,
         meter,
         lanes,
+        rack,
         l: fl,
         r: fr,
         running,
@@ -796,13 +863,19 @@ fn clip_through_fx(c: &MixClip, fx: &mut ClipFx, ts: f64, dt: f64, l: &mut [f32]
     fl.fill(0.0);
     fr.fill(0.0);
     read_clip(c, ts + lead, dt, fl, fr);
+    rack.apply(chain, ts + lead - c.start);
     let in_gain = if chain.bypass { 1.0 } else { chain.input };
     peak_into(&meter.input, fl, fr, in_gain);
-    let step = if lanes.is_empty() { n.max(1) } else { FX_STEP };
+    let step = if lanes.is_empty() && rack.is_empty() {
+        n.max(1)
+    } else {
+        FX_STEP
+    };
     let mut a = 0;
     while a < n {
         let b = (a + step).min(n);
         let local = ts + lead + dt * a as f64 - c.start;
+        rack.apply(chain, local);
         for f in lanes.iter_mut() {
             if let (Some(v), Some(slot)) = (
                 af27_core::automation::value_at(&f.points, local),
@@ -1108,7 +1181,9 @@ fn strip_auto(t: &af27_core::Track) -> Option<Box<StripAuto>> {
             _ => {}
         }
     }
-    (!a.vol.is_empty() || !a.pan.is_empty() || !a.fx.is_empty()).then(|| Box::new(a))
+    a.rack = RackLanes::of(&t.lanes);
+    (!a.vol.is_empty() || !a.pan.is_empty() || !a.fx.is_empty() || !a.rack.is_empty())
+        .then(|| Box::new(a))
 }
 
 /// Builds the mix for `session` at `rate`. `media` gives each media item's

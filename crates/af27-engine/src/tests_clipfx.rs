@@ -285,3 +285,65 @@ fn a_clip_effect_lane_moves_its_value() {
     assert!(near(at(&out, 0.25).0, 0.5));
     assert!(near(at(&out, 0.75).0, 0.25), "{:?}", at(&out, 0.75));
 }
+
+#[test]
+fn clip_and_track_rack_lanes_play_input_output_mix_and_power() {
+    use af27_core::automation::RackParam;
+    let hold = |time: f64, value: f64| LanePoint {
+        time,
+        value,
+        curve: Curve::Hold,
+    };
+    // A clip rack halving the sound (-6 dB amplify), its output line
+    // stepping from 0 dB to -6 dB at 0.5 s (clip time; the clip starts
+    // at 0.25 s).
+    let mut f = Fx::steady(0.5, 1.0, 0.25);
+    f.clip().props.chain = vec![slot("amplify", vec![-6.0206])];
+    f.clip().props.lanes = vec![lane(
+        LaneTarget::Rack(RackParam::Output),
+        vec![hold(0.0, 0.0), pt(0.5, -6.0206)],
+    )];
+    let out = f.render(1.3);
+    assert!(near(at(&out, 0.5).0, 0.25), "{:?}", at(&out, 0.5));
+    assert!(near(at(&out, 1.0).0, 0.125), "{:?}", at(&out, 1.0));
+
+    // Input gain: +6 dB before the effect.
+    f.clip().props.lanes = vec![lane(
+        LaneTarget::Rack(RackParam::Input),
+        vec![pt(0.0, 6.0206)],
+    )];
+    assert!(near(at(&f.render(1.0), 0.5).0, 0.5));
+
+    // Mix: dry until 0.5 s, then wet.
+    f.clip().props.lanes = vec![lane(
+        LaneTarget::Rack(RackParam::Mix),
+        vec![hold(0.0, 0.0), pt(0.5, 1.0)],
+    )];
+    let out = f.render(1.3);
+    assert!(near(at(&out, 0.5).0, 0.5), "dry: {:?}", at(&out, 0.5));
+    assert!(near(at(&out, 1.0).0, 0.25), "wet: {:?}", at(&out, 1.0));
+
+    // Power: off for the first half (the sound passes untouched).
+    f.clip().props.lanes = vec![lane(
+        LaneTarget::Rack(RackParam::Power),
+        vec![hold(0.0, 0.0), hold(0.5, 1.0)],
+    )];
+    let out = f.render(1.3);
+    assert!(near(at(&out, 0.5).0, 0.5));
+    assert!(near(at(&out, 1.0).0, 0.25));
+
+    // An off lane, or one with no points, leaves the rack as set.
+    f.clip().props.lanes[0].enabled = false;
+    assert!(near(at(&f.render(1.0), 0.5).0, 0.25));
+
+    // A track rack: the same output line, in timeline time.
+    let mut f = Fx::steady(0.5, 1.0, 0.0);
+    f.s.tracks[0].chain = vec![slot("amplify", vec![0.0])];
+    f.s.tracks[0].lanes = vec![lane(
+        LaneTarget::Rack(RackParam::Output),
+        vec![hold(0.0, 0.0), pt(0.5, -6.0206)],
+    )];
+    let out = f.render(1.0);
+    assert!(near(at(&out, 0.25).0, 0.5), "{:?}", at(&out, 0.25));
+    assert!(near(at(&out, 0.75).0, 0.25), "{:?}", at(&out, 0.75));
+}

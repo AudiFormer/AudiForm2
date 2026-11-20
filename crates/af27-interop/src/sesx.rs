@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use af27_core::automation::{self, Curve, Lane, LanePoint, LaneTarget};
+use af27_core::automation::{self, Curve, Lane, LanePoint, LaneTarget, RackParam};
 use af27_core::plugin::PluginData;
 use af27_core::session::{
     ChannelSend, Clip, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session,
@@ -412,6 +412,34 @@ fn rack_levels(rack: Node) -> Rack {
         }
     }
     r
+}
+
+/// A rack component's drawn line (`rackInput` and `rackOutput` as dB,
+/// `rackMix` as the wet share), with what it moves. Positions are file
+/// samples less `origin`.
+fn rack_line(c: Node, rate: f64, origin: f64) -> Option<(RackParam, Vec<LanePoint>)> {
+    let param = match c.attribute("id")? {
+        "rackInput" => RackParam::Input,
+        "rackOutput" => RackParam::Output,
+        "rackMix" => RackParam::Mix,
+        _ => return None,
+    };
+    let kf = keyframes(param_at(c, "0")?);
+    if kf.is_empty() {
+        return None;
+    }
+    let pts = kf
+        .iter()
+        .map(|&(at, v, hold)| LanePoint {
+            time: (at - origin) / rate,
+            value: match param {
+                RackParam::Mix => (1.0 - v).clamp(0.0, 1.0),
+                _ => gain_db(v) as f64,
+            },
+            curve: if hold { Curve::Hold } else { Curve::Linear },
+        })
+        .collect();
+    Some((param, pts))
 }
 
 /// A component's parameters by name.
@@ -808,9 +836,20 @@ fn racks(
     let mut lanes = Vec::new();
     let mut levels = None;
     for rack in node.children().filter(|c| c.has_tag_name("effectsRack")) {
+        let first = levels.is_none();
         levels.get_or_insert_with(|| rack_levels(rack));
         for c in rack.children().filter(|c| c.has_tag_name("component")) {
-            for _ in 0..lines_in(c) {
+            let mut lost = lines_in(c);
+            // The first rack's level and mix lines come across (its
+            // levels are the ones kept).
+            if let (true, Some((param, line))) = (first, rack_line(c, rate, origin)) {
+                let mut l = Lane::new(LaneTarget::Rack(param));
+                l.points = line;
+                lanes.push(l);
+                report.effect_lines += 1;
+                lost -= 1;
+            }
+            for _ in 0..lost {
                 report.drop("effects rack level line(s)");
             }
         }

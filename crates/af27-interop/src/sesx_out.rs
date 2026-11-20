@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use af27_core::automation::{Lane, LaneTarget};
+use af27_core::automation::{Lane, LaneTarget, RackParam};
 use af27_core::session::{Clip, EffectSlot, Rack, Session, StretchKind, StretchMode, TrackKind};
 
 /// What a `.sesx` export could not hold.
@@ -221,19 +221,46 @@ fn rack(
         })
         .collect();
     let plain = *r == Rack::default();
-    if slots.is_empty() && plain {
+    let level = |db: f32| 10f64.powf(db as f64 / 20.0);
+    let dry = |m: f64| 1.0 - m.clamp(0.0, 1.0);
+    // The rack's level and mix lines (its power has no line there).
+    let mut written = 0usize;
+    let mut line = |p: RackParam, f: &dyn Fn(f64) -> f64| {
+        let Some(l) = lanes
+            .iter()
+            .find(|l| l.plays() && l.target == LaneTarget::Rack(p))
+        else {
+            return String::new();
+        };
+        written += 1;
+        keyframes(
+            &l.points
+                .iter()
+                .map(|q| (origin + q.time * rate, f(q.value)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let ikeys = line(RackParam::Input, &|v| level(v as f32));
+    let okeys = line(RackParam::Output, &|v| level(v as f32));
+    let mkeys = line(RackParam::Mix, &dry);
+    if slots.is_empty() && plain && written == 0 {
         return 0;
     }
-    let level = |db: f32| 10f64.powf(db as f64 / 20.0);
+    let param = |v: f64, keys: &str| {
+        if keys.is_empty() {
+            format!(r#"<parameter index="0" parameterValue="{v}"/>"#)
+        } else {
+            format!(r#"<parameter index="0" parameterValue="{v}">{keys}</parameter>"#)
+        }
+    };
     let _ = write!(
         out,
-        r#"<effectsRack preFader="true"><component id="rackInput" powered="true"><parameter index="0" parameterValue="{}"/></component><component id="rackOutput" powered="true"><parameter index="0" parameterValue="{}"/></component><component id="rackMix" powered="true"><parameter index="0" parameterValue="{}"/></component>"#,
-        level(r.input_db),
-        level(r.output_db),
-        (1.0 - r.mix.clamp(0.0, 1.0)) as f64
+        r#"<effectsRack preFader="true"><component id="rackInput" powered="true">{}</component><component id="rackOutput" powered="true">{}</component><component id="rackMix" powered="true">{}</component>"#,
+        param(level(r.input_db), &ikeys),
+        param(level(r.output_db), &okeys),
+        param((1.0 - r.mix.clamp(0.0, 1.0)) as f64, &mkeys),
     );
     let mut next = 0usize;
-    let mut written = 0usize;
     for s in slots {
         let index = s.position.map_or(next, |p| (p as usize).max(next));
         next = index + 1;

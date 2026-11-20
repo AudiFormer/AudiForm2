@@ -81,9 +81,60 @@ pub enum LaneTarget {
     /// The pan (-1..1) of the owner's send whose `ext_id` this is. Kept;
     /// not played here yet.
     SendPan(String),
+    /// One of the owner's effects rack controls (its input or output gain
+    /// in dB, its dry/wet mix 0..1, or its power: 1 on, 0 off, points
+    /// hold). Played on clip and track racks.
+    Rack(RackParam),
+}
+
+/// A control of an effects rack itself (not of one of its effects).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RackParam {
+    Input,
+    Output,
+    Mix,
+    Power,
+}
+
+impl RackParam {
+    pub const ALL: [RackParam; 4] = [
+        RackParam::Input,
+        RackParam::Output,
+        RackParam::Mix,
+        RackParam::Power,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            RackParam::Input => "Rack Input",
+            RackParam::Output => "Rack Output",
+            RackParam::Mix => "Rack Mix",
+            RackParam::Power => "Rack Power",
+        }
+    }
+    /// The control's value in `rack` (power: 1 on, 0 off).
+    pub fn value_in(self, rack: &crate::session::Rack) -> f64 {
+        match self {
+            RackParam::Input => rack.input_db as f64,
+            RackParam::Output => rack.output_db as f64,
+            RackParam::Mix => rack.mix as f64,
+            RackParam::Power => (!rack.bypass) as u8 as f64,
+        }
+    }
+    /// The control's value in a fresh rack (0 dB, fully wet, on).
+    pub fn default_value(self) -> f64 {
+        self.value_in(&crate::session::Rack::default())
+    }
 }
 
 impl LaneTarget {
+    /// Whether the lane moves something in the owner's effects rack (an
+    /// effect value or a rack control): it shapes the sound before the
+    /// fader.
+    pub fn in_rack(&self) -> bool {
+        matches!(self, LaneTarget::Effect { .. } | LaneTarget::Rack(_))
+    }
+
     /// The value range a lane of this target covers (for drawing and for
     /// thinning).
     pub fn range(&self) -> (f64, f64) {
@@ -92,6 +143,8 @@ impl LaneTarget {
             LaneTarget::Pan | LaneTarget::SendPan(_) => (-1.0, 1.0),
             LaneTarget::SendLevel(_) => (-60.0, 12.0),
             LaneTarget::Effect { .. } | LaneTarget::Space(_) | LaneTarget::Mute => (0.0, 1.0),
+            LaneTarget::Rack(RackParam::Input | RackParam::Output) => (-24.0, 24.0),
+            LaneTarget::Rack(RackParam::Mix | RackParam::Power) => (0.0, 1.0),
         }
     }
     pub fn label(&self) -> String {
@@ -105,6 +158,7 @@ impl LaneTarget {
             LaneTarget::Mute => "Mute".into(),
             LaneTarget::SendLevel(_) => "Send Level".into(),
             LaneTarget::SendPan(_) => "Send Pan".into(),
+            LaneTarget::Rack(p) => p.label().into(),
         }
     }
 }
@@ -187,6 +241,21 @@ impl Lane {
         self.points.retain(|p| p.time < a || p.time > b);
         self.points.extend_from_slice(with);
         self.sort();
+    }
+}
+
+/// How close (screen pixels) a dragged point must come to its lane's
+/// default value to land on it.
+pub const SNAP_PX: f64 = 6.0;
+
+/// A dragged point's value `v`, pulled onto `default` when it lies within
+/// `within_px` pixels of it on a lane drawn `px_per_unit` pixels per unit
+/// of value.
+pub fn snap_to(v: f64, default: f64, px_per_unit: f64, within_px: f64) -> f64 {
+    if ((v - default) * px_per_unit).abs() <= within_px {
+        default
+    } else {
+        v
     }
 }
 
@@ -542,6 +611,47 @@ mod tests {
             value,
             curve: Curve::Linear,
         }
+    }
+
+    #[test]
+    fn snapping_pulls_onto_the_default_only_when_near() {
+        // 72 dB drawn over 144 px: 2 px per dB, so 6 px is 3 dB.
+        assert_eq!(snap_to(2.5, 0.0, 2.0, SNAP_PX), 0.0);
+        assert_eq!(snap_to(-3.0, 0.0, 2.0, SNAP_PX), 0.0);
+        assert_eq!(snap_to(-3.5, 0.0, 2.0, SNAP_PX), -3.5);
+        // Pan over 100 px (50 px per unit): within 0.12 of centre.
+        assert_eq!(snap_to(0.1, 0.0, 50.0, SNAP_PX), 0.0);
+        assert_eq!(snap_to(-0.2, 0.0, 50.0, SNAP_PX), -0.2);
+        // A default that is not zero (a full mix).
+        assert_eq!(snap_to(0.97, 1.0, 100.0, SNAP_PX), 1.0);
+        assert_eq!(snap_to(0.9, 1.0, 100.0, SNAP_PX), 0.9);
+    }
+
+    #[test]
+    fn rack_targets_read_and_write_and_old_targets_are_unchanged() {
+        let t = LaneTarget::Rack(RackParam::Mix);
+        let j = serde_json::to_string(&t).unwrap();
+        assert_eq!(j, r#"{"Rack":"mix"}"#);
+        assert_eq!(serde_json::from_str::<LaneTarget>(&j).unwrap(), t);
+        for p in RackParam::ALL {
+            let t = LaneTarget::Rack(p);
+            let back: LaneTarget =
+                serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+            assert_eq!(back, t);
+            assert!(t.in_rack());
+        }
+        // Earlier targets keep their text.
+        assert_eq!(
+            serde_json::to_string(&LaneTarget::Volume).unwrap(),
+            r#""Volume""#
+        );
+        assert_eq!(
+            serde_json::from_str::<LaneTarget>(r#"{"SendLevel":"x"}"#).unwrap(),
+            LaneTarget::SendLevel("x".into())
+        );
+        assert_eq!(RackParam::Mix.default_value(), 1.0);
+        assert_eq!(RackParam::Power.default_value(), 1.0);
+        assert_eq!(RackParam::Input.default_value(), 0.0);
     }
 
     #[test]

@@ -956,3 +956,79 @@ fn a_converted_effects_line_follows_it_onto_the_clip_and_back() {
         pts
     );
 }
+
+#[test]
+fn rack_level_and_mix_lines_come_across_and_export_back() {
+    use af27_core::automation::RackParam;
+    // A track rack with a drawn output line (linear gain 1 to 0.5) and a
+    // clip rack (its clip 1 s into its file) with a drawn mix line (the
+    // dry share, 1 to 0).
+    let tracks = r#"<audioTrack id="10001" index="1"><trackParameters><name>T</name></trackParameters>
+      <trackAudioParameters audioChannelType="stereo"><trackOutput outputID="10000" type="trackID"/></trackAudioParameters>
+      <effectsRack preFader="true">
+        <component id="rackInput" powered="true"><parameter index="0" parameterValue="1"/></component>
+        <component id="rackOutput" powered="true"><parameter index="0" parameterValue="1">
+          <parameterKeyframes><parameterKeyframe sampleOffset="0" value="1"/><parameterKeyframe sampleOffset="44100" value="0.5"/></parameterKeyframes></parameter></component>
+        <component id="rackMix" powered="true"><parameter index="0" parameterValue="0"/></component>
+        <slot powered="true" slotIndex="0"><component componentID="3:56535441 54383141 75746f2d 54756e65" name="Tuner"/></slot>
+      </effectsRack>
+      <audioClip fileID="0" startPoint="0" endPoint="44100" sourceInPoint="44100" sourceOutPoint="88200">
+        <effectsRack preFader="true">
+          <component id="rackMix" powered="true"><parameter index="0" parameterValue="0">
+            <parameterKeyframe sampleOffset="44100" value="1"/><parameterKeyframe sampleOffset="88200" value="0"/></parameter></component>
+          <slot powered="true" slotIndex="0"><component componentID="3:56535441 54383141 75746f2d 54756e65" name="Tuner"/></slot>
+        </effectsRack>
+      </audioClip>
+    </audioTrack><masterTrack id="10000"/>"#;
+    let (s, r) = read_s(&wrap(
+        r#"sampleRate="44100""#,
+        tracks,
+        r#"<file id="0" absolutePath="Z:\nowhere\x.wav" importerPrivateSettings="Channels:0:2;"/>"#,
+    ));
+    assert!(r.dropped.is_empty(), "{:?}", r.dropped);
+    let at = |l: &Lane, t: f64| l.value_at(t).unwrap();
+    let out_line = s.tracks[0]
+        .playing_lane(&LaneTarget::Rack(RackParam::Output))
+        .unwrap();
+    assert!(at(out_line, 0.0).abs() < 0.01);
+    assert!(
+        (at(out_line, 1.0) + 6.02).abs() < 0.01,
+        "{:?}",
+        out_line.points
+    );
+    let c = &s.tracks[0].clips[0];
+    let mix = c.playing_lane(&LaneTarget::Rack(RackParam::Mix)).unwrap();
+    // In clip time: fully dry at the clip's start, fully wet at its end.
+    assert!(at(mix, 0.0).abs() < 1e-6, "{:?}", mix.points);
+    assert!((at(mix, 1.0) - 1.0).abs() < 1e-6);
+    assert!((at(mix, 0.5) - 0.5).abs() < 1e-6);
+
+    // Exported and read back: the same lines, none left out.
+    let (text, rep) = crate::sesx_out::to_sesx(&s, None);
+    assert_eq!(rep.lanes_left_out, 0);
+    let (b, _) = read_s(&text);
+    let ob = b.tracks[0]
+        .playing_lane(&LaneTarget::Rack(RackParam::Output))
+        .unwrap();
+    for t in [0.0, 0.5, 1.0] {
+        assert!((at(ob, t) - at(out_line, t)).abs() < 0.02, "{t}");
+    }
+    let mb = b.tracks[0].clips[0]
+        .playing_lane(&LaneTarget::Rack(RackParam::Mix))
+        .unwrap();
+    for t in [0.0, 0.5, 1.0] {
+        assert!((at(mb, t) - at(mix, t)).abs() < 1e-3, "{t}");
+    }
+
+    // A power line has no place there: counted as left out.
+    let mut s2 = s.clone();
+    let mut p = Lane::new(LaneTarget::Rack(RackParam::Power));
+    p.points = vec![LanePoint {
+        time: 0.0,
+        value: 0.0,
+        curve: Curve::Hold,
+    }];
+    s2.tracks[0].lanes.push(p);
+    let (_, rep) = crate::sesx_out::to_sesx(&s2, None);
+    assert_eq!(rep.lanes_left_out, 1);
+}
