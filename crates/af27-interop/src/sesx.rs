@@ -55,9 +55,15 @@ pub struct Report {
     pub plugins: Vec<String>,
     /// Built-in effects turned into Audiform27's own, by kind.
     pub converted: BTreeMap<String, usize>,
-    /// Built-in effects left out, by name (each once), and how many.
-    pub skipped_names: Vec<String>,
-    pub skipped: usize,
+    /// Built-in effects Audiform27 has no counterpart for, kept in their
+    /// racks as the file has them (silent here, written back to a
+    /// `.sesx`): by name (each once), and how many.
+    pub kept_names: Vec<String>,
+    pub kept: usize,
+    /// Drawn lines of effect and plug-in settings that became lanes.
+    pub effect_lines: usize,
+    /// Drawn mute and send lines that became lanes.
+    pub other_lines: usize,
     pub stretched: usize,
     pub sends: usize,
     pub markers: usize,
@@ -80,10 +86,10 @@ impl Report {
     fn convert(&mut self, what: &str) {
         *self.converted.entry(what.into()).or_default() += 1;
     }
-    fn skip(&mut self, name: &str) {
-        self.skipped += 1;
-        if !name.is_empty() && !self.skipped_names.iter().any(|n| n == name) {
-            self.skipped_names.push(name.into());
+    fn keep(&mut self, name: &str) {
+        self.kept += 1;
+        if !name.is_empty() && !self.kept_names.iter().any(|n| n == name) {
+            self.kept_names.push(name.into());
         }
     }
 
@@ -118,17 +124,29 @@ impl Report {
                 self.lines
             ));
         }
+        if self.effect_lines > 0 {
+            out.push(format!(
+                "{} drawn effect or plug-in setting line(s) came across as automation.",
+                self.effect_lines
+            ));
+        }
+        if self.other_lines > 0 {
+            out.push(format!(
+                "{} drawn mute or send line(s) came across as automation (kept; not played yet).",
+                self.other_lines
+            ));
+        }
         if self.sends > 0 {
             out.push(format!("{} send(s) came across.", self.sends));
         }
         if self.markers > 0 {
             out.push(format!("{} marker(s) came across.", self.markers));
         }
-        if self.skipped > 0 {
+        if self.kept > 0 {
             out.push(format!(
-                "{} built-in effect(s) were left out ({}); rebuild them in the Effects Rack.",
-                self.skipped,
-                list(&self.skipped_names)
+                "{} built-in effect(s) with no counterpart here ({}) stay in their racks, silent, and are written back when saved as a .sesx.",
+                self.kept,
+                list(&self.kept_names)
             ));
         }
         if !self.dropped.is_empty() {
@@ -327,12 +345,34 @@ fn muted(nodes: &[Node], alias: &str) -> bool {
         .is_some_and(|v| v >= 0.5)
 }
 
+/// A mute's drawn line (1 muted, 0 heard; each point holds).
+fn mute_line(nodes: &[Node], alias: &str, rate: f64) -> Option<Vec<LanePoint>> {
+    let c = comp(nodes, "Audition.Mute", alias)?;
+    let kf = [param(c, "mute"), param_at(c, "1"), param_at(c, "0")]
+        .into_iter()
+        .flatten()
+        .map(keyframes)
+        .find(|k| !k.is_empty())?;
+    Some(
+        kf.iter()
+            .map(|&(at, v, _)| LanePoint {
+                time: at / rate,
+                value: if v >= 0.5 { 1.0 } else { 0.0 },
+                curve: Curve::Hold,
+            })
+            .collect(),
+    )
+}
+
 /// Counts drawn lines on parameters other than the ones read.
 fn other_lines(nodes: &[Node], report: &mut Report) {
     for n in nodes {
         for c in n.children().filter(|c| c.has_tag_name("component")) {
             let id = c.attribute("componentID").unwrap_or_default();
-            if matches!(id, "Audition.Fader" | "Audition.StereoPanner") || id.ends_with("51Panner")
+            if matches!(
+                id,
+                "Audition.Fader" | "Audition.StereoPanner" | "Audition.Mute"
+            ) || id.ends_with("51Panner")
             {
                 continue;
             }
@@ -347,12 +387,7 @@ fn other_lines(nodes: &[Node], report: &mut Report) {
 
 // ---------------------------------------------------------- effects
 
-/// Parametric Equalizer.
-const PARAMETRIC_EQ: &str = "8edcd326-33de-4a4d-985b-f1bf48ed1427";
-/// Hard Limiter.
-const HARD_LIMITER: &str = "e0b23f05-f1a7-4ef7-9b50-7ec3e3002058";
-/// Graphic Phase Shifter (each frequency turned by its own angle).
-const PHASE_SHIFTER: &str = "7354704a-d87c-11e0-b05b-763c4824019b";
+pub use self::builtin::{HARD_LIMITER, PARAMETRIC_EQ, PHASE_SHIFTER};
 /// The xvox vocal strip plug-in.
 const XVOX: &str = "3:abcdef01 9182faeb 58766f78 58766f78";
 
@@ -426,15 +461,8 @@ fn slot(effect: &str, values: Vec<f32>) -> EffectSlot {
 /// 0.01 below is 1 dB; Input Boost is an estimate (2/3 is 0 dB, 30 dB
 /// across the knob). Look-ahead and release keep their defaults.
 pub fn limiter(p: &HashMap<String, f64>) -> EffectSlot {
-    let e = af27_dsp::Effect::Limiter;
-    let mut v: Vec<f32> = e.params().iter().map(|p| p.default).collect();
-    if let Some(a) = p.get("Maximum Amplitude") {
-        v[0] = (((a - 1.0) * 100.0).clamp(-24.0, 0.0) * 10.0).round() as f32 / 10.0;
-    }
-    if let Some(b) = p.get("Input Boost") {
-        v[1] = (((b - 2.0 / 3.0) * 30.0).clamp(0.0, 24.0) * 10.0).round() as f32 / 10.0;
-    }
-    slot(e.id(), v)
+    let (vals, _) = builtin::from_knobs(HARD_LIMITER, p).unwrap_or_default();
+    builtin::make_slot(af27_dsp::Effect::Limiter.id(), &vals)
 }
 
 fn round_to(x: f64, step: f64) -> f64 {
@@ -447,68 +475,7 @@ fn round_to(x: f64, step: f64) -> f64 {
 /// Rate" (a share of 192 kHz), gains ±48 dB with 0.5 at 0, overall gain
 /// -40..20 dB, Q is the knob times 10000, pass slopes 12 to 42 dB/oct.
 pub fn parametric_eq(p: &HashMap<String, f64>) -> (BTreeMap<String, f64>, bool) {
-    let nyq = p
-        .get("Original Sample Rate")
-        .map_or(22_050.0, |r| r * 192_000.0 / 2.0)
-        .max(1000.0);
-    let hz = |v: f64| (20.0 + v * (nyq - 20.0)).round();
-    let db = |v: f64| round_to((v - 0.5) * 96.0, 0.01).clamp(-24.0, 24.0);
-    let slope = |v: f64| {
-        let d = 12.0 + (v * 5.0).round() * 6.0;
-        if d < 18.0 {
-            0.0
-        } else if d < 36.0 {
-            1.0
-        } else {
-            2.0
-        }
-    };
-    let mut out = BTreeMap::new();
-    let mut put = |k: &str, v: f64| {
-        out.insert(k.to_string(), v);
-    };
-    for (name, &v) in p {
-        let n = name.as_str();
-        match n {
-            "Gain" => put("gain", round_to(v * 60.0 - 40.0, 0.1)),
-            "High-Pass Filter Enable" => put("hp_on", on(Some(v)) as u8 as f64),
-            "High-Pass Cutoff Frequency" => put("hp_freq", hz(v).clamp(10.0, 2000.0)),
-            "High-Pass Slope" => put("hp_slope", slope(v)),
-            "Low Shelf Enable" => put("ls_on", on(Some(v)) as u8 as f64),
-            "Low Shelf Frequency" => put("ls_freq", hz(v)),
-            "Low Shelf Gain" => put("ls_gain", db(v)),
-            "High Shelf Enable" => put("hs_on", on(Some(v)) as u8 as f64),
-            "High Shelf Frequency" => put("hs_freq", hz(v).clamp(1000.0, 20_000.0)),
-            "High Shelf Gain" => put("hs_gain", db(v)),
-            "Low-Pass Filter Enable" => put("lp_on", on(Some(v)) as u8 as f64),
-            "Low-Pass Cutoff Frequency" => put("lp_freq", hz(v).clamp(1000.0, 22_000.0)),
-            "Low-Pass Slope" => put("lp_slope", slope(v)),
-            _ => {
-                // "EQ Band N Enable", "... Center Frequency", "... Gain", "... Q".
-                let Some(rest) = n.strip_prefix("EQ Band ") else {
-                    continue;
-                };
-                let Some((band, what)) = rest.split_once(' ') else {
-                    continue;
-                };
-                if !matches!(band, "1" | "2" | "3" | "4" | "5") {
-                    continue;
-                }
-                match what {
-                    "Enable" => put(&format!("b{band}_on"), on(Some(v)) as u8 as f64),
-                    "Center Frequency" => put(&format!("b{band}_freq"), hz(v)),
-                    "Gain" => put(&format!("b{band}_gain"), db(v)),
-                    "Q" => put(
-                        &format!("b{band}_q"),
-                        round_to(v * 10_000.0, 0.01).clamp(0.1, 100.0),
-                    ),
-                    _ => {}
-                }
-            }
-        }
-    }
-    let bypass = on(p.get("Bypass").copied());
-    (out, bypass)
+    builtin::from_knobs(PARAMETRIC_EQ, p).unwrap_or_default()
 }
 
 /// Graphic Phase Shifter settings (little-endian floats) to a Phase
@@ -692,7 +659,48 @@ pub fn state_to_chunk(state: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn plugin_slot(c: Node, id: &str, report: &mut Report) -> Option<EffectSlot> {
+/// A drawn line of one slot value: (value index, the key a lane names it
+/// by, points as (file sample, value, holds)).
+type SlotLine = (usize, Option<String>, Vec<(f64, f64, bool)>);
+
+/// A rack slot as read, with the drawn lines of its values.
+struct ReadSlot {
+    slot: EffectSlot,
+    lines: Vec<SlotLine>,
+}
+
+impl ReadSlot {
+    fn plain(slot: EffectSlot) -> ReadSlot {
+        ReadSlot {
+            slot,
+            lines: Vec::new(),
+        }
+    }
+}
+
+/// The effect id prefix of a built-in effect kept as the file has it.
+pub const KEPT: &str = "sesx:";
+
+/// Whether a slot is a built-in effect of the other editor kept as the
+/// file had it (silent here, written back to a `.sesx` unchanged).
+pub fn is_kept(effect: &str) -> bool {
+    effect.starts_with(KEPT)
+}
+
+/// The `<component>` XML a kept slot holds.
+pub fn kept_xml(s: &EffectSlot) -> Option<String> {
+    let d: serde_json::Value = serde_json::from_str(s.data.as_deref()?).ok()?;
+    d["xml"].as_str().map(str::to_string)
+}
+
+/// Counts drawn lines on a component's parameters.
+fn lines_in(c: Node) -> usize {
+    c.children()
+        .filter(|p| p.has_tag_name("parameter") && !keyframes(*p).is_empty())
+        .count()
+}
+
+fn plugin_slot(c: Node, id: &str, report: &mut Report) -> Option<ReadSlot> {
     let effect = vst3_effect(id, cfg!(windows))?;
     let name = c.attribute("name").unwrap_or("Plug-in").to_string();
     let state = chunk(c)
@@ -707,37 +715,66 @@ fn plugin_slot(c: Node, id: &str, report: &mut Report) -> Option<EffectSlot> {
     report.plugins.push(name);
     let mut s = slot(&effect, Vec::new());
     s.data = Some(data.to_json());
-    Some(s)
+    // Drawn plug-in controls: by the control's number in the file and its
+    // name (normalized 0..1, as plug-ins take them).
+    let lines = c
+        .children()
+        .filter(|p| p.has_tag_name("parameter"))
+        .filter_map(|p| {
+            let kf = keyframes(p);
+            if kf.is_empty() {
+                return None;
+            }
+            let index = num(p, "index")? as usize;
+            let key = p
+                .attribute("name")
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Control {index}"));
+            Some((index, Some(key), kf))
+        })
+        .collect();
+    Some(ReadSlot { slot: s, lines })
 }
 
-/// One rack slot's component as an effect slot (or None, counted).
-fn convert(c: Node, report: &mut Report) -> Option<EffectSlot> {
+/// One rack slot's component as an effect slot: a built-in effect turned
+/// into Audiform27's own, a plug-in, or (anything else) the component
+/// kept as it is.
+fn convert(c: Node, report: &mut Report) -> Option<ReadSlot> {
     let id = c.attribute("componentID").unwrap_or_default();
     let name = c.attribute("name").unwrap_or_default();
+    let unconverted_lines = |report: &mut Report, n: usize| {
+        for _ in 0..n {
+            report.drop("drawn line(s) on effect settings with no counterpart");
+        }
+    };
+    if let Some(f) = builtin::from_component(c) {
+        report.convert(f.label);
+        unconverted_lines(report, f.lost_lines);
+        let effect = f.slot.effect.clone();
+        let lines = f
+            .lines
+            .into_iter()
+            .map(|(k, pts)| (k, builtin::lane_key(&effect, k), pts))
+            .collect();
+        return Some(ReadSlot {
+            slot: f.slot,
+            lines,
+        });
+    }
     match id {
         PHASE_SHIFTER => {
             if let Some(s) = chunk(c).as_deref().and_then(phase_curve) {
                 report.convert("phase shifter(s) came across as Phase Curve");
-                return Some(s);
+                unconverted_lines(report, lines_in(c));
+                return Some(ReadSlot::plain(s));
             }
-        }
-        HARD_LIMITER => {
-            report.convert("Hard Limiter(s) came across as Limiter");
-            return Some(limiter(&named_params(c)));
-        }
-        PARAMETRIC_EQ => {
-            let (params, bypass) = parametric_eq(&named_params(c));
-            report.convert("Parametric Equalizer(s) came across as Parametric EQ");
-            let vals: Vec<(&str, f64)> = params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-            let mut s = fx_slot(af27_fx::effects::parametric_eq::ID, &vals)?;
-            s.bypass = bypass;
-            return Some(s);
         }
         XVOX => {
             let state = chunk(c).map(|ch| chunk_to_state(&ch).unwrap_or(ch));
             if let Some(s) = state.as_deref().and_then(vox_strip) {
                 report.convert("xvox strip(s) came across as Vox Strip");
-                return Some(s);
+                unconverted_lines(report, lines_in(c));
+                return Some(ReadSlot::plain(s));
             }
         }
         _ => {}
@@ -747,17 +784,36 @@ fn convert(c: Node, report: &mut Report) -> Option<EffectSlot> {
             return Some(s);
         }
     }
-    report.skip(name);
-    None
+    // Kept as the file has it, drawn lines and all.
+    let xml = &c.document().input_text()[c.range()];
+    let label = if name.is_empty() { "Effect" } else { name };
+    report.keep(label);
+    let mut s = slot(&format!("{KEPT}{label}"), Vec::new());
+    s.data = Some(serde_json::json!({ "xml": xml }).to_string());
+    Some(ReadSlot::plain(s))
 }
 
 /// Every `effectsRack` directly inside `node`, as one chain (up to 16
-/// slots, each keeping its slot number) and the first rack's levels.
-fn racks(node: Node, report: &mut Report) -> (Vec<EffectSlot>, Rack) {
+/// slots, each keeping its slot number), the first rack's levels, and
+/// the drawn lines of the slots' values as lanes. Line positions are
+/// file samples; `origin` (samples) is taken off, so clip lines count
+/// from the clip's file start like its volume line.
+fn racks(
+    node: Node,
+    report: &mut Report,
+    rate: f64,
+    origin: f64,
+) -> (Vec<EffectSlot>, Rack, Vec<Lane>) {
     let mut chain: Vec<EffectSlot> = Vec::new();
+    let mut lanes = Vec::new();
     let mut levels = None;
     for rack in node.children().filter(|c| c.has_tag_name("effectsRack")) {
         levels.get_or_insert_with(|| rack_levels(rack));
+        for c in rack.children().filter(|c| c.has_tag_name("component")) {
+            for _ in 0..lines_in(c) {
+                report.drop("effects rack level line(s)");
+            }
+        }
         let mut slots: Vec<Node> = rack
             .children()
             .filter(|s| s.has_tag_name("slot") && child(*s, "component").is_some())
@@ -769,15 +825,40 @@ fn racks(node: Node, report: &mut Report) -> (Vec<EffectSlot>, Rack) {
                 report.drop("effect(s) past the 16th slot");
                 continue;
             }
-            if let Some(mut e) = convert(c, report) {
-                if s.attribute("powered") == Some("false") {
-                    e.bypass = true;
-                }
-                e.position = num(s, "slotIndex")
-                    .filter(|&i| i < CHAIN_SLOTS as f64)
-                    .map(|i| i as u8);
-                chain.push(e);
+            if s.attribute("sideChainChannels").is_some() {
+                report.drop("sidechain input(s)");
             }
+            let Some(mut r) = convert(c, report) else {
+                continue;
+            };
+            let e = &mut r.slot;
+            if s.attribute("powered") == Some("false") {
+                e.bypass = true;
+            }
+            e.position = num(s, "slotIndex")
+                .filter(|&i| i < CHAIN_SLOTS as f64)
+                .map(|i| i as u8);
+            if !r.lines.is_empty() {
+                let sid = e.ext_id.get_or_insert_with(crate::audfrm::new_uuid).clone();
+                for (param, key, pts) in r.lines {
+                    let mut l = Lane::new(LaneTarget::Effect {
+                        slot: sid.clone(),
+                        param,
+                        key,
+                    });
+                    l.points = pts
+                        .iter()
+                        .map(|&(at, v, hold)| LanePoint {
+                            time: (at - origin) / rate,
+                            value: v,
+                            curve: if hold { Curve::Hold } else { Curve::Linear },
+                        })
+                        .collect();
+                    lanes.push(l);
+                    report.effect_lines += 1;
+                }
+            }
+            chain.push(r.slot);
         }
     }
     // Slot numbers must not repeat (two racks merged).
@@ -791,7 +872,7 @@ fn racks(node: Node, report: &mut Report) -> (Vec<EffectSlot>, Rack) {
             }
         }
     }
-    (chain, levels.unwrap_or_default())
+    (chain, levels.unwrap_or_default(), lanes)
 }
 
 // ------------------------------------------------------------- 5.1
@@ -1071,6 +1152,18 @@ pub fn read_report(
     }
     let mut report = Report::default();
 
+    // Hardware input ports by number (`<audioDevice><inputPort>`).
+    let input_ports: HashMap<String, String> = root
+        .children()
+        .filter(|n| n.has_tag_name("audioDevice"))
+        .flat_map(|d| d.children().filter(|n| n.has_tag_name("inputPort")))
+        .filter_map(|p| {
+            Some((
+                p.attribute("id")?.to_string(),
+                p.attribute("name")?.to_string(),
+            ))
+        })
+        .collect();
     let files: HashMap<String, FileEntry> = root
         .descendants()
         .filter(|n| n.has_tag_name("file"))
@@ -1140,9 +1233,19 @@ pub fn read_report(
         let (pan_v, pan_line) = pan(&nodes, rate);
         other_lines(&nodes, &mut report);
         let ch_type = audio.and_then(|a| a.attribute("audioChannelType"));
-        let (chain, rack) = racks(t, &mut report);
-        if t.attribute("preRendered") == Some("true") {
-            report.drop("Pre-render switch(es)");
+        let (chain, rack, fx_lanes) = racks(t, &mut report, rate, 0.0);
+        let mute_lane = mute_line(&nodes, "trackMute", rate);
+        let input = audio
+            .and_then(|a| child(a, "trackInput"))
+            .and_then(|i| i.attribute("inputID"))
+            .and_then(|id| input_ports.get(id))
+            .filter(|n| !n.starts_with("Default"))
+            .cloned();
+        if audio
+            .and_then(|a| child(a, "trackOutput"))
+            .is_some_and(|o| o.attribute("type") == Some("hardwareOutput"))
+        {
+            report.approx("direct hardware output(s) (sent to the master)");
         }
         let spot = if surround {
             spot_51(&nodes, surrounds, ch_type != Some("mono"), &mut report)
@@ -1188,6 +1291,10 @@ pub fn read_report(
         }
         tr.volume_db = vol;
         tr.pan = pan_v;
+        tr.prerender = t.attribute("preRendered") == Some("true");
+        if kind == TrackKind::Audio {
+            tr.input = input;
+        }
         tr.mute = muted(&nodes, "trackMute");
         tr.solo = audio.and_then(|a| a.attribute("solo")) == Some("true");
         tr.solo_safe = audio.and_then(|a| a.attribute("soloSafe")) == Some("true");
@@ -1213,6 +1320,13 @@ pub fn read_report(
                 report.lines += 1;
             }
         }
+        if let Some(points) = mute_lane {
+            let mut l = Lane::new(LaneTarget::Mute);
+            l.points = points;
+            tr.lanes.push(l);
+            report.other_lines += 1;
+        }
+        tr.lanes.extend(fx_lanes);
         tr.chain = chain;
         tr.rack = rack;
         tr.clips = clips;
@@ -1233,6 +1347,7 @@ pub fn read_report(
             .and_then(|id| by_xml.get(id).copied().flatten())
             .filter(|&b| b != tid);
         let mut sends = Vec::new();
+        let mut send_lanes = Vec::new();
         for s in track.descendants().filter(|n| n.has_tag_name("sendSlot")) {
             let Some(bus) = s
                 .attribute("sendOutputID")
@@ -1259,6 +1374,48 @@ pub fn read_report(
                 .and_then(value)
                 .unwrap_or(0.0);
             let mut send = Send::new(bus);
+            // Drawn send level and pan lines (gains, and 0..1 pans).
+            let level_kf = sc
+                .and_then(|c| param(c, "Level"))
+                .map(keyframes)
+                .unwrap_or_default();
+            let pan_kf = s
+                .children()
+                .find(|c| c.attribute("id") == Some("sendPan"))
+                .and_then(|c| param(c, "Pan"))
+                .map(keyframes)
+                .unwrap_or_default();
+            if sc
+                .and_then(|c| param(c, "Power On/Off"))
+                .is_some_and(|p| !keyframes(p).is_empty())
+            {
+                report.drop("send on/off line(s)");
+            }
+            let to_points = |kf: &[(f64, f64, bool)], f: &dyn Fn(f64) -> f64| -> Vec<LanePoint> {
+                kf.iter()
+                    .map(|&(at, v, hold)| LanePoint {
+                        time: at / rate,
+                        value: f(v),
+                        curve: if hold { Curve::Hold } else { Curve::Linear },
+                    })
+                    .collect()
+            };
+            if !level_kf.is_empty() || !pan_kf.is_empty() {
+                let sid = send
+                    .ext_id
+                    .get_or_insert_with(crate::audfrm::new_uuid)
+                    .clone();
+                if !level_kf.is_empty() {
+                    let mut l = Lane::new(LaneTarget::SendLevel(sid.clone()));
+                    l.points = to_points(&level_kf, &|g| gain_db(g) as f64);
+                    send_lanes.push(l);
+                }
+                if !pan_kf.is_empty() {
+                    let mut l = Lane::new(LaneTarget::SendPan(sid));
+                    l.points = to_points(&pan_kf, &|v| (v * 2.0 - 1.0).clamp(-1.0, 1.0));
+                    send_lanes.push(l);
+                }
+            }
             send.level_db = gain_db(level);
             send.pre_fader = s.attribute("preFader") == Some("true");
             send.pan = (pan / 100.0) as f32;
@@ -1267,9 +1424,11 @@ pub fn read_report(
             sends.push(send);
             report.sends += 1;
         }
+        report.other_lines += send_lanes.len();
         let tr = out.track_mut(tid).unwrap();
         tr.output = output;
         tr.sends = sends;
+        tr.lanes.extend(send_lanes);
     }
 
     if let Some(m) = tracks_node
@@ -1293,7 +1452,8 @@ pub fn read_report(
             report.drop("master pan (the master has none)");
         }
         other_lines(&nodes, &mut report);
-        let (chain, rack) = racks(m, &mut report);
+        let (chain, rack, fx_lanes) = racks(m, &mut report, rate, 0.0);
+        out.master_lanes.extend(fx_lanes);
         out.master_chain = chain;
         out.master_rack = rack;
     }
@@ -1431,13 +1591,14 @@ fn read_clip(
     let cut = |pts: &[LanePoint]| automation::crop(pts, origin, origin + clip_len);
     let mut lanes = Vec::new();
     if let Some(points) = line {
-        // A line that never moves is a level.
-        let first = points[0].value;
-        if points.iter().all(|p| (p.value - first).abs() < 0.01) {
+        // A line that does not move within the clip is a level.
+        let inside = cut(&points);
+        let first = inside.first().map_or(points[0].value, |p| p.value);
+        if inside.iter().all(|p| (p.value - first).abs() < 0.01) {
             gain_db = (gain as f64 + first) as f32;
         } else {
             let mut l = Lane::new(LaneTarget::Volume);
-            l.points = cut(&points);
+            l.points = inside;
             lanes.push(l);
             report.lines += 1;
         }
@@ -1461,8 +1622,19 @@ fn read_clip(
         l.points = pan_points;
         lanes.push(l);
     }
+    if let Some(points) = mute_line(&nodes, "clipMute", rate) {
+        let mut l = Lane::new(LaneTarget::Mute);
+        l.points = cut(&points);
+        lanes.push(l);
+        report.other_lines += 1;
+    }
     other_lines(&nodes, report);
-    let (clip_chain, clip_rack) = racks(c, report);
+    // Effect lines count from the file start too.
+    let (clip_chain, clip_rack, fx_lanes) = racks(c, report, rate, 0.0);
+    lanes.extend(fx_lanes.into_iter().map(|mut l| {
+        l.points = cut(&l.points);
+        l
+    }));
     if c.attribute("looped") == Some("true") {
         report.drop("looped clip(s) (played once)");
     }
@@ -1606,6 +1778,8 @@ fn channel_map_unusual(c: Node, file_channels: Option<u16>) -> bool {
     }
     !(pairs.len() as i64 >= n.min(2) && in_place)
 }
+
+pub mod builtin;
 
 #[cfg(test)]
 mod tests;

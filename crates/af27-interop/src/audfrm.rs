@@ -291,18 +291,74 @@ fn channel_map_from(c: &Value) -> Option<Vec<ChannelSend>> {
     )
 }
 
+/// Lanes Audiform has no envelope for (mute and send automation): kept
+/// in the object's own `af27_lanes` list, which Audiform keeps but does
+/// not read.
+fn is_own(t: &LaneTarget) -> bool {
+    matches!(
+        t,
+        LaneTarget::Mute | LaneTarget::SendLevel(_) | LaneTarget::SendPan(_)
+    )
+}
+
+/// Takes the lanes [`is_own`] picks out of `lanes`.
+fn split_own(lanes: &mut Vec<Lane>) -> Vec<Lane> {
+    let (own, rest): (Vec<Lane>, Vec<Lane>) = std::mem::take(lanes)
+        .into_iter()
+        .partition(|l| is_own(&l.target));
+    *lanes = rest;
+    own
+}
+
+fn own_lanes_from(o: &Value) -> Vec<Lane> {
+    o.get("af27_lanes")
+        .and_then(|v| serde_json::from_value::<Vec<Lane>>(v.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| is_own(&l.target))
+        .collect()
+}
+
+/// Writes `own` as `af27_lanes`, only when it differs from what `o` has.
+fn write_own(o: &mut Map<String, Value>, own: &[Lane]) {
+    if own_lanes_from(&Value::Object(o.clone())) == own {
+        return;
+    }
+    if own.is_empty() {
+        o.shift_remove("af27_lanes");
+    } else {
+        o.insert(
+            "af27_lanes".into(),
+            serde_json::to_value(own).unwrap_or(Value::Null),
+        );
+    }
+}
+
 /// A clip's effects, rack, automation and Source Channels into `p`.
 /// Envelope positions count from the clip's left edge.
 fn clip_fx_from(c: &Value, rate: f64, p: &mut ClipProps) {
     p.chain = chain_from(&c["effects"]);
     p.rack = rack_from(&c["effects"]);
     p.lanes = auto_lanes_from(&c["envelopes"], rate, &p.chain);
+    p.lanes.extend(own_lanes_from(c));
     p.channel_map = channel_map_from(c);
 }
 
 /// Writes a clip's effects, rack, automation and Source Channels into
 /// `co` (its original, or a new clip), each only when it changed.
 fn write_clip_fx(
+    co: &mut Map<String, Value>,
+    c: &mut Clip,
+    rate: f64,
+    uuid_of: &HashMap<u64, String>,
+) {
+    let own = split_own(&mut c.props.lanes);
+    write_clip_fx_inner(co, c, rate, uuid_of);
+    write_own(co, &own);
+    c.props.lanes.extend(own);
+}
+
+fn write_clip_fx_inner(
     co: &mut Map<String, Value>,
     c: &mut Clip,
     rate: f64,
@@ -684,6 +740,12 @@ fn param_index(chain: &[EffectSlot], slot_id: &str, key: &str) -> usize {
             return i;
         }
     }
+    // A plug-in control: by its id (`p<id>`).
+    if af27_core::plugin::is_plugin(&slot.effect) {
+        if let Some(id) = af27_core::plugin::param_id(key) {
+            return id as usize;
+        }
+    }
     key.strip_prefix("values.")
         .and_then(|n| n.parse().ok())
         .unwrap_or(usize::MAX)
@@ -783,6 +845,10 @@ fn auto_lanes_to(
                         "param": key.clone().unwrap_or_else(|| format!("values.{param}")),
                     }),
                     LaneTarget::Space(p) => json!({"type": "space", "param": p}),
+                    // Kept apart in `af27_lanes` (see `split_own`); never here.
+                    LaneTarget::Mute | LaneTarget::SendLevel(_) | LaneTarget::SendPan(_) => {
+                        Value::Null
+                    }
                 };
                 o.insert("target".into(), target);
                 o.insert("enabled".into(), json!(l.enabled));
@@ -1118,6 +1184,8 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
     let mut by_uuid: HashMap<String, u64> = HashMap::new();
     let mut pending: Vec<(u64, Value)> = Vec::new();
     let mut silent_fx = 0usize;
+    let mut plugin_instruments = 0usize;
+    let mut looped = 0usize;
     let mut bus_pos: HashMap<TrackId, u32> = HashMap::new();
     let lists = [
         (v["tracks"].as_array(), false),
@@ -1145,6 +1213,9 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
                 };
                 let src_in = c["source_in"].as_f64().unwrap_or(0.0);
                 let src_out = c["source_out"].as_f64().unwrap_or(src_in);
+                if c["looped"].is_object() {
+                    looped += 1;
+                }
                 let mut props = props_from(c);
                 clip_fx_from(c, rate as f64, &mut props);
                 // A reversed clip's source points count from the file's
@@ -1197,6 +1268,13 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
                 tr.midi_in = t["input"].as_str().map(str::to_string);
             }
             tr.armed = t["record_armed"].as_bool().unwrap_or(false);
+            tr.prerender = t["prerender"].as_bool().unwrap_or(false);
+            if kind == TrackKind::Audio {
+                tr.input = t["input"].as_str().map(str::to_string);
+            }
+            if t["instrument"].is_object() {
+                plugin_instruments += 1;
+            }
             if let Some(h) = t["height"].as_f64() {
                 tr.height = (h as f32).max(40.0);
             }
@@ -1252,6 +1330,7 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
         tr.sends = sends;
         resolve_sidechains(&mut tr.chain, &t["effects"], &by_uuid);
         tr.lanes = auto_lanes_from(&t["envelopes"], rate as f64, &tr.chain);
+        tr.lanes.extend(own_lanes_from(&t));
         if let Some(p) = t["position"].as_u64().filter(|_| tr.kind == TrackKind::Bus) {
             bus_pos.insert(tid, p as u32);
         }
@@ -1269,6 +1348,14 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
             length: secs(&m["duration"]),
             ext_id: m["id"].as_str().map(str::to_string),
         });
+    }
+    if looped > 0 {
+        notices.push(format!(
+            "{looped} looped clip(s) play their source once here; the loop is kept and saved back."
+        ));
+    }
+    if plugin_instruments > 0 {
+        notices.push(format!("{plugin_instruments} MIDI track(s) play a VST3 instrument, which Audiform27 does not host on MIDI tracks yet; the built-in synth plays them, and the instrument is kept and saved back."));
     }
     if silent_fx > 0 {
         notices.push(format!("{silent_fx} effect(s) Audiform27 does not have stay in their chains, silent here, and are saved back unchanged."));
@@ -1442,6 +1529,22 @@ fn write_chain(
                 // Audiform27's own effect: a slot Audiform skips but keeps.
                 o.insert("effect".into(), json!(format!("{AF27}{}", s.effect)));
                 o.insert("params".into(), json!({ "values": s.values }));
+                // Its own data (an impulse file, a kept component), as text.
+                let had = match o.get("data") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(t)) => Some(t.clone()),
+                    Some(other) => Some(other.to_string()),
+                };
+                if had != s.data {
+                    match &s.data {
+                        Some(d) => {
+                            o.insert("data".into(), json!(d));
+                        }
+                        None => {
+                            o.shift_remove("data");
+                        }
+                    }
+                }
             }
             // Otherwise an effect only Audiform has: its original slot, as is.
             o.entry("params").or_insert_with(|| json!({}));
@@ -1708,6 +1811,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             "effects".into(),
             write_chain(&mut t.chain, &t.rack, orig.map(|x| &x["effects"]), &uuid_of),
         );
+        let own = split_own(&mut t.lanes);
         let envs = auto_lanes_to(
             &mut t.lanes,
             orig.map(|x| &x["envelopes"]),
@@ -1715,6 +1819,8 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             &t.chain,
         );
         o.insert("envelopes".into(), envs);
+        write_own(&mut o, &own);
+        t.lanes.extend(own);
         // The spot: kept whether or not 3D Space is on (Audiform keeps
         // every spot when it is turned off). A track with none in the file
         // and still at the default gets none.
@@ -1740,6 +1846,20 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
         }
         o.entry("role").or_insert_with(|| json!("standard"));
         o.insert("record_armed".into(), json!(t.armed));
+        // Written only when on, as Audiform does.
+        if orig.and_then(|x| x["prerender"].as_bool()).unwrap_or(false) != t.prerender {
+            if t.prerender {
+                o.insert("prerender".into(), json!(true));
+            } else {
+                o.shift_remove("prerender");
+            }
+        }
+        if t.kind == TrackKind::Audio {
+            let was = o.get("input").and_then(Value::as_str).map(str::to_string);
+            if was != t.input {
+                o.insert("input".into(), json!(t.input));
+            }
+        }
         o.entry("monitor_input").or_insert_with(|| json!(false));
         let base_clips = orig.and_then(|x| x["clips"].as_array());
         let clips: Vec<Value> = t
@@ -2835,7 +2955,7 @@ mod tests {
 
     /// An Audiform session using buses, sends, keys, lanes, modes, MIDI
     /// with controller moves and channels, and bus positions.
-    const MIX: &str = r##"{
+    pub(super) const MIX: &str = r##"{
       "format": "altaudio.session", "schema_version": 1, "id": "22222222-2222-4222-8222-222222222222",
       "name": "Mix", "sample_rate": 48000, "bit_depth": 32, "created": "x", "modified": "x", "media": [],
       "tracks": [
@@ -3117,6 +3237,163 @@ mod plugin_slots {
         assert_eq!(n["params"], json!({"p3": 0.75}));
         assert!(n["id"].is_string());
         assert!(n.get("plugin_state").is_none());
+    }
+}
+
+#[cfg(test)]
+mod carry_over {
+    use super::*;
+
+    fn strip(mut v: Value) -> Value {
+        v.as_object_mut().unwrap().remove("modified");
+        v
+    }
+
+    #[test]
+    fn input_prerender_mute_and_send_lanes_and_own_effect_data_round_trip() {
+        let imp = import(super::tests::MIX, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        assert_eq!(s.tracks[0].input, None);
+        assert!(!s.tracks[0].prerender);
+        // Edits Audiform27 makes or brings in from a .sesx.
+        let t = &mut s.tracks[0];
+        t.input = Some("[02M] Input 2".into());
+        t.prerender = true;
+        let send_id = t.sends[0].ext_id.clone().unwrap();
+        let mut mute = Lane::new(LaneTarget::Mute);
+        mute.points = vec![
+            AutoPoint {
+                time: 0.0,
+                value: 0.0,
+                curve: Curve::Hold,
+            },
+            AutoPoint {
+                time: 1.0,
+                value: 1.0,
+                curve: Curve::Hold,
+            },
+        ];
+        let mut level = Lane::new(LaneTarget::SendLevel(send_id.clone()));
+        level.points = vec![AutoPoint {
+            time: 0.5,
+            value: -6.0,
+            curve: Curve::Linear,
+        }];
+        t.lanes.insert(0, mute.clone());
+        t.lanes.push(level.clone());
+        let mut kept = EffectSlot {
+            effect: "sesx:Multiband Compressor".into(),
+            values: Vec::new(),
+            bypass: true,
+            position: None,
+            sidechain: None,
+            data: Some(r#"{"xml":"<component/>"}"#.into()),
+            ext_id: None,
+        };
+        t.chain.push(kept.clone());
+
+        let out = export(&mut s, Some(&base));
+        let t0 = &out["tracks"][0];
+        assert_eq!(t0["input"], json!("[02M] Input 2"));
+        assert_eq!(t0["prerender"], json!(true));
+        // Audiform's envelopes hold only what it reads; the rest rides in
+        // Audiform27's own list.
+        let envs = t0["envelopes"].as_array().unwrap();
+        assert!(envs.iter().all(|e| e["target"]["type"] != Value::Null));
+        assert_eq!(envs.len(), 3, "the three lanes the file had");
+        assert_eq!(t0["af27_lanes"].as_array().unwrap().len(), 2);
+        let slot = t0["effects"]["slots"].as_array().unwrap().last().unwrap();
+        assert_eq!(slot["effect"], json!("af27.sesx:Multiband Compressor"));
+        assert_eq!(slot["data"], json!(r#"{"xml":"<component/>"}"#));
+        assert_eq!(slot["enabled"], json!(false));
+
+        // Read back: the same, and a second save changes nothing.
+        let text = serde_json::to_string_pretty(&out).unwrap();
+        let back = import(&text, Path::new(".")).unwrap();
+        let b = &back.session.tracks[0];
+        assert_eq!(b.input.as_deref(), Some("[02M] Input 2"));
+        assert!(b.prerender);
+        assert!(b.lanes.contains(&mute));
+        assert!(b.lanes.contains(&level));
+        kept.ext_id = b.chain.last().unwrap().ext_id.clone();
+        assert_eq!(b.chain.last(), Some(&kept));
+        let base2 = back.base.clone().unwrap();
+        let mut s2 = back.session;
+        assert_eq!(strip(export(&mut s2, Some(&base2))), strip(base2.clone()));
+
+        // Taken off again: the fields go (Audiform leaves them out).
+        let t = &mut s2.tracks[0];
+        t.prerender = false;
+        t.input = None;
+        t.lanes
+            .retain(|l| !matches!(l.target, LaneTarget::Mute | LaneTarget::SendLevel(_)));
+        let out = export(&mut s2, Some(&base2));
+        let t0 = &out["tracks"][0];
+        assert!(t0.get("prerender").is_none());
+        assert!(t0.get("af27_lanes").is_none());
+        assert_eq!(t0["input"], Value::Null);
+    }
+
+    #[test]
+    fn a_clip_mute_lane_rides_in_the_clips_own_list() {
+        let imp = import(super::tests::SAMPLE, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let (ti, ci) = s
+            .tracks
+            .iter()
+            .enumerate()
+            .find_map(|(i, t)| (!t.clips.is_empty()).then_some((i, 0)))
+            .unwrap();
+        let mut mute = Lane::new(LaneTarget::Mute);
+        mute.points = vec![AutoPoint {
+            time: 0.25,
+            value: 1.0,
+            curve: Curve::Hold,
+        }];
+        s.tracks[ti].clips[ci].props.lanes.push(mute.clone());
+        let out = export(&mut s, Some(&base));
+        let co = &out["tracks"][ti]["clips"][ci];
+        assert_eq!(co["af27_lanes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            co["envelopes"],
+            base["tracks"][ti]["clips"][ci]["envelopes"]
+        );
+        let back = import(&out.to_string(), Path::new(".")).unwrap();
+        assert!(back.session.tracks[ti].clips[ci]
+            .props
+            .lanes
+            .contains(&mute));
+    }
+
+    #[test]
+    fn plug_in_control_lanes_take_the_control_id() {
+        let chain = [EffectSlot {
+            effect: "vst3:00112233445566778899AABBCCDDEEFF".into(),
+            values: Vec::new(),
+            bypass: false,
+            position: None,
+            sidechain: None,
+            data: None,
+            ext_id: Some("fx".into()),
+        }];
+        let envs = json!([{
+            "id": "e1", "enabled": true,
+            "target": {"type": "effect_param", "slot_id": "fx", "param": "p458681842"},
+            "points": [{"position": 0, "value": 0.5, "curve": "linear"}]
+        }]);
+        let lanes = auto_lanes_from(&envs, 48_000.0, &chain);
+        assert_eq!(
+            lanes[0].target,
+            LaneTarget::Effect {
+                slot: "fx".into(),
+                param: 458_681_842,
+                key: Some("p458681842".into())
+            }
+        );
+        let mut l = lanes.clone();
+        assert_eq!(auto_lanes_to(&mut l, Some(&envs), 48_000.0, &chain), envs);
     }
 }
 

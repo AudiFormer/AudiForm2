@@ -15,7 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use af27_core::automation::{self, Lane, LaneTarget};
-use af27_core::session::{Clip, MediaItem, Session, StretchKind, StretchMode};
+use af27_core::session::{Clip, Marker, MediaItem, Session, StretchKind, StretchMode};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::Imported;
@@ -491,6 +491,16 @@ fn raw_tracks(root: &Elem, project_rate: u32) -> Vec<RawTrack> {
         .collect()
 }
 
+/// A readable name from a real-time effect's plug-in id (its last part,
+/// which names the effect).
+fn effect_name(id: &str) -> String {
+    id.rsplit(['_', ';', '\\', '/'])
+        .find(|p| !p.trim().is_empty())
+        .unwrap_or(id)
+        .trim()
+        .to_string()
+}
+
 /// Imports a project, writing its audio into `audio_dir`.
 pub fn import(path: &Path, audio_dir: &Path) -> Result<Imported, String> {
     let conn = Connection::open_with_flags(
@@ -676,8 +686,27 @@ pub fn import(path: &Path, audio_dir: &Path) -> Result<Imported, String> {
         tr.clips = clips;
     }
 
+    // Labels: markers (a label with an end is a range).
+    for lt in root.kids("labeltrack") {
+        for l in lt.kids("label") {
+            let t = l.num("t").unwrap_or(0.0).max(0.0);
+            let t1 = l.num("t1").unwrap_or(t).max(t);
+            out.markers.push(Marker {
+                name: l.text("title").unwrap_or("Label").to_string(),
+                time: t,
+                length: t1 - t,
+                ext_id: None,
+            });
+        }
+    }
+    out.markers.sort_by(|a, b| a.time.total_cmp(&b.time));
+    if !out.markers.is_empty() {
+        notices.push(format!(
+            "{} label(s) came across as markers.",
+            out.markers.len()
+        ));
+    }
     for (tag, what) in [
-        ("labeltrack", "label track(s)"),
         ("notetrack", "note track(s)"),
         ("timetrack", "time track(s)"),
     ] {
@@ -686,14 +715,31 @@ pub fn import(path: &Path, audio_dir: &Path) -> Result<Imported, String> {
             dropped.push(format!("{n} {what}"));
         }
     }
-    let effects = root
+    // Real-time effects on tracks and the master: their lists are in
+    // every project, so only the effects in them count.
+    let mut fx_names: Vec<String> = Vec::new();
+    let lists = root
         .children
         .iter()
         .flat_map(|e| std::iter::once(e).chain(e.children.iter()))
-        .filter(|e| e.name == "effects" || e.name == "realtimeeffect")
-        .count();
-    if effects > 0 {
-        dropped.push(format!("{effects} effect list(s)"));
+        .filter(|e| e.name == "effects");
+    for list in lists {
+        for fx in list.children.iter().filter(|e| e.name == "effect") {
+            fx_names.push(
+                fx.text("id")
+                    .map(effect_name)
+                    .unwrap_or_else(|| "effect".into()),
+            );
+        }
+    }
+    if !fx_names.is_empty() {
+        let n = fx_names.len();
+        fx_names.sort();
+        fx_names.dedup();
+        dropped.push(format!(
+            "{n} real-time effect(s) ({}; rebuild them in the Effects Rack)",
+            fx_names.join(", ")
+        ));
     }
     notices.push(format!(
         "Imported {} track(s) and {clip_count} clip(s); the audio was written to {}.",
@@ -820,8 +866,21 @@ mod tests {
             w.end("sequence");
             w.end("waveclip");
         }
+        // An empty effect list (every track has one) and one effect.
+        w.start("effects");
+        w.end("effects");
         w.end("wavetrack");
+        w.start("effects");
+        w.start("effect");
+        w.s("id", "Effect_VST3_Vendor_Big Reverb");
+        w.end("effect");
+        w.end("effects");
         w.start("labeltrack");
+        w.start("label");
+        w.d("t", 1.5);
+        w.d("t1", 2.0);
+        w.s("title", "Chorus");
+        w.end("label");
         w.end("labeltrack");
         w.end("project");
         let path = dir.join("Song.aup3");
@@ -894,11 +953,17 @@ mod tests {
                 .copied()
                 .collect::<Vec<_>>()
         );
-        assert!(
-            imp.notices.iter().any(|n| n.contains("1 label track(s)")),
-            "{:?}",
-            imp.notices
+        // The label is a range marker; the effect is named in the notice
+        // and the empty lists are not counted.
+        let m = &imp.session.markers;
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            (m[0].name.as_str(), m[0].time, m[0].length),
+            ("Chorus", 1.5, 0.5)
         );
+        let all = imp.notices.join("\n");
+        assert!(all.contains("1 real-time effect(s) (Big Reverb;"), "{all}");
+        assert!(!all.contains("label track"), "{all}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

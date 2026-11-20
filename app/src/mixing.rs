@@ -274,6 +274,17 @@ pub fn control_value(t: &af27_core::Track, target: &LaneTarget) -> f64 {
             .and_then(|s| s.values.get(*param))
             .map_or(0.0, |v| *v as f64),
         LaneTarget::Space(_) => 0.0,
+        LaneTarget::Mute => t.mute as u8 as f64,
+        LaneTarget::SendLevel(id) => t
+            .sends
+            .iter()
+            .find(|s| s.ext_id.as_deref() == Some(id.as_str()))
+            .map_or(0.0, |s| s.level_db as f64),
+        LaneTarget::SendPan(id) => t
+            .sends
+            .iter()
+            .find(|s| s.ext_id.as_deref() == Some(id.as_str()))
+            .map_or(0.0, |s| s.pan as f64),
     }
 }
 
