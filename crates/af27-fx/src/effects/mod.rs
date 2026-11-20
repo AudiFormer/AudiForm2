@@ -11,6 +11,7 @@ pub mod amp;
 pub mod center;
 pub mod mixer;
 pub mod modulation;
+pub mod parametric_eq;
 pub mod phase_curve;
 pub mod reverb;
 pub mod tube;

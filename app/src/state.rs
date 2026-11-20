@@ -323,6 +323,9 @@ pub struct State {
     /// levels shown (falling back slowly).
     pub rack_meters: Vec<std::sync::Arc<af27_engine::mix::RackMeter>>,
     pub rack_shown: HashMap<u16, (f32, f32)>,
+    /// Each track's rack input and output peaks this frame, falling back
+    /// slowly (read once a frame from the engine).
+    pub track_levels: Vec<(f32, f32)>,
     /// The Import from Audiform 1 window.
     pub af1_prompt: Option<crate::af1_import::Prompt>,
     /// The clip whose Properties show, and a floating window for them.
@@ -581,6 +584,7 @@ impl State {
             rack_row: None,
             rack_meters: Vec::new(),
             rack_shown: HashMap::new(),
+            track_levels: Vec::new(),
             want_properties: false,
             gesture: false,
             want_piano: false,
@@ -1396,6 +1400,15 @@ impl State {
 
     pub fn tick(&mut self) {
         self.watch_audio(Instant::now());
+        // Track meters: every rack's peaks, once a frame.
+        let n = self.rack_meters.len();
+        self.track_levels.resize(n, (0.0, 0.0));
+        for (i, m) in self.rack_meters.iter().enumerate() {
+            let (a, b) = m.take();
+            let e = &mut self.track_levels[i];
+            e.0 = a.max(e.0 * 0.86);
+            e.1 = b.max(e.1 * 0.86);
+        }
         self.poll_jobs();
         crate::separation::poll(self);
         crate::spectral_select::poll(self);
@@ -1969,9 +1982,10 @@ impl State {
                 self.meter.0.max(self.meter.1),
             )
         } else {
-            self.rack_meters
+            self.track_levels
                 .get(target as usize)
-                .map_or((0.0, 0.0), |m| m.take())
+                .copied()
+                .unwrap_or((0.0, 0.0))
         };
         let e = self.rack_shown.entry(target).or_insert((0.0, 0.0));
         e.0 = fresh.0.max(e.0 * 0.88);

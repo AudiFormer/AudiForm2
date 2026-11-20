@@ -54,7 +54,7 @@ our own feature names.
 
 **Delay**: ✅ Echo · ⬜ Simple L/R delay · ⬜ Tape/analog delay
 
-**Filter and EQ**: ✅ Parametric EQ (3 band) · ✅ High/Low-pass · ✅ Notch · ⬜ 5-band parametric with M/S ·
+**Filter and EQ**: ✅ Parametric EQ (3 band) · ✅ Parametric EQ (7 bands + HP/LP, graph editor; Audiform's `parametric_eq` keys) · ✅ High/Low-pass · ✅ Notch · ⬜ 5-band parametric with M/S ·
 ⬜ Graphic EQ · ⬜ Drawn FFT filter · ⬜ Precision filters (Bessel, Butterworth, Chebyshev, elliptic)
 
 **Modulation**: ✅ Chorus · ✅ Flanger · ✅ Phaser · ✅ Double Track (Audiform's Modulation)

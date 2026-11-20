@@ -9,6 +9,7 @@ mod caustics;
 mod classic_themes;
 mod clip_props;
 mod corners;
+mod eq_editor;
 mod export;
 mod files_panel;
 mod fx;
@@ -104,8 +105,16 @@ fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Re
         renderer,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             desired_maximum_frame_latency: Some(1),
+            // Low-latency drawing: present at once instead of waiting for
+            // the refresh (the app caps the frame rate itself, ui.rs).
+            present_mode: if settings::Prefs::load().low_latency {
+                eframe::wgpu::PresentMode::AutoNoVsync
+            } else {
+                eframe::wgpu::PresentMode::AutoVsync
+            },
             ..Default::default()
         },
+        vsync: !settings::Prefs::load().low_latency,
         ..Default::default()
     };
     eframe::run_native(
