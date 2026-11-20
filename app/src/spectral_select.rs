@@ -12,8 +12,10 @@
 //! screen, so a selection stays on the same sounds while the display
 //! zooms or changes scale. Each channel has its own band in the display;
 //! a selection drawn in one band shows in every band, and an edit reaches
-//! every channel (Audiform 2 has no per-channel enable yet), one channel
-//! at a time, in a background job.
+//! every channel switched on (see [`crate::wave_channels`]), one channel
+//! at a time, in a background job. Playing with a spectral selection
+//! plays only its sounds, over its time span (looping with Loop
+//! Playback): see [`audition`].
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
@@ -985,9 +987,152 @@ pub fn poll(st: &mut State) {
     }
 }
 
+// ----------------------------------------------------------- audition
+
+/// What the Waveform editor plays while there is a spectral selection:
+/// only the selected sounds (time, frequencies and the channels switched
+/// on), rendered in the background. Playback treats the selection's time
+/// span as the play range (looping with Loop Playback).
+pub struct SpecPlay {
+    /// Document, its version, the selection's version, channels on, frame size.
+    key: (DocId, u64, u64, u64, usize),
+    rx: Option<Receiver<AudioBuffer>>,
+    buf: Option<Arc<AudioBuffer>>,
+}
+
+/// What plays for a spectral selection, from the program's point of view.
+pub enum Audition {
+    /// No spectral selection: play the file.
+    None,
+    /// Rendering: play silence for now (never the whole file).
+    Pending,
+    /// The selected sounds alone, the file's length, silent elsewhere.
+    Ready(Arc<AudioBuffer>, u64),
+}
+
+/// `buf` with only what the selection covers kept, on the channels in
+/// `on`: the original minus the original with the selection removed, so
+/// Lasso and Brush shapes follow their mask with the same soft edges
+/// the edits use. Everything else is silent.
+pub fn isolate(buf: &AudioBuffer, regions: &[Region], fft: usize, on: &[usize]) -> AudioBuffer {
+    let mut out = AudioBuffer::new(buf.rate, buf.num_channels(), buf.frames());
+    let Some(grid) = edit_grid(regions, buf.rate as f64, buf.frames(), fft) else {
+        return out;
+    };
+    for &ch in on {
+        let Some(src) = buf.channels.get(ch) else {
+            continue;
+        };
+        if let Some((first, removed)) = edit_channel(src, &grid, Action::Gain(0.0), &mut |_| {}) {
+            for (i, r) in removed.iter().enumerate() {
+                out.channels[ch][first + i] = src[first + i] - r;
+            }
+        }
+    }
+    out
+}
+
+/// The spectral selection's time span in the current file (the play range).
+pub fn time_span(st: &State) -> Option<(f64, f64)> {
+    let d = st.doc()?;
+    let (t0, t1, _, _) = d.spec_sel.bounds()?;
+    let dur = d.duration();
+    let (a, b) = (t0.clamp(0.0, dur), t1.clamp(0.0, dur));
+    (b - a > 1e-6).then_some((a, b))
+}
+
+/// Keeps the audition render up to date (called with every program
+/// check). At most one render runs; a newer selection waits for it.
+pub fn audition(st: &mut State) -> Audition {
+    let fft = st.spec.fft.clamp(512, 8192);
+    let Some(d) = st.doc().filter(|d| !d.spec_sel.is_empty()) else {
+        st.spec_play = None;
+        return Audition::None;
+    };
+    let key = (d.id, d.version, d.spec_sel.version, d.chans.on_mask(), fft);
+    if let Some(p) = &mut st.spec_play {
+        if let Some(rx) = &p.rx {
+            match rx.try_recv() {
+                Ok(b) => {
+                    p.buf = Some(Arc::new(b));
+                    p.rx = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => p.rx = None,
+            }
+        }
+        if p.key == key {
+            return match &p.buf {
+                Some(b) => Audition::Ready(b.clone(), key.2),
+                None => Audition::Pending,
+            };
+        }
+        if p.rx.is_some() {
+            // An older render is still going: let it finish first.
+            return Audition::Pending;
+        }
+    }
+    let Some(d) = st.doc() else {
+        return Audition::None;
+    };
+    let (buf, regions, on) = (d.buf.clone(), d.spec_sel.regions.clone(), d.chans.on());
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(isolate(&buf, &regions, fft, &on));
+    });
+    st.spec_play = Some(SpecPlay {
+        key,
+        rx: Some(rx),
+        buf: None,
+    });
+    Audition::Pending
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolate_keeps_only_the_selected_band_and_channels() {
+        let rate = 48_000u32;
+        let n = rate as usize;
+        // 200 Hz + 5 kHz on both channels.
+        let tone = |f: f64, i: usize| (std::f64::consts::TAU * f * i as f64 / rate as f64).sin();
+        let ch: Vec<f32> = (0..n)
+            .map(|i| (0.4 * tone(200.0, i) + 0.4 * tone(5000.0, i)) as f32)
+            .collect();
+        let buf = AudioBuffer {
+            rate,
+            channels: vec![ch.clone(), ch],
+        };
+        // A box 0.25..0.75 s around 3.5..7 kHz.
+        let sel = [Region::Box {
+            a: SPoint {
+                t: 0.25,
+                u: hz_to_u(3500.0),
+            },
+            b: SPoint {
+                t: 0.75,
+                u: hz_to_u(7000.0),
+            },
+        }];
+        let out = isolate(&buf, &sel, 2048, &[0]);
+        // Right channel off: silent.
+        assert!(out.channels[1].iter().all(|v| *v == 0.0));
+        // Outside the time span: silent.
+        assert!(out.channels[0][..4000].iter().all(|v| v.abs() < 1e-6));
+        assert!(out.channels[0][n - 4000..].iter().all(|v| v.abs() < 1e-6));
+        // In the middle: the 5 kHz tone alone (correlates with it, not 200 Hz).
+        let mid = 20_000..28_000;
+        let corr = |f: f64| {
+            mid.clone()
+                .map(|i| out.channels[0][i] as f64 * tone(f, i))
+                .sum::<f64>()
+                / mid.len() as f64
+        };
+        assert!(corr(5000.0) > 0.15, "5 kHz kept: {}", corr(5000.0));
+        assert!(corr(200.0).abs() < 0.02, "200 Hz gone: {}", corr(200.0));
+    }
 
     fn mapper(spec: SpecView, bands: usize) -> Mapper {
         Mapper {

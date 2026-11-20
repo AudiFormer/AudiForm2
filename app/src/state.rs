@@ -392,6 +392,8 @@ pub struct State {
     pub spec_colors: Option<[[u8; 3]; 2]>,
     /// A spectral edit running in the background.
     pub spectral_job: Option<crate::spectral_select::SpecJob>,
+    /// The spectral selection's sounds alone, for playback.
+    pub spec_play: Option<crate::spectral_select::SpecPlay>,
     /// The tempo window and a `.mid` import waiting for an answer.
     pub tempo_ui: crate::tempo::TempoUi,
     /// The pointer is over the Piano Roll: Cut, Copy, Paste, Delete and
@@ -634,6 +636,7 @@ impl State {
             spec_split: 0.5,
             spec_colors: None,
             spectral_job: None,
+            spec_play: None,
             sessions: crate::sessions::Sessions::load(),
             files_ui: Default::default(),
         }
@@ -1115,7 +1118,10 @@ impl State {
 
     pub fn selection(&self) -> Option<(f64, f64)> {
         match self.mode {
-            Mode::Waveform => self.doc().and_then(|d| d.sel),
+            // A spectral selection plays (and loops) over its time span.
+            Mode::Waveform => {
+                crate::spectral_select::time_span(self).or(self.doc().and_then(|d| d.sel))
+            }
             Mode::Multitrack => self.session_sel,
         }
         .filter(|s| (s.1 - s.0).abs() > 1e-6)
@@ -1130,6 +1136,16 @@ impl State {
 
     /// Hands the audio thread a fresh program when what would play changed.
     pub fn sync_program(&mut self) {
+        use crate::spectral_select::Audition;
+        let audition = match self.mode {
+            Mode::Waveform => crate::spectral_select::audition(self),
+            Mode::Multitrack => Audition::None,
+        };
+        let heard = match &audition {
+            Audition::None => 0,
+            Audition::Pending => 1,
+            Audition::Ready(_, v) => (v << 1) | 1,
+        };
         let key = (
             self.mode,
             self.current.unwrap_or(0),
@@ -1138,7 +1154,8 @@ impl State {
                 + self.docs.iter().map(|d| d.version).sum::<u64>()
                 + (self.prerender.version << 32),
             // Channels switched off in the Waveform editor are silent.
-            self.doc().map_or(0, |d| d.chans.on_mask()),
+            // and a spectral selection plays its sounds alone.
+            self.doc().map_or(0, |d| d.chans.on_mask()) ^ heard.rotate_left(20),
         );
         if key == self.program_key {
             return;
@@ -1178,6 +1195,13 @@ impl State {
         }
         let program = match self.mode {
             Mode::Waveform => match self.doc() {
+                Some(_) if !matches!(audition, Audition::None) => {
+                    af27_engine::buffer_program(match audition {
+                        Audition::Ready(b, _) => b,
+                        // Rendering (a moment): silence, not the whole file.
+                        _ => Arc::new(AudioBuffer::new(self.session.rate, 2, 0)),
+                    })
+                }
                 Some(d) => af27_engine::buffer_program(
                     d.chans
                         .audible(&d.buf)
