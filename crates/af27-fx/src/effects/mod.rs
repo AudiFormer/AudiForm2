@@ -14,6 +14,7 @@ pub mod modulation;
 pub mod phase_curve;
 pub mod reverb;
 pub mod tube;
+pub mod tube_master;
 pub mod verb;
 pub mod vocal;
 pub mod width;

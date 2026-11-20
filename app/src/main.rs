@@ -47,6 +47,7 @@ mod tempo;
 mod theme;
 mod track_views;
 mod transport;
+mod tube_master_ui;
 mod ui;
 mod visualizer;
 mod waveform;

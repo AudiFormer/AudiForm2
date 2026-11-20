@@ -1008,7 +1008,7 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
             ui.separator();
             if af27_core::plugin::is_plugin(&slot.effect) {
                 crate::plugins::slot_controls(ui, st, target, i, &th);
-            } else {
+            } else if !crate::tube_master_ui::ui(ui, st, target, i) {
                 slot_controls(ui, st, target, i, &th);
             }
         });

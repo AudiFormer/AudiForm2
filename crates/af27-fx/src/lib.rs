@@ -4,7 +4,8 @@
 //! Audiform27's effects, ported from the effects their author wrote for
 //! Audiform (see PORTING.md): Amp Model, Opto Leveler, Tube Preamp, Delay
 //! and Echo, Reverb, Convolution Reverb, Modulation, Center Channel
-//! Extractor, Channel Mixer, Stereo Width, Phase Curve and Vox Strip.
+//! Extractor, Channel Mixer, Stereo Width, Phase Curve and Vox Strip;
+//! and Tube Master, a stereo valve mastering compressor written for AF2.
 //!
 //! [`registry`] lists them, [`build`] makes a running [`Processor`] for
 //! one, and [`params_from`] turns saved values into [`Params`].
@@ -22,7 +23,9 @@ pub mod nam;
 pub use framework::{choice, db_to_gain, num, toggle, EffectInfo, ParamInfo, Params, Processor};
 pub use meters::SlotMeter;
 
-use effects::{amp, center, mixer, modulation, phase_curve, reverb, tube, verb, vocal, width};
+use effects::{
+    amp, center, mixer, modulation, phase_curve, reverb, tube, tube_master, verb, vocal, width,
+};
 
 /// Every effect, in menu order.
 pub fn registry() -> Vec<EffectInfo> {
@@ -30,6 +33,7 @@ pub fn registry() -> Vec<EffectInfo> {
         amp::amp_info(),
         tube::preamp_info(),
         tube::opto_info(),
+        tube_master::info(),
         vocal::vocal_info(),
         verb::verb_info(),
         reverb::reverb_info(),
@@ -89,6 +93,7 @@ pub fn build_with(
         amp::AMP => Box::new(amp::AmpModel::new(p, rate, data)),
         tube::OPTO => Box::new(tube::Opto::new(p, rate, meter())),
         tube::PREAMP => Box::new(tube::Preamp::new(p, rate, meter())),
+        tube_master::ID => Box::new(tube_master::TubeMaster::new(p, rate)),
         vocal::VOCAL => Box::new(vocal::VoxStrip::new(p, rate, meter())),
         verb::ID => Box::new(verb::Reverb::new(p, rate)),
         reverb::ID => Box::new(reverb::ConvolutionReverb::new(p, rate, data)),
@@ -102,8 +107,8 @@ pub fn build_with(
 }
 
 /// The effects with their own form on a speaker bed (more than two
-/// channels): the Reverb, the Convolution Reverb and Modulation.
-pub const NATIVE_WIDE: [&str; 3] = [verb::ID, reverb::ID, modulation::ID];
+/// channels): the Reverb, the Convolution Reverb, Modulation and Tube Master.
+pub const NATIVE_WIDE: [&str; 4] = [verb::ID, reverb::ID, modulation::ID, tube_master::ID];
 
 /// A running processor for effect `id` over a speaker bed with channels
 /// named `names`, for the effects in [`NATIVE_WIDE`]; it processes
@@ -122,6 +127,7 @@ pub fn build_wide(
         verb::ID => Box::new(verb::Reverb::wide(params, rate, names)),
         reverb::ID => Box::new(reverb::ConvolutionReverb::wide(params, rate, data, names)),
         modulation::ID => Box::new(modulation::Modulation::wide(params, rate, names)),
+        tube_master::ID => Box::new(tube_master::TubeMaster::wide(params, rate, names)),
         _ => return None,
     })
 }
@@ -250,6 +256,7 @@ mod tests {
         amp_model_runs_clean => amp::AMP,
         tube_preamp_runs_clean => tube::PREAMP,
         opto_leveler_runs_clean => tube::OPTO,
+        tube_master_runs_clean => tube_master::ID,
         vox_strip_runs_clean => vocal::VOCAL,
         reverb_runs_clean => verb::ID,
         convolution_reverb_runs_clean => reverb::ID,
@@ -282,9 +289,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_opto_leveler_takes_a_sidechain() {
+    fn the_opto_leveler_and_tube_master_take_a_sidechain() {
         for i in registry() {
-            assert_eq!(takes_sidechain(i.id), i.id == tube::OPTO, "{}", i.id);
+            let keyed = [tube::OPTO, tube_master::ID].contains(&i.id);
+            assert_eq!(takes_sidechain(i.id), keyed, "{}", i.id);
         }
         assert!(!takes_sidechain("af.nope"));
     }
