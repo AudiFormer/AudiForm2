@@ -298,7 +298,30 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
         }
     });
     presets_row(ui, st, target, i, &slot, &f, inst.as_ref());
-    if let Some(inst) = &inst {
+    // The plug-in's own window is the main way in; the generic list waits
+    // under a closed heading (open at once for plug-ins with no window).
+    egui::CollapsingHeader::new(RichText::new("Controls").color(c(th.text_dim)))
+        .id_salt(("vst-controls", target, i))
+        .default_open(!f.info.has_editor)
+        .show(ui, |ui| {
+            generic_controls(ui, st, target, i, th, &slot, &f, &inst)
+        });
+}
+
+/// A plug-in slot's generic controls: its delay and one control per
+/// parameter, with a search box for long lists.
+#[allow(clippy::too_many_arguments)]
+fn generic_controls(
+    ui: &mut egui::Ui,
+    st: &mut State,
+    target: u16,
+    i: usize,
+    th: &Theme,
+    slot: &EffectSlot,
+    f: &Found,
+    inst: &Option<Arc<Instance>>,
+) {
+    if let Some(inst) = inst {
         let own = inst.plugin_latency();
         let text = if inst.offline || inst.pipeline == 0 {
             format!("Delay: {own} samples")
@@ -310,7 +333,6 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
         };
         ui.label(RichText::new(text).size(10.5).color(c(th.text_dim)));
     }
-    ui.separator();
     // Generic controls (every plug-in has them; they also reach plug-ins
     // with no window, and stopped ones keep their values).
     let params: Vec<_> = inst
@@ -391,7 +413,7 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
             }
         });
     if let Some((id, v)) = changed {
-        if let Some(inst) = &inst {
+        if let Some(inst) = inst {
             inst.set_param(id, v);
         }
         if let Some(s) = crate::rack::chain_of(st, target).and_then(|c| c.get_mut(i)) {
