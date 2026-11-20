@@ -844,6 +844,8 @@ mod tests {
             length: 4.0,
             notes: Vec::new(),
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         assert!(is_placed(&s, &s.tracks[0]));

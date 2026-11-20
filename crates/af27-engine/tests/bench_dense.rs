@@ -104,6 +104,8 @@ fn dense(tracks: usize, secs: f64) -> (Session, Arc<AudioBuffer>, usize) {
             bus: buses[t % 2],
             level_db: -12.0,
             pre_fader: false,
+            pan: 0.0,
+            enabled: true,
             ext_id: None,
         });
         if t % 7 == 6 {

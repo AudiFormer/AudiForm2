@@ -265,6 +265,8 @@ pub fn add_to_session(session: &mut Session, imp: &SmfImport, replace_tempo: boo
                 })
                 .collect(),
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         ids.push(id);
@@ -443,6 +445,8 @@ mod tests {
             length: 32.0,
             notes,
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         };
         let ta = s.track_mut(a).unwrap();

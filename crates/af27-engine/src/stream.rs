@@ -44,6 +44,8 @@ pub(crate) struct Core {
     scratch: Vec<f32>,
     /// One chunk in the device's channels, before format conversion.
     dev: Vec<f32>,
+    /// Notes played live (MIDI input), from another thread.
+    notes: Option<rtrb::Consumer<crate::LiveNote>>,
 }
 
 impl Core {
@@ -75,6 +77,7 @@ impl Core {
             routes,
             scratch: vec![0.0; CHUNK * MAX_SPEAKERS.max(2)],
             dev: vec![0.0; CHUNK * channels],
+            notes: None,
         }
     }
 
@@ -84,6 +87,21 @@ impl Core {
             match cmd {
                 Cmd::Routes(r) => self.routes = r,
                 other => self.voice.apply(other, &mut self.trash),
+            }
+        }
+        if let Some(rx) = &mut self.notes {
+            while let Ok(n) = rx.pop() {
+                if let Some(a) = &mut self.voice.audition {
+                    match n {
+                        crate::LiveNote::On {
+                            pitch,
+                            velocity,
+                            pan,
+                        } => a.note_on(pitch, velocity, pan),
+                        crate::LiveNote::Off(p) => a.note_off(p),
+                        crate::LiveNote::AllOff => a.all_off(),
+                    }
+                }
             }
         }
         let ch = self.channels;
@@ -167,6 +185,7 @@ struct Built {
     stats: Arc<CallbackStats>,
     fault: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
+    notes: rtrb::Producer<crate::LiveNote>,
 }
 
 fn build(
@@ -197,6 +216,9 @@ fn build(
         cfg.channels as usize,
         routes,
     );
+    let (notes, notes_rx) = rtrb::RingBuffer::<crate::LiveNote>::new(512);
+    let mut core = core;
+    core.notes = Some(notes_rx);
     macro_rules! go {
         ($t:ty) => {{
             let (h, s, f, l) = (hush.clone(), stats.clone(), fault.clone(), lost.clone());
@@ -237,6 +259,7 @@ fn build(
         stats,
         fault,
         lost,
+        notes,
     })
 }
 
@@ -373,6 +396,7 @@ pub(crate) fn open(choice: &DeviceChoice) -> Result<Engine, String> {
         asio_inputs,
         asio_device: (host == HostKind::Asio).then(|| device.clone()),
         recorders: Vec::new(),
+        notes: Some(built.notes),
     })
 }
 

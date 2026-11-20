@@ -458,11 +458,39 @@ fn two_mut(tracks: &mut [MixTrack], a: usize, b: usize) -> (&mut MixTrack, &mut 
     }
 }
 
+/// Whether track `i` is a 3D Bus.
+pub(super) fn is_room(tracks: &[MixTrack], i: usize) -> bool {
+    tracks[i].sp.as_ref().is_some_and(|s| s.room.is_some())
+}
+
+/// A send from `ti` into a 3D Bus `bus`: `sl`/`sr` (already at the send's
+/// level and aligned) placed by the sender's spot (no Spread or
+/// Spatialize).
+pub(super) fn place_send(
+    tracks: &mut [MixTrack],
+    space: &super::SpaceMix,
+    ti: usize,
+    bus: usize,
+    sl: &[f32],
+    sr: &[f32],
+    n: usize,
+) {
+    let (ch, lfe) = (space.channels, space.lfe_channel);
+    let (t, b) = two_mut(tracks, ti, bus);
+    let Some(room) = b.sp.as_deref_mut().and_then(|s| s.room.as_mut()) else {
+        return;
+    };
+    if let Some(p) = t.sp.as_deref_mut().and_then(|s| s.place.as_mut()) {
+        p.place(sl, sr, n, &mut room.bed, ch, lfe, false, 1.0);
+    }
+}
+
 impl Mix {
     /// Where track `ti`'s main output goes: Some(bus) or None (master).
     fn dest(&self, ti: usize) -> Option<usize> {
         let t = &self.tracks[ti];
-        t.output.filter(|&bus| bus != ti && (bus > ti || !t.is_bus))
+        // Outputs that would close a loop were dropped when it was built.
+        t.output.filter(|&bus| bus != ti)
     }
 
     fn is_room(&self, i: usize) -> bool {
@@ -472,14 +500,21 @@ impl Mix {
     /// Sends track `ti`'s main output into the room (3D sessions).
     /// Returns false when the stereo sound still has to go to a stereo
     /// bus, as in a stereo session.
-    pub(super) fn route_space(&mut self, ti: usize, n: usize) -> bool {
+    /// `g` is the strip's fader gain (for its 3D Bus or multichannel
+    /// bed); its stereo sound is in `sl`/`sr`, already faded and aligned.
+    pub(super) fn route_space(&mut self, ti: usize, n: usize, g: f32) -> bool {
         if self.space.is_none() {
             return false;
         }
         let dest = self.dest(ti);
         let room_dest = dest.filter(|&b| self.is_room(b));
-        let g = self.tracks[ti].gain_l;
-        let Mix { space, tracks, .. } = self;
+        let Mix {
+            space,
+            tracks,
+            sl,
+            sr,
+            ..
+        } = self;
         let space = space.as_mut().unwrap();
         let ch = space.channels;
         let lfe = space.lfe_channel;
@@ -530,37 +565,19 @@ impl Mix {
             (_, Some(b)) => {
                 let (t, bus) = two_mut(tracks, ti, b);
                 let room = bus.sp.as_deref_mut().unwrap().room.as_mut().unwrap();
-                let MixTrack { sp, l, r, .. } = t;
-                if let Some(p) = sp.as_deref_mut().and_then(|s| s.place.as_mut()) {
-                    p.place(l, r, n, &mut room.bed, ch, lfe, true, 1.0);
+                if let Some(p) = t.sp.as_deref_mut().and_then(|s| s.place.as_mut()) {
+                    p.place(sl, sr, n, &mut room.bed, ch, lfe, true, 1.0);
                 }
                 true
             }
             (None, None) => {
-                let MixTrack { sp, l, r, .. } = &mut tracks[ti];
+                let sp = &mut tracks[ti].sp;
                 if let Some(p) = sp.as_deref_mut().and_then(|s| s.place.as_mut()) {
-                    p.place(l, r, n, &mut space.bed, ch, lfe, true, 1.0);
+                    p.place(sl, sr, n, &mut space.bed, ch, lfe, true, 1.0);
                 }
                 true
             }
         }
-    }
-
-    /// A send from `ti` into a 3D Bus `bus` at `gain`: placed by its spot
-    /// (no Spread or Spatialize). Returns false for a stereo bus.
-    pub(super) fn send_space(&mut self, ti: usize, bus: usize, gain: f32, n: usize) -> bool {
-        if self.space.is_none() || !self.is_room(bus) {
-            return false;
-        }
-        let ch = self.space.as_ref().map_or(2, |s| s.channels);
-        let lfe = self.space.as_ref().and_then(|s| s.lfe_channel);
-        let (t, b) = two_mut(&mut self.tracks, ti, bus);
-        let room = b.sp.as_deref_mut().unwrap().room.as_mut().unwrap();
-        let MixTrack { sp, l, r, .. } = t;
-        if let Some(p) = sp.as_deref_mut().and_then(|s| s.place.as_mut()) {
-            p.place(l, r, n, &mut room.bed, ch, lfe, false, gain);
-        }
-        true
     }
 
     /// Before a block: clears the 3D Buses' beds and moves automated spots.
@@ -599,19 +616,19 @@ impl Mix {
     /// Frames every placed sound is held back by (Place Elements), and
     /// sources are read ahead by so it all still lines up with the clock.
     pub fn lead(&self) -> usize {
-        self.lead
+        self.lead + self.steer_lead
     }
 
     /// After a jump: the held-back frame is filled with the sound just
     /// before it (rendered and thrown away), so nothing goes missing.
-    pub(super) fn prime(&mut self, t0: f64, dt: f64) {
-        if self.lead == 0 || self.primed {
+    pub(super) fn space_prime(&mut self, t0: f64, dt: f64) {
+        if self.steer_lead == 0 || self.primed {
             return;
         }
         self.primed = true;
         let mut buf = std::mem::take(&mut self.prime_out);
-        let mut left = self.lead;
-        let mut t = t0 - self.lead as f64 * dt;
+        let mut left = self.steer_lead;
+        let mut t = t0 - self.steer_lead as f64 * dt;
         while left > 0 {
             let n = left.min(BLOCK);
             self.render(t, dt, n, &mut buf, true);
@@ -645,17 +662,19 @@ impl Mix {
 
     /// Writes the last block's bed to `out` (after the master fader), in
     /// the export's channel order. Returns the peak (on both sides).
-    pub(super) fn write_bed(&mut self, n: usize, out: &mut [f32]) -> (f32, f32) {
-        let master = self.master;
+    pub(super) fn write_bed(&mut self, n: usize, out: &mut [f32], t0: f64, dt: f64) -> (f32, f32) {
         let Some(sp) = self.space.as_ref() else {
             return (0.0, 0.0);
         };
         let ch = sp.channels;
         let mut peak = 0.0f32;
-        for (o, f) in out[..n * ch]
+        for (i, (o, f)) in out[..n * ch]
             .chunks_exact_mut(ch)
             .zip(sp.bed[..n * ch].chunks_exact(ch))
+            .enumerate()
         {
+            // The master fader, ramped (or its volume lane).
+            let master = self.master_gain(i, n, t0, dt);
             for (k, v) in o.iter_mut().enumerate() {
                 let from = sp.bed_order.as_ref().map_or(k, |ord| ord[k]);
                 *v = f[from] * master;

@@ -270,6 +270,8 @@ fn a_3d_bus_runs_its_effects_on_its_own_bed() {
         bus,
         level_db: 0.0,
         pre_fader: false,
+        pan: 0.0,
+        enabled: true,
         ext_id: None,
     });
     let bed = f.bed(0.5);

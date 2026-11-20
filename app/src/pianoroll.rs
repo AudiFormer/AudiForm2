@@ -51,6 +51,64 @@ pub enum Tool {
 pub enum Lane {
     Velocity,
     Pan,
+    /// A controller's moves (0..127, 128 aftertouch, 129 pitch bend).
+    Control(u8),
+}
+
+/// A drawn controller value, kept to the controller's own steps: pedals
+/// up or down, pitch bend 16384 steps, others 128.
+fn shape_control(controller: u8, frac: f32) -> f32 {
+    let f = frac.clamp(0.0, 1.0);
+    if af27_core::midi::ControlEvent::is_switch(controller) {
+        if f >= 0.5 {
+            1.0
+        } else {
+            0.0
+        }
+    } else if controller == af27_core::midi::PITCH_BEND {
+        (f * 16383.0).round() / 16383.0
+    } else {
+        (f * 127.0).round() / 127.0
+    }
+}
+
+/// Draws a controller value at beat `b` over the span dragged since
+/// `from`: moves in that span give way to the new one. A pedal move is
+/// kept only where the value changes.
+fn paint_control(
+    controls: &mut Vec<af27_core::midi::ControlEvent>,
+    controller: u8,
+    channel: u8,
+    from: f64,
+    b: f64,
+    value: f32,
+) {
+    // The span since the last move, not counting that move itself.
+    let inside = |at: f64| {
+        if b > from {
+            at > from && at <= b
+        } else if b < from {
+            at >= b && at < from
+        } else {
+            at == b
+        }
+    };
+    controls.retain(|e| !(e.controller == controller && e.channel == channel && inside(e.at)));
+    let before = controls
+        .iter()
+        .filter(|e| e.controller == controller && e.channel == channel && e.at < b)
+        .max_by(|x, y| x.at.total_cmp(&y.at))
+        .map(|e| e.value);
+    if af27_core::midi::ControlEvent::is_switch(controller) && before == Some(value) {
+        return;
+    }
+    controls.push(af27_core::midi::ControlEvent {
+        at: b.max(0.0),
+        controller,
+        value,
+        channel,
+    });
+    controls.sort_by(|x, y| x.at.total_cmp(&y.at));
 }
 
 /// Edit commands routed from the keyboard while the pointer is on the roll.
@@ -139,6 +197,11 @@ enum NoteDrag {
     Erase,
     Lane,
     Pan,
+    /// Drawing a controller; where the last move went.
+    Control {
+        controller: u8,
+        last: Option<f64>,
+    },
 }
 
 pub struct PianoState {
@@ -330,6 +393,38 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ui.separator();
         ui.selectable_value(&mut ps.lane, Lane::Velocity, "Velocity");
         ui.selectable_value(&mut ps.lane, Lane::Pan, "Pan");
+        {
+            use af27_core::midi::{ControlEvent, LANE_CONTROLLERS};
+            let used: Vec<u8> = st.session.tracks[ti].midi[ci]
+                .controls
+                .iter()
+                .map(|e| e.controller)
+                .collect();
+            let shown = match ps.lane {
+                Lane::Control(c) => ControlEvent::name(c),
+                _ => "Controller".to_string(),
+            };
+            let mut list: Vec<u8> = LANE_CONTROLLERS.to_vec();
+            for c in &used {
+                if !list.contains(c) {
+                    list.push(*c);
+                }
+            }
+            egui::ComboBox::from_id_salt("piano-ctl-lane")
+                .selected_text(shown)
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for c in list {
+                        // A dot marks a controller the clip already uses.
+                        let mark = if used.contains(&c) { " •" } else { "" };
+                        ui.selectable_value(
+                            &mut ps.lane,
+                            Lane::Control(c),
+                            format!("{}{mark}", ControlEvent::name(c)),
+                        );
+                    }
+                });
+        }
         ui.separator();
         let picked = !ps.sel.is_empty();
         if ui.add_enabled(picked, egui::Button::new("Cut")).clicked() {
@@ -590,6 +685,10 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                 Some(match ps.lane {
                     Lane::Velocity => NoteDrag::Lane,
                     Lane::Pan => NoteDrag::Pan,
+                    Lane::Control(controller) => NoteDrag::Control {
+                        controller,
+                        last: None,
+                    },
                 })
             } else if grid_r.contains(q) {
                 let b = b_of(q.x);
@@ -657,7 +756,23 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     }
 
     // Dragging.
-    if let (Some(d), Some(q)) = (ps.drag, resp.interact_pointer_pos()) {
+    if let (Some(NoteDrag::Control { controller, last }), Some(q)) =
+        (ps.drag, resp.interact_pointer_pos())
+    {
+        if resp.dragged() {
+            let b = b_of(q.x).clamp(0.0, clip_len);
+            let b = snap_down(b).max(0.0);
+            let frac = (lane_r.bottom() - q.y) / lane_r.height();
+            let value = shape_control(controller, frac);
+            let channel = ps.channel;
+            let ctl = &mut st.session.tracks[ti].midi[ci].controls;
+            paint_control(ctl, controller, channel, last.unwrap_or(b), b, value);
+            ps.drag = Some(NoteDrag::Control {
+                controller,
+                last: Some(b),
+            });
+        }
+    } else if let (Some(d), Some(q)) = (ps.drag, resp.interact_pointer_pos()) {
         if resp.dragged() {
             let ns = &mut st.session.tracks[ti].midi[ci].notes;
             match d {
@@ -736,6 +851,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         }
                     }
                 }
+                NoteDrag::Control { .. } => {}
             }
         }
     }
@@ -751,7 +867,26 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
 
     // Clicks (no drag).
     if resp.secondary_clicked() {
-        if let Some(q) = resp.interact_pointer_pos() {
+        if let (Some(q), Lane::Control(controller)) = (resp.interact_pointer_pos(), ps.lane) {
+            if lane_r.contains(q) {
+                // Right-click in a controller lane removes the nearest move.
+                let b = b_of(q.x);
+                let before = st.session.clone();
+                let ctl = &mut st.session.tracks[ti].midi[ci].controls;
+                if let Some(k) = ctl
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.controller == controller)
+                    .filter(|(_, e)| ((e.at - b).abs() as f32) * zoom < 8.0)
+                    .min_by(|a, c2| (a.1.at - b).abs().total_cmp(&(c2.1.at - b).abs()))
+                    .map(|(k, _)| k)
+                {
+                    ctl.remove(k);
+                    st.commit_session("Remove controller move", before);
+                }
+            }
+        }
+        if let Some(q) = resp.interact_pointer_pos().filter(|q| !lane_r.contains(*q)) {
             if let Some((i, _, _)) = hit(q) {
                 apply(st, ti, ci, &[i], "Delete note", |ns, idx| {
                     ops::remove(ns, idx)
@@ -887,8 +1022,9 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         lane_r.left_top() - vec2(KEYS_W - 4.0, -2.0),
         Align2::LEFT_TOP,
         match ps.lane {
-            Lane::Velocity => "Velocity",
-            Lane::Pan => "Pan",
+            Lane::Velocity => "Velocity".to_string(),
+            Lane::Pan => "Pan".to_string(),
+            Lane::Control(c) => af27_core::midi::ControlEvent::name(c),
         },
         FontId::proportional(9.0),
         c(th.text_dim),
@@ -901,11 +1037,56 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             Stroke::new(1.0_f32, c(th.border)),
         );
     }
+    if let Lane::Control(controller) = ps.lane {
+        // Stepped: each move holds until the next.
+        let mut moves: Vec<af27_core::midi::ControlEvent> = st.session.tracks[ti].midi[ci]
+            .controls
+            .iter()
+            .filter(|e| e.controller == controller)
+            .copied()
+            .collect();
+        moves.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let y_of_v = |v: f32| lane_r.bottom() - v.clamp(0.0, 1.0) * lane_r.height();
+        for (k, e) in moves.iter().enumerate() {
+            let x0 = x_of(e.at);
+            let x1 = moves.get(k + 1).map_or(x_of(clip_len), |n| x_of(n.at));
+            let col = channel_color(e.channel);
+            let y = y_of_v(e.value);
+            lp.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.5_f32, col));
+            if let Some(n) = moves.get(k + 1) {
+                lp.line_segment(
+                    [pos2(x1, y), pos2(x1, y_of_v(n.value))],
+                    Stroke::new(1.0_f32, col),
+                );
+            }
+            lp.circle_filled(pos2(x0, y), 2.5, col);
+        }
+        if let Some(e) = resp
+            .hover_pos()
+            .filter(|q| lane_r.contains(*q))
+            .and_then(|q| {
+                let b = b_of(q.x);
+                moves.iter().rev().find(|e| e.at <= b).copied()
+            })
+        {
+            lp.text(
+                lane_r.right_top() + vec2(-4.0, 2.0),
+                Align2::RIGHT_TOP,
+                af27_core::midi::ControlEvent::value_text(controller, e.value),
+                FontId::proportional(9.0),
+                c(th.text_dim),
+            );
+        }
+    }
     for (i, n) in st.session.tracks[ti].midi[ci].notes.iter().enumerate() {
+        if matches!(ps.lane, Lane::Control(_)) {
+            break;
+        }
         let x = x_of(n.start);
         let frac = match ps.lane {
             Lane::Velocity => n.velocity as f32 / 127.0,
             Lane::Pan => (n.pan + 1.0) / 2.0,
+            Lane::Control(_) => 0.0,
         };
         let y = lane_r.bottom() - frac * lane_r.height();
         let base = if ps.lane == Lane::Pan {
@@ -1237,11 +1418,46 @@ pub fn new_clip(st: &mut State, track: af27_core::TrackId, beats: f64) {
             length,
             notes: Vec::new(),
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         st.piano_clip = Some(id);
         st.selected_clip = Some(id);
         st.want_piano = true;
         st.commit_session("New MIDI clip", before);
+    }
+}
+
+#[cfg(test)]
+mod control_lane_tests {
+    use super::{paint_control, shape_control};
+
+    #[test]
+    fn controller_values_keep_their_steps() {
+        assert_eq!(shape_control(64, 0.7), 1.0);
+        assert_eq!(shape_control(64, 0.2), 0.0);
+        assert_eq!(shape_control(1, 0.5), 64.0 / 127.0);
+        assert_eq!(
+            shape_control(129, 0.5),
+            (0.5f32 * 16383.0).round() / 16383.0
+        );
+    }
+
+    #[test]
+    fn painting_replaces_the_dragged_span_and_pedals_only_change() {
+        let mut c = Vec::new();
+        paint_control(&mut c, 1, 0, 0.0, 0.0, 0.2);
+        paint_control(&mut c, 1, 0, 0.0, 0.5, 0.4);
+        paint_control(&mut c, 1, 0, 0.5, 1.0, 0.6);
+        assert_eq!(c.len(), 3);
+        // Dragging back over the span gives way to one move at the end.
+        paint_control(&mut c, 1, 0, 1.0, 0.25, 0.9);
+        assert_eq!(c.len(), 3);
+        assert_eq!((c[1].at, c[1].value), (0.25, 0.9));
+        // A pedal move that does not change the pedal is not kept.
+        paint_control(&mut c, 64, 0, 0.0, 0.0, 1.0);
+        paint_control(&mut c, 64, 0, 2.0, 2.0, 1.0);
+        assert_eq!(c.iter().filter(|e| e.controller == 64).count(), 1);
     }
 }

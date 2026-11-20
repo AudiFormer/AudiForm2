@@ -821,7 +821,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             .iter()
             .any(|t| t.kind == af27_core::TrackKind::Midi);
     let mut top = lanes.top() - scroll;
-    let solo = st.session.any_solo();
+    let heard_all = st.session.heard();
     let tracks = st.session.tracks.clone();
     for (ti, tr) in tracks.iter().enumerate() {
         let row = Rect::from_min_size(pos2(lanes.left(), top), vec2(lanes.width(), tr.height));
@@ -855,7 +855,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 &th,
             );
         }
-        let heard = !tr.mute && (!solo || tr.solo);
+        let heard = heard_all.get(ti).copied().unwrap_or(true);
         for clip in &tr.clips {
             let x0 = time_to_x(&v, lanes, clip.start);
             let x1 = time_to_x(&v, lanes, clip.end());
@@ -1161,6 +1161,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 },
             );
         }
+        // The automation lane shown over the clips.
+        crate::mixing::lane_overlay(ui, st, ti, row, &v, lanes);
         // Header.
         head_p.rect_filled(
             head,
@@ -1975,6 +1977,10 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     let before = st.session.clone();
     let mut changed = false;
+    // Mono or polarity: the mix changes shape.
+    let mut reshaped = false;
+    let mut clicked: Option<(char, usize)> = None;
+    let mut moved: Vec<(usize, af27_core::automation::LaneTarget, f64)> = Vec::new();
     let avail = ui.available_rect_before_wrap();
     let h = avail.height().max(260.0);
     const W: f32 = 92.0;
@@ -1999,18 +2005,62 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
                 cui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.add_space(((W - 12.0) - 3.0 * 22.0 - 6.0) / 2.0);
-                    changed |= key(ui, &mut tr.mute, "M", th.meter_mid, "Mute", &th);
-                    changed |= key(ui, &mut tr.solo, "S", th.accent, "Solo", &th);
-                    changed |= key(
+                    let (mut m, mut s, mut r) = (tr.mute, tr.solo, tr.armed);
+                    if key(
                         ui,
-                        &mut tr.armed,
-                        "R",
-                        th.accent_alt,
-                        "Arm for recording",
+                        &mut m,
+                        "M",
+                        th.meter_mid,
+                        "Mute (Ctrl+Shift: every track)",
                         &th,
-                    );
+                    ) {
+                        clicked = Some(('M', ti));
+                    }
+                    if key(
+                        ui,
+                        &mut s,
+                        "S",
+                        th.accent,
+                        "Solo (Ctrl: this one only; Ctrl+Shift: every track)",
+                        &th,
+                    ) {
+                        clicked = Some(('S', ti));
+                    }
+                    if tr.kind != af27_core::TrackKind::Bus
+                        && key(
+                            ui,
+                            &mut r,
+                            "R",
+                            th.accent_alt,
+                            "Arm for recording (Ctrl+Shift: every track)",
+                            &th,
+                        )
+                    {
+                        clicked = Some(('R', ti));
+                    }
                 });
-                changed |= pan_knob(&mut cui, &mut tr.pan, &th);
+                cui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.add_space(((W - 12.0) - 2.0 * 22.0 - 3.0) / 2.0);
+                    if key(
+                        ui,
+                        &mut tr.mono,
+                        "Mo",
+                        th.accent,
+                        "Mono: fold left and right together after the effects",
+                        &th,
+                    ) {
+                        reshaped = true;
+                    }
+                    if key(ui, &mut tr.polarity, "Ø", th.accent, "Invert polarity", &th) {
+                        reshaped = true;
+                    }
+                });
+                if pan_knob(&mut cui, &mut tr.pan, &th) {
+                    changed = true;
+                    moved.push((ti, af27_core::automation::LaneTarget::Pan, tr.pan as f64));
+                }
+                let vol_before = tr.volume_db;
                 // The fader takes the rest, above the level box.
                 let top = cui.cursor().top() + 4.0;
                 let fr = Rect::from_center_size(
@@ -2032,6 +2082,13 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
                             .max_decimals(1),
                     )
                     .changed();
+                if tr.volume_db != vol_before {
+                    moved.push((
+                        ti,
+                        af27_core::automation::LaneTarget::Volume,
+                        tr.volume_db as f64,
+                    ));
+                }
             }
             // Master.
             let (rect, _) = ui.allocate_exact_size(vec2(W + 10.0, h - 4.0), Sense::hover());
@@ -2074,6 +2131,10 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
                 .changed();
         });
     });
+    if reshaped {
+        st.commit_session("Mixer", before);
+        return;
+    }
     if changed {
         let down = ui.input(|i| i.pointer.any_down());
         if !st.gesture {
@@ -2084,6 +2145,16 @@ pub fn mixer(ui: &mut egui::Ui, st: &mut State) {
             st.live_track(ti);
         }
         st.live_master();
+        for (ti, target, value) in moved {
+            st.auto_moved(ti, target, value);
+        }
+    }
+    let mods = ui.input(|i| i.modifiers);
+    match clicked {
+        Some(('S', ti)) => st.click_solo(ti, mods),
+        Some(('M', ti)) => st.click_mute(ti, mods),
+        Some(('R', ti)) => st.click_arm(ti, mods),
+        _ => {}
     }
 }
 

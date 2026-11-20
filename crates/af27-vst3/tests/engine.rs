@@ -172,15 +172,15 @@ fn an_export_runs_plug_ins_in_their_own_copies_with_sidechain_keys() {
     let dry = clicks(&f.render());
     assert_eq!(dry.len(), 1, "{dry:?}");
     let (at, level) = dry[0];
-    // Half gain, 32 samples late (the engine has no delay compensation
-    // yet, so the plug-in's latency shows in the export).
+    // Half gain, on time: the plug-in's own copy is 32 samples late and
+    // the mix's delay compensation reads the track that far ahead.
     f.s.track_mut(a)
         .unwrap()
         .chain
         .push(plugin(&gain, &[(0, 0.25)], None));
     let wet = clicks(&f.render());
     assert_eq!(wet.len(), 1, "{wet:?}");
-    assert_eq!(wet[0].0, at + 32);
+    assert_eq!(wet[0].0, at);
     assert!((wet[0].1 - level * 0.5).abs() < 1e-6, "{wet:?}");
     // A silent track keyed by track A plays A's sound (the test plug-in
     // passes the key through), at its keyed latency.
@@ -190,15 +190,16 @@ fn an_export_runs_plug_ins_in_their_own_copies_with_sidechain_keys() {
         .chain
         .push(plugin(&keyed, &[], Some(a)));
     let both = clicks(&f.render());
-    assert_eq!(both.len(), 2, "{both:?}");
-    assert_eq!(both[0].0, at + 32, "track A");
-    // The key is A after its chain (half gain, 32 late), 64 later again.
-    assert_eq!(both[1].0, at + 32 + 64, "track B hears the key");
+    // The key is A after its chain (half gain); B's keyed latency (64) is
+    // compensated too, so A and B land together, on time.
+    assert_eq!(both.len(), 1, "{both:?}");
+    assert_eq!(both[0].0, at, "A and B in step");
+    assert!((both[0].1 - level).abs() < 1e-6, "{both:?}");
     // A plug-in that is not installed stays in the chain and is skipped.
     f.s.track_mut(a)
         .unwrap()
         .chain
         .insert(0, plugin("00112233445566778899AABBCCDDEEFF", &[], None));
     let skipped = clicks(&f.render());
-    assert_eq!(skipped[0].0, at + 32);
+    assert_eq!(skipped[0].0, at);
 }

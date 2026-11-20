@@ -235,6 +235,10 @@ pub struct State {
     /// Playback this side started and has not yet seen stop (the audio
     /// thread may stop on its own at the end).
     transport_live: bool,
+    /// Automation writing and lane display (see `mixing`).
+    pub mixing: crate::mixing::Mixing,
+    /// MIDI input for armed MIDI tracks (see `midi_in`).
+    pub midi: crate::midi_in::MidiIn,
     /// A new selection taking over the loop while playing.
     loop_watch: crate::transport::Settle,
     /// Seconds of held Left/Right since playback last skipped along.
@@ -495,6 +499,8 @@ impl State {
             start_marker: None,
             paused: false,
             transport_live: false,
+            mixing: Default::default(),
+            midi: Default::default(),
             loop_watch: Default::default(),
             scrub_clock: 0.0,
             born: Instant::now(),
@@ -1169,6 +1175,9 @@ impl State {
             e.play_plan(from, plan);
             self.transport_live = true;
             self.put_cursor(from);
+            if self.mode == Mode::Multitrack {
+                self.auto_start(from);
+            }
         } else if let Some(err) = self.engine_error.clone() {
             self.start_marker = None;
             self.error(err);
@@ -1192,6 +1201,7 @@ impl State {
 
     /// Playback is over (stopped, or ran to its end) at `reached`.
     fn finish(&mut self, reached: f64) {
+        self.auto_stop(reached);
         let t = crate::transport::stop_position(reached, self.start_marker, self.return_on_stop);
         self.start_marker = None;
         self.paused = false;
@@ -1393,6 +1403,10 @@ impl State {
         }
         if self.transport_live && self.is_playing() {
             self.follow_new_loop();
+            self.auto_tick();
+        }
+        if self.mode == Mode::Multitrack {
+            self.midi_tick();
         }
         let now = self.born.elapsed().as_secs_f64();
         let dt = (now - self.last_tick).clamp(0.0, 1.0);
@@ -1516,14 +1530,30 @@ impl State {
     // -------------------------------------------------------- recording
 
     pub fn is_recording(&self) -> bool {
-        self.engine.as_ref().is_some_and(|e| e.is_recording())
+        self.engine.as_ref().is_some_and(|e| e.is_recording()) || self.midi.recording
     }
 
     pub fn start_recording(&mut self) {
+        // Only MIDI tracks armed: record what they hear while playing.
+        let audio_armed = self
+            .session
+            .tracks
+            .iter()
+            .any(|t| t.armed && t.kind == af27_core::TrackKind::Audio);
+        if self.mode == Mode::Multitrack && self.midi_armed() && !audio_armed {
+            self.midi_record_start();
+            self.play();
+            return;
+        }
         let target = match self.mode {
             Mode::Waveform => RecordTarget::NewFile,
             Mode::Multitrack => {
-                let armed = self.session.tracks.iter().find(|t| t.armed).map(|t| t.id);
+                let armed = self
+                    .session
+                    .tracks
+                    .iter()
+                    .find(|t| t.armed && t.kind != af27_core::TrackKind::Midi)
+                    .map(|t| t.id);
                 match armed.or(self.selected_track) {
                     Some(t) => RecordTarget::Track(t, self.session_cursor),
                     None => {
@@ -1539,6 +1569,9 @@ impl State {
             Ok(()) => {
                 self.recording_target = Some(target);
                 if matches!(target, RecordTarget::Track(..)) {
+                    if self.midi_armed() {
+                        self.midi_record_start();
+                    }
                     self.play();
                 }
             }
@@ -1547,6 +1580,15 @@ impl State {
     }
 
     pub fn stop_recording(&mut self) {
+        if self.midi.recording {
+            let reached = self.position();
+            self.midi_record_stop(reached);
+            let audio = self.engine.as_ref().is_some_and(|e| e.is_recording());
+            if !audio {
+                self.stop();
+                return;
+            }
+        }
         let Some(e) = &mut self.engine else { return };
         let takes = e.stop_recording_all();
         if takes.is_empty() {
@@ -1834,25 +1876,40 @@ impl State {
     /// (fader, pan, effect settings, 3D position, instrument): the mix is
     /// not rebuilt, so effect tails and the playhead carry on.
     pub fn commit_live(&mut self, label: &str, before: Session) {
-        self.session_history.push(label, before);
+        // While automation is written, the moves belong to its one step.
+        if !self.mixing.pass_open() {
+            self.session_history.push(label, before);
+        }
         self.session_dirty = true;
+    }
+
+    /// Seconds since the app started (a wall clock for UI timing).
+    pub fn clock(&self) -> f64 {
+        self.born.elapsed().as_secs_f64()
     }
 
     /// Sends a track's fader, pan and mute or solo state to the mix.
     pub fn live_track(&mut self, ti: usize) {
-        let space = self.session.space.is_some();
-        let audible: Vec<bool> = self
-            .session
-            .tracks
-            .iter()
-            .map(|t| self.session.audible(t))
-            .collect();
+        let audible = self.session.heard();
         let Some(t) = self.session.tracks.get(ti) else {
             return;
         };
-        let (l, r) = af27_engine::track_gains(t, space);
+        let fader = af27_core::session::fader_gain(t.volume_db);
+        let pan = t.pan;
+        let sends: Vec<(f32, f32, bool)> = t
+            .sends
+            .iter()
+            .filter(|s| self.session.track_index(s.bus).is_some())
+            .map(|s| {
+                let level = af27_core::time::db_to_gain(s.level_db.clamp(-96.0, 12.0));
+                (level, s.pan, s.enabled)
+            })
+            .collect();
         if let Some(e) = &mut self.engine {
-            e.set_gains(ti, l, r);
+            e.set_strip(ti, fader, pan);
+            for (k, (level, pan, on)) in sends.into_iter().enumerate() {
+                e.set_send(ti, k, level, pan, on);
+            }
             // Solo on one track changes what every track does.
             for (i, a) in audible.into_iter().enumerate() {
                 e.set_audible(i, a);
@@ -1938,7 +1995,7 @@ impl State {
 
     /// Points the engine's audition at track `ti`'s instrument, building
     /// it only when the track or its settings changed.
-    fn audition_for(&mut self, ti: usize) -> bool {
+    pub fn audition_for(&mut self, ti: usize) -> bool {
         let Some(t) = self.session.tracks.get(ti) else {
             return false;
         };

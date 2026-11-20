@@ -17,6 +17,8 @@ mod hwcursor;
 mod inspector;
 mod keymap;
 mod lane_menu;
+mod midi_in;
+mod mixing;
 mod multitrack;
 mod overview;
 mod panels;

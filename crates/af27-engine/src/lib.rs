@@ -30,6 +30,8 @@ pub mod transport;
 #[cfg(test)]
 mod tests_keys;
 #[cfg(test)]
+mod tests_mix;
+#[cfg(test)]
 mod tests_space;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -74,10 +76,22 @@ enum Cmd {
         plan: Plan,
     },
     Stop,
-    Gains {
+    Strip {
         track: u16,
-        l: f32,
-        r: f32,
+        fader: f32,
+        pan: f32,
+    },
+    Send {
+        track: u16,
+        send: u16,
+        level: f32,
+        pan: f32,
+        on: bool,
+    },
+    LaneLive {
+        track: u16,
+        kind: mix::LaneKind,
+        live: bool,
     },
     Audible {
         track: u16,
@@ -185,7 +199,11 @@ impl Voice {
             _ => None,
         };
         match cmd {
-            Cmd::Program(p) => {
+            Cmd::Program(mut p) => {
+                // Arriving while playing: prime it so it carries on in step.
+                if let (true, Program::Mix(m)) = (self.playing, p.as_mut()) {
+                    m.prime(self.t);
+                }
                 if let Some(old) = self.program.replace(p) {
                     if let Err(rtrb::PushError::Full(old)) = trash.push(Garbage::Program(old)) {
                         // Never free on the audio thread.
@@ -198,7 +216,7 @@ impl Voice {
                 self.plan = plan;
                 self.playing = true;
                 if let Some(Program::Mix(m)) = self.program.as_deref_mut() {
-                    m.reset();
+                    m.start(self.t);
                 }
             }
             Cmd::Retarget { to, plan } => {
@@ -208,10 +226,26 @@ impl Voice {
                 self.plan = plan;
             }
             Cmd::Stop => self.playing = false,
-            Cmd::Gains { track, l, r } => {
-                if let Some(t) = mix.and_then(|m| m.tracks.get_mut(track as usize)) {
-                    t.gain_l = l;
-                    t.gain_r = r;
+            Cmd::Strip { track, fader, pan } => {
+                if let Some(m) = mix {
+                    m.set_strip(track as usize, fader, pan);
+                }
+            }
+            Cmd::Send {
+                track,
+                send,
+                level,
+                pan,
+                on,
+            } => {
+                if let Some(m) = mix {
+                    m.set_send(track as usize, send as usize, level, pan, on);
+                }
+            }
+            Cmd::LaneLive { track, kind, live } => {
+                if let Some(m) = mix {
+                    let t = (track != MASTER).then_some(track as usize);
+                    m.set_lane_live(t, kind, live);
                 }
             }
             Cmd::Audible { track, on } => {
@@ -571,6 +605,17 @@ pub struct Engine {
     /// On ASIO: the driver as an input device, for the track input menus.
     pub asio_inputs: Option<DeviceInfo>,
     recorders: Vec<record::Recorder>,
+    /// Notes played live (MIDI input), until a sender is taken.
+    notes: Option<rtrb::Producer<LiveNote>>,
+}
+
+/// A note played live, straight to the audition instrument from another
+/// thread (the MIDI input), without waiting for the UI.
+#[derive(Debug, Clone, Copy)]
+pub enum LiveNote {
+    On { pitch: u8, velocity: u8, pan: f32 },
+    Off(u8),
+    AllOff,
 }
 
 impl Drop for Engine {
@@ -586,6 +631,13 @@ impl Drop for Engine {
 }
 
 impl Engine {
+    /// The sender for live notes (once per opened engine): the MIDI
+    /// input's thread plays the audition instrument through it, heard
+    /// within one device buffer.
+    pub fn take_note_sender(&mut self) -> Option<rtrb::Producer<LiveNote>> {
+        self.notes.take()
+    }
+
     /// Opens the default output device.
     pub fn new() -> Result<Engine, String> {
         Engine::open(&DeviceChoice::default())
@@ -706,11 +758,33 @@ impl Engine {
         self.send(Cmd::Stop);
     }
 
-    pub fn set_gains(&mut self, track: usize, l: f32, r: f32) {
-        self.send(Cmd::Gains {
+    /// A strip's fader (linear) and pan (-1..1), ramped in over a block.
+    pub fn set_strip(&mut self, track: usize, fader: f32, pan: f32) {
+        self.send(Cmd::Strip {
             track: track as u16,
-            l,
-            r,
+            fader,
+            pan,
+        });
+    }
+
+    /// One send's level (linear), pan and on/off.
+    pub fn set_send(&mut self, track: usize, send: usize, level: f32, pan: f32, on: bool) {
+        self.send(Cmd::Send {
+            track: track as u16,
+            send: send as u16,
+            level,
+            pan,
+            on,
+        });
+    }
+
+    /// Switches a lane to its live control while it is written (`track`
+    /// None: the master).
+    pub fn set_lane_live(&mut self, track: Option<usize>, kind: mix::LaneKind, live: bool) {
+        self.send(Cmd::LaneLive {
+            track: track.map_or(MASTER, |t| t as u16),
+            kind,
+            live,
         });
     }
 
@@ -942,9 +1016,9 @@ fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.set_offline();
-        m.reset();
         // Offline: every stretched clip as it will finally sound.
         m.prepare_now();
+        m.start(from);
     }
     let frames = ((to - from).max(0.0) * rate as f64).round() as usize;
     let mut inter = vec![0.0f32; frames * channels];
@@ -981,9 +1055,9 @@ pub fn render_each(
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.set_offline();
-        m.reset();
         // Offline: every stretched clip as it will finally sound.
         m.prepare_now();
+        m.start(from);
     }
     let mut left = ((to - from).max(0.0) * rate as f64).round() as usize;
     let mut block = vec![0.0f32; BLOCK * channels];
@@ -1137,6 +1211,8 @@ mod tests {
             bus,
             level_db: 0.0,
             pre_fader: true,
+            pan: 0.0,
+            enabled: true,
             ext_id: None,
         });
         let b2 = buf.clone();
@@ -1446,6 +1522,8 @@ mod tests {
                 pan: 0.0,
             }],
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         let out = render(mix_program(&s, &|_| None, 48_000), 48_000, 0.0, 1.0);
@@ -1482,6 +1560,8 @@ mod tests {
                 pan: 0.0,
             }],
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         let rate = 8_000;
@@ -1578,6 +1658,8 @@ mod bench {
                 bus: if k % 2 == 0 { verb_a } else { verb_b },
                 level_db: -12.0,
                 pre_fader: false,
+                pan: 0.0,
+                enabled: true,
                 ext_id: None,
             });
         }

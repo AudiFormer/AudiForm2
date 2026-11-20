@@ -4,10 +4,12 @@
 //! Core types shared by every part of Audiform27: planar audio buffers,
 //! the multitrack session model, and a generic undo history.
 
+pub mod automation;
 pub mod buffer;
 mod edit_ops;
 pub mod history;
 pub mod midi;
+pub mod midi_live;
 pub mod noteops;
 pub mod plugin;
 pub mod quantize;

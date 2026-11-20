@@ -277,6 +277,29 @@ pub struct Track {
     /// built-in synth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub soundfont: Option<crate::midi::SoundFontRef>,
+    /// Folds left and right into one centred signal after the chain,
+    /// before the fader and pan.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub mono: bool,
+    /// Flips the track's polarity (times -1) on every route.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub polarity: bool,
+    /// Stays heard while other tracks are soloed (a shared reverb bus).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub solo_safe: bool,
+    /// How the track's controls write into its lanes while playing.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub automation: crate::automation::AutomationMode,
+    /// Automation lanes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<crate::automation::Lane>,
+    /// Lanes show under the track.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub show_lanes: bool,
+    /// MIDI tracks: the MIDI input they listen to when armed. None is
+    /// every input, `Some("none")` none, otherwise a port name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_in: Option<String>,
     /// The object's id in an `.audfrm` file it came from, so saving back
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,7 +320,9 @@ pub enum TrackKind {
     Midi,
 }
 
-/// A send from a track to a bus.
+/// A send from a track to a bus. A post-fader send follows the fader but
+/// not the track's pan (it has its own); a pre-fader send ignores both.
+/// Every send follows mute and solo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Send {
     pub bus: TrackId,
@@ -305,10 +330,56 @@ pub struct Send {
     /// Taken before the track's fader (true) or after it.
     #[serde(default)]
     pub pre_fader: bool,
+    /// The send's own pan, -1 (left) to 1 (right).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub pan: f32,
+    /// Off: plays nowhere (still counts for routing order and loops).
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub enabled: bool,
     /// The object's id in an `.audfrm` file it came from, so saving back
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_id: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
+}
+
+/// Send levels are kept within this range (dB).
+pub const SEND_MIN_DB: f32 = -96.0;
+pub const SEND_MAX_DB: f32 = 12.0;
+
+impl Send {
+    /// A new send: post-fader, 0 dB, centred, on.
+    pub fn new(bus: TrackId) -> Send {
+        Send {
+            bus,
+            level_db: 0.0,
+            pre_fader: false,
+            pan: 0.0,
+            enabled: true,
+            ext_id: None,
+        }
+    }
+
+    /// Clamps level and pan into range (NaN to the default).
+    pub fn tidy(&mut self) {
+        self.level_db = if self.level_db.is_nan() {
+            0.0
+        } else {
+            self.level_db.clamp(SEND_MIN_DB, SEND_MAX_DB)
+        };
+        self.pan = if self.pan.is_nan() {
+            0.0
+        } else {
+            self.pan.clamp(-1.0, 1.0)
+        };
+    }
 }
 
 /// One slot of an effect chain.
@@ -359,15 +430,40 @@ impl Default for Rack {
 /// Up to this many effects per chain.
 pub const CHAIN_SLOTS: usize = 16;
 
+/// Pan as a balance (-1 left .. 1 right): centred plays both sides at
+/// full level and panning turns the far side down, so a centred voice
+/// plays at exactly the level its fader shows.
+pub fn balance(pan: f32) -> [f32; 2] {
+    let p = if pan.is_nan() {
+        0.0
+    } else {
+        pan.clamp(-1.0, 1.0)
+    };
+    [
+        if p > 0.0 { 1.0 - p } else { 1.0 },
+        if p < 0.0 { 1.0 + p } else { 1.0 },
+    ]
+}
+
+/// A fader level in dB as a gain, clamped to -96..24 dB.
+pub fn fader_gain(db: f32) -> f32 {
+    crate::time::db_to_gain(db.clamp(-96.0, 24.0))
+}
+
 impl Track {
-    /// Constant-power pan gains (left, right) times the track volume.
+    /// Fader and balance-pan gains (left, right).
     pub fn gains(&self) -> (f32, f32) {
-        let v = crate::time::db_to_gain(self.volume_db);
-        let p = (self.pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
-        (
-            v * p.cos() * std::f32::consts::SQRT_2,
-            v * p.sin() * std::f32::consts::SQRT_2,
-        )
+        let v = fader_gain(self.volume_db);
+        let [l, r] = balance(self.pan);
+        (v * l, v * r)
+    }
+
+    /// The playing lane for `target`, if any.
+    pub fn playing_lane(
+        &self,
+        target: &crate::automation::LaneTarget,
+    ) -> Option<&crate::automation::Lane> {
+        self.lanes.iter().find(|l| &l.target == target && l.plays())
     }
 }
 
@@ -401,6 +497,9 @@ pub struct Session {
     pub master_chain: Vec<EffectSlot>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub master_rack: Rack,
+    /// The master's automation lanes (its volume lane plays).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub master_lanes: Vec<crate::automation::Lane>,
     /// Some(layout) makes this a 3D Space session.
     #[serde(default)]
     pub space: Option<crate::space::SpaceLayout>,
@@ -443,6 +542,7 @@ impl Session {
             next_id: 1,
             master_chain: Vec::new(),
             master_rack: Default::default(),
+            master_lanes: Vec::new(),
             space: None,
             monitor: Default::default(),
             tempo: Default::default(),
@@ -494,6 +594,13 @@ impl Session {
             midi: Vec::new(),
             instrument: Default::default(),
             soundfont: None,
+            mono: false,
+            polarity: false,
+            solo_safe: false,
+            automation: Default::default(),
+            lanes: Vec::new(),
+            show_lanes: false,
+            midi_in: None,
             ext_id: None,
         });
         id
@@ -610,9 +717,61 @@ impl Session {
         self.tracks.iter().any(|t| t.solo)
     }
 
-    /// Whether a track is heard, given mute and solo states.
+    /// Whether a track is heard, given mute and solo states (see
+    /// [`Session::heard`]).
     pub fn audible(&self, t: &Track) -> bool {
-        !t.mute && (!self.any_solo() || t.solo)
+        match self.track_index(t.id) {
+            Some(i) => self.heard()[i],
+            None => !t.mute,
+        }
+    }
+
+    /// Which tracks are heard, by index. With nothing soloed, everything
+    /// not muted. With any solo, everything reached from a soloed track or
+    /// bus through outputs and sends that are on, forward (where it goes)
+    /// and backward (what feeds it), plus solo-safe tracks. Mute always
+    /// wins. Sidechain keys are not routes.
+    pub fn heard(&self) -> Vec<bool> {
+        let n = self.tracks.len();
+        if !self.any_solo() {
+            return self.tracks.iter().map(|t| !t.mute).collect();
+        }
+        let mut edges: Vec<(usize, usize)> = Vec::new();
+        for (a, t) in self.tracks.iter().enumerate() {
+            let to = t
+                .output
+                .into_iter()
+                .chain(t.sends.iter().filter(|s| s.enabled).map(|s| s.bus));
+            for b in to.filter_map(|id| self.track_index(id)) {
+                if b != a {
+                    edges.push((a, b));
+                }
+            }
+        }
+        let mut reached = vec![false; n];
+        for forward in [true, false] {
+            let mut seen: Vec<bool> = self.tracks.iter().map(|t| t.solo).collect();
+            let mut stack: Vec<usize> = (0..n).filter(|&i| seen[i]).collect();
+            while let Some(x) = stack.pop() {
+                reached[x] = true;
+                for &(a, b) in &edges {
+                    let next = match (forward, a == x, b == x) {
+                        (true, true, _) => b,
+                        (false, _, true) => a,
+                        _ => continue,
+                    };
+                    if !seen[next] {
+                        seen[next] = true;
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        self.tracks
+            .iter()
+            .zip(reached)
+            .map(|(t, r)| !t.mute && (r || t.solo_safe))
+            .collect()
     }
 
     pub fn to_json(&self) -> String {

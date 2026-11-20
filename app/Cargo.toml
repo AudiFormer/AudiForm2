@@ -29,6 +29,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 sha2 = "0.10"
 raw-window-handle = "0.6"
 egui_dock = { version = "0.14", features = ["serde"] }
+# MIDI input (MIT).
+midir = "0.10.4"
+rtrb.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 # Builds the icon into the exe (MIT/Apache-2.0).
