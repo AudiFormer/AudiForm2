@@ -1508,6 +1508,85 @@ fn tool_button(
             ));
             p.line_segment([a, b], Stroke::new(2.0_f32, col));
         }
+        Tool::BoxSelect => {
+            // A dashed rectangle.
+            let r = egui::Rect::from_center_size(m, vec2(17.0, 13.0));
+            let thin = Stroke::new(1.4_f32, col);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+            ];
+            for i in 0..4 {
+                let (a, b) = (corners[i], corners[(i + 1) % 4]);
+                let len = (b - a).length();
+                let dir = (b - a) / len;
+                let mut d = 0.0;
+                while d < len {
+                    p.line_segment([a + dir * d, a + dir * (d + 3.0).min(len)], thin);
+                    d += 5.0;
+                }
+            }
+        }
+        Tool::LassoSelect => {
+            // A freeform loop with a tail hanging from it.
+            let c0 = m + vec2(1.5, -2.5);
+            let pts: Vec<egui::Pos2> = (0..=40)
+                .map(|i| {
+                    let a = i as f32 / 40.0 * std::f32::consts::TAU;
+                    let wob = 1.0 + 0.12 * (a * 3.0).sin();
+                    c0 + vec2(a.cos() * 8.0, a.sin() * 5.0) * wob
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, s));
+            let tail = [
+                c0 + vec2(-5.5, 3.6),
+                m + vec2(-6.5, 4.5),
+                m + vec2(-4.5, 7.0),
+                m + vec2(-7.5, 8.5),
+            ];
+            p.add(egui::Shape::line(tail.to_vec(), s));
+            p.circle_filled(tail[3], 1.5, col);
+        }
+        Tool::BrushSelect => {
+            // A brush: handle, ferrule and a soft tip.
+            let dir = vec2(1.0, -1.0).normalized();
+            let side = vec2(-dir.y, dir.x);
+            let tip = m + vec2(-7.0, 7.0);
+            let neck = tip + dir * 6.0;
+            let top = m + vec2(8.0, -8.0);
+            p.line_segment([neck + dir * 3.0, top], Stroke::new(2.2_f32, col));
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    neck + side * 2.2,
+                    neck + dir * 3.0 + side * 1.6,
+                    neck + dir * 3.0 - side * 1.6,
+                    neck - side * 2.2,
+                ],
+                col,
+                Stroke::NONE,
+            ));
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    neck + side * 2.4,
+                    neck - side * 2.4,
+                    tip - side * 0.6 - dir * 0.5,
+                    tip + side * 0.8,
+                ],
+                crate::theme::ca(th.background, 120),
+                s,
+            ));
+        }
+        Tool::SpotRepair => {
+            // A spot healer: a ring with a centre dot.
+            p.circle_stroke(m, 7.5, s);
+            p.circle_filled(m, 2.0, col);
+            for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let d = vec2(dx, dy);
+                p.line_segment([m + d * 7.5, m + d * 10.0], Stroke::new(1.2_f32, col));
+            }
+        }
         _ => {
             // I-beam.
             p.line_segment([pos2(m.x, m.y - 7.0), pos2(m.x, m.y + 7.0)], s);
@@ -1550,33 +1629,29 @@ fn viewer_dock_nodes(dock: &mut DockState<Tab>) -> impl Iterator<Item = &mut egu
 fn spectral_tools(ui: &mut egui::Ui, st: &mut State) {
     ui.separator();
     let wave = st.mode == Mode::Waveform;
-    for (tool, label, tip) in [
+    let th = st.theme.clone();
+    for (tool, tip) in [
         (
             Tool::BoxSelect,
-            "Box",
             "Box Select: drag a rectangle in the spectrum (Shift adds)",
         ),
         (
             Tool::LassoSelect,
-            "Lasso",
             "Lasso Select: draw around a sound in the spectrum (Shift adds)",
         ),
         (
             Tool::BrushSelect,
-            "Brush",
             "Brush Select: paint over a sound in the spectrum (Shift adds)",
         ),
         (
             Tool::SpotRepair,
-            "Spot",
             "Spot Repair: paint over a sound; it is repaired when you let go",
         ),
     ] {
+        let on = st.tool == tool;
         if ui
-            .add_enabled(
-                wave,
-                egui::SelectableLabel::new(st.tool == tool, RichText::new(label).size(12.5)),
-            )
+            .add_enabled_ui(wave, |ui| tool_button(ui, tool, on, &th))
+            .inner
             .on_hover_text(tip)
             .on_disabled_hover_text("Spectral tools work in the Waveform editor")
             .clicked()
@@ -2231,6 +2306,7 @@ impl eframe::App for App {
                 }
             }
         }
+        shot_setup(&mut self.st);
         let __t0 = std::time::Instant::now();
         struct TraceGuard(std::time::Instant, egui::Rect);
         impl Drop for TraceGuard {
@@ -2685,4 +2761,41 @@ impl eframe::App for App {
 /// Shared helpers for panels.
 pub fn meter_db(x: f32) -> f32 {
     gain_to_db(x).max(-90.0)
+}
+
+/// For documentation shots, once the first file is open:
+/// `AF2_CHANNELS_OFF=2,5` switches those channels off (counting from 1),
+/// and `AF2_SPECTRAL_BOX=t0,t1,hz0,hz1` draws a Box selection.
+fn shot_setup(st: &mut State) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.load(Ordering::Relaxed) || st.doc().is_none() {
+        return;
+    }
+    DONE.store(true, Ordering::Relaxed);
+    let nums =
+        |v: &str| -> Vec<f64> { v.split(',').filter_map(|x| x.trim().parse().ok()).collect() };
+    if let Ok(v) = std::env::var("AF2_CHANNELS_OFF") {
+        if let Some(d) = st.doc_mut() {
+            for k in nums(&v) {
+                d.chans = d.chans.toggle((k as usize).saturating_sub(1));
+            }
+        }
+    }
+    if let Ok(v) = std::env::var("AF2_SPECTRAL_BOX") {
+        if let (&[t0, t1, f0, f1], Some(d)) = (&nums(&v)[..], st.doc_mut()) {
+            use crate::spectral_select::{hz_to_u, Region, SPoint};
+            d.spec_sel.push(Region::Box {
+                a: SPoint {
+                    t: t0,
+                    u: hz_to_u(f0),
+                },
+                b: SPoint {
+                    t: t1,
+                    u: hz_to_u(f1),
+                },
+            });
+            st.choose_tool(Tool::BoxSelect);
+        }
+    }
 }
