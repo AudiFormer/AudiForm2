@@ -9,6 +9,7 @@ mod edit_ops;
 pub mod history;
 pub mod midi;
 pub mod noteops;
+pub mod plugin;
 pub mod quantize;
 pub mod session;
 pub mod space;
