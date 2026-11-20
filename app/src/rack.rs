@@ -209,6 +209,8 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     if st.mode == Mode::Multitrack {
         ui.horizontal(|ui| {
+            let w = ui.available_width();
+            ui.add_space(((w - 250.0) / 2.0).max(0.0));
             if ui
                 .selectable_label(st.rack_tab == RackTab::Clip, "Clip Effects")
                 .on_hover_text("The selected clip's own effects, before its track's")
@@ -240,55 +242,73 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
         ui.label(RichText::new(what).color(c(th.text_dim)));
         return;
     };
-    // The track's (or the master's) own settings, folded above the rack.
-    if target != FILE && !is_clip(target) {
-        egui::CollapsingHeader::new(
-            RichText::new(if target == MASTER {
-                "Master".to_string()
-            } else {
-                format!("Track: {}", target_name(st, target))
-            })
-            .strong(),
-        )
-        .id_salt("rack-track-settings")
-        .default_open(true)
-        .show(ui, |ui| {
-            if target == MASTER {
-                crate::inspector::master_settings(ui, st);
-            } else {
-                crate::inspector::track_settings(ui, st, target as usize);
+    // Laid out as the leading editor's rack: presets and the target on
+    // top, the sixteen rows filling the middle, levels, mix and the rack's
+    // power fixed along the bottom. Everything keeps to the panel's width.
+    // The panel's frame covers its last few pixels on the right.
+    let w0 = (ui.available_width() - 14.0).max(160.0);
+    ui.set_max_width(w0);
+    egui::TopBottomPanel::bottom(egui::Id::new(("rack-bottom", target)))
+        .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(0.0, 4.0)))
+        .show_separator_line(true)
+        .show_inside(ui, |ui| {
+            ui.allocate_ui(vec2(w0, 200.0), |ui| rack_controls(ui, st, target, &th));
+            if target == FILE {
+                file_apply(ui, st, &th);
             }
         });
-        ui.separator();
-    }
-    presets_row(ui, st, target, &th);
-    let kind = match target {
-        FILE => "File",
-        MASTER => "Mix",
-        t if is_clip(t) => "Clip",
-        i => match st.session.tracks.get(i as usize).map(|t| t.kind) {
-            Some(TrackKind::Bus) => "Bus",
-            _ => "Track",
-        },
-    };
-    ui.label(
-        RichText::new(format!("{kind}: {}", target_name(st, target)))
-            .strong()
-            .color(c(th.text)),
-    );
-    ui.add_space(2.0);
-    let bottom_h = if target == FILE { 130.0 } else { 100.0 };
-    let avail = (ui.available_height() - bottom_h).max(120.0);
-    egui::ScrollArea::vertical()
-        .id_salt("rack-slots")
-        .max_height(avail)
-        .auto_shrink([false, true])
-        .show(ui, |ui| slots(ui, st, target, &th));
-    ui.separator();
-    rack_controls(ui, st, target, &th);
-    if target == FILE {
-        file_apply(ui, st, &th);
-    }
+    egui::CentralPanel::default()
+        .frame(egui::Frame::none())
+        .show_inside(ui, |ui| {
+            ui.set_max_width(w0);
+            ui.allocate_ui(vec2(w0, 24.0), |ui| presets_row(ui, st, target, &th));
+            let kind = match target {
+                FILE => "File",
+                MASTER => "Mix",
+                t if is_clip(t) => "Clip",
+                i => match st.session.tracks.get(i as usize).map(|t| t.kind) {
+                    Some(TrackKind::Bus) => "Bus",
+                    _ => "Track",
+                },
+            };
+            ui.label(
+                RichText::new(format!("{kind}: {}", target_name(st, target)))
+                    .strong()
+                    .color(c(th.text)),
+            );
+            ui.add_space(2.0);
+            // The track's (or the master's) own settings, folded away by
+            // default so the rack keeps the room.
+            if target != FILE && !is_clip(target) {
+                egui::CollapsingHeader::new(
+                    RichText::new(if target == MASTER {
+                        "Master settings"
+                    } else {
+                        "Track settings"
+                    })
+                    .size(11.0)
+                    .color(c(th.text_dim)),
+                )
+                .id_salt("rack-track-settings")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.set_max_width(w0);
+                    if target == MASTER {
+                        crate::inspector::master_settings(ui, st);
+                    } else {
+                        crate::inspector::track_settings(ui, st, target as usize);
+                    }
+                });
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("rack-slots")
+                .auto_shrink([false, false])
+                .max_width(w0)
+                .show(ui, |ui| {
+                    ui.set_max_width(w0 - 10.0);
+                    slots(ui, st, target, &th)
+                });
+        });
 }
 
 /// Which slot sits in each of the sixteen rows (slots keep their row, so
@@ -724,25 +744,26 @@ fn meter(ui: &mut egui::Ui, level: f32, th: &Theme, scale: bool) {
                 [pos2(x, bar.bottom()), pos2(x, bar.bottom() + 3.0)],
                 Stroke::new(1.0_f32, ca(th.text_dim, 160)),
             );
+            // The left end reads "dB", as on the leading editor's meters.
+            let label = if d == -48.0 {
+                "dB".to_string()
+            } else {
+                format!("{d:.0}")
+            };
             p.text(
                 pos2(x, bar.bottom() + 4.0),
                 if d == 0.0 {
                     Align2::RIGHT_TOP
+                } else if d == -48.0 {
+                    Align2::LEFT_TOP
                 } else {
                     Align2::CENTER_TOP
                 },
-                format!("{d:.0}"),
+                label,
                 FontId::proportional(9.0),
                 c(th.text_dim),
             );
         }
-        p.text(
-            pos2(bar.left(), bar.bottom() + 4.0),
-            Align2::LEFT_TOP,
-            "dB",
-            FontId::proportional(9.0),
-            c(th.text_dim),
-        );
     }
 }
 
