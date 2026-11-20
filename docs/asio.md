@@ -5,24 +5,30 @@ by default: a normal build uses the system driver (WASAPI) only, and
 Settings > Audio Devices shows ASIO as "not in this build", listing any
 ASIO drivers installed so the user can see why they are not offered.
 
-## Before shipping a build with ASIO
+## Licence: the GPLv3 route
 
 ASIO is Steinberg's. Building with it compiles part of Steinberg's ASIO
-SDK into the program. The SDK is offered under two licences: GPLv3, which
-AudiForm 2 cannot use (it is not GPL), and Steinberg's own proprietary
-licence. **Shipping a build with ASIO needs Steinberg's proprietary ASIO
-licence agreement**, signed by whoever publishes the build (see
-Steinberg's developer site). That decision is the project lead's.
+SDK into the program. Steinberg offers the SDK under GPLv3 or under its
+own proprietary licence. AudiForm 2 is GPL-3.0-or-later, so release builds
+use the **GPLv3 option**: no separate agreement with Steinberg is needed,
+and a build with ASIO is distributed under GPLv3 as a whole (check the
+SDK's licence text for whether it allows later GPL versions; until then,
+treat such a binary as GPLv3). What that asks of a
+release:
 
-Also, if ASIO ships:
+- Ship the complete corresponding source with the build, or a written
+  offer for it, as GPLv3 requires. The ASIO SDK is not committed to this
+  repository; state which SDK version the build used (and its SHA-256),
+  so anyone can fetch the same files from Steinberg and rebuild.
+- Keep the credit "ASIO is a trademark and software of Steinberg Media
+  Technologies GmbH." The About box shows it in builds with the feature
+  (`af27_engine::ASIO_CREDIT`); use the name ASIO only to say what is
+  supported, and never the ASIO logo.
+- Add `asio-sys` (Apache-2.0, part of the cpal project, compatible with
+  GPLv3) and the ASIO SDK (GPLv3 option) to `ATTRIBUTION.md`; `asio-sys`
+  is a Cargo dependency only when the feature is on.
 
-- Say "ASIO is a trademark and software of Steinberg Media Technologies
-  GmbH" where ASIO is mentioned, and never use the ASIO logo unless the
-  licence allows it.
-- Add `asio-sys` (Apache-2.0, part of the cpal project) to
-  `ATTRIBUTION.md`; its notice travels with the build. It is a Cargo
-  dependency only when the feature is on.
-- Do whatever else the signed Steinberg agreement asks (credits, notices).
+Builds without the feature contain nothing of the SDK.
 
 ## Building with ASIO
 
@@ -32,7 +38,7 @@ Needed on the build machine (none of this is needed for a normal build):
 2. LLVM, for `bindgen` (it needs `libclang`). Set `LIBCLANG_PATH` to
    LLVM's `bin` folder, e.g. `C:\Program Files\LLVM\bin`. GitHub's Windows
    runners have it already.
-3. The ASIO SDK, under the licence above. `asio-sys`'s build script
+3. The ASIO SDK (used under its GPLv3 option). `asio-sys`'s build script
    downloads it from Steinberg when it is not given one; better, download
    it yourself, check its SHA-256, unzip it and set `CPAL_ASIO_DIR` to the
    folder that holds `common/` and `host/`, so the build is pinned and

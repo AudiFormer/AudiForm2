@@ -31,6 +31,13 @@ pub enum HostKind {
 /// True when this build can use ASIO.
 pub const ASIO_BUILT: bool = cfg!(all(windows, feature = "asio"));
 
+/// The credit the About box shows in builds with ASIO (None without).
+pub const ASIO_CREDIT: Option<&str> = if ASIO_BUILT {
+    Some("ASIO is a trademark and software of Steinberg Media Technologies GmbH.")
+} else {
+    None
+};
+
 /// The system host's name ("WASAPI" on Windows).
 pub fn system_name() -> String {
     cpal::default_host().id().name().to_string()
@@ -519,6 +526,7 @@ mod tests {
 
     #[test]
     fn asio_stays_off_when_not_built() {
+        assert_eq!(ASIO_CREDIT.is_some(), ASIO_BUILT);
         if !ASIO_BUILT {
             let l = list_asio(Some("SSL ASIO Driver"), &names(&["SSL ASIO Driver"]));
             assert!(l.outputs.is_empty() && l.inputs.is_empty());

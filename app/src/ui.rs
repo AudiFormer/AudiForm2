@@ -2023,6 +2023,9 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
         ui.label("A fast, themeable audio editor written entirely in Rust.");
         ui.label("AudiForm 2 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
         ui.label("The sequel to Audiform, by the same project lead.");
+        if let Some(credit) = af27_engine::ASIO_CREDIT {
+            ui.label(credit);
+        }
     });
     st.show_about = open;
 }

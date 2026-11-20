@@ -37,7 +37,7 @@ use af27_core::AudioBuffer;
 use cpal::traits::{DeviceTrait, HostTrait};
 
 pub use capture::{AudioApp, CaptureSupport, OutputDevice, RecordSource};
-pub use devices::{DeviceInfo, DeviceList, HostKind, ASIO_BUILT};
+pub use devices::{DeviceInfo, DeviceList, HostKind, ASIO_BUILT, ASIO_CREDIT};
 pub use mix::{space_gains, stereo_frame, track_gains, Mix, BLOCK, MAX_SPEAKERS};
 pub use routing::{InputPick, OutputMap};
 pub use transport::{Plan, Region};
