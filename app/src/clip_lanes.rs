@@ -269,13 +269,21 @@ pub fn overlay(
         let empty = Lane::new(line.target.clone());
         let lane = line.lane.map_or(&empty, |k| &clip.props.lanes[k]);
         let (lo, hi) = crate::mixing::lane_range_in(chain, &lane.target);
+        // Pan runs left at the top, right at the bottom.
+        let flip = crate::mixing::drawn_flipped(&lane.target);
         let y_of = |val: f64| {
-            let x = ((val - lo) / (hi - lo).max(1e-9)).clamp(0.0, 1.0);
+            let mut x = ((val - lo) / (hi - lo).max(1e-9)).clamp(0.0, 1.0);
+            if flip {
+                x = 1.0 - x;
+            }
             body.bottom() - x as f32 * body.height()
         };
         let val_of = |y: f32| {
-            let x = ((body.bottom() - y) / body.height().max(1.0)).clamp(0.0, 1.0);
-            lo + (hi - lo) * x as f64
+            let mut x = ((body.bottom() - y) / body.height().max(1.0)).clamp(0.0, 1.0) as f64;
+            if flip {
+                x = 1.0 - x;
+            }
+            lo + (hi - lo) * x
         };
         let px_per_unit = body.height() as f64 / (hi - lo).max(1e-9);
         let pts = &lane.points;

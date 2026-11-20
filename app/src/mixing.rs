@@ -295,6 +295,12 @@ fn lane_range(t: &af27_core::Track, target: &LaneTarget) -> (f64, f64) {
     lane_range_in(&t.chain, target)
 }
 
+/// Lanes drawn upside down: pan (and send pan) puts left at the top and
+/// right at the bottom, as multitrack editors draw it.
+pub fn drawn_flipped(target: &LaneTarget) -> bool {
+    matches!(target, LaneTarget::Pan | LaneTarget::SendPan(_))
+}
+
 /// [`lane_range`] for a lane on the owner of `chain` (a track or a clip).
 pub fn lane_range_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> (f64, f64) {
     if let LaneTarget::Effect { slot, param, .. } = target {
@@ -497,13 +503,21 @@ pub fn lane_overlay(
     let lane = &t.lanes[k];
     let (lo, hi) = lane_range(&t, &lane.target);
     let area = row.shrink2(vec2(0.0, 6.0));
+    // Pan runs left at the top, right at the bottom.
+    let flip = drawn_flipped(&lane.target);
     let y_of = |val: f64| {
-        let x = ((val - lo) / (hi - lo).max(1e-9)).clamp(0.0, 1.0);
+        let mut x = ((val - lo) / (hi - lo).max(1e-9)).clamp(0.0, 1.0);
+        if flip {
+            x = 1.0 - x;
+        }
         area.bottom() - x as f32 * area.height()
     };
     let val_of = |y: f32| {
-        let x = ((area.bottom() - y) / area.height().max(1.0)).clamp(0.0, 1.0);
-        lo + (hi - lo) * x as f64
+        let mut x = ((area.bottom() - y) / area.height().max(1.0)).clamp(0.0, 1.0) as f64;
+        if flip {
+            x = 1.0 - x;
+        }
+        lo + (hi - lo) * x
     };
     let painter = ui.painter_at(lanes.intersect(row));
     let col = if lane.enabled {
