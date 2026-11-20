@@ -25,7 +25,7 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense,
 use crate::state::{State, Tool, View};
 use crate::theme::{c, ca, lerp};
 use crate::ui::Caches;
-use crate::waveform::{draw_channel, playhead, time_to_x, x_to_time};
+use crate::waveform::{draw_channel_gained, playhead, time_to_x, x_to_time};
 use af27_core::{ClipId, Session};
 
 const HEADER_W: f32 = 210.0;
@@ -128,6 +128,15 @@ fn fade_handle(cr: Rect, x: f32) -> Rect {
 fn gain_handle(cr: Rect) -> Rect {
     Rect::from_min_size(pos2(cr.left() + 3.0, cr.bottom() - 15.0), vec2(16.0, 12.0))
 }
+/// A clip gain as its readout shows it: "+1.2", "-3.4", "0.0".
+fn gain_text(db: f32) -> String {
+    let r = (db * 10.0).round() / 10.0;
+    if r == 0.0 {
+        "0.0".into()
+    } else {
+        format!("{r:+.1}")
+    }
+}
 fn stretch_handle(cr: Rect, left: bool) -> Rect {
     if left {
         Rect::from_min_size(cr.min, vec2(11.0, 11.0))
@@ -146,6 +155,15 @@ pub fn height_for_share(share: f32, view_h: f32, n: usize) -> f32 {
 #[cfg(test)]
 mod vzoom_tests {
     use super::*;
+
+    #[test]
+    fn the_gain_readout_is_signed_with_one_decimal() {
+        assert_eq!(gain_text(1.2), "+1.2");
+        assert_eq!(gain_text(-3.44), "-3.4");
+        assert_eq!(gain_text(0.0), "0.0");
+        assert_eq!(gain_text(-0.04), "0.0");
+        assert_eq!(gain_text(12.0), "+12.0");
+    }
 
     #[test]
     fn the_thumb_share_sets_one_height_for_every_track() {
@@ -1022,12 +1040,28 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     let n = buf.num_channels().min(2);
                     let h = wave.height() / n as f32;
                     let tint = if alpha == 255 { ccol } else { [90, 90, 100] };
+                    // Drawn at the clip's gain and along its volume line,
+                    // as it plays (+6 dB twice as tall, -12 dB a quarter).
+                    let level = af27_core::time::db_to_gain(clip.gain_db);
+                    let vol = clip
+                        .playing_lane(&af27_core::automation::LaneTarget::Volume)
+                        .map(|l| l.points.as_slice());
+                    let gain = |x: f32| -> f32 {
+                        match vol {
+                            Some(pts) => {
+                                let t = x_to_time(&v, lanes, x) - clip.start;
+                                let db = af27_core::automation::value_at(pts, t).unwrap_or(0.0);
+                                level * af27_core::time::db_to_gain(db as f32)
+                            }
+                            None => level,
+                        }
+                    };
                     for ch in 0..n {
                         let lane = Rect::from_min_size(
                             pos2(wave.left(), wave.top() + h * ch as f32),
                             vec2(wave.width(), h),
                         );
-                        draw_channel(
+                        draw_channel_gained(
                             &lane_p,
                             lane,
                             &buf.channels[ch],
@@ -1038,6 +1072,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                             &th,
                             Some(tint),
                             st.session_amp,
+                            Some(&gain),
                         );
                     }
                 }
@@ -1158,6 +1193,24 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         [pos2(x, cr.center().y - 8.0), pos2(x, cr.center().y + 8.0)],
                         Stroke::new(2.0_f32, ca(th.text, 150)),
                     );
+                }
+            }
+            // The clip's gain beside its handle, always (clips big
+            // enough for the handle and the text).
+            if cr.width() >= 56.0 && cr.height() >= 34.0 {
+                let g = gain_handle(cr);
+                let hot = hover_handle.is_some_and(|h| h.1 == clip.id && h.2 == Handle::Gain)
+                    || matches!(caches.drag.kind, Some(DragKind::Gain { clip: id, .. }) if id == clip.id);
+                let galley = lane_p.layout_no_wrap(
+                    gain_text(clip.gain_db),
+                    FontId::monospace(9.5),
+                    if hot { c(th.accent) } else { c(th.text) },
+                );
+                let at = pos2(g.right() + 3.0, g.center().y - galley.size().y / 2.0);
+                let back = Rect::from_min_size(at, galley.size()).expand2(vec2(2.0, 0.5));
+                if back.right() < cr.right() - 2.0 {
+                    lane_p.rect_filled(back, Rounding::same(2.0), ca(th.background, 170));
+                    lane_p.galley(at, galley, c(th.text));
                 }
             }
             if stretch_on && cr.width() >= 24.0 && cr.height() >= 34.0 {
@@ -1290,8 +1343,18 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         // Each clip's own automation over it (the track's lane, when
         // shown, covers the row instead).
         if st.shown_lane(ti).is_none() {
+            // The lines leave the pointer to the clip's handles and edges,
+            // to other tools and to drags already under way.
+            let hp = ui.input(|i| i.pointer.hover_pos());
             for clip in &tr.clips {
-                crate::clip_lanes::overlay(ui, st, clip.id, row, &v, lanes);
+                let free = st.tool == Tool::Move
+                    && caches.drag.kind.is_none()
+                    && on_edge.is_none()
+                    && hp.is_some_and(|hp| {
+                        handle_at(st, hp).is_none()
+                            && !hit(st, hp).is_some_and(|h| h.1 == clip.id && (h.2 || h.3))
+                    });
+                crate::clip_lanes::overlay(ui, st, clip.id, row, &v, lanes, free);
             }
         }
         // The automation lane shown over the clips.

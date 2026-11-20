@@ -92,6 +92,8 @@ pub struct Prefs {
     pub header_view: crate::track_views::HeaderView,
     /// Stretch handles on clip corners.
     pub stretch_handles: bool,
+    /// Every audio clip shows its volume and pan lines.
+    pub clip_lines: bool,
     /// The metronome's sound and level (kept here, not in sessions).
     pub metronome: af27_core::midi::MetronomeSettings,
     /// What New Audio File and New Multitrack Session start with.
@@ -228,6 +230,7 @@ impl Default for Prefs {
             audio: AudioPrefs::default(),
             header_view: Default::default(),
             stretch_handles: false,
+            clip_lines: true,
             metronome: Default::default(),
             new_file: Default::default(),
             new_session: Default::default(),
@@ -415,6 +418,7 @@ impl Draft {
         prefs.snap_ruler = st.prefs.snap_ruler;
         prefs.header_view = st.prefs.header_view;
         prefs.stretch_handles = st.prefs.stretch_handles;
+        prefs.clip_lines = st.prefs.clip_lines;
         prefs.metronome = st.prefs.metronome;
         prefs.new_file = st.prefs.new_file.clone();
         prefs.new_session = st.prefs.new_session.clone();
