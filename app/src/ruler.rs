@@ -176,7 +176,6 @@ pub fn input(
             let t = ui
                 .data(|d| d.get_temp::<f64>(at_id))
                 .unwrap_or_else(|| st.position());
-            let at = r.interact_pointer_pos().or(ui.ctx().pointer_latest_pos());
             ui.separator();
             if ui
                 .button("Add Tempo Change Here")
@@ -184,7 +183,7 @@ pub fn input(
                 .clicked()
             {
                 let beats = st.session.tempo.beats(t);
-                crate::tempo::add_here(st, beats, false, at);
+                crate::tempo::add_here(st, beats, false);
                 ui.close_menu();
             }
             if ui
@@ -193,7 +192,7 @@ pub fn input(
                 .clicked()
             {
                 let beats = st.session.tempo.beats(t);
-                crate::tempo::add_here(st, beats, true, at);
+                crate::tempo::add_here(st, beats, true);
                 ui.close_menu();
             }
         }

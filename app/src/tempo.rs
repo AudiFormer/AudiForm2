@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use egui::{pos2, vec2, Align2, FontId, Pos2, Rect, RichText, Sense, Stroke};
+use egui::{pos2, Align2, FontId, Rect, RichText, Sense, Stroke};
 
 use crate::state::State;
 use crate::theme::{c, ca};
@@ -26,9 +26,8 @@ pub struct TempoUi {
     /// first set from the playhead.
     pub ramp_from: u32,
     pub ramp_to: u32,
-    /// The change being edited in the small editor by the ruler, and where
-    /// it opened.
-    pub edit: Option<(usize, Pos2)>,
+    /// The change being edited in the small Tempo Change editor.
+    pub edit: Option<usize>,
     /// The ruler marker under the pointer (a change index).
     pub hot: Option<usize>,
     /// A ruler marker being dragged: the change, whether it is a glide's
@@ -101,8 +100,8 @@ fn fmt_bpm(b: f64) -> String {
 
 /// Adds a change at the bar nearest `beats` (bar 2 or later): immediate,
 /// or a glide starting there and arriving four bars later. Opens the
-/// ruler's editor on it at `at`.
-pub fn add_here(st: &mut State, beats: f64, gradual: bool, at: Option<Pos2>) {
+/// Tempo Change editor on it.
+pub fn add_here(st: &mut State, beats: f64, gradual: bool) {
     let before = st.session.clone();
     let t = &mut st.session.tempo;
     let bar = t.nearest_bar(beats.max(0.0));
@@ -120,10 +119,7 @@ pub fn add_here(st: &mut State, beats: f64, gradual: bool, at: Option<Pos2>) {
         before,
     );
     st.live_metronome();
-    match at {
-        Some(p) => st.tempo_ui.edit = Some((i, p)),
-        None => st.tempo_ui.open = true,
-    }
+    st.tempo_ui.edit = Some(i);
 }
 
 /// The kind picker for change `i`: Immediate, or Gradual from a bar.
@@ -401,7 +397,7 @@ pub fn window(ctx: &egui::Context, st: &mut State) {
 
 /// The small editor a double-click on a ruler marker opens.
 pub fn edit_popup(ctx: &egui::Context, st: &mut State) {
-    let Some((i, at)) = st.tempo_ui.edit else {
+    let Some(i) = st.tempo_ui.edit else {
         return;
     };
     if i >= st.session.tempo.changes.len() {
@@ -409,72 +405,74 @@ pub fn edit_popup(ctx: &egui::Context, st: &mut State) {
         return;
     }
     let mut open = true;
-    egui::Window::new("Tempo Change")
-        .id(egui::Id::new("af2-tempo-change-edit"))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .default_pos(at)
-        .show(ctx, |ui| {
-            let before = st.session.clone();
-            let mut changed = false;
-            let mut act = None;
-            egui::Grid::new("tempo-change-edit")
-                .num_columns(2)
-                .spacing([10.0, 6.0])
-                .show(ui, |ui| {
-                    let t = &st.session.tempo;
-                    ui.label("Bar");
-                    let mut shown = t.changes[i].bar + 1;
-                    if ui
-                        .add(egui::DragValue::new(&mut shown).range(2..=9999).speed(0.1))
-                        .changed()
-                    {
-                        act = Some(RowAct::Move(i, shown - 1));
+    crate::ui::popup(
+        ctx,
+        egui::Id::new(("af2-popup", "tempo.rs", 2)),
+        "Tempo Change",
+    )
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(false)
+    .show(ctx, |ui| {
+        let before = st.session.clone();
+        let mut changed = false;
+        let mut act = None;
+        egui::Grid::new("tempo-change-edit")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                let t = &st.session.tempo;
+                ui.label("Bar");
+                let mut shown = t.changes[i].bar + 1;
+                if ui
+                    .add(egui::DragValue::new(&mut shown).range(2..=9999).speed(0.1))
+                    .changed()
+                {
+                    act = Some(RowAct::Move(i, shown - 1));
+                }
+                ui.end_row();
+                ui.label("Kind");
+                ui.horizontal(|ui| {
+                    if let Some(k) = kind_picker(ui, t, i, "pop") {
+                        act = Some(RowAct::Kind(i, k));
                     }
-                    ui.end_row();
-                    ui.label("Kind");
-                    ui.horizontal(|ui| {
-                        if let Some(k) = kind_picker(ui, t, i, "pop") {
-                            act = Some(RowAct::Kind(i, k));
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Tempo and time signature");
-                    ui.horizontal(|ui| {
-                        changed |= value_fields(ui, &mut st.session.tempo, Some(i), "pop");
-                    });
-                    ui.end_row();
                 });
-            ui.add_space(4.0);
-            if ui.button("Delete").clicked() {
-                act = Some(RowAct::Delete(i));
+                ui.end_row();
+                ui.label("Tempo and time signature");
+                ui.horizontal(|ui| {
+                    changed |= value_fields(ui, &mut st.session.tempo, Some(i), "pop");
+                });
+                ui.end_row();
+            });
+        ui.add_space(4.0);
+        if ui.button("Delete").clicked() {
+            act = Some(RowAct::Delete(i));
+        }
+        match act {
+            Some(RowAct::Move(_, bar)) => {
+                apply_act(st, RowAct::Move(i, bar));
+                // It may have moved in the list.
+                let ni = st
+                    .session
+                    .tempo
+                    .changes
+                    .iter()
+                    .position(|c| c.bar == bar.max(1));
+                st.tempo_ui.edit = ni;
+                tempo_commit(st, ui, &before, true);
             }
-            match act {
-                Some(RowAct::Move(_, bar)) => {
-                    apply_act(st, RowAct::Move(i, bar));
-                    // It may have moved in the list.
-                    let ni = st
-                        .session
-                        .tempo
-                        .changes
-                        .iter()
-                        .position(|c| c.bar == bar.max(1));
-                    st.tempo_ui.edit = ni.map(|n| (n, at));
-                    tempo_commit(st, ui, &before, true);
+            Some(a) => {
+                let deleting = matches!(a, RowAct::Delete(_));
+                let label = apply_act(st, a).unwrap_or("Tempo map");
+                st.commit_session(label, before.clone());
+                st.live_metronome();
+                if deleting {
+                    st.tempo_ui.edit = None;
                 }
-                Some(a) => {
-                    let deleting = matches!(a, RowAct::Delete(_));
-                    let label = apply_act(st, a).unwrap_or("Tempo map");
-                    st.commit_session(label, before.clone());
-                    st.live_metronome();
-                    if deleting {
-                        st.tempo_ui.edit = None;
-                    }
-                }
-                None => tempo_commit(st, ui, &before, changed),
             }
-        });
+            None => tempo_commit(st, ui, &before, changed),
+        }
+    });
     if !open {
         st.tempo_ui.edit = None;
     }
@@ -688,12 +686,11 @@ pub fn markers_input(
                 }
             }
             if resp.double_clicked() {
-                let at = resp.interact_pointer_pos().unwrap_or(r.center()) + vec2(8.0, 12.0);
-                st.tempo_ui.edit = Some((i, at));
+                st.tempo_ui.edit = Some(i);
             }
             resp.context_menu(|ui| {
                 if ui.button("Edit...").clicked() {
-                    st.tempo_ui.edit = Some((i, r.center_bottom() + vec2(8.0, 12.0)));
+                    st.tempo_ui.edit = Some(i);
                     ui.close_menu();
                 }
                 let gradual = st
