@@ -446,6 +446,11 @@ pub struct Track {
     /// before the fader and pan.
     #[serde(default, skip_serializing_if = "is_default")]
     pub mono: bool,
+    /// Pre-render: the track's clips and effects are rendered ahead in
+    /// the background and playback uses the render (the app's prerender
+    /// module). Left out of the file when off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prerender: bool,
     /// Flips the track's polarity (times -1) on every route.
     #[serde(default, skip_serializing_if = "is_default")]
     pub polarity: bool,
@@ -781,6 +786,7 @@ impl Session {
             instrument: Default::default(),
             soundfont: None,
             mono: false,
+            prerender: false,
             polarity: false,
             solo_safe: false,
             automation: Default::default(),

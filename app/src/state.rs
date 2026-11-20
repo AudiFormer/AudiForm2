@@ -224,6 +224,8 @@ pub struct State {
     /// change the sound (see `audio_view`).
     program_session: Option<Session>,
     program_docs: u64,
+    /// Pre-rendered tracks (see `prerender`).
+    pub prerender: crate::prerender::Prerender,
     /// Where playback began, shown on the ruler while playing or paused;
     /// Stop folds it into the playhead.
     pub start_marker: Option<f64>,
@@ -523,6 +525,7 @@ impl State {
             program_key: (Mode::Waveform, 0, 0, 0),
             program_session: None,
             program_docs: 0,
+            prerender: Default::default(),
             start_marker: None,
             paused: false,
             transport_live: false,
@@ -1116,7 +1119,9 @@ impl State {
             self.mode,
             self.current.unwrap_or(0),
             self.doc().map_or(0, |d| d.version),
-            self.session_version + self.docs.iter().map(|d| d.version).sum::<u64>(),
+            self.session_version
+                + self.docs.iter().map(|d| d.version).sum::<u64>()
+                + (self.prerender.version << 32),
         );
         if key == self.program_key {
             return;
@@ -1136,6 +1141,7 @@ impl State {
             let mut m: Vec<_> = self.media_docs.iter().collect();
             m.sort();
             m.hash(&mut h);
+            self.prerender.version.hash(&mut h);
             h.finish()
         };
         let same_docs = key.0 == self.program_key.0
@@ -1163,7 +1169,8 @@ impl State {
             },
             Mode::Multitrack => {
                 let rate = self.engine.as_ref().map_or(self.session.rate, |e| e.rate);
-                let p = af27_engine::mix_program(&self.session, &|m| self.media_buffer(m), rate);
+                let heard = self.heard_session();
+                let p = af27_engine::mix_program(&heard, &|m| self.heard_media(m), rate);
                 if let af27_engine::Program::Mix(m) = &p {
                     self.rack_meters = m.tracks.iter().map(|t| t.meter.clone()).collect();
                     self.clip_meters = m.clip_meters().into_iter().collect();
@@ -1462,6 +1469,7 @@ impl State {
         let t1 = Instant::now();
         crate::separation::poll(self);
         crate::spectral_select::poll(self);
+        self.prerender_poll();
         self.sync_program();
         if tr {
             eprintln!(
@@ -2211,8 +2219,8 @@ impl State {
     /// Renders the session offline at its own rate: stereo as heard, or
     /// (3D sessions, `bed`) one channel per speaker.
     pub fn render_mix(&self, from: f64, to: f64, bed: bool) -> AudioBuffer {
-        let program =
-            af27_engine::mix_program(&self.session, &|m| self.media_buffer(m), self.session.rate);
+        let heard = self.heard_session();
+        let program = af27_engine::mix_program(&heard, &|m| self.heard_media(m), self.session.rate);
         if bed {
             af27_engine::render_bed(program, self.session.rate, from, to)
         } else {

@@ -387,7 +387,13 @@ fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize, below: bool) {
         }
     });
     ui.separator();
-    let toggles: [(&str, bool, Flag, &str); 3] = [
+    let toggles: [(&str, bool, Flag, &str); 4] = [
+        (
+            "Pre-render",
+            t.prerender,
+            |t| &mut t.prerender,
+            "Render the track's clips and effects ahead in the background; playback uses the render so its plug-ins rest. Fader, pan, sends and output stay live.",
+        ),
         (
             "Mono",
             t.mono,
@@ -408,7 +414,7 @@ fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize, below: bool) {
         ),
     ];
     for (label, on, field, tip) in toggles {
-        if label == "Invert Polarity" && t.kind == TrackKind::Bus {
+        if (label == "Invert Polarity" || label == "Pre-render") && t.kind == TrackKind::Bus {
             continue;
         }
         if ui

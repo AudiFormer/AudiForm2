@@ -1391,6 +1391,25 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         if tab_r.clicked() {
             st.selected_track = Some(tr.id);
         }
+        // Pre-render: a dot on the colour tab (green ready, amber
+        // rendering, hollow waiting).
+        if let Some(ps) = st.prerender_status(tr.id) {
+            let at = pos2(tab.center().x, tab.top() + 9.0);
+            let (fill, ring) = match ps {
+                crate::prerender::Status::Ready => (Some(Color32::from_rgb(90, 220, 120)), None),
+                crate::prerender::Status::Rendering => {
+                    (Some(Color32::from_rgb(240, 180, 60)), None)
+                }
+                crate::prerender::Status::Waiting => (None, Some(Color32::from_gray(220))),
+            };
+            if let Some(f) = fill {
+                head_p.circle_filled(at, 3.0, f);
+            }
+            if let Some(r) = ring {
+                head_p.circle_stroke(at, 2.5, Stroke::new(1.0_f32, r));
+            }
+            tab_r.clone().on_hover_text(ps.words());
+        }
         if tab_r.drag_started() {
             caches.drag.track_move = Some(tr.id);
         }
