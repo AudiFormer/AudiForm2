@@ -193,6 +193,8 @@ pub struct ExportUi {
     /// Files that exist, waiting for "Replace".
     confirm: Option<Vec<PathBuf>>,
     pub job: Option<Job>,
+    /// 3D Space: what the speaker bed export writes.
+    pub bed: crate::space_export::BedOptions,
 }
 
 fn home() -> PathBuf {
@@ -638,7 +640,8 @@ fn start(st: &mut State, paths: Vec<PathBuf>) {
         }
         Purpose::Mixdown | Purpose::Bed => {
             let bed = purpose == Purpose::Bed;
-            let (s, from, to) = mix_source(st, if bed { MixRange::Session } else { prefs.range });
+            let (mut s, from, to) =
+                mix_source(st, if bed { MixRange::Session } else { prefs.range });
             let (from, to) = if bed {
                 st.session_sel.unwrap_or((from, to))
             } else {
@@ -649,10 +652,29 @@ fn start(st: &mut State, paths: Vec<PathBuf>) {
                 return;
             }
             let mut opts = opts;
-            if bed && opts.channels == ChannelChoice::Keep {
-                opts.channel_mask = s.space.map(af27_space::pan::channel_mask);
+            // 3D Space: the bed in the layout chosen for this export (or a
+            // binaural file); a stereo mixdown is the plain fold, whatever
+            // the session is listened to on.
+            let (bed, order) = if bed {
+                if let Some(why) = st.export.bed.refuse(s.space, opts.container) {
+                    st.error(why);
+                    return;
+                }
+                let (bed, mask, order) = st.export.bed.prepare(&mut s);
+                if bed && opts.channels == ChannelChoice::Keep {
+                    opts.channel_mask = mask;
+                }
+                (bed, order)
+            } else {
+                if s.space.is_some() {
+                    s.monitor = af27_core::space::Monitor::StereoFold;
+                }
+                (false, None)
+            };
+            let mut program = af27_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
+            if let af27_engine::Program::Mix(m) = &mut program {
+                m.set_bed_order(order);
             }
-            let program = af27_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
             let path = paths[0].clone();
             let meta = session_meta(&s, from, to, &stem_of(&prefs_name(&path)));
             let total = ((to - from) * rate as f64) as u64;
@@ -846,10 +868,7 @@ fn source_shape(st: &State, purpose: Purpose, range: MixRange) -> (f64, usize, u
             (b - a, 2, st.session.rate, 1)
         }
         Purpose::Bed => {
-            let ch = st
-                .session
-                .space
-                .map_or(2, |l| af27_space::pan::layout_info(l).channels);
+            let ch = st.export.bed.channels(st.session.space);
             let (a, b) = st.session_sel.unwrap_or((0.0, st.session.duration()));
             (b - a, ch, st.session.rate, 1)
         }
@@ -906,6 +925,7 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
     let (secs, src_ch, src_rate, files) = source_shape(st, purpose, prefs.range);
     let confirm = st.export.confirm.clone();
     let session_name = st.session.name.clone();
+    let session_layout = st.session.space;
     egui::Window::new(title(purpose))
         .open(&mut open)
         .collapsible(false)
@@ -978,6 +998,9 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                         ex_ui.name = with_ext(&ex_ui.name, prefs.container);
                     }
                     ui.end_row();
+                    if purpose == Purpose::Bed {
+                        ex_ui.bed.ui(ui, session_layout);
+                    }
 
                     if purpose == Purpose::Mixdown {
                         ui.label("Mix");
@@ -1106,6 +1129,11 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                 },
                 ex::human_bytes(bytes)
             ));
+            if purpose == Purpose::Bed {
+                if let Some(why) = ex_ui.bed.refuse(session_layout, opts.container) {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 90), why);
+                }
+            }
             if opts.container == Container::Flac && out_ch > ex::flac::MAX_CHANNELS {
                 ui.colored_label(egui::Color32::from_rgb(230, 120, 90), "FLAC holds at most 8 channels: choose WAV.");
             }

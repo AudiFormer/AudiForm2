@@ -7,11 +7,17 @@
 //! or folded left and right ([`Monitor`]).
 
 pub mod binaural;
+pub mod channels;
+pub mod diffuse;
+pub mod lfe;
 pub mod pan;
+pub mod place;
+pub mod steer;
 
-pub use af27_core::space::{Monitor, SpaceLayout, SpacePos};
+pub use af27_core::space::{Monitor, SpaceLayout, SpacePos, SpatializeMode};
 pub use binaural::Binaural;
-pub use pan::{fold_gains, lfe_channel, point_gains, source_gains, speakers};
+pub use pan::{fold_gains, lfe_channel, point_gains, source_gains, speakers, Gains, MAX_SPEAKERS};
+pub use place::Placement;
 
 /// Turns a speaker bed into stereo for listening.
 pub enum Monitoring {
@@ -24,7 +30,9 @@ impl Monitoring {
     pub fn new(layout: SpaceLayout, monitor: Monitor, rate: u32) -> Monitoring {
         match monitor {
             Monitor::Binaural => Monitoring::Binaural(Box::new(Binaural::new(layout, rate))),
-            Monitor::StereoFold => Monitoring::Fold(fold_bed(layout)),
+            // Speakers: each speaker goes to its own output; the stereo
+            // fold is still what the meters and scope read.
+            Monitor::StereoFold | Monitor::Speakers => Monitoring::Fold(fold_bed(layout)),
         }
     }
 
@@ -50,7 +58,8 @@ impl Monitoring {
 }
 
 /// Fold gains per speaker: by where it stands left to right, sharing
-/// power, with the low-frequency channel to both sides at -6 dB.
+/// power. The low-frequency channel is left out (as stereo playback of a
+/// surround mix leaves it out).
 pub fn fold_bed(layout: SpaceLayout) -> Vec<[f32; 2]> {
     speakers(layout)
         .iter()
@@ -59,7 +68,7 @@ pub fn fold_bed(layout: SpaceLayout) -> Vec<[f32; 2]> {
                 let a = ((x + 1.0) / 2.0).clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
                 [a.cos(), a.sin()]
             }
-            None => [0.5, 0.5],
+            None => [0.0, 0.0],
         })
         .collect()
 }
@@ -73,6 +82,8 @@ mod tests {
         let g = fold_bed(SpaceLayout::Surround51);
         assert!((g[0][0] - 1.0).abs() < 1e-6 && g[0][1].abs() < 1e-6);
         assert!((g[2][0] - g[2][1]).abs() < 1e-6);
+        assert!((g[2][0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert_eq!(g[3], [0.0, 0.0]);
         let mut m = Monitoring::new(SpaceLayout::Surround51, Monitor::StereoFold, 48_000);
         let bed = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let mut out = [0.0; 2];

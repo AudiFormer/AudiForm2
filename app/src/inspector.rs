@@ -193,44 +193,7 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     // 3D position.
     if let Some(layout) = st.session.space {
         ui.collapsing(format!("3D position ({})", layout.label()), |ui| {
-            let b2 = st.session.clone();
-            let mut ch = false;
-            {
-                let p = &mut st.session.tracks[ti].pos;
-                ch |= ui
-                    .add(crate::widgets::Slider::new(&mut p.x, -1.0..=1.0).text("Left / right"))
-                    .changed();
-                ch |= ui
-                    .add(crate::widgets::Slider::new(&mut p.y, -1.0..=1.0).text("Back / front"))
-                    .changed();
-                ch |= ui
-                    .add(crate::widgets::Slider::new(&mut p.z, 0.0..=1.0).text("Height"))
-                    .changed();
-                ch |= ui
-                    .add(crate::widgets::Slider::new(&mut p.size, 0.0..=1.0).text("Size"))
-                    .changed();
-                ch |= ui
-                    .add(crate::widgets::Slider::new(&mut p.width, 0.0..=1.0).text("Width"))
-                    .changed();
-                ch |= ui
-                    .add(
-                        crate::widgets::Slider::new(&mut p.rotation, -180.0..=180.0)
-                            .suffix("°")
-                            .text("Rotation"),
-                    )
-                    .changed();
-                ch |= ui
-                    .add(
-                        crate::widgets::Slider::new(&mut p.lfe_db, -96.0..=6.0)
-                            .suffix(" dB")
-                            .text("LFE send"),
-                    )
-                    .changed();
-            }
-            if ch {
-                st.live_space(ti);
-            }
-            live_commit(st, ui, "3D position", &b2, ch);
+            crate::space::spot_controls(ui, st, ti);
         });
     }
 

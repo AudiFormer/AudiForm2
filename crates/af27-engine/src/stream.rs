@@ -110,6 +110,15 @@ impl Core {
         sh.pos.store(self.voice.t.to_bits(), Ordering::Relaxed);
         store_max_f32(&sh.peak_l, l);
         store_max_f32(&sh.peak_r, r);
+        // Per-speaker meters of a 3D session's bed.
+        if let Some(Program::Mix(m)) = self.voice.program.as_deref_mut() {
+            let mut pk = [0.0f32; crate::MAX_SPEAKERS];
+            let n = m.take_bed_peaks(&mut pk);
+            for (a, v) in sh.bed_peaks.iter().zip(pk) {
+                store_max_f32(a, v);
+            }
+            sh.bed_count.store(n as u32, Ordering::Relaxed);
+        }
         let out = &mut out[..frames * ch];
         routing::map_frames(src, width, out, ch, &self.routes);
         // The click last: after the master fader, the meters and the
@@ -173,6 +182,8 @@ fn build(
         pos: AtomicU64::new(0f64.to_bits()),
         peak_l: AtomicU32::new(0),
         peak_r: AtomicU32::new(0),
+        bed_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
+        bed_count: AtomicU32::new(0),
     });
     let hush = Arc::new(Hush::default());
     let stats = Arc::new(CallbackStats::default());
@@ -385,6 +396,8 @@ mod tests {
             pos: AtomicU64::new(0),
             peak_l: AtomicU32::new(0),
             peak_r: AtomicU32::new(0),
+            bed_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
+            bed_count: AtomicU32::new(0),
         });
         (
             Core::new(rx, trash_tx, shared, 48_000, channels, routes),
