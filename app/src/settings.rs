@@ -104,6 +104,11 @@ pub struct Prefs {
     /// Draw without waiting for the screen's refresh (less lag between the
     /// pointer and what follows it; frames capped at 240 a second).
     pub low_latency: bool,
+    /// The Windows firewall choice made in Settings (Some(true) allow,
+    /// Some(false) block), applied again for each new copy of the app.
+    pub firewall: Option<bool>,
+    /// The program files the firewall rules cover.
+    pub firewall_paths: Vec<String>,
     /// Soloing a track or bus unsolos every other (Ctrl+click always
     /// does, whatever this says).
     pub solo_exclusive: bool,
@@ -238,6 +243,8 @@ impl Default for Prefs {
             new_session: Default::default(),
             af1_import_asked: false,
             low_latency: true,
+            firewall: None,
+            firewall_paths: Vec::new(),
             solo_exclusive: false,
             midi_monitor: true,
             meters: Default::default(),
@@ -588,23 +595,30 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
     match name {
         "General" => {
             group(ui, th, "Windows network prompts", |ui| {
-                note(ui, th, "Windows asks \"Allow access to the network?\" when a program listens for connections. In AudiForm 2 that is usually a plug-in checking its licence, since plug-ins run inside AudiForm 2's plug-in host. A firewall rule for AudiForm 2 stops the question for good. Windows asks for your permission to add it.");
+                note(ui, th, "Windows asks \"Allow access to the network?\" when a program listens for connections. In AudiForm 2 that is usually a plug-in checking its licence, since plug-ins run inside AudiForm 2's plug-in host. A firewall rule for AudiForm 2 stops the question for good, on every kind of network. Windows asks for your permission to add it, once now and once for each new copy of AudiForm 2 (a new test build, say).");
                 ui.horizontal(|ui| {
                     if ui
-                        .button("Allow on private networks")
+                        .button("Allow network access")
                         .on_hover_text("Plug-ins that check their licence online keep working (recommended)")
                         .clicked()
                     {
-                        firewall_rule(true);
+                        d.prefs.firewall = Some(true);
+                        d.prefs.firewall_paths = firewall_rule(true, &d.prefs.firewall_paths);
                     }
                     if ui
                         .button("Block network access")
                         .on_hover_text("No prompts and no network use; plug-ins that need to authorise online may stop working")
                         .clicked()
                     {
-                        firewall_rule(false);
+                        d.prefs.firewall = Some(false);
+                        d.prefs.firewall_paths = firewall_rule(false, &d.prefs.firewall_paths);
                     }
                 });
+                match d.prefs.firewall {
+                    Some(true) => note(ui, th, "Set to allow."),
+                    Some(false) => note(ui, th, "Set to block."),
+                    None => {}
+                }
             });
             group(ui, th, "Audiform 1", |ui| {
                 ui.horizontal(|ui| {
@@ -898,43 +912,94 @@ fn ensure_scan(d: &mut Draft, st: &State, force: bool) -> Scan {
     })
 }
 
-/// Adds (replacing any earlier one) a Windows Firewall rule for this
-/// program: allow on private and domain networks, or block everywhere.
-/// Windows shows its own permission prompt (UAC) first; nothing changes if
-/// the user says no.
-fn firewall_rule(allow: bool) {
+/// Every copy of AudiForm 2 a firewall rule should cover: this one, the
+/// ones next to it (test builds side by side) and those covered before
+/// that still exist.
+fn firewall_programs(before: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    let mut add = |p: String| {
+        let p = p.replace('"', "");
+        if !v.iter().any(|x| x.eq_ignore_ascii_case(&p)) {
+            v.push(p);
+        }
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        add(exe.display().to_string());
+        if let Some(dir) = exe.parent() {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with("audiform2") && name.ends_with(".exe") {
+                    add(e.path().display().to_string());
+                }
+            }
+        }
+    }
+    for p in before {
+        if std::path::Path::new(p).exists() {
+            add(p.clone());
+        }
+    }
+    v
+}
+
+/// Replaces the "AudiForm 2" firewall rules (in and out, every network
+/// kind) with ones that allow or block every copy of the app. Windows
+/// shows its own permission prompt (UAC) first, and no console window
+/// shows. Returns the programs covered.
+fn firewall_rule(allow: bool, before: &[String]) -> Vec<String> {
+    let programs = firewall_programs(before);
     #[cfg(windows)]
     {
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
-        let exe = exe.display().to_string().replace('"', "");
-        let (action, profiles) = if allow {
-            ("allow", "private,domain")
-        } else {
-            ("block", "any")
-        };
-        let rule = |dir: &str| {
-            format!(
-                "netsh advfirewall firewall add rule name=\"AudiForm 2\" dir={dir} action={action} program=\"{exe}\" profile={profiles} enable=yes"
-            )
-        };
-        let cmd = format!(
-            "netsh advfirewall firewall delete rule name=\"AudiForm 2\" & {} & {}",
-            rule("in"),
-            rule("out")
-        );
-        // Elevated through PowerShell's Start-Process -Verb RunAs.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let action = if allow { "allow" } else { "block" };
+        let mut cmd = String::from("netsh advfirewall firewall delete rule name=\"AudiForm 2\"");
+        for exe in &programs {
+            for dir in ["in", "out"] {
+                cmd.push_str(&format!(
+                    " & netsh advfirewall firewall add rule name=\"AudiForm 2\" dir={dir} action={action} program=\"{exe}\" profile=any enable=yes"
+                ));
+            }
+        }
         let ps = format!(
             "Start-Process cmd -Verb RunAs -WindowStyle Hidden -ArgumentList '/c {}'",
             cmd.replace('\'', "''")
         );
         let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &ps,
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
     #[cfg(not(windows))]
     let _ = allow;
+    programs
+}
+
+/// At start: a firewall choice made earlier is applied to this copy of the
+/// app when its rule does not cover it yet (a new test build), so its
+/// plug-ins do not bring the network question back.
+pub fn firewall_follow(prefs: &mut Prefs) {
+    let Some(allow) = prefs.firewall else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let exe = exe.display().to_string();
+    if prefs
+        .firewall_paths
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(&exe))
+    {
+        return;
+    }
+    prefs.firewall_paths = firewall_rule(allow, &prefs.firewall_paths);
+    prefs.save();
 }
 
 /// Settings > Audio Devices: the driver, what plays and records, the
