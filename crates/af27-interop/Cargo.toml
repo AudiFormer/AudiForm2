@@ -13,3 +13,5 @@ roxmltree = "0.20"
 af27-dsp = { path = "../af27-dsp" }
 af27-fx = { path = "../af27-fx" }
 midly = { version = "0.5.3", default-features = false, features = ["std"] }
+hound.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }

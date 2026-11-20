@@ -607,13 +607,13 @@ const AUDIO_FILTER: &[&str] = af27_io::EXTENSIONS;
 
 pub fn open_dialog(st: &mut State) {
     let mut all: Vec<&str> = AUDIO_FILTER.to_vec();
-    all.extend(["af27", "sesx", "audfrm", "altaudio", "altemplate"]);
+    all.extend(["af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"]);
     if let Some(paths) = rfd::FileDialog::new()
         .add_filter("Audio and sessions", &all)
         .add_filter("Audio", AUDIO_FILTER)
         .add_filter(
             "Sessions",
-            &["af27", "sesx", "audfrm", "altaudio", "altemplate"],
+            &["af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"],
         )
         .pick_files()
     {

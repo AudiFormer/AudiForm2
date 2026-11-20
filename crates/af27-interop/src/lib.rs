@@ -5,6 +5,7 @@
 //!
 //! * `.sesx`: the XML multitrack session format used by a widely used
 //!   commercial editor ([`sesx`]); also written by [`sesx_out`].
+//! * `.aup3`: an open-source editor's SQLite projects ([`aup3`]).
 //! * `.audfrm` / `.altaudio`: Audiform's JSON sessions ([`audfrm`]), and
 //!   the session inside an Audiform template (`.altemplate`).
 //!
@@ -12,6 +13,7 @@
 //! when the audio is loaded.
 
 pub mod audfrm;
+pub mod aup3;
 mod b64;
 pub mod check;
 pub mod paths;
@@ -33,7 +35,7 @@ pub struct Imported {
 }
 
 /// The kinds of session file this crate opens, by extension (lower case).
-pub const SESSION_EXTENSIONS: [&str; 4] = ["audfrm", "altaudio", "altemplate", "sesx"];
+pub const SESSION_EXTENSIONS: [&str; 5] = ["audfrm", "altaudio", "altemplate", "sesx", "aup3"];
 
 /// Whether files with this extension (any case) open as sessions here.
 pub fn is_session_ext(ext: &str) -> bool {
@@ -56,6 +58,7 @@ pub fn import_with(path: &Path, surrounds: sesx::Surrounds) -> Result<Imported, 
         .to_ascii_lowercase();
     match ext.as_str() {
         "sesx" => sesx::import_file(path, surrounds),
+        "aup3" => aup3::import(path, &aup3::audio_folder(path)),
         "audfrm" | "altaudio" | "altemplate" => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
