@@ -9,7 +9,7 @@ use egui::{pos2, vec2, Align2, FontId, Rect, RichText, Rounding, Sense, Shape, S
 
 use crate::state::{Mode, State};
 use crate::theme::{c, ca};
-use crate::ui::{meter_db, Caches, Tab};
+use crate::ui::{Caches, Tab};
 use af27_core::time::format_time;
 use af27_dsp::effects::GROUPS;
 
@@ -295,70 +295,103 @@ pub fn history(ui: &mut egui::Ui, st: &mut State) {
 // ----------------------------------------------------------------- Levels
 
 pub fn levels(ui: &mut egui::Ui, st: &mut State) {
+    use crate::meters::{self, MeterKind, PeakHold, Response};
     let th = st.theme.clone();
+    let prefs = st.prefs.meters;
     let rect = ui.available_rect_before_wrap();
-    let (rect, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(rect.size(), Sense::click());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, Rounding::ZERO, c(th.panel));
-    let scale_h = 12.0;
+    let scale_h = 13.0;
+    let latch_w = if prefs.clip { 12.0 } else { 0.0 };
     let bars = Rect::from_min_max(
-        rect.min + vec2(28.0, 2.0),
-        pos2(rect.right() - 6.0, rect.bottom() - scale_h),
+        rect.min + vec2(18.0, 3.0),
+        pos2(rect.right() - 8.0 - latch_w, rect.bottom() - scale_h),
     );
-    let bar_h = ((bars.height() - 3.0) / 2.0).max(2.0);
-    let x_of = |db: f32| bars.left() + ((db + 60.0) / 60.0).clamp(0.0, 1.0) * bars.width();
-    for (i, (v, hold)) in [(st.meter.0, st.meter_hold.0), (st.meter.1, st.meter_hold.1)]
-        .into_iter()
-        .enumerate()
-    {
+    let gap = 3.0;
+    let bar_h = ((bars.height() - gap) / 2.0).max(2.0);
+    let mut latches = [Rect::NOTHING; 2];
+    for (i, ch) in st.levels.ch.iter().enumerate() {
         let r = Rect::from_min_size(
-            pos2(bars.left(), bars.top() + i as f32 * (bar_h + 3.0)),
+            pos2(bars.left(), bars.top() + i as f32 * (bar_h + gap)),
             vec2(bars.width(), bar_h),
         );
-        p.rect_filled(r, Rounding::same(2.0), c(th.wave_background));
-        let db = meter_db(v);
-        // Segmented gradient fill.
-        let mut x = r.left();
-        while x < x_of(db) {
-            let seg_db = (x - bars.left()) / bars.width() * 60.0 - 60.0;
-            p.rect_filled(
-                Rect::from_min_max(pos2(x, r.top()), pos2((x + 3.0).min(x_of(db)), r.bottom())),
-                Rounding::ZERO,
-                th.meter_color(seg_db),
-            );
-            x += 4.0;
-        }
-        let hx = x_of(meter_db(hold));
-        p.line_segment(
-            [pos2(hx, r.top()), pos2(hx, r.bottom())],
-            Stroke::new(2.0_f32, th.meter_color(meter_db(hold))),
-        );
+        meters::draw_channel(&p, r, ch, &prefs, &th);
         p.text(
-            pos2(rect.left() + 4.0, r.center().y),
+            pos2(rect.left() + 5.0, r.center().y),
             Align2::LEFT_CENTER,
             if i == 0 { "L" } else { "R" },
             FontId::proportional(10.0),
             c(th.text_dim),
         );
-        if hold >= 1.0 {
-            p.rect_filled(
-                Rect::from_min_size(pos2(bars.right() + 1.0, r.top()), vec2(4.0, r.height())),
-                Rounding::ZERO,
-                c(th.meter_high),
-            );
+        if prefs.clip {
+            latches[i] = meters::clip_latch(r);
+            meters::draw_clip_latch(&p, latches[i], ch.clipped, &th);
         }
     }
-    let mut db = -60;
-    while db <= 0 {
-        let x = x_of(db as f32);
-        p.text(
-            pos2(x, rect.bottom() - 1.0),
-            Align2::CENTER_BOTTOM,
-            db.to_string(),
-            FontId::proportional(9.0),
-            c(th.text_dim),
-        );
-        db += 3;
+    meters::draw_scale(&p, rect, bars, prefs.floor(), &th);
+    // A click clears the clip lights and the peak-hold lines.
+    if resp.clicked() {
+        st.levels.clear_clips();
+        st.levels.reset_holds(prefs.kind);
+    }
+    let hint = if prefs.clip && st.levels.ch.iter().any(|c| c.clipped) {
+        "Click to clear the clip lights and peak hold. Right-click for the meter settings"
+    } else {
+        "Click to reset the peak hold. Right-click for the meter settings"
+    };
+    let resp = resp.on_hover_text(hint);
+    let mut m = prefs;
+    resp.context_menu(|ui| {
+        ui.menu_button("Range", |ui| {
+            for r in meters::RANGES {
+                if ui
+                    .radio(m.range_db == r, format!("-{r} dB to 0 dB"))
+                    .clicked()
+                {
+                    m.range_db = r;
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Response", |ui| {
+            for r in Response::ALL {
+                if ui.radio(m.response == r, r.label()).clicked() {
+                    m.response = r;
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Peak Hold", |ui| {
+            for h in PeakHold::ALL {
+                if ui.radio(m.hold == h, h.label()).clicked() {
+                    m.hold = h;
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Meter Type", |ui| {
+            for k in MeterKind::ALL {
+                if ui.radio(m.kind == k, k.label()).clicked() {
+                    m.kind = k;
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.checkbox(&mut m.clip, "Show Clip Indicators");
+        ui.separator();
+        if ui.button("Reset Peak Hold and Clip Lights").clicked() {
+            st.levels.clear_clips();
+            st.levels.reset_holds(m.kind);
+            ui.close_menu();
+        }
+    });
+    if m != st.prefs.meters {
+        if m.kind != st.prefs.meters.kind {
+            st.levels.reset_holds(m.kind);
+        }
+        st.prefs.meters = m;
+        st.prefs.save();
     }
 }
 

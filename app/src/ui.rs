@@ -2660,7 +2660,7 @@ impl eframe::App for App {
             || !self.st.jobs.is_empty()
             || self.st.separation.job.is_some()
             || self.st.spectral_job.is_some()
-            || self.st.meter.0 > 0.001
+            || self.st.levels.active(&self.st.prefs.meters)
         {
             ctx.request_repaint();
         } else if fx.animating(&th)

@@ -23,6 +23,7 @@ mod hwcursor;
 mod inspector;
 mod keymap;
 mod lane_menu;
+mod meters;
 mod midi_in;
 mod mixing;
 mod multitrack;
