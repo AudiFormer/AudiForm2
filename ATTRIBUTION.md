@@ -8,6 +8,8 @@
 | NeuralAmpModelerCore (Steven Atkinson) | MIT | `crates/af27-fx/src/nam.rs` follows its model layout and uses its fast tanh approximation, to play `.nam` amp captures |
 | flacenc (Yotaro Kubo) | Apache-2.0 | The FLAC encoder behind `crates/af27-io/src/export/flac.rs` (a Cargo dependency, not copied code) |
 | Freeverb (Jezar at Dreampoint) | Public domain | The comb and allpass delay tunings in `crates/af27-dsp/src/reverb.rs` |
+| `asio-sys` (cpal project) | Apache-2.0 | ASIO driver access, only in builds with the `asio` feature |
+| Steinberg ASIO SDK | GPL-3.0 (Steinberg's GPLv3 option) | Compiled in only with the `asio` feature. ASIO is a trademark and software of Steinberg Media Technologies GmbH. |
 | `midly` (Negamartin) | Unlicense | Reading and writing `.mid` files (`crates/af27-interop/src/smf.rs`), as a crate dependency |
 | `rustysynth` (Nobuaki Tanaka) | MIT | SoundFont instruments (`crates/af27-engine/src/soundfont.rs`), as a crate dependency; its MIT notice must travel with release builds |
 | `embed-resource` (nabijaczleweli and others) | MIT | Builds the icon and version text into the Windows exe (`app/build.rs`); a build-time dependency only, nothing of it is in the program |

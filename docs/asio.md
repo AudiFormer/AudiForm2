@@ -8,11 +8,10 @@ ASIO drivers installed so the user can see why they are not offered.
 ## Before shipping a build with ASIO
 
 ASIO is Steinberg's. Building with it compiles part of Steinberg's ASIO
-SDK into the program. The SDK is offered under two licences: GPLv3, which
-AudiForm 2 cannot use (it is not GPL), and Steinberg's own proprietary
-licence. **Shipping a build with ASIO needs Steinberg's proprietary ASIO
-licence agreement**, signed by whoever publishes the build (see
-Steinberg's developer site). That decision is the project lead's.
+SDK into the program. The SDK is offered under two licences: GPLv3 and
+Steinberg's own proprietary licence. AudiForm 2 is GPL-3.0-or-later, so
+it uses the **GPLv3 option**: no separate agreement is needed, and builds
+with ASIO stay under the GPL like the rest of the program.
 
 Also, if ASIO ships:
 
@@ -22,7 +21,7 @@ Also, if ASIO ships:
 - Add `asio-sys` (Apache-2.0, part of the cpal project) to
   `ATTRIBUTION.md`; its notice travels with the build. It is a Cargo
   dependency only when the feature is on.
-- Do whatever else the signed Steinberg agreement asks (credits, notices).
+- Keep the SDK's GPLv3 notice with the build's licences.
 
 ## Building with ASIO
 
