@@ -12,11 +12,17 @@
 //! through small fixed-size commands, so a tweak never restarts a tail.
 //! Position, meters and the Phase Wheel's ring come back through atomics.
 
+mod asio;
 pub mod capture;
+pub mod devices;
+pub mod health;
 pub mod mix;
 pub mod pool;
+mod record;
+pub mod routing;
 pub mod scope;
 pub mod soundfont;
+mod stream;
 pub mod stretch;
 pub mod synth;
 pub mod transport;
@@ -28,10 +34,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use af27_core::AudioBuffer;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait};
 
 pub use capture::{AudioApp, CaptureSupport, OutputDevice, RecordSource};
+pub use devices::{DeviceInfo, DeviceList, HostKind, ASIO_BUILT};
 pub use mix::{space_gains, stereo_frame, track_gains, Mix, BLOCK, MAX_SPEAKERS};
+pub use routing::{InputPick, OutputMap};
 pub use transport::{Plan, Region};
 
 /// What the audio thread plays.
@@ -123,6 +131,8 @@ enum Cmd {
     },
     NoteOff(u8),
     AllNotesOff,
+    /// Where each channel goes on the device (handled by the callback).
+    Routes(routing::Routes),
 }
 
 /// What the audio thread hands back to be freed on the UI thread.
@@ -307,6 +317,8 @@ impl Voice {
                     a.all_off();
                 }
             }
+            // The device callback keeps the routes.
+            Cmd::Routes(_) => {}
         }
     }
 
@@ -403,7 +415,9 @@ impl Voice {
 }
 
 /// Adds the click (one value per frame) to the first two channels of
-/// interleaved `out`.
+/// interleaved `out` (the live engine maps the click with
+/// [`routing::add_clicks_at`]; kept for the click tests).
+#[cfg(test)]
 fn add_clicks(out: &mut [f32], channels: usize, clicks: &[f32]) {
     let ch = channels.max(1);
     for (f, c) in out.chunks_exact_mut(ch).zip(clicks) {
@@ -430,30 +444,40 @@ fn cross(t: &mut f64, playing: &mut bool, seam: f64, action: transport::Action) 
     }
 }
 
-/// Which devices to use, by name. None (or a name no longer present)
-/// means the system default.
+/// Which driver and devices to use. A device name that is None (or no
+/// longer present) means the system default.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeviceChoice {
+    /// The system's own driver, or ASIO.
+    pub host: HostKind,
+    /// The ASIO driver (None: the best guess among those installed).
+    pub asio_driver: Option<String>,
     pub output: Option<String>,
     pub input: Option<String>,
     /// Frames per audio callback; None lets the driver choose.
     pub buffer: Option<u32>,
+    /// The rate to run the device at; None keeps the device's own.
+    pub rate: Option<u32>,
+    /// Which outputs the stereo mix and 3D speakers play on.
+    pub map: OutputMap,
 }
 
-/// The output devices present now, by name.
+/// The system driver's output devices present now, by name.
 pub fn output_devices() -> Vec<String> {
-    cpal::default_host()
-        .output_devices()
-        .map(|it| it.filter_map(|d| d.name().ok()).collect())
-        .unwrap_or_default()
+    devices::list(HostKind::System, None, None)
+        .outputs
+        .into_iter()
+        .map(|d| d.name)
+        .collect()
 }
 
-/// The recording devices present now, by name.
+/// The system driver's recording devices present now, by name.
 pub fn input_devices() -> Vec<String> {
-    cpal::default_host()
-        .input_devices()
-        .map(|it| it.filter_map(|d| d.name().ok()).collect())
-        .unwrap_or_default()
+    devices::list(HostKind::System, None, None)
+        .inputs
+        .into_iter()
+        .map(|d| d.name)
+        .collect()
 }
 
 /// The system's default output and input device names.
@@ -465,19 +489,19 @@ pub fn default_devices() -> (Option<String>, Option<String>) {
     )
 }
 
-/// The driver layer in use ("WASAPI" on Windows).
+/// The system driver layer ("WASAPI" on Windows).
 pub fn driver_name() -> String {
-    format!("{:?}", cpal::default_host().id())
+    devices::system_name()
 }
 
 static INPUT_CHOICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// The recording device new recordings use (None: the system default).
 pub fn set_input_device(name: Option<String>) {
-    *INPUT_CHOICE.lock().unwrap() = name;
+    *INPUT_CHOICE.lock().unwrap_or_else(|e| e.into_inner()) = name;
 }
 
-fn find_output(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
+pub(crate) fn find_output(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     name.and_then(|n| {
         host.output_devices()
             .ok()?
@@ -486,8 +510,11 @@ fn find_output(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     .or_else(|| host.default_output_device())
 }
 
-fn find_input(host: &cpal::Host) -> Option<cpal::Device> {
-    let want = INPUT_CHOICE.lock().unwrap().clone();
+pub(crate) fn find_input(host: &cpal::Host) -> Option<cpal::Device> {
+    let want = INPUT_CHOICE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     want.and_then(|n| {
         host.input_devices()
             .ok()?
@@ -497,9 +524,15 @@ fn find_input(host: &cpal::Host) -> Option<cpal::Device> {
 }
 
 pub struct Engine {
-    _stream: cpal::Stream,
+    /// Dropped last, after the device has taken a few silent buffers.
+    stream: Option<cpal::Stream>,
     /// Set when the output device went away (unplugged) or failed.
     lost: Arc<AtomicBool>,
+    /// Set when the callback caught a panic.
+    fault: Arc<AtomicBool>,
+    hush: Arc<health::Hush>,
+    stats: Arc<health::CallbackStats>,
+    watchdog: health::Watchdog,
     /// The frames per callback asked for, if any.
     pub buffer: Option<u32>,
     tx: rtrb::Producer<Cmd>,
@@ -507,7 +540,35 @@ pub struct Engine {
     shared: Arc<Shared>,
     pub rate: u32,
     pub device: String,
-    recorders: Vec<Recorder>,
+    /// The driver layer in use (after any fallback).
+    pub host: HostKind,
+    /// "WASAPI", or "ASIO (SSL ASIO Driver)".
+    pub driver: String,
+    /// The device's output channels as opened.
+    pub channels: usize,
+    pub format: cpal::SampleFormat,
+    /// What the user should know about how the device opened: a fallback
+    /// to the system driver, a rate or buffer size it could not use.
+    pub note: Option<String>,
+    map: OutputMap,
+    layout: Option<af27_core::space::SpaceLayout>,
+    /// The ASIO driver's device, which recording must share.
+    asio_device: Option<cpal::Device>,
+    /// On ASIO: the driver as an input device, for the track input menus.
+    pub asio_inputs: Option<DeviceInfo>,
+    recorders: Vec<record::Recorder>,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Inputs first (on ASIO they share the driver), then end the
+        // output on silence before it closes.
+        self.recorders.clear();
+        if let Some(s) = self.stream.take() {
+            self.hush.settle();
+            drop(s);
+        }
+    }
 }
 
 impl Engine {
@@ -517,117 +578,67 @@ impl Engine {
     }
 
     /// Opens the chosen output device, or the system default when it is
-    /// not there.
+    /// not there (and the system driver when an ASIO driver will not open).
     pub fn open(choice: &DeviceChoice) -> Result<Engine, String> {
-        set_input_device(choice.input.clone());
-        let host = cpal::default_host();
-        let device = find_output(&host, choice.output.as_deref())
-            .ok_or("No audio output device was found.")?;
-        let name = device.name().unwrap_or_else(|_| "Output".into());
-        let config = device
-            .default_output_config()
-            .map_err(|e| format!("The output device gave no format: {e}"))?;
-        let rate = config.sample_rate().0;
-        let channels = config.channels() as usize;
-        scope::set_rate(rate);
-        let (tx, mut rx) = rtrb::RingBuffer::<Cmd>::new(1024);
-        let (mut trash_tx, trash) = rtrb::RingBuffer::<Garbage>::new(256);
-        let shared = Arc::new(Shared {
-            playing: AtomicBool::new(false),
-            pos: AtomicU64::new(0f64.to_bits()),
-            peak_l: AtomicU32::new(0),
-            peak_r: AtomicU32::new(0),
-        });
-        let sh = shared.clone();
-        let mut voice = Voice {
-            program: None,
-            audition: None,
-            playing: false,
-            t: 0.0,
-            plan: Plan::default(),
-            metro: Default::default(),
-            recording: false,
-            clicks: Some(vec![0.0; CLICK_FRAMES]),
-        };
-        let mut callback = move |out: &mut [f32]| {
-            while let Ok(cmd) = rx.pop() {
-                voice.apply(cmd, &mut trash_tx);
-            }
-            let (l, r) = voice.render(out, channels, rate as f64, false);
-            // Hand-played notes, heard whether or not the transport runs.
-            if let Some(a) = &mut voice.audition {
-                a.render(out, channels, 1.0 / rate as f64);
-            }
-            if voice.playing {
-                for f in out.chunks_exact(channels) {
-                    scope::push(f[0], if channels > 1 { f[1] } else { f[0] });
-                }
-            }
-            sh.playing.store(voice.playing, Ordering::Relaxed);
-            sh.pos.store(voice.t.to_bits(), Ordering::Relaxed);
-            store_max_f32(&sh.peak_l, l);
-            store_max_f32(&sh.peak_r, r);
-            // The click last: after the master fader, the meters and the
-            // scope, heard but never measured.
-            if let Some(c) = &voice.clicks {
-                add_clicks(out, channels, c);
-            }
-        };
-        let lost = Arc::new(AtomicBool::new(false));
-        let lost2 = lost.clone();
-        let err = move |e: cpal::StreamError| {
-            eprintln!("audio output error: {e}");
-            lost2.store(true, Ordering::Relaxed);
-        };
-        let mut cfg: cpal::StreamConfig = config.clone().into();
-        if let Some(n) = choice.buffer {
-            let n = match config.buffer_size() {
-                cpal::SupportedBufferSize::Range { min, max } => n.clamp(*min, *max),
-                cpal::SupportedBufferSize::Unknown => n,
-            };
-            cfg.buffer_size = cpal::BufferSize::Fixed(n);
-        }
-        let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                device.build_output_stream(&cfg, move |d: &mut [f32], _| callback(d), err, None)
-            }
-            cpal::SampleFormat::I16 => {
-                let mut tmp = vec![0.0f32; 1 << 16];
-                device.build_output_stream(
-                    &cfg,
-                    move |d: &mut [i16], _| {
-                        let n = d.len().min(tmp.len());
-                        callback(&mut tmp[..n]);
-                        for (o, s) in d.iter_mut().zip(&tmp[..n]) {
-                            *o = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                        }
-                    },
-                    err,
-                    None,
-                )
-            }
-            other => return Err(format!("Unsupported output sample format {other:?}.")),
-        }
-        .map_err(|e| format!("Could not open the audio output: {e}"))?;
-        stream
-            .play()
-            .map_err(|e| format!("Could not start audio: {e}"))?;
-        Ok(Engine {
-            _stream: stream,
-            lost,
-            buffer: choice.buffer,
-            tx,
-            trash,
-            shared,
-            rate,
-            device: name,
-            recorders: Vec::new(),
-        })
+        stream::open(choice)
     }
 
     /// The output device went away or failed: reopen (the default).
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Relaxed)
+    }
+
+    /// Call every frame: why the output should be opened again (gone,
+    /// failed, stopped calling back, or a fault on the audio thread).
+    pub fn check(&mut self, now: std::time::Instant) -> Option<String> {
+        if self.is_lost() {
+            health::log(&format!("play: \"{}\" went away or failed", self.device));
+            return Some("The audio device went away or failed.".into());
+        }
+        if self.fault.swap(false, Ordering::Relaxed) {
+            health::log("play: a fault on the audio thread (see the panic above)");
+            return Some("Playback stopped after a fault on the audio thread.".into());
+        }
+        let calls = self.stats.calls.load(Ordering::Relaxed);
+        if self.watchdog.stalled(calls, now) {
+            health::log(&format!(
+                "play: \"{}\" stopped calling back after {calls} buffers",
+                self.device
+            ));
+            return Some(format!("{} stopped asking for sound.", self.device));
+        }
+        None
+    }
+
+    /// The frames the device really asks for each callback, once it has.
+    pub fn real_buffer(&self) -> Option<u32> {
+        self.stats.buffer()
+    }
+
+    /// The channel map this output was opened with.
+    pub fn map(&self) -> &OutputMap {
+        &self.map
+    }
+
+    /// The 3D speaker layout of what plays (None: a stereo session), so
+    /// its speakers can go to their own outputs. Live.
+    pub fn set_layout(&mut self, layout: Option<af27_core::space::SpaceLayout>) {
+        if self.layout == layout {
+            return;
+        }
+        self.layout = layout;
+        let names: Option<Vec<&str>> =
+            layout.map(|l| af27_space::speakers(l).iter().map(|s| s.name).collect());
+        let r = self.map.routes(names.as_deref());
+        self.send(Cmd::Routes(r));
+    }
+
+    /// Speakers (or "Left"/"Right") this device has no output for.
+    pub fn unplayable(&self) -> Vec<String> {
+        let names: Option<Vec<&str>> = self
+            .layout
+            .map(|l| af27_space::speakers(l).iter().map(|s| s.name).collect());
+        self.map.unplayable(names.as_deref(), self.channels)
     }
 
     fn send(&mut self, c: Cmd) {
@@ -822,16 +833,11 @@ impl Engine {
     }
 
     /// Records each source at once (a game on one track, a voice chat on
-    /// another). All or nothing: if one fails to open, none run.
+    /// another, channels 1 and 2 of an interface on two more). Sources on
+    /// one input device share one stream. All or nothing: if one fails to
+    /// open, none run.
     pub fn start_recording_from(&mut self, sources: &[RecordSource]) -> Result<(), String> {
-        let mut recs = Vec::with_capacity(sources.len());
-        for s in sources {
-            let r = Recorder::new(s).map_err(|e| match s {
-                RecordSource::Input => e,
-                _ => format!("{}: {e}", s.label()),
-            })?;
-            recs.push(r);
-        }
+        let recs = record::open_all(sources, self.host, self.asio_device.as_ref())?;
         self.recorders = recs;
         self.send(Cmd::Recording(true));
         Ok(())
@@ -844,7 +850,7 @@ impl Engine {
     pub fn recording_len_secs(&self) -> f64 {
         self.recorders
             .iter()
-            .map(|r| r.data.len() as f64 / (r.channels.max(1) as f64 * r.rate.max(1) as f64))
+            .map(|r| r.len_secs())
             .fold(0.0, f64::max)
     }
 
@@ -855,7 +861,8 @@ impl Engine {
             .fold(0.0, f32::max)
     }
 
-    /// Problems a running capture hit (a device went away), taken once.
+    /// Problems a running capture hit (a device went away, restarted or
+    /// changed its rate), each taken once.
     pub fn take_recording_errors(&mut self) -> Vec<String> {
         self.recorders
             .iter_mut()
@@ -872,10 +879,7 @@ impl Engine {
     /// they were given.
     pub fn stop_recording_all(&mut self) -> Vec<Take> {
         self.send(Cmd::Recording(false));
-        std::mem::take(&mut self.recorders)
-            .into_iter()
-            .map(Recorder::finish)
-            .collect()
+        record::finish_all(std::mem::take(&mut self.recorders))
     }
 }
 
@@ -1020,139 +1024,6 @@ pub fn render(program: Program, rate: u32, from: f64, to: f64) -> AudioBuffer {
 /// Offline mixdown of a 3D session's speaker bed, one channel per speaker.
 pub fn render_bed(program: Program, rate: u32, from: f64, to: f64) -> AudioBuffer {
     render_with(program, rate, from, to, true)
-}
-
-enum Backend {
-    Device(#[allow(dead_code)] cpal::Stream),
-    Loopback(capture::LoopbackCapture),
-}
-
-struct Recorder {
-    backend: Backend,
-    source: RecordSource,
-    rx: rtrb::Consumer<f32>,
-    data: Vec<f32>,
-    rate: u32,
-    channels: usize,
-    peak: Arc<AtomicU32>,
-    errors: Vec<String>,
-}
-
-impl Recorder {
-    fn new(source: &RecordSource) -> Result<Recorder, String> {
-        if source.is_system() {
-            Self::loopback(source)
-        } else {
-            Self::input()
-        }
-    }
-
-    fn loopback(source: &RecordSource) -> Result<Recorder, String> {
-        // Ten seconds of 192 kHz stereo: the UI drains every frame.
-        let (tx, rx) = rtrb::RingBuffer::<f32>::new(192_000 * 2 * 10);
-        let peak = Arc::new(AtomicU32::new(0));
-        let cap = capture::LoopbackCapture::open(source, tx, peak.clone())?;
-        Ok(Recorder {
-            rate: cap.rate,
-            channels: 2,
-            backend: Backend::Loopback(cap),
-            source: source.clone(),
-            rx,
-            data: Vec::new(),
-            peak,
-            errors: Vec::new(),
-        })
-    }
-
-    fn input() -> Result<Recorder, String> {
-        let host = cpal::default_host();
-        let device = find_input(&host).ok_or("No recording device was found.")?;
-        let config = device
-            .default_input_config()
-            .map_err(|e| format!("The recording device gave no format: {e}"))?;
-        let rate = config.sample_rate().0;
-        let channels = (config.channels() as usize).max(1);
-        let (mut tx, rx) = rtrb::RingBuffer::<f32>::new(rate as usize * channels * 10);
-        let peak = Arc::new(AtomicU32::new(0));
-        let pk = peak.clone();
-        let cfg: cpal::StreamConfig = config.clone().into();
-        let err = |e| eprintln!("audio input error: {e}");
-        let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => device.build_input_stream(
-                &cfg,
-                move |d: &[f32], _| {
-                    let mut m = 0.0f32;
-                    for &s in d {
-                        m = m.max(s.abs());
-                        let _ = tx.push(s);
-                    }
-                    store_max_f32(&pk, m);
-                },
-                err,
-                None,
-            ),
-            cpal::SampleFormat::I16 => device.build_input_stream(
-                &cfg,
-                move |d: &[i16], _| {
-                    let mut m = 0.0f32;
-                    for &s in d {
-                        let v = s as f32 / 32768.0;
-                        m = m.max(v.abs());
-                        let _ = tx.push(v);
-                    }
-                    store_max_f32(&pk, m);
-                },
-                err,
-                None,
-            ),
-            other => return Err(format!("Unsupported input sample format {other:?}.")),
-        }
-        .map_err(|e| format!("Could not open the recording device: {e}"))?;
-        stream
-            .play()
-            .map_err(|e| format!("Could not start recording: {e}"))?;
-        Ok(Recorder {
-            backend: Backend::Device(stream),
-            source: RecordSource::Input,
-            rx,
-            data: Vec::new(),
-            rate,
-            channels,
-            peak,
-            errors: Vec::new(),
-        })
-    }
-
-    fn drain(&mut self) {
-        while let Ok(s) = self.rx.pop() {
-            self.data.push(s);
-        }
-    }
-
-    fn take_error(&mut self) -> Option<String> {
-        match &self.backend {
-            Backend::Loopback(c) => c.take_error().inspect(|e| self.errors.push(e.clone())),
-            Backend::Device(_) => None,
-        }
-    }
-
-    fn finish(mut self) -> Take {
-        let mut note = None;
-        if let Backend::Loopback(c) = &mut self.backend {
-            c.stop();
-            note = c.note.clone();
-        }
-        let _ = self.take_error();
-        self.drain();
-        if let Some(e) = self.errors.last() {
-            note = Some(e.clone());
-        }
-        Take {
-            buf: AudioBuffer::from_interleaved(self.rate, self.channels, &self.data),
-            source: self.source,
-            note,
-        }
-    }
 }
 
 #[cfg(test)]

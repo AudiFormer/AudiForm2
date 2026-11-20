@@ -71,3 +71,13 @@ file is the record of how every part of Audiform27 was sourced.
   `af27-dsp::live`, the pair wrapper in `af27-dsp::wide`).
 - VST3 hosting (`plughost/`): the lead's own work, but its tests were
   touched by AAE's merge. To be ported separately with those tests left out.
+
+## Written fresh from a description
+
+- Audio device I/O (`af27-engine`: `devices.rs`, `asio.rs`, `stream.rs`,
+  `record.rs`, `routing.rs`, `health.rs`; the Audio Devices and Channel
+  Routing settings pages). Written for Audiform27 from the project lead's
+  handoff notes on how Audiform's device I/O behaved on real hardware
+  (driver picking, ending streams on silence, stalls, channel maps). No
+  code from Audiform or from its patched cpal was used. ASIO goes through
+  upstream `cpal` and `asio-sys` (Apache-2.0) unchanged; see `asio.md`.

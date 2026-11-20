@@ -96,48 +96,92 @@ pub struct Prefs {
     pub metronome: af27_core::midi::MetronomeSettings,
 }
 
-/// Settings > Audio Devices.
+/// Settings > Audio Devices and Settings > Channel Routing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioPrefs {
-    /// Play through this device (None: the system default).
+    /// The system's own driver, or ASIO.
+    pub host: af27_engine::HostKind,
+    /// The ASIO driver (None: the best guess among those installed).
+    pub asio_driver: Option<String>,
+    /// Play through this device (None: the system default). System
+    /// driver only: on ASIO the driver is the device.
     pub output: Option<String>,
     /// Record from this device (None: the system default).
     pub input: Option<String>,
     /// Frames per audio buffer (None: the driver's own).
     pub buffer: Option<u32>,
+    /// Sample rate to run the device at (None: the device's own).
+    pub rate: Option<u32>,
+    /// Which outputs the stereo mix and 3D speakers play on.
+    pub map: af27_engine::OutputMap,
 }
 
 impl AudioPrefs {
     pub fn choice(&self) -> af27_engine::DeviceChoice {
         af27_engine::DeviceChoice {
+            host: self.host,
+            asio_driver: self.asio_driver.clone(),
             output: self.output.clone(),
             input: self.input.clone(),
             buffer: self.buffer,
+            rate: self.rate,
+            map: self.map.clone(),
         }
     }
 }
 
-/// The devices found, listed once when the page opens (and on Refresh).
-#[derive(Clone, Default)]
-struct DeviceList {
-    outputs: Vec<String>,
-    inputs: Vec<String>,
-    default_out: Option<String>,
-    default_in: Option<String>,
-    driver: String,
+/// What a device listing is for: the driver, the ASIO driver, and the
+/// output whose rates and buffer sizes are shown.
+type ScanKey = (af27_engine::HostKind, Option<String>, Option<String>);
+
+fn scan_key(a: &AudioPrefs) -> ScanKey {
+    match a.host {
+        af27_engine::HostKind::System => (a.host, None, a.output.clone()),
+        af27_engine::HostKind::Asio => (a.host, a.asio_driver.clone(), None),
+    }
 }
 
-impl DeviceList {
-    fn scan() -> DeviceList {
-        let (default_out, default_in) = af27_engine::default_devices();
-        DeviceList {
-            outputs: af27_engine::output_devices(),
-            inputs: af27_engine::input_devices(),
-            default_out,
-            default_in,
-            driver: af27_engine::driver_name(),
+/// The devices found for one driver choice: listed when the page opens,
+/// again whenever the driver changes (the lists follow it), and on
+/// Refresh.
+#[derive(Clone)]
+struct Scan {
+    key: ScanKey,
+    list: af27_engine::DeviceList,
+    /// The newest listing came back empty for the same driver (one busy
+    /// for a moment, or just restarted); this is the last one that had
+    /// devices.
+    stale: bool,
+}
+
+fn has_devices(l: &af27_engine::DeviceList) -> bool {
+    !l.outputs.is_empty() || !l.inputs.is_empty()
+}
+
+/// A new listing, keeping the previous one's devices when the new one is
+/// empty for the same driver.
+fn merge_scan(prev: Option<&Scan>, key: ScanKey, list: af27_engine::DeviceList) -> Scan {
+    match prev {
+        Some(p)
+            if p.key.0 == key.0
+                && p.key.1 == key.1
+                && !has_devices(&list)
+                && has_devices(&p.list) =>
+        {
+            let mut kept = p.list.clone();
+            kept.error = list.error;
+            Scan {
+                key,
+                list: kept,
+                stale: true,
+            }
         }
+        _ => Scan {
+            key,
+            list,
+            stale: false,
+        },
     }
 }
 
@@ -251,7 +295,9 @@ struct Draft {
     intro: bool,
     realistic: bool,
     workspace: Workspace,
-    devices: Option<DeviceList>,
+    devices: Option<Scan>,
+    /// The layout Channel Routing shows speakers for.
+    routing_layout: Option<af27_core::space::SpaceLayout>,
     act: Option<PageAct>,
 }
 
@@ -269,6 +315,7 @@ impl Draft {
             realistic: st.theme.realistic,
             workspace: st.workspace,
             devices: None,
+            routing_layout: None,
             act: None,
         }
     }
@@ -302,7 +349,13 @@ impl Draft {
                 self.prefs.copy_on_save = d.copy_on_save;
             }
             "Effects" => self.prefs.show_effects_on_pick = d.show_effects_on_pick,
-            "Audio Devices" => self.prefs.audio = d.audio.clone(),
+            "Audio Devices" => {
+                // The channel map has its own page.
+                let map = self.prefs.audio.map.clone();
+                self.prefs.audio = d.audio.clone();
+                self.prefs.audio.map = map;
+            }
+            "Channel Routing" => self.prefs.audio.map = d.audio.map.clone(),
             "Playback and Recording" => {
                 self.prefs.space_returns = d.space_returns;
                 self.prefs.follow_playhead = d.follow_playhead;
@@ -470,7 +523,9 @@ impl SettingsUi {
                     });
             });
         match draft.act.take() {
-            Some(PageAct::RefreshDevices) => draft.devices = Some(DeviceList::scan()),
+            Some(PageAct::RefreshDevices) => {
+                ensure_scan(&mut draft, st, true);
+            }
             Some(PageAct::ReloadThemes) => {
                 st.themes = crate::theme::load_all(&crate::theme::user_dir());
             }
@@ -550,6 +605,7 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
         }
         "Appearance" => appearance(ui, d, st, th),
         "Audio Devices" => audio_devices(ui, d, st, th),
+        "Channel Routing" => channel_routing(ui, d, st, th),
         "Autosave" => {
             group(ui, th, "Autosave", |ui| {
                 ui.checkbox(
@@ -708,71 +764,213 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
     }
 }
 
+/// The device listing for the draft's driver choice, listing again when
+/// the choice changed (or `force`). An ASIO driver other than the one
+/// playing is not loaded just to list it (a process can hold one driver):
+/// it is listed once Apply has switched to it.
+fn ensure_scan(d: &mut Draft, st: &State, force: bool) -> Scan {
+    use af27_engine::HostKind;
+    let key = scan_key(&d.prefs.audio);
+    let fresh = d.devices.as_ref().is_some_and(|s| s.key == key);
+    if force || !fresh {
+        let busy_with = st
+            .engine
+            .as_ref()
+            .filter(|e| e.host == HostKind::Asio && key.0 == HostKind::Asio)
+            .map(|e| e.device.clone());
+        let wanted = (key.0 == HostKind::Asio)
+            .then(|| {
+                af27_engine::devices::pick_driver(
+                    &af27_engine::devices::asio_drivers(),
+                    key.1.as_deref(),
+                )
+            })
+            .flatten();
+        let list = match (busy_with, wanted) {
+            (Some(open), Some(w)) if open != w => af27_engine::DeviceList {
+                host: HostKind::Asio,
+                driver: format!("ASIO ({w})"),
+                asio_drivers: af27_engine::devices::asio_drivers(),
+                asio_driver: Some(w.clone()),
+                error: Some(format!(
+                    "{open} is in use. Press Apply to switch to {w}; its inputs and outputs \
+                     are listed once it is open."
+                )),
+                ..Default::default()
+            },
+            _ => af27_engine::devices::list(key.0, key.1.as_deref(), key.2.as_deref()),
+        };
+        d.devices = Some(merge_scan(d.devices.as_ref(), key, list));
+    }
+    d.devices.clone().unwrap_or(Scan {
+        key: scan_key(&d.prefs.audio),
+        list: Default::default(),
+        stale: false,
+    })
+}
+
 /// Settings > Audio Devices: the driver, what plays and records, the
-/// buffer, and what is open now.
+/// sample rate and buffer, what is open now, and the audio log.
 fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
-    let list = d.devices.get_or_insert_with(DeviceList::scan).clone();
+    use af27_engine::HostKind;
+    let scan = ensure_scan(d, st, false);
+    let list = &scan.list;
     let a = &mut d.prefs.audio;
+    let row = |ui: &mut egui::Ui, label: &str| {
+        ui.add_sized(vec2(118.0, 20.0), egui::Label::new(label));
+    };
     let pick = |ui: &mut egui::Ui,
                 id: &str,
                 label: &str,
                 cur: &mut Option<String>,
-                all: &[String],
-                default: &Option<String>| {
+                all: &[af27_engine::DeviceInfo],
+                default: &Option<String>,
+                dir: &str| {
         let dflt = format!(
             "System default ({})",
             default.clone().unwrap_or_else(|| "none".into())
         );
         let shown = match cur {
             None => dflt.clone(),
-            Some(n) if all.contains(n) => n.clone(),
+            Some(n) if all.iter().any(|x| &x.name == n) => n.clone(),
             Some(n) => format!("{n} (not connected)"),
         };
         ui.horizontal(|ui| {
-            ui.add_sized(vec2(118.0, 20.0), egui::Label::new(label));
+            row(ui, label);
             egui::ComboBox::from_id_salt(id)
                 .selected_text(shown)
                 .width(380.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(cur, None, dflt);
-                    for n in all {
-                        ui.selectable_value(cur, Some(n.clone()), n);
+                    for x in all {
+                        let text = format!("{}  ({} {dir})", x.name, x.channels);
+                        ui.selectable_value(cur, Some(x.name.clone()), text);
                     }
                 });
         });
     };
+    let mut refresh = false;
     group(ui, th, "Audio hardware", |ui| {
+        let system = format!("System ({})", af27_engine::driver_name());
         ui.horizontal(|ui| {
-            ui.add_sized(vec2(118.0, 20.0), egui::Label::new("Device class"));
+            row(ui, "Driver");
+            let shown = match a.host {
+                HostKind::System => system.clone(),
+                HostKind::Asio if af27_engine::ASIO_BUILT => "ASIO".to_string(),
+                HostKind::Asio => "ASIO (not in this build)".to_string(),
+            };
             egui::ComboBox::from_id_salt("settings-driver")
-                .selected_text(format!("System ({})", list.driver))
+                .selected_text(shown)
                 .width(380.0)
                 .show_ui(ui, |ui| {
-                    let _ = ui.selectable_label(true, format!("System ({})", list.driver));
-                    ui.add_enabled(
-                        false,
-                        egui::SelectableLabel::new(false, "ASIO (not in this build)"),
-                    );
+                    ui.selectable_value(&mut a.host, HostKind::System, system.as_str());
+                    if af27_engine::ASIO_BUILT {
+                        ui.selectable_value(&mut a.host, HostKind::Asio, "ASIO");
+                    } else {
+                        ui.add_enabled(
+                            false,
+                            egui::SelectableLabel::new(false, "ASIO (not in this build)"),
+                        )
+                        .on_disabled_hover_text(af27_engine::devices::NO_ASIO);
+                    }
                 });
         });
-        pick(
-            ui,
-            "settings-out",
-            "Default output",
-            &mut a.output,
-            &list.outputs,
-            &list.default_out,
-        );
-        pick(
-            ui,
-            "settings-in",
-            "Default input",
-            &mut a.input,
-            &list.inputs,
-            &list.default_in,
-        );
+        if !af27_engine::ASIO_BUILT {
+            let names = &list.asio_drivers;
+            if !names.is_empty() {
+                note(
+                    ui,
+                    th,
+                    &format!(
+                        "ASIO drivers on this computer: {}. This build of AudiForm 2 was made \
+                         without ASIO, so it plays and records through {} instead.",
+                        names.join(", "),
+                        af27_engine::driver_name()
+                    ),
+                );
+            }
+        }
+        if a.host == HostKind::Asio {
+            ui.horizontal(|ui| {
+                row(ui, "ASIO driver");
+                let guess = af27_engine::devices::pick_driver(&list.asio_drivers, None);
+                let auto = format!(
+                    "Automatic ({})",
+                    guess.unwrap_or_else(|| "none installed".into())
+                );
+                let shown = match &a.asio_driver {
+                    None => auto.clone(),
+                    Some(n) if list.asio_drivers.contains(n) => n.clone(),
+                    Some(n) => format!("{n} (not installed)"),
+                };
+                egui::ComboBox::from_id_salt("settings-asio-driver")
+                    .selected_text(shown)
+                    .width(380.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut a.asio_driver, None, auto)
+                            .on_hover_text("The interface's own driver, passing over wrappers such as ASIO4ALL and virtual cables");
+                        for n in &list.asio_drivers {
+                            ui.selectable_value(&mut a.asio_driver, Some(n.clone()), n);
+                        }
+                    });
+            });
+            match (list.outputs.first(), list.inputs.first()) {
+                (None, None) => {}
+                (o, i) => info(
+                    ui,
+                    th,
+                    "Plays and records through",
+                    &format!(
+                        "{} ({} out, {} in)",
+                        list.asio_driver.clone().unwrap_or_default(),
+                        o.map_or(0, |x| x.channels),
+                        i.map_or(0, |x| x.channels)
+                    ),
+                ),
+            }
+        } else {
+            pick(
+                ui,
+                "settings-out",
+                "Default output",
+                &mut a.output,
+                &list.outputs,
+                &list.default_out,
+                "out",
+            );
+            pick(
+                ui,
+                "settings-in",
+                "Default input",
+                &mut a.input,
+                &list.inputs,
+                &list.default_in,
+                "in",
+            );
+        }
         ui.horizontal(|ui| {
-            ui.add_sized(vec2(118.0, 20.0), egui::Label::new("Buffer size"));
+            row(ui, "Sample rate");
+            let own = format!(
+                "Device's own{}",
+                list.rate.map_or(String::new(), |r| format!(" ({r} Hz)"))
+            );
+            let shown = match a.rate {
+                None => own.clone(),
+                Some(r) if list.rates.is_empty() || list.rates.contains(&r) => format!("{r} Hz"),
+                Some(r) => format!("{r} Hz (not offered)"),
+            };
+            egui::ComboBox::from_id_salt("settings-rate")
+                .selected_text(shown)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut a.rate, None, own);
+                    for &r in &list.rates {
+                        ui.selectable_value(&mut a.rate, Some(r), format!("{r} Hz"));
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            row(ui, "Buffer size");
             let shown = match a.buffer {
                 None => "Driver's own".to_string(),
                 Some(n) => format!("{n} samples"),
@@ -782,22 +980,39 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                 .width(160.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut a.buffer, None, "Driver's own");
-                    for n in [64u32, 128, 256, 512, 1024, 2048] {
+                    for n in af27_engine::devices::buffer_choices(list.buffer_range) {
                         ui.selectable_value(&mut a.buffer, Some(n), format!("{n} samples"));
                     }
                 });
-            if let (Some(n), Some(e)) = (a.buffer, &st.engine) {
+            let rate = a.rate.or(st.engine.as_ref().map(|e| e.rate)).or(list.rate);
+            if let (Some(n), Some(r)) = (a.buffer, rate) {
                 ui.label(
-                    RichText::new(format!("{:.1} ms", n as f64 * 1000.0 / e.rate as f64))
+                    RichText::new(format!("{:.1} ms", af27_engine::devices::latency_ms(n, r)))
                         .color(c(th.text_dim)),
                 );
             }
         });
-        note(ui, th, "If a chosen device is unplugged, the system default plays instead, and the chosen one is used again once it is back and you press Apply. Tracks pick their own inputs in the track header.");
+        if let Some((lo, hi)) = list.buffer_range {
+            note(
+                ui,
+                th,
+                &format!("The device takes buffers from {lo} to {hi} samples."),
+            );
+        }
+        if let Some(e) = &list.error {
+            ui.label(RichText::new(e).color(c(th.accent_alt)));
+        }
+        if scan.stale {
+            note(ui, th, "The device list came back empty just now (a driver busy for a moment?), so the last list found is shown. Press Refresh Devices to look again.");
+        }
+        note(ui, th, match a.host {
+            HostKind::System => "If a chosen device is unplugged, the system default plays instead, and the chosen one is used again once it is back and you press Apply. Tracks pick their own inputs, down to single channels, in the track header.",
+            HostKind::Asio => "Only the chosen ASIO driver is loaded. Most drivers serve one program at a time: if the driver is busy, AudiForm 2 plays through the system driver and says so. Tracks pick the driver's channels in the track header.",
+        });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui.button("Refresh Devices").clicked() {
-                d.act = Some(PageAct::RefreshDevices);
+                refresh = true;
             }
             if ui.button("Open System Sound Settings").clicked() {
                 let _ = std::process::Command::new("explorer")
@@ -806,24 +1021,206 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
             }
         });
     });
+    if refresh {
+        d.act = Some(PageAct::RefreshDevices);
+    }
     group(ui, th, "Open now", |ui| {
         match (&st.engine, &st.engine_error) {
             (Some(e), _) => {
                 info(ui, th, "Playing through", &e.device);
-                info(ui, th, "Sample rate", &format!("{} Hz", e.rate));
+                info(ui, th, "Driver", &e.driver);
                 info(
                     ui,
                     th,
-                    "Buffer",
-                    &e.buffer
-                        .map_or("Driver's own".to_string(), |n| format!("{n} samples")),
+                    "Format",
+                    &format!("{} Hz, {} channels, {:?}", e.rate, e.channels, e.format),
                 );
+                let asked = e
+                    .buffer
+                    .map_or("driver's own".to_string(), |n| format!("{n} samples"));
+                let real = e.real_buffer().map_or(String::new(), |n| {
+                    format!(
+                        "; the device asks for {n} ({:.1} ms)",
+                        af27_engine::devices::latency_ms(n, e.rate)
+                    )
+                });
+                info(ui, th, "Buffer", &format!("{asked}{real}"));
+                let session = st.session.rate;
+                if session > 0 && session != e.rate {
+                    note(ui, th, &format!("This session is {session} Hz and the device runs at {} Hz: playback is converted as it plays, and recordings are converted to the session's rate. Pick {session} Hz above to play it unconverted, if the device offers it.", e.rate));
+                }
+                if let Some(n) = &e.note {
+                    ui.label(RichText::new(n).color(c(th.accent_alt)));
+                }
+                let lost = e.unplayable();
+                if !lost.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "This device has no output for: {}. See Channel Routing.",
+                            lost.join(", ")
+                        ))
+                        .color(c(th.accent_alt)),
+                    );
+                }
             }
             (None, Some(err)) => {
                 ui.label(RichText::new(err).color(c(th.accent_alt)));
             }
             _ => note(ui, th, "No audio output is open."),
         }
+    });
+    group(ui, th, "Audio log", |ui| {
+        let p = af27_engine::health::log_path().unwrap_or_else(|| data_dir().join("audio.log"));
+        ui.label(RichText::new(p.display().to_string()).monospace());
+        note(ui, th, "Each stream opened (driver, device, rate, channels, buffer), device errors and restarts are written here. Attach it when reporting an audio problem.");
+        if ui.button("Copy Path").clicked() {
+            ui.ctx().copy_text(p.display().to_string());
+        }
+    });
+}
+
+/// Settings > Channel Routing: which device outputs the stereo mix plays
+/// on, and where each speaker of a 3D Space session goes.
+fn channel_routing(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
+    use af27_core::space::SpaceLayout;
+    let scan = ensure_scan(d, st, false);
+    let a = &d.prefs.audio;
+    // Outputs the device offers: the chosen output's widest config.
+    let listed = match a.host {
+        af27_engine::HostKind::Asio => scan.list.outputs.first(),
+        af27_engine::HostKind::System => a
+            .output
+            .as_deref()
+            .and_then(|n| scan.list.output(n))
+            .or_else(|| {
+                scan.list
+                    .default_out
+                    .as_deref()
+                    .and_then(|n| scan.list.output(n))
+            }),
+    };
+    let width = listed
+        .map(|x| usize::from(x.channels))
+        .or(st.engine.as_ref().map(|e| e.channels))
+        .unwrap_or(2)
+        .max(1);
+    let layout = *d
+        .routing_layout
+        .get_or_insert(st.session.space.unwrap_or(SpaceLayout::Surround714));
+    let m = &mut d.prefs.audio.map;
+    let out_name = |o: usize| format!("Output {}", o + 1);
+    let output_box = |ui: &mut egui::Ui, id: String, cur: &mut u16| {
+        let shown = if usize::from(*cur) < width {
+            out_name(usize::from(*cur))
+        } else {
+            format!("{} (not on this device)", out_name(usize::from(*cur)))
+        };
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(shown)
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                for o in 0..width.max(usize::from(*cur) + 1) {
+                    ui.selectable_value(cur, o as u16, out_name(o));
+                }
+            });
+    };
+    group(ui, th, "Stereo output", |ui| {
+        for (side, k) in [("Left", 0), ("Right", 1)] {
+            ui.horizontal(|ui| {
+                ui.add_sized(vec2(118.0, 20.0), egui::Label::new(side));
+                output_box(ui, format!("route-stereo-{k}"), &mut m.stereo[k]);
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.add_sized(vec2(118.0, 20.0), egui::Label::new(""));
+            let mut p = 0;
+            while p + 1 < width.min(16) {
+                if ui
+                    .small_button(format!("{}-{}", p + 1, p + 2))
+                    .on_hover_text("Both sides to this pair")
+                    .clicked()
+                {
+                    m.stereo = [p as u16, p as u16 + 1];
+                }
+                p += 2;
+            }
+        });
+        note(ui, th, &format!(
+            "Playback, hand-played notes and the metronome play on this pair. The device has {width} output{} as listed; outputs nothing is sent to stay silent. A mono device gets left and right summed.",
+            if width == 1 { "" } else { "s" }
+        ));
+    });
+    group(ui, th, "3D Space speakers", |ui| {
+        ui.checkbox(
+            &mut m.speakers_out,
+            "Send each speaker of a 3D Space session to its own output (for a speaker rig)",
+        );
+        note(ui, th, "Off: 3D sessions are heard on the stereo pair, binaurally or folded (as chosen in the 3D Space panel). On: the device opens with all its outputs; meters and the Phase Wheel still show left and right.");
+        ui.add_enabled_ui(m.speakers_out, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_sized(vec2(118.0, 20.0), egui::Label::new("Layout"));
+                egui::ComboBox::from_id_salt("route-layout")
+                    .selected_text(layout.label())
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        for l in SpaceLayout::ALL {
+                            ui.selectable_value(&mut d.routing_layout, Some(l), l.label());
+                        }
+                    });
+                if st.session.space == Some(layout) {
+                    ui.label(RichText::new("(this session's)").color(c(th.text_dim)));
+                }
+            });
+            let names: Vec<&str> = af27_space::speakers(layout)
+                .iter()
+                .map(|s| s.name)
+                .collect();
+            egui::Grid::new("route-speakers")
+                .num_columns(2)
+                .spacing(vec2(10.0, 4.0))
+                .show(ui, |ui| {
+                    for (k, name) in names.iter().enumerate() {
+                        ui.label(*name);
+                        let cur = m.speakers.get(*name).copied();
+                        let by_place = format!("By place ({})", out_name(k));
+                        let shown = match cur {
+                            None => by_place.clone(),
+                            Some(o) if usize::from(o) < width => out_name(usize::from(o)),
+                            Some(o) => format!("{} (not on this device)", out_name(usize::from(o))),
+                        };
+                        let mut pick = cur;
+                        egui::ComboBox::from_id_salt(format!("route-spk-{name}"))
+                            .selected_text(shown)
+                            .width(170.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut pick, None, by_place);
+                                for o in 0..width {
+                                    ui.selectable_value(&mut pick, Some(o as u16), out_name(o));
+                                }
+                            });
+                        if pick != cur {
+                            match pick {
+                                Some(o) => m.speakers.insert(name.to_string(), o),
+                                None => m.speakers.remove(*name),
+                            };
+                        }
+                        ui.end_row();
+                    }
+                });
+            let lost = m.unplayable(Some(&names), width);
+            if !lost.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "Not heard on this device ({width} outputs): {}.",
+                        lost.join(", ")
+                    ))
+                    .color(c(th.accent_alt)),
+                );
+            }
+            if ui.button("Every speaker by place").clicked() {
+                m.speakers.clear();
+            }
+        });
     });
 }
 
@@ -1265,4 +1662,78 @@ fn waiting(ui: &mut egui::Ui, th: &Theme) {
         egui::Button::new(RichText::new("Press keys...").color(c(th.background)))
             .fill(c(th.accent)),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use af27_engine::{DeviceInfo, DeviceList, HostKind};
+
+    fn listing(outs: &[&str]) -> DeviceList {
+        DeviceList {
+            outputs: outs
+                .iter()
+                .map(|n| DeviceInfo {
+                    name: n.to_string(),
+                    channels: 2,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_list_that_has_items_is_kept_when_the_driver_comes_back_empty() {
+        let key: ScanKey = (HostKind::Asio, Some("SSL ASIO Driver".into()), None);
+        let first = merge_scan(None, key.clone(), listing(&["SSL ASIO Driver"]));
+        assert!(!first.stale);
+        let mut empty = listing(&[]);
+        empty.error = Some("busy".into());
+        let again = merge_scan(Some(&first), key.clone(), empty.clone());
+        assert!(again.stale);
+        assert_eq!(again.list.outputs.len(), 1);
+        assert_eq!(again.list.error.as_deref(), Some("busy"));
+        // Another driver: its own (empty) list, not the old one.
+        let other: ScanKey = (HostKind::Asio, Some("Focusrite USB ASIO".into()), None);
+        let switched = merge_scan(Some(&first), other, empty);
+        assert!(!switched.stale);
+        assert!(switched.list.outputs.is_empty());
+        // A fresh list with devices replaces the old one.
+        let fresh = merge_scan(Some(&again), key, listing(&["A", "B"]));
+        assert!(!fresh.stale);
+        assert_eq!(fresh.list.outputs.len(), 2);
+    }
+
+    #[test]
+    fn device_lists_follow_the_driver() {
+        let mut a = AudioPrefs {
+            output: Some("Speakers".into()),
+            asio_driver: Some("SSL ASIO Driver".into()),
+            ..Default::default()
+        };
+        // The system driver lists by output; the ASIO driver name is moot.
+        assert_eq!(
+            scan_key(&a),
+            (HostKind::System, None, Some("Speakers".into()))
+        );
+        a.host = HostKind::Asio;
+        assert_eq!(
+            scan_key(&a),
+            (HostKind::Asio, Some("SSL ASIO Driver".into()), None)
+        );
+    }
+
+    #[test]
+    fn old_audio_prefs_still_load() {
+        let old = r#"{"output":"Speakers","input":null,"buffer":256}"#;
+        let a: AudioPrefs = serde_json::from_str(old).unwrap();
+        assert_eq!(a.host, HostKind::System);
+        assert_eq!(a.buffer, Some(256));
+        assert_eq!(a.map, af27_engine::OutputMap::default());
+        let back: AudioPrefs = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back, a);
+        let c = a.choice();
+        assert_eq!(c.output.as_deref(), Some("Speakers"));
+        assert_eq!(c.rate, None);
+    }
 }

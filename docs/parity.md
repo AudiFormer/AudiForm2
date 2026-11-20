@@ -92,7 +92,7 @@ our own feature names.
 - ⬜ Live loudness meter · ⬜ FFT settings (size, window, scale)
 
 ## Recording and the rest
-- 🟡 Recording: default input into a new file or onto an armed track ✅; device picker, ASIO, punch-in ⬜
+- 🟡 Recording: default input into a new file or onto an armed track ✅; device and driver picker, per-channel track inputs, output channel map ✅; ASIO behind the off-by-default `asio` feature (docs/asio.md) 🟡; punch-in ⬜
 - ⬜ Batch processing · ⬜ macros · ⬜ metadata editing · ⬜ video track
 - ✅ Session autosave every 2 minutes · ⬜ crash-recovery prompt
 - ✅ Themes (beyond the reference product's light/dark slider)
