@@ -160,6 +160,17 @@ fn voice(i: &Instrument, freq: f32, local: f64, dt: f32) -> f32 {
     (a + osc(i.wave, f2, local, dt)) * 0.5
 }
 
+impl Note {
+    /// The note `semitones` off its key (a MIDI clip's fractional pitch
+    /// shift).
+    pub fn detuned(mut self, semitones: f32) -> Note {
+        if semitones != 0.0 {
+            self.freq *= 2f32.powf(semitones / 12.0);
+        }
+        self
+    }
+}
+
 /// A note's frequency, gain and pan from MIDI values.
 pub fn note(start: f64, end: f64, pitch: u8, velocity: u8, pan: f32) -> Note {
     let p = (pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
@@ -359,6 +370,14 @@ mod tests {
         s.reset();
         s.render(2.0, 1.0 / 48_000.0, &mut l, &mut r);
         assert!(l.iter().all(|v| v.abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_detuned_note_plays_off_its_key() {
+        let n = note(0.0, 1.0, 69, 100, 0.0);
+        assert_eq!(n.detuned(0.0).freq, n.freq);
+        assert!((n.detuned(0.5).freq - 440.0 * 2f32.powf(0.5 / 12.0)).abs() < 1e-2);
+        assert!((n.detuned(-0.25).freq - 440.0 * 2f32.powf(-0.25 / 12.0)).abs() < 1e-2);
     }
 
     #[test]

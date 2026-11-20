@@ -1521,6 +1521,9 @@ mod tests {
                 channel: 0,
                 pan: 0.0,
             }],
+            timing: Default::default(),
+            stretch: 1.0,
+            pitch: 0.0,
             muted: false,
             gain_db: 0.0,
             controls: Vec::new(),
@@ -1528,6 +1531,48 @@ mod tests {
         });
         let out = render(mix_program(&s, &|_| None, 48_000), 48_000, 0.0, 1.0);
         assert!(out.peak() > 0.01);
+    }
+
+    #[test]
+    fn a_stretched_and_shifted_midi_clip_renders_later_and_higher() {
+        use af27_core::midi::{MidiClip, MidiNote, Wave};
+        // A note at beat 1 of a clip at 0, 120 BPM: 0.5 s; at 200%, 1 s.
+        let mut s = Session::new("m", 8_000, 0);
+        let t = s.add_track_of(TrackKind::Midi);
+        let ti = s.track_index(t).unwrap();
+        s.tracks[ti].instrument.wave = Wave::Sine;
+        s.tracks[ti].instrument.detune = 0.0;
+        s.tracks[ti].instrument.attack = 0.001;
+        s.tracks[ti].instrument.release = 0.01;
+        let mut c = MidiClip::new(1, "c", 0.0, 4.0);
+        c.notes.push(MidiNote {
+            pitch: 57,
+            start: 1.0,
+            length: 0.5,
+            velocity: 127,
+            channel: 0,
+            pan: 0.0,
+        });
+        c.stretch = 2.0;
+        c.pitch = 12.0;
+        s.tracks[ti].midi.push(c);
+        let rate = 8_000;
+        let out = render(mix_program(&s, &|_| None, rate), rate, 0.0, 2.5);
+        let ch = &out.channels[0];
+        let first = ch.iter().position(|v| v.abs() > 1e-3).unwrap();
+        let last = ch.iter().rposition(|v| v.abs() > 1e-3).unwrap();
+        assert!((first as f64 / rate as f64 - 1.0).abs() < 0.002, "{first}");
+        // Half a beat at 200% is a beat: 0.5 s.
+        assert!((last as f64 / rate as f64 - 1.5).abs() < 0.03, "{last}");
+        // An octave up from A3: about 440 Hz, by zero crossings.
+        let seg = &ch[(1.1 * rate as f64) as usize..(1.4 * rate as f64) as usize];
+        let crossings = seg
+            .windows(2)
+            .filter(|w| (w[0] <= 0.0) != (w[1] <= 0.0))
+            .count() as f64;
+        let hz = crossings / 2.0 / 0.3;
+        assert!((hz - 440.0).abs() < 15.0, "{hz} Hz");
+        assert!((s.duration() - 4.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1553,6 +1598,9 @@ mod tests {
                 channel: 0,
                 pan: 0.0,
             }],
+            timing: Default::default(),
+            stretch: 1.0,
+            pitch: 0.0,
             muted: false,
             gain_db: 0.0,
             controls: Vec::new(),

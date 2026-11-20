@@ -15,7 +15,8 @@
 //! Writing: format 1 at 960 ticks per quarter note. Track 0 holds the
 //! tempo map (a tempo and a time signature at each stretch), then one
 //! track per MIDI track with the notes of its unmuted clips as they play
-//! (cut at the clip's end), pan as controller 10 when it changes.
+//! (cut at the clip's end; through each clip's timing, stretch and whole
+//! semitones of pitch), pan as controller 10 when it changes.
 
 use std::collections::HashMap;
 
@@ -357,6 +358,9 @@ pub fn add_to_session(session: &mut Session, imp: &SmfImport, replace_tempo: boo
                     ..*n
                 })
                 .collect(),
+            timing: Default::default(),
+            stretch: 1.0,
+            pitch: 0.0,
             muted: false,
             gain_db: 0.0,
             controls: Vec::new(),
@@ -455,12 +459,18 @@ pub fn write(session: &Session) -> Result<Vec<u8>, String> {
         .iter()
         .filter(|t| t.kind == TrackKind::Midi || !t.midi.is_empty());
     for (k, tr) in midi_tracks.enumerate() {
-        let mut notes: Vec<(u64, u64, &MidiNote)> = Vec::new();
+        // The notes as they play: through each clip's timing and stretch,
+        // transposed by its whole semitones of pitch shift (a fraction of
+        // a semitone has no place in a note number and is left out).
+        let tempo = &session.tempo;
+        let mut notes: Vec<(u64, u64, MidiNote)> = Vec::new();
         for c in tr.midi.iter().filter(|c| !c.muted) {
             for n in c.notes.iter().filter(|n| n.start < c.length) {
-                let s = tick(c.start + n.start);
-                let e = tick(c.start + (n.start + n.length).min(c.length)).max(s + 1);
-                notes.push((s, e, n));
+                let s = tick(c.beats_at(n.start, tempo));
+                let end = (n.start + n.length).min(c.length);
+                let e = tick(c.beats_at(end, tempo)).max(s + 1);
+                let pitch = c.shifted(n.pitch);
+                notes.push((s, e, MidiNote { pitch, ..*n }));
             }
         }
         notes.sort_by_key(|(s, _, n)| (*s, n.channel, n.pitch));
@@ -546,6 +556,9 @@ mod tests {
             start,
             length: 32.0,
             notes,
+            timing: Default::default(),
+            stretch: 1.0,
+            pitch: 0.0,
             muted: false,
             gain_db: 0.0,
             controls: Vec::new(),
@@ -671,6 +684,36 @@ mod tests {
             .filter(|e| matches!(e.kind, TrackEventKind::Meta(MetaMessage::Tempo(_))))
             .count();
         assert_eq!(tempos, 1 + 64 + 1 + 1 + 24 + 1);
+    }
+
+    #[test]
+    fn export_writes_the_notes_as_they_play() {
+        use af27_core::midi::ClipTiming;
+        let mut s = Session::new("Song", 48_000, 0);
+        s.tempo.changes.push(TempoChange::new(1, 60.0, 4, 4));
+        let a = s.add_track_of(TrackKind::Midi);
+        let mut c = MidiClip::new(5, "c", 0.0, 8.0);
+        c.notes.push(note(60, 1.0, 1.0, 100, 0, 0.0));
+        c.notes.push(note(64, 6.0, 1.0, 100, 0, 0.0));
+        c.stretch = 0.5;
+        c.pitch = 3.4;
+        s.track_mut(a).unwrap().midi.push(c.clone());
+        // A kept-speed copy at 120 BPM on its own track.
+        let b = s.add_track_of(TrackKind::Midi);
+        let mut k = MidiClip::new(6, "k", 0.0, 8.0);
+        k.notes.push(note(60, 6.0, 1.0, 100, 0, 0.0));
+        k.timing = ClipTiming::KeepSpeed { bpm: 120.0 };
+        s.track_mut(b).unwrap().midi.push(k);
+        let imp = read(&write(&s).unwrap()).unwrap();
+        let n = &imp.tracks[0].notes;
+        // At 50% beat 1 is half a beat in, transposed up three.
+        assert_eq!((n[0].pitch, n[0].start, n[0].length), (63, 0.5, 0.5));
+        assert_eq!((n[1].pitch, n[1].start), (67, 3.0));
+        // Kept at 120: 6 of its beats are 3 s, which is bar 1 (2 s at
+        // 120) plus one beat at 60: session beat 5.
+        let kn = &imp.tracks[1].notes;
+        assert!((kn[0].start - 5.0).abs() < 1e-3, "{kn:?}");
+        assert!((kn[0].length - 0.5).abs() < 1e-3, "{kn:?}");
     }
 
     #[test]

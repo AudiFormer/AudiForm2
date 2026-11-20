@@ -705,7 +705,7 @@ impl Session {
             .tracks
             .iter()
             .flat_map(|t| t.midi.iter())
-            .map(|c| self.tempo.secs(c.start + c.length))
+            .map(|c| c.end_secs(&self.tempo))
             .fold(0.0, f64::max);
         audio.max(midi)
     }

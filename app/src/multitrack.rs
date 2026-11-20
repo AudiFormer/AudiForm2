@@ -83,6 +83,11 @@ pub enum DragKind {
         clip: ClipId,
         left: bool,
     },
+    /// A stretch handle on a MIDI clip corner.
+    StretchMidi {
+        clip: ClipId,
+        left: bool,
+    },
 }
 
 /// A handle on a clip, under the pointer.
@@ -403,8 +408,35 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             .midi
             .iter()
             .rev()
-            .find(|c| t >= c.start && t <= c.end())
+            .find(|c| t >= c.start && t <= c.end_beats(&tempo))
             .map(|c| (ti, c.id))
+    };
+    // A MIDI clip's stretch handle under a point (Stretch Handles on).
+    let midi_stretch_at = |st: &State, pp: egui::Pos2| -> Option<(usize, ClipId, bool)> {
+        if !stretch_on || st.tool != Tool::Move {
+            return None;
+        }
+        let ti = track_at(st, lanes.top(), scroll, pp.y)?;
+        let row_top = lanes.top() - scroll
+            + st.session.tracks[..ti]
+                .iter()
+                .map(|t| t.height)
+                .sum::<f32>();
+        let tr = &st.session.tracks[ti];
+        for c in tr.midi.iter().rev() {
+            let x0 = time_to_x(&v, lanes, tempo.secs(c.start));
+            let x1 = time_to_x(&v, lanes, c.end_secs(&tempo));
+            let cr = clip_rect(row_top, tr.height, x0, x1);
+            if cr.width() < 24.0 || cr.height() < 34.0 || !cr.expand(4.0).contains(pp) {
+                continue;
+            }
+            for left in [true, false] {
+                if stretch_handle(cr, left).expand(2.0).contains(pp) {
+                    return Some((ti, c.id, left));
+                }
+            }
+        }
+        None
     };
     if resp.double_clicked() {
         if let Some(pp) = resp.interact_pointer_pos() {
@@ -428,7 +460,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             && st.tool == Tool::Move
             && on_edge.is_none()
         {
-            if let Some((ti, id)) = hit_midi(st, pp) {
+            if let Some((ti, id, left)) = midi_stretch_at(st, pp) {
+                st.selected_clip = Some(id);
+                st.selected_track = Some(st.session.tracks[ti].id);
+                drag.before = Some(st.session.clone());
+                drag.kind = Some(DragKind::StretchMidi { clip: id, left });
+            } else if let Some((ti, id)) = hit_midi(st, pp) {
                 let (mti, mci) = st.session.find_midi(id).unwrap();
                 let grab = tempo.beats(x_to_time(&v, lanes, pp.x))
                     - st.session.tracks[mti].midi[mci].start;
@@ -646,6 +683,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     st.session_sel = Some((anchor.min(t), anchor.max(t)));
                     st.session_cursor = anchor.min(t);
                 }
+                Some(DragKind::StretchMidi { clip, left }) => {
+                    if let Some((ti, ci)) = st.session.find_midi(clip) {
+                        st.session.tracks[ti].midi[ci].stretch_edge(left, tempo.beats(t), &tempo);
+                        st.session_version += 1;
+                    }
+                }
                 Some(DragKind::MoveMidi { clip, grab }) => {
                     if let Some((ti, ci)) = st.session.find_midi(clip) {
                         // Whole beats.
@@ -669,6 +712,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     DragKind::Fade { .. } => "Fade",
                     DragKind::Gain { .. } => "Clip gain",
                     DragKind::Stretch { .. } => "Stretch clip",
+                    DragKind::StretchMidi { .. } => "Stretch MIDI clip",
                 };
                 st.commit_session(label, before);
             }
@@ -695,7 +739,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         }
                     }
                     _ => {
-                        st.selected_clip = None;
+                        // A MIDI clip is selected by a click too (its
+                        // Properties then show).
+                        st.selected_clip = hit_midi(st, pp).map(|(_, id)| id);
                         st.session_sel = None;
                         if !playing {
                             st.set_cursor(t);
@@ -712,8 +758,10 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         .hover_pos()
         .filter(|_| st.tool == Tool::Move)
         .and_then(|hp| handle_at(st, hp));
+    let hover_midi_stretch = resp.hover_pos().and_then(|hp| midi_stretch_at(st, hp));
     if let Some(hp) = resp.hover_pos() {
         let icon = match (st.tool, hit(st, hp)) {
+            _ if hover_midi_stretch.is_some() => egui::CursorIcon::ResizeHorizontal,
             _ if hover_handle.is_some() => match hover_handle.unwrap().2 {
                 Handle::Fade(_) => egui::CursorIcon::Move,
                 Handle::Gain => egui::CursorIcon::ResizeVertical,
@@ -1107,7 +1155,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         }
         for mc in &tr.midi {
             let x0 = time_to_x(&v, lanes, tempo.secs(mc.start));
-            let x1 = time_to_x(&v, lanes, tempo.secs(mc.end()));
+            let x1 = time_to_x(&v, lanes, mc.end_secs(&tempo));
             if x1 < lanes.left() || x0 > lanes.right() {
                 continue;
             }
@@ -1140,6 +1188,17 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 FontId::proportional(10.0),
                 c(th.background),
             );
+            // Kept speed, stretch and pitch, like an audio clip's badges.
+            let badge = mc.badge();
+            if !badge.is_empty() && cr.width() > 90.0 {
+                lane_p.text(
+                    title.right_center() - vec2(5.0, 0.0),
+                    Align2::RIGHT_CENTER,
+                    badge,
+                    FontId::proportional(9.0),
+                    c(th.background),
+                );
+            }
             if !mc.notes.is_empty() {
                 let (lo, hi) = mc
                     .notes
@@ -1150,12 +1209,14 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     pos2(cr.left(), title.bottom() + 2.0),
                     pos2(cr.right(), cr.bottom() - 2.0),
                 );
+                // Through the clip's timing and stretch, so notes squeeze
+                // and spread across tempo changes and glides as they play.
                 for n in mc.notes.iter().filter(|n| n.start < mc.length) {
-                    let nx0 = time_to_x(&v, lanes, tempo.secs(mc.start + n.start));
+                    let nx0 = time_to_x(&v, lanes, mc.secs_at(n.start, &tempo));
                     let nx1 = time_to_x(
                         &v,
                         lanes,
-                        tempo.secs(mc.start + (n.start + n.length).min(mc.length)),
+                        mc.secs_at((n.start + n.length).min(mc.length), &tempo),
                     );
                     let y =
                         body.bottom() - (n.pitch - lo) as f32 / span * (body.height() - 3.0) - 3.0;
@@ -1175,6 +1236,27 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     Stroke::new(1.0_f32, ca(tr.color, 200))
                 },
             );
+            if stretch_on && cr.width() >= 24.0 && cr.height() >= 34.0 {
+                let hot = hover_midi_stretch.filter(|h| h.1 == mc.id).map(|h| h.2);
+                for left in [true, false] {
+                    let r = stretch_handle(cr, left);
+                    let pts = if left {
+                        vec![r.left_top(), r.right_top(), r.left_bottom()]
+                    } else {
+                        vec![r.left_top(), r.right_top(), r.right_bottom()]
+                    };
+                    let col = if hot == Some(left) {
+                        c(th.accent)
+                    } else {
+                        ca(th.background, 230)
+                    };
+                    lane_p.add(egui::Shape::convex_polygon(
+                        pts,
+                        col,
+                        Stroke::new(1.0_f32, ca(th.text, 200)),
+                    ));
+                }
+            }
         }
         // The automation lane shown over the clips.
         crate::mixing::lane_overlay(ui, st, ti, row, &v, lanes);

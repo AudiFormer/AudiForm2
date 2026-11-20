@@ -673,15 +673,60 @@ pub struct MidiNote {
     pub pan: f32,
 }
 
+/// How a MIDI clip's notes meet the tempo map under it.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum ClipTiming {
+    /// Its beats are the session's: it speeds up and slows down with
+    /// tempo changes and glides under it, its length in seconds changing.
+    #[default]
+    FollowTempo,
+    /// It plays at its own fixed tempo wherever it sits: its length in
+    /// seconds stays put, its length in session beats changes.
+    KeepSpeed { bpm: f64 },
+}
+
+impl ClipTiming {
+    pub fn is_follow(&self) -> bool {
+        matches!(self, ClipTiming::FollowTempo)
+    }
+}
+
+/// Lowest and highest MIDI clip stretch (timeline length over the clip's
+/// own length).
+pub const MIDI_STRETCH_MIN: f64 = 0.25;
+pub const MIDI_STRETCH_MAX: f64 = 4.0;
+/// Semitones a MIDI clip can be shifted either way.
+pub const MIDI_PITCH_MAX: f32 = 24.0;
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(x: &f64) -> bool {
+    *x == 1.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MidiClip {
     pub id: ClipId,
     pub name: String,
     /// Beats from the session start.
     pub start: f64,
-    /// Beats.
+    /// The clip's own beats (its notes' time), before stretch and timing:
+    /// on the timeline it lasts [`MidiClip::end_beats`] minus `start`.
     pub length: f64,
     pub notes: Vec<MidiNote>,
+    /// Follow the session's tempo, or keep its own speed.
+    #[serde(default, skip_serializing_if = "ClipTiming::is_follow")]
+    pub timing: ClipTiming,
+    /// Timeline length over its own length (2 plays at half speed, its
+    /// notes twice as long), 0.25..4. The notes themselves are unchanged.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub stretch: f64,
+    /// Pitch shift in semitones (-24..24): whole semitones transpose the
+    /// notes, the fraction detunes the instrument.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pitch: f32,
     #[serde(default)]
     pub muted: bool,
     /// Clip level in dB: scales every note's velocity (-96..24).
@@ -768,12 +813,16 @@ pub struct PlannedNote {
     pub velocity: f32,
     pub channel: u8,
     pub pan: f32,
+    /// Semitones the instrument plays it off its key (-0.5..0.5), from
+    /// the clip's fractional pitch shift.
+    pub detune: f32,
 }
 
 /// Every note of `clips` as it plays through the tempo map: muted clips
 /// are silent, notes starting at or past their clip's end are not played
 /// and the rest are cut at it, the clip level scales velocity (within
-/// 1/127..1), and a sustain pedal held down in the clip keeps released
+/// 1/127..1), the clip's timing, stretch and pitch shift apply, and a
+/// sustain pedal held down in the clip keeps released
 /// notes sounding until it comes up (the built-in instruments have no
 /// pedal of their own). Sorted by start; a note always lasts a frame.
 pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
@@ -810,12 +859,13 @@ pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
             if let Some(up) = held_until(n.channel, end) {
                 end = up.max(end);
             }
-            let start = tempo.secs(c.start + n.start);
-            let stop = tempo.secs(c.start + end);
+            let start = c.secs_at(n.start, tempo);
+            let stop = c.secs_at(end, tempo);
             out.push(PlannedNote {
                 start,
                 end: stop.max(start + 1e-6),
-                pitch: n.pitch.min(127),
+                pitch: c.shifted(n.pitch),
+                detune: c.detune(),
                 velocity: c.velocity(n),
                 channel: n.channel.min(15),
                 pan: if n.pan.is_nan() {
@@ -834,8 +884,182 @@ pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
 pub const LANE_CONTROLLERS: [u8; 10] = [64, 1, 11, 7, 10, 2, 66, 67, PITCH_BEND, AFTERTOUCH];
 
 impl MidiClip {
+    /// A new empty clip of `length` beats that follows the tempo,
+    /// unstretched and unshifted.
+    pub fn new(id: ClipId, name: impl Into<String>, start: f64, length: f64) -> MidiClip {
+        MidiClip {
+            id,
+            name: name.into(),
+            start,
+            length,
+            notes: Vec::new(),
+            timing: ClipTiming::FollowTempo,
+            stretch: 1.0,
+            pitch: 0.0,
+            muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
+            ext_id: None,
+        }
+    }
+
+    /// Start plus its own length: its end on the timeline while it
+    /// follows the tempo unstretched. [`MidiClip::end_beats`] is the real
+    /// end.
     pub fn end(&self) -> f64 {
         self.start + self.length
+    }
+
+    /// The stretch applied (0.25..4).
+    pub fn ratio(&self) -> f64 {
+        if self.stretch.is_finite() {
+            self.stretch.clamp(MIDI_STRETCH_MIN, MIDI_STRETCH_MAX)
+        } else {
+            1.0
+        }
+    }
+
+    /// The pitch shift applied in semitones.
+    pub fn shift(&self) -> f32 {
+        if self.pitch.is_finite() {
+            self.pitch.clamp(-MIDI_PITCH_MAX, MIDI_PITCH_MAX)
+        } else {
+            0.0
+        }
+    }
+
+    /// A key after the whole semitones of the pitch shift.
+    pub fn shifted(&self, pitch: u8) -> u8 {
+        (pitch.min(127) as i32 + self.shift().round() as i32).clamp(0, 127) as u8
+    }
+
+    /// The fraction of the pitch shift the instrument detunes by.
+    pub fn detune(&self) -> f32 {
+        let s = self.shift();
+        s - s.round()
+    }
+
+    /// Whether it plays other than as written: kept speed, stretched or
+    /// shifted.
+    pub fn is_altered(&self) -> bool {
+        !self.timing.is_follow() || self.ratio() != 1.0 || self.shift() != 0.0
+    }
+
+    /// Timeline seconds of a time in its own beats (inside or past it).
+    pub fn secs_at(&self, x: f64, tempo: &Tempo) -> f64 {
+        match self.timing {
+            ClipTiming::FollowTempo => tempo.secs(self.start + x * self.ratio()),
+            ClipTiming::KeepSpeed { bpm } => {
+                tempo.secs(self.start) + x * self.ratio() * 60.0 / clamp_bpm(bpm)
+            }
+        }
+    }
+
+    /// Session beats of a time in its own beats.
+    pub fn beats_at(&self, x: f64, tempo: &Tempo) -> f64 {
+        match self.timing {
+            ClipTiming::FollowTempo => self.start + x * self.ratio(),
+            ClipTiming::KeepSpeed { .. } => tempo.beats(self.secs_at(x, tempo)),
+        }
+    }
+
+    /// Its own beats at a time in session beats; inverse of `beats_at`.
+    pub fn local_at(&self, beats: f64, tempo: &Tempo) -> f64 {
+        match self.timing {
+            ClipTiming::FollowTempo => (beats - self.start) / self.ratio(),
+            ClipTiming::KeepSpeed { bpm } => {
+                (tempo.secs(beats) - tempo.secs(self.start)) * clamp_bpm(bpm) / 60.0 / self.ratio()
+            }
+        }
+    }
+
+    /// Where it ends on the timeline, in session beats.
+    pub fn end_beats(&self, tempo: &Tempo) -> f64 {
+        self.beats_at(self.length, tempo)
+    }
+
+    /// Where it ends on the timeline, in seconds.
+    pub fn end_secs(&self, tempo: &Tempo) -> f64 {
+        self.secs_at(self.length, tempo)
+    }
+
+    /// Switches between following the tempo and keeping its speed (at
+    /// the tempo where it starts). Every note, controller move and its
+    /// end stay where they sound now: under a steady tempo nothing
+    /// changes; across tempo changes the notes are re-timed in its own
+    /// beats to match.
+    pub fn set_timing(&mut self, keep: bool, tempo: &Tempo) {
+        if keep != self.timing.is_follow() {
+            return;
+        }
+        let old = self.clone();
+        self.timing = if keep {
+            ClipTiming::KeepSpeed {
+                bpm: clamp_bpm(tempo.bpm_at(self.start)),
+            }
+        } else {
+            ClipTiming::FollowTempo
+        };
+        let new = self.clone();
+        let remap = |x: f64| new.local_at(old.beats_at(x, tempo), tempo);
+        // Float dust is snapped away, so a steady tempo leaves it exactly
+        // as it was.
+        let tidy = |a: f64, b: f64| if (a - b).abs() < 1e-9 { b } else { a };
+        self.length = tidy(remap(old.length), old.length);
+        for (n, o) in self.notes.iter_mut().zip(&old.notes) {
+            let a = remap(o.start);
+            n.start = tidy(a, o.start);
+            n.length = tidy(remap(o.start + o.length) - a, o.length);
+        }
+        for (e, o) in self.controls.iter_mut().zip(&old.controls) {
+            e.at = tidy(remap(o.at), o.at);
+        }
+    }
+
+    /// Drags one edge to `to` (session beats), stretching it so the other
+    /// edge stays put, within 25%..400%.
+    pub fn stretch_edge(&mut self, left: bool, to: f64, tempo: &Tempo) {
+        if self.length <= 0.0 {
+            return;
+        }
+        let end_s = self.end_secs(tempo);
+        let start_s = tempo.secs(self.start);
+        // The span in seconds it should cover.
+        let (a, b) = if left {
+            (tempo.secs(to.max(0.0)), end_s)
+        } else {
+            (start_s, tempo.secs(to))
+        };
+        let r = match self.timing {
+            ClipTiming::FollowTempo => (tempo.beats(b) - tempo.beats(a)) / self.length,
+            ClipTiming::KeepSpeed { bpm } => (b - a) * clamp_bpm(bpm) / 60.0 / self.length,
+        };
+        self.stretch = r.clamp(MIDI_STRETCH_MIN, MIDI_STRETCH_MAX);
+        if left {
+            // Back from the fixed end at the clamped stretch.
+            self.start = match self.timing {
+                ClipTiming::FollowTempo => tempo.beats(end_s) - self.length * self.stretch,
+                ClipTiming::KeepSpeed { bpm } => {
+                    tempo.beats(end_s - self.length * self.stretch * 60.0 / clamp_bpm(bpm))
+                }
+            }
+            .max(0.0);
+        }
+    }
+
+    /// The badge on its title: "Keep 120 BPM 150% +2.0st", or empty.
+    pub fn badge(&self) -> String {
+        let mut out = Vec::new();
+        if let ClipTiming::KeepSpeed { bpm } = self.timing {
+            out.push(format!("Keep {} BPM", (bpm * 10.0).round() / 10.0));
+        }
+        if self.ratio() != 1.0 {
+            out.push(format!("{:.0}%", self.ratio() * 100.0));
+        }
+        if self.shift() != 0.0 {
+            out.push(format!("{:+.1}st", self.shift()));
+        }
+        out.join(" ")
     }
 
     /// The clip's level as a velocity scale.
@@ -1107,6 +1331,135 @@ mod tests {
         assert_eq!(parse_meter("6/8"), Some((6, 8)));
         assert_eq!(parse_meter("3"), Some((3, 4)));
         assert_eq!(parse_meter("5/6"), None);
+    }
+
+    fn clip_with(notes: &[(f64, f64)], start: f64, length: f64) -> MidiClip {
+        let mut c = MidiClip::new(7, "c", start, length);
+        c.notes = notes
+            .iter()
+            .map(|&(s, l)| MidiNote {
+                pitch: 60,
+                start: s,
+                length: l,
+                velocity: 100,
+                channel: 0,
+                pan: 0.0,
+            })
+            .collect();
+        c
+    }
+
+    #[test]
+    fn switching_timing_leaves_every_note_where_it_sounds() {
+        // Two bars at 120 (4 s), then 60 BPM.
+        let mut t = Tempo::default();
+        t.changes.push(change(2, 60.0, 4, 4));
+        let mut c = clip_with(&[(0.0, 1.0), (6.0, 4.0), (12.0, 2.0)], 0.0, 16.0);
+        let before = plan_notes(std::slice::from_ref(&c), &t);
+        let end = c.end_secs(&t);
+        c.set_timing(true, &t);
+        assert_eq!(c.timing, ClipTiming::KeepSpeed { bpm: 120.0 });
+        let after = plan_notes(std::slice::from_ref(&c), &t);
+        for (a, b) in before.iter().zip(&after) {
+            assert!(
+                close(a.start, b.start) && close(a.end, b.end),
+                "{a:?} {b:?}"
+            );
+        }
+        assert!(close(c.end_secs(&t), end));
+        // At its own 120 BPM the note at 12 session beats (8 s) is at 16.
+        assert!(close(c.notes[2].start, 16.0));
+        c.set_timing(false, &t);
+        assert!(c.timing.is_follow());
+        assert!(close(c.notes[2].start, 12.0) && close(c.length, 16.0));
+        // Under a steady tempo nothing changes at all.
+        let steady = Tempo::constant(93.0, 4, 4);
+        let mut d = clip_with(&[(0.3, 1.7), (5.1, 0.2)], 3.0, 8.0);
+        let was = d.clone();
+        d.set_timing(true, &steady);
+        assert_eq!((d.notes.clone(), d.length), (was.notes.clone(), was.length));
+        d.set_timing(false, &steady);
+        assert_eq!(d, was);
+    }
+
+    #[test]
+    fn a_kept_speed_clip_lasts_the_same_seconds_anywhere() {
+        let mut t = Tempo::default();
+        t.changes.push(change(2, 60.0, 4, 4));
+        t.changes.push(ramp(4, 6, 180.0));
+        let mut c = clip_with(&[(0.0, 1.0)], 0.0, 8.0);
+        c.set_timing(true, &t);
+        for start in [0.0, 6.0, 9.0, 18.0, 30.0] {
+            c.start = start;
+            assert!(close(c.end_secs(&t) - t.secs(start), 4.0), "at {start}");
+            // Its length in session beats follows the map under it.
+            let b = c.end_beats(&t);
+            assert!(close(t.secs(b), c.end_secs(&t)));
+            assert!(close(c.local_at(b, &t), 8.0));
+        }
+        // Following the tempo, the same clip lasts 8 beats anywhere.
+        c.set_timing(false, &t);
+        c.start = 9.0;
+        assert!(close(c.end_beats(&t) - 9.0, c.length));
+    }
+
+    #[test]
+    fn stretch_scales_the_notes_and_edges_drag_it() {
+        let t = Tempo::default();
+        let mut c = clip_with(&[(1.0, 1.0)], 4.0, 4.0);
+        c.stretch = 2.0;
+        let p = plan_notes(std::slice::from_ref(&c), &t);
+        // Beat 1 of the clip at 200% is 2 beats in: 6 beats, 3 s.
+        assert!(close(p[0].start, 3.0) && close(p[0].end, 4.0));
+        assert!(close(c.end_beats(&t), 12.0));
+        assert!(close(c.local_at(6.0, &t), 1.0));
+        // The right edge to beat 6: 50%.
+        c.stretch_edge(false, 6.0, &t);
+        assert!(close(c.ratio(), 0.5));
+        // The left edge keeps the end put.
+        let end = c.end_beats(&t);
+        c.stretch_edge(true, 2.0, &t);
+        assert!(close(c.start, 2.0) && close(c.end_beats(&t), end));
+        assert!(close(c.ratio(), 1.0));
+        // Held to 25%..400%.
+        c.stretch_edge(false, 1000.0, &t);
+        assert_eq!(c.ratio(), MIDI_STRETCH_MAX);
+        c.stretch_edge(true, c.end_beats(&t) - 0.01, &t);
+        assert_eq!(c.ratio(), MIDI_STRETCH_MIN);
+        assert!(close(c.end_beats(&t), 2.0 + 16.0));
+        // A kept-speed clip stretches in seconds.
+        let mut k = clip_with(&[], 0.0, 4.0);
+        k.timing = ClipTiming::KeepSpeed { bpm: 60.0 };
+        k.stretch_edge(false, 4.0, &t);
+        assert!(close(k.ratio(), 0.5));
+        assert!(close(k.end_secs(&t), 2.0));
+    }
+
+    #[test]
+    fn pitch_shift_transposes_and_detunes() {
+        let t = Tempo::default();
+        let mut c = clip_with(&[(0.0, 1.0)], 0.0, 4.0);
+        c.pitch = 2.3;
+        let p = plan_notes(std::slice::from_ref(&c), &t);
+        assert_eq!(p[0].pitch, 62);
+        assert!((p[0].detune - 0.3).abs() < 1e-5);
+        c.pitch = -1.6;
+        assert_eq!(c.shifted(60), 58);
+        assert!((c.detune() - 0.4).abs() < 1e-5);
+        c.pitch = 24.0;
+        assert_eq!(c.shifted(120), 127);
+        assert_eq!(c.badge(), "+24.0st");
+        c.stretch = 1.5;
+        c.timing = ClipTiming::KeepSpeed { bpm: 120.0 };
+        assert_eq!(c.badge(), "Keep 120 BPM 150% +24.0st");
+        // Saved only when set; old clips read as plain.
+        let plain = clip_with(&[], 0.0, 4.0);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("timing") && !json.contains("stretch") && !json.contains("pitch\""));
+        let back: MidiClip = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, plain);
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(serde_json::from_str::<MidiClip>(&json).unwrap(), c);
     }
 
     #[test]
