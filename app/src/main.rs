@@ -9,6 +9,7 @@ mod caustics;
 mod classic_themes;
 mod clip_props;
 mod corners;
+mod eq_editor;
 mod export;
 mod files_panel;
 mod fx;
