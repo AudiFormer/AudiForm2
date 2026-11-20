@@ -121,6 +121,109 @@ impl Session {
         track != target && !self.reaches(target, track)
     }
 
+    /// Every track and bus whose output (not sends) reaches `bus`,
+    /// directly or through other buses.
+    pub fn feeders(&self, bus: TrackId) -> Vec<TrackId> {
+        let mut out: Vec<TrackId> = Vec::new();
+        let mut stack = vec![bus];
+        while let Some(b) = stack.pop() {
+            for t in &self.tracks {
+                if t.output == Some(b) && !out.contains(&t.id) && t.id != bus {
+                    out.push(t.id);
+                    stack.push(t.id);
+                }
+            }
+        }
+        out
+    }
+
+    /// Solos (or unsolos) a track. `exclusive` unsolos every other track
+    /// and bus first (Exclusive Solo, or Ctrl+click: Solo Track Only).
+    /// Soloing a bus does the same to everything whose output reaches it,
+    /// so the buttons show what the engine plays.
+    pub fn set_solo(&mut self, id: TrackId, on: bool, exclusive: bool) {
+        if exclusive && on {
+            for t in &mut self.tracks {
+                t.solo = false;
+            }
+        }
+        let is_bus = self
+            .tracks
+            .iter()
+            .any(|t| t.id == id && t.kind == TrackKind::Bus);
+        let mut ids = vec![id];
+        if is_bus {
+            ids.extend(self.feeders(id));
+        }
+        for t in &mut self.tracks {
+            if ids.contains(&t.id) {
+                t.solo = on;
+            }
+        }
+    }
+
+    /// Sets a sends list for a track, tidying each send (level -96..12
+    /// dB, pan -1..1). Refused (false, nothing changed) when a send names
+    /// no bus or would feed back.
+    pub fn set_sends(&mut self, id: TrackId, sends: Vec<crate::session::Send>) -> bool {
+        let ok = sends.iter().all(|s| {
+            self.tracks
+                .iter()
+                .any(|t| t.id == s.bus && t.kind == TrackKind::Bus)
+                && self.can_route(id, s.bus)
+        });
+        if !ok {
+            return false;
+        }
+        match self.track_mut(id) {
+            Some(t) => {
+                t.sends = sends;
+                for s in &mut t.sends {
+                    s.tidy();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Sets a track's output (None: the master). Refused when the target
+    /// is not a bus or would feed back.
+    pub fn set_output(&mut self, id: TrackId, to: Option<TrackId>) -> bool {
+        if let Some(b) = to {
+            let is_bus = self
+                .tracks
+                .iter()
+                .any(|t| t.id == b && t.kind == TrackKind::Bus);
+            if !is_bus || !self.can_route(id, b) {
+                return false;
+            }
+        }
+        match self.track_mut(id) {
+            Some(t) => {
+                t.output = to;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// True when any routing in the session feeds back (only a damaged
+    /// file can hold one; the engine still plays it).
+    pub fn has_loop(&self) -> bool {
+        self.tracks.iter().any(|t| {
+            t.output
+                .into_iter()
+                .chain(t.sends.iter().map(|s| s.bus))
+                .any(|b| b == t.id || self.reaches(b, t.id))
+                || t.chain
+                    .iter()
+                    .filter_map(|s| s.sidechain)
+                    .filter(|&k| self.track_index(k).is_some())
+                    .any(|k| k == t.id || self.reaches(t.id, k))
+        })
+    }
+
     /// Splits every clip under time `t`. Returns how many were split.
     pub fn split_all_at(&mut self, t: f64) -> usize {
         let ids: Vec<ClipId> = self
@@ -308,6 +411,39 @@ mod tests {
         assert_eq!(s.tracks.len(), 2);
         assert_eq!(s.tracks[0].output, None);
         assert!(s.tracks[1].sends.is_empty());
+    }
+
+    #[test]
+    fn buses_route_send_and_solo_in_one_step() {
+        let mut s = Session::new("t", 48_000, 2);
+        let (a, b) = (s.tracks[0].id, s.tracks[1].id);
+        let grp = s.add_track_of(TrackKind::Bus);
+        let verb = s.add_track_of(TrackKind::Bus);
+        assert!(s.set_output(a, Some(grp)));
+        assert!(s.set_output(grp, Some(verb)));
+        // A loop is refused and changes nothing.
+        assert!(!s.set_output(verb, Some(grp)));
+        assert_eq!(s.track_mut(verb).unwrap().output, None);
+        // Sends are tidied; one that would feed back is refused.
+        let mut loud = Send::new(verb);
+        loud.level_db = 40.0;
+        loud.pan = -3.0;
+        assert!(s.set_sends(b, vec![loud]));
+        let sent = &s.track_mut(b).unwrap().sends[0];
+        assert_eq!((sent.level_db, sent.pan), (12.0, -1.0));
+        assert!(!s.set_sends(verb, vec![Send::new(grp)]));
+        assert!(!s.has_loop());
+        // Soloing a bus solos what outputs into it (not what sends).
+        s.set_solo(verb, true, false);
+        let solos: Vec<bool> = s.tracks.iter().map(|t| t.solo).collect();
+        assert_eq!(solos, vec![true, false, true, true]);
+        // Exclusive: only the one.
+        s.set_solo(b, true, true);
+        let solos: Vec<bool> = s.tracks.iter().map(|t| t.solo).collect();
+        assert_eq!(solos, vec![false, true, false, false]);
+        // A damaged file's loop is seen.
+        s.track_mut(verb).unwrap().output = Some(grp);
+        assert!(s.has_loop());
     }
 
     #[test]

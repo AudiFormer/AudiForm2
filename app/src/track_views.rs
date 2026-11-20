@@ -13,6 +13,7 @@
 use egui::{pos2, vec2, Align2, FontId, Rect, Response, RichText, Rounding, Sense, Stroke};
 use std::ops::RangeInclusive;
 
+use af27_core::automation::{AutomationMode, LaneTarget};
 use af27_core::midi::{ClickSound, Subdivide};
 use af27_core::{Send, TrackId, TrackKind};
 use af27_engine::MASTER;
@@ -392,6 +393,9 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
     let before = st.session.clone();
     let mut live = false;
     let mut structural = false;
+    let mut clicked: Option<char> = None;
+    let mut moved: Vec<(LaneTarget, f64)> = Vec::new();
+    let mods = ui.input(|i| i.modifiers);
     let kind = st.session.tracks[ti].kind;
     let id = st.session.tracks[ti].id;
     let h = st.session.tracks[ti].height;
@@ -413,18 +417,36 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if kind != TrackKind::Bus
-                    && letter(ui, tr.armed, "R", th.accent_alt, "Arm for recording", &th)
+                    && letter(
+                        ui,
+                        tr.armed,
+                        "R",
+                        th.accent_alt,
+                        "Arm for recording (Ctrl+Shift: every track)",
+                        &th,
+                    )
                 {
-                    tr.armed = !tr.armed;
-                    live = true;
+                    clicked = Some('R');
                 }
-                if letter(ui, tr.solo, "S", th.accent, "Solo", &th) {
-                    tr.solo = !tr.solo;
-                    live = true;
+                if letter(
+                    ui,
+                    tr.solo,
+                    "S",
+                    th.accent,
+                    "Solo (Ctrl: this one only; Ctrl+Shift: every track)",
+                    &th,
+                ) {
+                    clicked = Some('S');
                 }
-                if letter(ui, tr.mute, "M", th.meter_mid, "Mute", &th) {
-                    tr.mute = !tr.mute;
-                    live = true;
+                if letter(
+                    ui,
+                    tr.mute,
+                    "M",
+                    th.meter_mid,
+                    "Mute (Ctrl+Shift: every track)",
+                    &th,
+                ) {
+                    clicked = Some('M');
                 }
             });
         });
@@ -433,7 +455,7 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                 ui.horizontal(|ui| {
                     let tr = &mut st.session.tracks[ti];
                     ui.label(RichText::new("Vol").size(9.5).color(c(th.text_dim)));
-                    live |= dial(
+                    if dial(
                         ui,
                         &mut tr.volume_db,
                         -60.0..=12.0,
@@ -442,7 +464,11 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                         &th,
                     )
                     .on_hover_text("Volume (dB). Double-click for 0 dB.")
-                    .changed();
+                    .changed()
+                    {
+                        live = true;
+                        moved.push((LaneTarget::Volume, tr.volume_db as f64));
+                    }
                     if st.session.space.is_none() {
                         ui.label(RichText::new("Pan").size(9.5).color(c(th.text_dim)));
                         let mut pan = tr.pan * 100.0;
@@ -467,9 +493,13 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                         {
                             tr.pan = pan / 100.0;
                             live = true;
+                            moved.push((LaneTarget::Pan, tr.pan as f64));
                         }
                     }
                 });
+                if h >= 100.0 {
+                    structural |= strip_options_row(ui, st, ti, &th);
+                }
                 if h >= 60.0 && kind != TrackKind::Bus {
                     input_row(ui, st, id, &th);
                 }
@@ -501,10 +531,92 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
             st.gesture = down;
         }
         st.live_track(ti);
+        for (target, value) in moved {
+            st.auto_moved(ti, target, value);
+        }
+    }
+    match clicked {
+        Some('S') => st.click_solo(ti, mods),
+        Some('M') => st.click_mute(ti, mods),
+        Some('R') => st.click_arm(ti, mods),
+        _ => {}
     }
     if structural {
         st.commit_session("Routing", before);
     }
+}
+
+/// Mono, polarity, the automation mode and the lanes shown. True when
+/// the mix changes shape (rebuilt).
+fn strip_options_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let is_bus = st.session.tracks[ti].kind == TrackKind::Bus;
+        let tr = &mut st.session.tracks[ti];
+        if letter(
+            ui,
+            tr.mono,
+            "Mo",
+            th.accent,
+            "Mono: fold left and right together after the effects",
+            th,
+        ) {
+            tr.mono = !tr.mono;
+            changed = true;
+        }
+        if !is_bus && letter(ui, tr.polarity, "Ø", th.accent, "Invert polarity", th) {
+            tr.polarity = !tr.polarity;
+            changed = true;
+        }
+        let mode = tr.automation;
+        let id = tr.id;
+        egui::ComboBox::from_id_salt(("auto-mode", id))
+            .selected_text(RichText::new(mode.label()).size(10.0))
+            .width(54.0)
+            .show_ui(ui, |ui| {
+                for m in AutomationMode::ALL {
+                    if ui.selectable_label(m == mode, m.label()).clicked() {
+                        st.session.tracks[ti].automation = m;
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "Automation: Read plays the lanes; Write, Latch and Touch record \
+                 the volume and pan you move while playing.",
+            );
+        let tr = &st.session.tracks[ti];
+        let shown = tr.show_lanes;
+        let lane_names: Vec<String> = tr.lanes.iter().map(|l| l.target.label()).collect();
+        let cur = st.shown_lane(ti);
+        ui.menu_button(
+            RichText::new(if shown { "Lanes on" } else { "Lanes" }).size(10.0),
+            |ui| {
+                if ui
+                    .selectable_label(shown, "Show lanes over the clips")
+                    .clicked()
+                {
+                    st.session.tracks[ti].show_lanes = !shown;
+                    changed = true;
+                }
+                if !lane_names.is_empty() {
+                    ui.separator();
+                }
+                for (k, name) in lane_names.iter().enumerate() {
+                    if ui.selectable_label(cur == Some(k), name).clicked() {
+                        st.mixing.shown.insert(id, k);
+                        st.session.tracks[ti].show_lanes = true;
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                ui.menu_button("Add Lane", |ui| crate::mixing::lanes_menu(ui, st, ti));
+            },
+        );
+    });
+    changed
 }
 
 fn input_row(ui: &mut egui::Ui, st: &mut State, id: TrackId, th: &Theme) {
@@ -561,6 +673,8 @@ fn output_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -> bool 
 fn sends_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, room: usize) -> bool {
     let me = st.session.tracks[ti].id;
     let mut changed = false;
+    let mut live = false;
+    let before = st.session.clone();
     let mut remove = None;
     let names: Vec<(TrackId, String)> = st
         .session
@@ -586,10 +700,21 @@ fn sends_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, room: us
         ui.horizontal(|ui| {
             ui.label(RichText::new("Send").size(9.5).color(c(th.text_dim)));
             ui.add_sized(
-                vec2(44.0, 18.0),
+                vec2(34.0, 18.0),
                 egui::Label::new(RichText::new(name).size(10.5)).truncate(),
             );
-            changed |= dial(
+            if letter(
+                ui,
+                s.enabled,
+                "On",
+                th.accent,
+                "Send on or off (off still counts for routing)",
+                th,
+            ) {
+                s.enabled = !s.enabled;
+                live = true;
+            }
+            live |= dial(
                 ui,
                 &mut s.level_db,
                 -60.0..=12.0,
@@ -597,8 +722,31 @@ fn sends_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, room: us
                 |v| format!("{v:+.0}"),
                 th,
             )
-            .on_hover_text("Send level (dB)")
+            .on_hover_text("Send level (dB). Double-click for 0 dB.")
             .changed();
+            let mut pan = s.pan * 100.0;
+            if dial(
+                ui,
+                &mut pan,
+                -100.0..=100.0,
+                0.0,
+                |v| {
+                    if v.abs() < 0.5 {
+                        "C".into()
+                    } else if v < 0.0 {
+                        format!("L{:.0}", -v)
+                    } else {
+                        format!("R{v:.0}")
+                    }
+                },
+                th,
+            )
+            .on_hover_text("Send pan (its own; the track's pan does not move it)")
+            .changed()
+            {
+                s.pan = pan / 100.0;
+                live = true;
+            }
             let pre = egui::Button::new(RichText::new("P").size(10.0).color(if s.pre_fader {
                 c(th.background)
             } else {
@@ -626,6 +774,14 @@ fn sends_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, room: us
     if let Some(k) = remove {
         st.session.tracks[ti].sends.remove(k);
         changed = true;
+    }
+    if live && !changed {
+        let down = ui.input(|i| i.pointer.any_down());
+        if !st.gesture {
+            st.commit_live("Send", before);
+            st.gesture = down;
+        }
+        st.live_track(ti);
     }
     let free: Vec<(TrackId, String)> = names
         .iter()

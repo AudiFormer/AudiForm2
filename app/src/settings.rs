@@ -94,6 +94,12 @@ pub struct Prefs {
     pub stretch_handles: bool,
     /// The metronome's sound and level (kept here, not in sessions).
     pub metronome: af27_core::midi::MetronomeSettings,
+    /// Soloing a track or bus unsolos every other (Ctrl+click always
+    /// does, whatever this says).
+    pub solo_exclusive: bool,
+    /// The MIDI input played on armed MIDI tracks is heard through their
+    /// instrument.
+    pub midi_monitor: bool,
 }
 
 /// Settings > Audio Devices.
@@ -170,6 +176,8 @@ impl Default for Prefs {
             header_view: Default::default(),
             stretch_handles: false,
             metronome: Default::default(),
+            solo_exclusive: false,
+            midi_monitor: true,
         }
     }
 }
@@ -223,9 +231,6 @@ const PAGES: [&str; 18] = [
 fn coming(page: &str) -> &'static [&'static str] {
     match page {
         "Editing" => &["The shape new fades start as: straight, or a curve smooth at both ends."],
-        "Multitrack" => {
-            &["Exclusive solo: soloing one track un-solos the others, in one undoable step."]
-        }
         "Clips" => &["Clip auto-crossfade where clips overlap."],
         "Playback and Recording" => &[
             "Meter yellow and red levels.",
@@ -625,6 +630,26 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     "When saving, copy in audio that came in while it was outside the session folder",
                 );
                 note(ui, th, "The original is never moved or changed. Files already inside the session folder stay where they are. The same file imported again uses its copy; a different file with the same name gets a numbered name. File > Collect Session Media copies in everything the session uses at any time.");
+            });
+        }
+        "Multitrack" => {
+            group(ui, th, "Solo", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.solo_exclusive,
+                    "Exclusive solo: soloing a track or bus un-solos the others",
+                );
+                note(
+                    ui,
+                    th,
+                    "Ctrl+click on S always solos that track only. Ctrl+Shift+click on M, S \
+                     or R sets it on every track. Soloing a bus solos what feeds it.",
+                );
+            });
+            group(ui, th, "MIDI", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.midi_monitor,
+                    "Hear what you play on armed MIDI tracks through their instrument",
+                );
             });
         }
         "Effects" => {

@@ -242,6 +242,8 @@ pub struct State {
     /// Playback this side started and has not yet seen stop (the audio
     /// thread may stop on its own at the end).
     transport_live: bool,
+    /// Automation writing and lane display (see `mixing`).
+    pub mixing: crate::mixing::Mixing,
     /// A new selection taking over the loop while playing.
     loop_watch: crate::transport::Settle,
     /// Seconds of held Left/Right since playback last skipped along.
@@ -493,6 +495,7 @@ impl State {
             start_marker: None,
             paused: false,
             transport_live: false,
+            mixing: Default::default(),
             loop_watch: Default::default(),
             scrub_clock: 0.0,
             born: Instant::now(),
@@ -1159,6 +1162,9 @@ impl State {
             e.play_plan(from, plan);
             self.transport_live = true;
             self.put_cursor(from);
+            if self.mode == Mode::Multitrack {
+                self.auto_start(from);
+            }
         } else if let Some(err) = self.engine_error.clone() {
             self.start_marker = None;
             self.error(err);
@@ -1182,6 +1188,7 @@ impl State {
 
     /// Playback is over (stopped, or ran to its end) at `reached`.
     fn finish(&mut self, reached: f64) {
+        self.auto_stop(reached);
         let t = crate::transport::stop_position(reached, self.start_marker, self.return_on_stop);
         self.start_marker = None;
         self.paused = false;
@@ -1352,6 +1359,7 @@ impl State {
         }
         if self.transport_live && self.is_playing() {
             self.follow_new_loop();
+            self.auto_tick();
         }
         let now = self.born.elapsed().as_secs_f64();
         let dt = (now - self.last_tick).clamp(0.0, 1.0);
@@ -1741,8 +1749,16 @@ impl State {
     /// (fader, pan, effect settings, 3D position, instrument): the mix is
     /// not rebuilt, so effect tails and the playhead carry on.
     pub fn commit_live(&mut self, label: &str, before: Session) {
-        self.session_history.push(label, before);
+        // While automation is written, the moves belong to its one step.
+        if !self.mixing.pass_open() {
+            self.session_history.push(label, before);
+        }
         self.session_dirty = true;
+    }
+
+    /// Seconds since the app started (a wall clock for UI timing).
+    pub fn clock(&self) -> f64 {
+        self.born.elapsed().as_secs_f64()
     }
 
     /// Sends a track's fader, pan and mute or solo state to the mix.

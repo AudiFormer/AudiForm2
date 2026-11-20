@@ -17,6 +17,7 @@ mod hwcursor;
 mod inspector;
 mod keymap;
 mod lane_menu;
+mod mixing;
 mod multitrack;
 mod panels;
 mod phasewheel;

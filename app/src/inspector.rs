@@ -110,14 +110,39 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     live_commit(st, ui, "Track level", &before, changed);
 
     // Output and sends (structural: the mix is rebuilt).
+    // Only buses that would not feed back into this track.
     let buses: Vec<(af27_core::TrackId, String)> = st
         .session
         .tracks
         .iter()
-        .filter(|t| t.kind == TrackKind::Bus && t.id != tid)
+        .filter(|t| t.kind == TrackKind::Bus && t.id != tid && st.session.can_route(tid, t.id))
         .map(|t| (t.id, t.name.clone()))
         .collect();
     let mut structural = false;
+    ui.horizontal_wrapped(|ui| {
+        let t = &mut st.session.tracks[ti];
+        structural |= ui
+            .checkbox(&mut t.mono, "Mono")
+            .on_hover_text("Fold left and right together after the effects")
+            .changed();
+        if t.kind != TrackKind::Bus {
+            structural |= ui.checkbox(&mut t.polarity, "Invert polarity").changed();
+        }
+        structural |= ui
+            .checkbox(&mut t.solo_safe, "Solo safe")
+            .on_hover_text("Stays heard while other tracks are soloed")
+            .changed();
+    });
+    egui::ComboBox::from_label("Automation")
+        .selected_text(st.session.tracks[ti].automation.label())
+        .show_ui(ui, |ui| {
+            let t = &mut st.session.tracks[ti];
+            for m in af27_core::automation::AutomationMode::ALL {
+                structural |= ui
+                    .selectable_value(&mut t.automation, m, m.label())
+                    .changed();
+            }
+        });
     let out_name = st.session.tracks[ti]
         .output
         .and_then(|o| buses.iter().find(|b| b.0 == o))
@@ -152,7 +177,21 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                                 .suffix(" dB"),
                         )
                         .changed();
+                    let mut pan = s.pan * 100.0;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut pan)
+                                .speed(0.5)
+                                .range(-100.0..=100.0)
+                                .prefix("Pan "),
+                        )
+                        .changed()
+                    {
+                        s.pan = pan / 100.0;
+                        structural = true;
+                    }
                     structural |= ui.checkbox(&mut s.pre_fader, "Pre").changed();
+                    structural |= ui.checkbox(&mut s.enabled, "On").changed();
                     if ui.small_button("✕").clicked() {
                         remove = Some(i);
                     }

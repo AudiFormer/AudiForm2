@@ -361,6 +361,82 @@ fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             }
         }
     });
+    ui.separator();
+    let toggles: [(&str, bool, fn(&mut af27_core::Track) -> &mut bool, &str); 3] = [
+        (
+            "Mono",
+            t.mono,
+            |t| &mut t.mono,
+            "Fold left and right together after the effects",
+        ),
+        (
+            "Invert Polarity",
+            t.polarity,
+            |t| &mut t.polarity,
+            "Flip the track's polarity",
+        ),
+        (
+            "Solo Safe",
+            t.solo_safe,
+            |t| &mut t.solo_safe,
+            "Stay heard while other tracks are soloed (a shared reverb bus)",
+        ),
+    ];
+    for (label, on, field, tip) in toggles {
+        if label == "Invert Polarity" && t.kind == TrackKind::Bus {
+            continue;
+        }
+        if ui
+            .add(egui::SelectableLabel::new(on, label))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            edit(st, label, |s| {
+                s.track_mut(me)
+                    .map(|t| {
+                        let f = field(t);
+                        *f = !*f;
+                    })
+                    .is_some()
+            });
+            ui.close_menu();
+        }
+    }
+    ui.menu_button("Automation", |ui| {
+        for m in af27_core::automation::AutomationMode::ALL {
+            if ui.radio(t.automation == m, m.label()).clicked() {
+                edit(st, "Automation mode", |s| {
+                    s.track_mut(me).map(|t| t.automation = m).is_some()
+                });
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui
+            .add(egui::SelectableLabel::new(t.show_lanes, "Show Lanes"))
+            .clicked()
+        {
+            edit(st, "Show lanes", |s| {
+                s.track_mut(me)
+                    .map(|t| t.show_lanes = !t.show_lanes)
+                    .is_some()
+            });
+            ui.close_menu();
+        }
+        ui.menu_button("Add Lane", |ui| crate::mixing::lanes_menu(ui, st, ti));
+        if !t.lanes.is_empty() {
+            ui.menu_button("Remove Lane", |ui| {
+                for (k, l) in t.lanes.iter().enumerate() {
+                    if ui.button(l.target.label()).clicked() {
+                        edit(st, "Remove lane", |s| {
+                            s.track_mut(me).map(|t| t.lanes.remove(k)).is_some()
+                        });
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn empty_items(ui: &mut egui::Ui, st: &mut State, at: MenuAt) {
