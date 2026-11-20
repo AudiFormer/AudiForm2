@@ -82,6 +82,40 @@ pub fn bind_to_app(child: &std::process::Child) {
     let _ = child;
 }
 
+/// Puts the calling thread at audio priority (the Windows multimedia
+/// scheduler's "Pro Audio" class, and the highest thread priority), so a
+/// busy desktop does not make a plug-in late: a late plug-in plays dry for
+/// that moment, which is heard as a stutter.
+pub fn audio_priority() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            AvSetMmThreadCharacteristicsW, GetCurrentThread, SetThreadPriority,
+            THREAD_PRIORITY_HIGHEST,
+        };
+        let name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+        let mut task = 0u32;
+        unsafe {
+            AvSetMmThreadCharacteristicsW(name.as_ptr(), &mut task);
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        }
+    }
+}
+
+/// Raises the whole plug-in host process above normal, so its message
+/// loop and plug-in threads keep up while the app draws.
+pub fn host_process_priority() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+        };
+        unsafe {
+            SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+        }
+    }
+}
+
 /// Ends a host or scan process now with `code`, without running loaded
 /// plug-in DLLs' shutdown code (a stuck plug-in can hang a normal exit
 /// forever, leaving the process behind after the app has gone).

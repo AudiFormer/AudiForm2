@@ -380,34 +380,6 @@ impl State {
             self.prerender.version += 1;
         }
     }
-
-    /// Turns Pre-render on or off for a track (one undo step).
-    pub fn set_prerender(&mut self, id: TrackId, on: bool) {
-        let before = self.session.clone();
-        if let Some(t) = self.session.track_mut(id) {
-            if t.prerender == on {
-                return;
-            }
-            t.prerender = on;
-            self.commit_session(
-                if on {
-                    "Pre-render on"
-                } else {
-                    "Pre-render off"
-                },
-                before,
-            );
-        }
-    }
-
-    /// Whether some pre-rendered track is still rendering (keeps frames
-    /// coming so the result is picked up).
-    pub fn prerender_busy(&self) -> bool {
-        self.prerender
-            .entries
-            .values()
-            .any(|e| e.rendering.is_some())
-    }
 }
 
 /// Renders one track alone: stereo at the session rate from the start,

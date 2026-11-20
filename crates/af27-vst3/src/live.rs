@@ -808,7 +808,10 @@ impl Manager {
         let weak = Arc::downgrade(&inst);
         if let Ok(h) = std::thread::Builder::new()
             .name("plugin-pump".into())
-            .spawn(move || pump(weak, pump_side))
+            .spawn(move || {
+                crate::audio_priority();
+                pump(weak, pump_side)
+            })
         {
             let _ = inst.pump.set(h.thread().clone());
         }

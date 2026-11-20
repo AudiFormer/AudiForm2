@@ -193,3 +193,144 @@ fn zoom_bench() {
         report(&format!("{label}: idle"), ms);
     }
 }
+
+/// `AF2_BENCH_FILE=<session file>`: a real session (any format AF2 opens)
+/// with its audio loaded, timed for import, drawing while zooming and
+/// scrolling, and the audio engine block by block (the slowest blocks are
+/// what a stutter is made of). `AF2_BENCH_PLUGINS=1` keeps VST3 plug-ins.
+#[test]
+#[ignore]
+fn real_session_bench() {
+    let Some(path) = std::env::var_os("AF2_BENCH_FILE").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let t = Instant::now();
+    let imported = af27_interop::import(&path).expect("import");
+    eprintln!("import: {:.2} s", t.elapsed().as_secs_f64());
+    let mut st = State::new();
+    st.mode = Mode::Multitrack;
+    st.session = imported.session;
+    if std::env::var_os("AF2_BENCH_PLUGINS").is_none() {
+        for tr in &mut st.session.tracks {
+            tr.chain
+                .retain(|s| !af27_core::plugin::is_plugin(&s.effect));
+            for c in &mut tr.clips {
+                c.props
+                    .chain
+                    .retain(|s| !af27_core::plugin::is_plugin(&s.effect));
+            }
+        }
+        st.session
+            .master_chain
+            .retain(|s| !af27_core::plugin::is_plugin(&s.effect));
+    }
+    let t = Instant::now();
+    let media: Vec<(af27_core::MediaId, std::path::PathBuf)> = st
+        .session
+        .media
+        .iter()
+        .filter_map(|m| Some((m.id, m.path.clone()?)))
+        .collect();
+    let mut missing = 0;
+    for (id, p) in media {
+        match af27_io::decode_file(&p) {
+            Ok(buf) => {
+                let d = st.add_doc(
+                    p.file_name().unwrap().to_string_lossy().to_string(),
+                    Some(p.clone()),
+                    buf,
+                );
+                st.media_docs.insert(id, d);
+            }
+            Err(_) => missing += 1,
+        }
+    }
+    let clips: usize = st.session.tracks.iter().map(|t| t.clips.len()).sum();
+    let fx: usize = st.session.tracks.iter().map(|t| t.chain.len()).sum();
+    eprintln!(
+        "audio load: {:.2} s; {} tracks, {clips} clips, {fx} track effects, {} media ({missing} missing), {:.0} s long",
+        t.elapsed().as_secs_f64(),
+        st.session.tracks.len(),
+        st.session.media.len(),
+        st.session.duration()
+    );
+    st.session_view = View::fit(st.session.duration().max(30.0));
+
+    // Drawing.
+    let ctx = egui::Context::default();
+    let mut caches = crate::ui::Caches::default();
+    for _ in 0..5 {
+        frame(&ctx, &mut st, &mut caches);
+    }
+    let lim = st.session_limits();
+    let full = st.session_view;
+    let anchor = full.start + full.len * 0.37;
+    let mut ms = Vec::new();
+    for i in 0..120 {
+        st.session_view
+            .zoom_at(if i < 60 { 0.8 } else { 1.25 }, anchor, &lim);
+        ms.push(frame(&ctx, &mut st, &mut caches));
+    }
+    report("draw: wheel zoom", ms);
+    st.session_view = View {
+        start: 0.0,
+        len: 60.0,
+    };
+    let mut ms = Vec::new();
+    for _ in 0..120 {
+        st.session_view.pan_px(25.0, st.session_px as f64, &lim);
+        ms.push(frame(&ctx, &mut st, &mut caches));
+    }
+    report("draw: scroll in time (60 s view)", ms);
+    st.session_view = full;
+    let mut ms = Vec::new();
+    for i in 0..120 {
+        caches.drag.scroll_y += if i < 60 { 30.0 } else { -30.0 };
+        ms.push(frame(&ctx, &mut st, &mut caches));
+    }
+    report("draw: scroll tracks", ms);
+    let mut ms = Vec::new();
+    for _ in 0..60 {
+        ms.push(frame(&ctx, &mut st, &mut caches));
+    }
+    report("draw: idle", ms);
+
+    // The audio engine: one block at a time from a third of the way in,
+    // as the audio thread runs it.
+    let rate = 48_000u32;
+    let t = Instant::now();
+    let program = af27_engine::mix_program(&st.session, &|m| st.media_buffer(m), rate);
+    eprintln!("mix build: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    let af27_engine::Program::Mix(mut mix) = program else {
+        panic!("not a mix")
+    };
+    let start = st.session.duration() / 3.0;
+    let dt = 1.0 / rate as f64;
+    let block = 512usize;
+    let budget = block as f64 / rate as f64 * 1e3;
+    let t = Instant::now();
+    mix.start(start);
+    eprintln!("start: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    let t = Instant::now();
+    mix.prime(start);
+    eprintln!(
+        "prime (a mix arriving while playing): {:.1} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    let mut out = vec![0.0f32; block * 2];
+    let mut ms = Vec::new();
+    let blocks = (20.0 * rate as f64 / block as f64) as usize;
+    let mut at = start;
+    for _ in 0..blocks {
+        let t = Instant::now();
+        mix.render(at, dt, block, &mut out, false);
+        ms.push(t.elapsed().as_secs_f64() * 1e3);
+        at += block as f64 * dt;
+    }
+    let over = ms.iter().filter(|&&m| m > budget).count();
+    report(
+        &format!("audio: {block}-frame block (budget {budget:.1} ms)"),
+        ms,
+    );
+    eprintln!("audio: {over} of {blocks} blocks over budget");
+}

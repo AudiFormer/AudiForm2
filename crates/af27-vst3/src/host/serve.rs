@@ -46,6 +46,7 @@ enum ToMain {
 }
 
 pub fn serve() -> i32 {
+    crate::host_process_priority();
     let out: Out = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
     let (to_main, from_reader) = mpsc::channel::<ToMain>();
     let (audio_tx, audio_rx) = mpsc::channel::<(u32, Audio)>();
@@ -63,6 +64,7 @@ pub fn serve() -> i32 {
 }
 
 fn audio_loop(out: Out, to_main: mpsc::Sender<ToMain>, new_audio: mpsc::Receiver<(u32, Audio)>) {
+    crate::audio_priority();
     let mut stdin = io::stdin().lock();
     let mut audios: HashMap<u32, Audio> = HashMap::new();
     let mut a = AudioIn::default();
