@@ -67,7 +67,7 @@ fn main() -> eframe::Result<()> {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     if let Some(code) = af27_vst3::main_with_args(&args) {
-        std::process::exit(code);
+        af27_vst3::exit_now(code);
     }
     fx::register();
     plugins::init();

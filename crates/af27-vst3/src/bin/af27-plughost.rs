@@ -7,10 +7,10 @@
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match af27_vst3::main_with_args(&args) {
-        Some(code) => std::process::exit(code),
+        Some(code) => af27_vst3::exit_now(code),
         None => {
             eprintln!("usage: af27-plughost --plugin-host | --plugin-scan <bundle>");
-            std::process::exit(2);
+            af27_vst3::exit_now(2);
         }
     }
 }

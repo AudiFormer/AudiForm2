@@ -32,7 +32,7 @@ fn send(out: &Out, kind: u8, id: u32, payload: &[u8]) {
         .unwrap_or(false);
     if !ok {
         // The app went away: nothing left to do.
-        std::process::exit(0);
+        crate::exit_now(0);
     }
 }
 
@@ -59,7 +59,7 @@ pub fn serve() -> i32 {
     main_loop(out, from_reader, audio_tx);
     // Unloading plug-ins on the way out can hang or crash in them; the
     // process ends instead.
-    std::process::exit(0)
+    crate::exit_now(0)
 }
 
 fn audio_loop(out: Out, to_main: mpsc::Sender<ToMain>, new_audio: mpsc::Receiver<(u32, Audio)>) {

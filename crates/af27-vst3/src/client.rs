@@ -80,6 +80,8 @@ impl Conn {
     pub fn spawn(exe: &Path) -> Result<Arc<Conn>, String> {
         let mut cmd = Command::new(exe);
         cmd.arg("--plugin-host")
+            .arg("--parent")
+            .arg(std::process::id().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -92,6 +94,7 @@ impl Conn {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("The plug-in host could not start: {e}"))?;
+        crate::bind_to_app(&child);
         STARTED.fetch_add(1, Ordering::SeqCst);
         let stdin = child.stdin.take().ok_or("No pipe to the plug-in host.")?;
         let mut stdout = child

@@ -391,6 +391,8 @@ pub fn scan_bundle(exe: &Path, bundle: &Path, timeout: Duration, stop: &AtomicBo
     let mut cmd = Command::new(exe);
     cmd.arg("--plugin-scan")
         .arg(bundle)
+        .arg("--parent")
+        .arg(std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -400,7 +402,10 @@ pub fn scan_bundle(exe: &Path, bundle: &Path, timeout: Duration, stop: &AtomicBo
         cmd.creation_flags(0x0800_0000);
     }
     let mut child = match cmd.spawn() {
-        Ok(c) => c,
+        Ok(c) => {
+            crate::bind_to_app(&c);
+            c
+        }
         Err(e) => {
             return ScanResult {
                 error: Some(format!("The scanner could not start: {e}")),

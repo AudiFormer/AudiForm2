@@ -32,7 +32,7 @@ pub fn scan(bundle: &Path) -> i32 {
         Err(message) => {
             say(&ScanLine::Error { message });
             say(&ScanLine::Done);
-            std::process::exit(0);
+            crate::exit_now(0);
         }
     };
     let classes = module.audio_classes();
@@ -77,5 +77,5 @@ pub fn scan(bundle: &Path) -> i32 {
     say(&ScanLine::Done);
     std::mem::forget(keep);
     std::mem::forget(module);
-    std::process::exit(0)
+    crate::exit_now(0)
 }
