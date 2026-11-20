@@ -15,11 +15,17 @@
 //! Opto Leveler / Tube Preamp and Vox Strip panels. The Compressor,
 //! Limiter, Noise Gate and De-Esser units are AudiForm 2's own.
 //!
+//! Every face is laid out on the grid in [`layout`]: one margin and gap
+//! scale, dials centred in equal cells across the face's width, group
+//! frames in a row of one height, big dials either side of a centred
+//! display.
+//!
 //! Cheap to draw: values are read from the slot each frame, graphs are a
 //! few dozen points, and the windows ask for frames only while sound
 //! plays (for the meters) or a needle is still settling.
 
 mod dynamics;
+pub mod layout;
 mod parts;
 mod phase;
 mod space;
@@ -478,87 +484,252 @@ pub fn spatial_only(c: &Ctl) -> bool {
     c.key == "spread" || c.name.to_lowercase().contains("room spread")
 }
 
-/// The dial columns: a dial and value box per control, ungrouped controls
-/// in rows, each group as a column with its On switch in the heading.
-/// Picks are stepped switches; switches are lit lamps.
+/// What one control takes in the dial columns.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Knob,
+    /// A pick, with the width it needs.
+    Pick(f32),
+    /// A switch, with the width it needs.
+    Switch(f32),
+}
+
+/// A group of the dial columns: its heading, its On switch, its dials and
+/// the rest (picks and switches, in order).
+struct Band {
+    name: String,
+    power: Option<usize>,
+    knobs: Vec<usize>,
+    /// The width of a dial's cell here (wider for long names).
+    cell: f32,
+    picks: Vec<(usize, f32)>,
+    switches: Vec<(usize, f32)>,
+}
+
+impl Band {
+    /// Dials per row: up to three (two by two for four).
+    fn per_row(&self) -> usize {
+        match self.knobs.len() {
+            4 => 2,
+            // Long names: two to a row keeps the group from sprawling.
+            n if self.cell * 3.0 > 3.0 * layout::CELL + 80.0 => n.clamp(1, 2),
+            n => n.clamp(1, 3),
+        }
+    }
+
+    /// The width its contents need (inside the frame).
+    fn inner_w(&self) -> f32 {
+        let dials = self.per_row() as f32 * self.cell;
+        let picks = self.picks.iter().map(|p| p.1).fold(0.0, f32::max);
+        let switches = self.switches.iter().map(|p| p.1).fold(0.0, f32::max);
+        dials.max(picks).max(switches).max(layout::CELL)
+    }
+}
+
+/// The widest line of groups before the next one starts a new line.
+const LINE_W: f32 = 720.0;
+
+fn text_w(ui: &egui::Ui, t: &str) -> f32 {
+    text_w_at(ui, t, 11.5)
+}
+
+fn text_w_at(ui: &egui::Ui, t: &str, size: f32) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            t.to_string(),
+            egui::FontId::proportional(size),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x
+}
+
+/// The dial columns: a dial and value box per control. Ungrouped
+/// controls come first, centred across the face (picks, then dials in
+/// even rows, then switches); the groups follow in framed lines, each
+/// line filling the face's width, the frames in a line one height, and
+/// each group's dials in even rows of up to three. Picks are stepped
+/// switches (a list when long); switches are lit lamps.
 pub fn columns(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
-    let th = &env.th;
-    // (group, [control index]) in order.
-    let mut cols: Vec<(String, Option<usize>, Vec<usize>)> = Vec::new();
+    let th = env.th.clone();
+    let kind = |ui: &egui::Ui, c: &Ctl| {
+        if c.toggle {
+            Kind::Switch(text_w(ui, &c.name) + 26.0 + layout::GAP_S)
+        } else if !c.choices.is_empty() {
+            if short_pick(c) {
+                let w: f32 = c.choices.iter().map(|n| text_w(ui, n) + 18.0).sum();
+                Kind::Pick(w + layout::GAP_S)
+            } else {
+                Kind::Pick(130.0 + layout::GAP_S)
+            }
+        } else {
+            Kind::Knob
+        }
+    };
+    let mut loose = Band {
+        name: String::new(),
+        power: None,
+        knobs: Vec::new(),
+        cell: layout::CELL,
+        picks: Vec::new(),
+        switches: Vec::new(),
+    };
+    let mut bands: Vec<Band> = Vec::new();
     for (k, c) in fx.ctls.iter().enumerate() {
         if c.hidden || (spatial_only(c) && !env.spatial) {
             continue;
         }
-        if cols.last().is_none_or(|(g, _, _)| *g != c.group) {
-            cols.push((c.group.clone(), None, Vec::new()));
-        }
-        let col = cols.last_mut().unwrap();
-        if !c.group.is_empty() && c.toggle && c.name == "On" && col.1.is_none() {
-            col.1 = Some(k);
+        let band = if c.group.is_empty() {
+            &mut loose
         } else {
-            col.2.push(k);
-        }
-    }
-    let cell = |ui: &mut egui::Ui, fx: &mut Fx, k: usize| {
-        let c = fx.ctls[k].clone();
-        if c.toggle {
-            fx.toggle(ui, &c.key, "");
-        } else if !c.choices.is_empty() {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(&c.name).size(10.5).color(c_dim(th)));
-                if c.choices.len() <= 4 && c.choices.iter().map(String::len).sum::<usize>() < 32 {
-                    fx.choice(ui, &c.key, &[]);
-                } else {
-                    let cur = (f64::from(fx.vals[k]) - c.min).round().max(0.0) as usize;
-                    let cur = cur.min(c.choices.len() - 1);
-                    let mut pick = cur;
-                    egui::ComboBox::from_id_salt(fx.uid.with(("pick", k)))
-                        .selected_text(&c.choices[cur])
-                        .width(120.0)
-                        .show_ui(ui, |ui| {
-                            for (ci, n) in c.choices.iter().enumerate() {
-                                ui.selectable_value(&mut pick, ci, n);
-                            }
-                        });
-                    if pick != cur {
-                        fx.set(&c.key, c.min + pick as f64);
-                    }
-                }
-            });
-        } else {
-            fx.knob(ui, &c.key, 56.0, "", &[]);
-        }
-    };
-    for (name, _, list) in &cols {
-        if name.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(560.0);
-                for k in list {
-                    cell(ui, fx, *k);
-                }
-            });
-        }
-    }
-    let banded: Vec<_> = cols.iter().filter(|(n, _, _)| !n.is_empty()).collect();
-    if !banded.is_empty() {
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.set_max_width(620.0);
-            for (name, power, list) in banded {
-                let off = power.is_some_and(|p| fx.vals[p] < 0.5);
-                parts::module(ui, th, name, |ui| {
-                    if let Some(p) = power {
-                        let key = fx.ctls[*p].key.clone();
-                        fx.toggle(ui, &key, "On");
-                    }
-                    ui.add_enabled_ui(!off, |ui| {
-                        for k in list {
-                            cell(ui, fx, *k);
-                        }
-                    });
+            if bands.last().is_none_or(|b| b.name != c.group) {
+                bands.push(Band {
+                    name: c.group.clone(),
+                    power: None,
+                    knobs: Vec::new(),
+                    cell: layout::CELL,
+                    picks: Vec::new(),
+                    switches: Vec::new(),
                 });
             }
+            bands.last_mut().unwrap()
+        };
+        match kind(ui, c) {
+            Kind::Switch(_) if !c.group.is_empty() && c.name == "On" && band.power.is_none() => {
+                band.power = Some(k);
+            }
+            Kind::Knob => {
+                // A small dial's name is 10.5 px text centred under it.
+                let name = text_w_at(ui, &c.name, 10.5) + layout::GAP_S + 4.0;
+                band.cell = band.cell.max(name);
+                band.knobs.push(k);
+            }
+            Kind::Pick(w) => band.picks.push((k, w)),
+            Kind::Switch(w) => band.switches.push((k, w)),
+        }
+    }
+    // The groups in lines, in order, each line as wide as fits.
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut line_w = 0.0;
+    for (i, b) in bands.iter().enumerate() {
+        let w = b.inner_w() + 2.0 * layout::PAD;
+        if lines.is_empty() || line_w + layout::GAP + w > LINE_W {
+            lines.push(vec![i]);
+            line_w = w;
+        } else {
+            lines.last_mut().unwrap().push(i);
+            line_w += layout::GAP + w;
+        }
+    }
+    let widest_line = lines
+        .iter()
+        .map(|l| {
+            l.iter()
+                .map(|i| bands[*i].inner_w() + 2.0 * layout::PAD)
+                .sum::<f32>()
+                + layout::GAP * (l.len() - 1) as f32
+        })
+        .fold(0.0, f32::max);
+    let loose_w = (loose.knobs.len().min(6) as f32 * loose.cell)
+        .max(loose.picks.iter().map(|p| p.1).fold(0.0, f32::max))
+        .max(loose.switches.iter().map(|p| p.1).sum::<f32>());
+    let w = widest_line.max(loose_w).max(layout::MIN_W);
+    ui.vertical(|ui| {
+        ui.set_width(w);
+        // Ungrouped controls.
+        let any_loose = !(loose.knobs.is_empty() && loose.picks.is_empty());
+        band_body(ui, fx, &th, &loose, w, 6);
+        // The groups.
+        for (n, line) in lines.iter().enumerate() {
+            if n > 0 || any_loose {
+                ui.add_space(layout::GAP_S);
+            }
+            let items: Vec<(&str, f32)> = line
+                .iter()
+                .map(|i| {
+                    (
+                        bands[*i].name.as_str(),
+                        bands[*i].inner_w() + 2.0 * layout::PAD,
+                    )
+                })
+                .collect();
+            layout::groups(ui, &th, w, &items, |ui, g| {
+                let b = &bands[line[g]];
+                let iw = ui.available_width();
+                let off = b.power.is_some_and(|p| fx.vals[p] < 0.5);
+                if let Some(p) = b.power {
+                    let key = fx.ctls[p].key.clone();
+                    layout::centred(ui, iw, |ui| fx.toggle(ui, &key, "On"));
+                }
+                ui.add_enabled_ui(!off, |ui| band_body(ui, fx, &th, b, iw, b.per_row()));
+            });
+        }
+    });
+}
+
+/// A long pick shows as a list, a short one as a stepped switch.
+fn short_pick(c: &Ctl) -> bool {
+    c.choices.len() <= 4 && c.choices.iter().map(String::len).sum::<usize>() < 32
+}
+
+/// A group's (or the ungrouped controls') contents across `w`: each pick
+/// centred, the dials in rows of `per_row`, the switches in rows that fit.
+fn band_body(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, b: &Band, w: f32, per_row: usize) {
+    for (k, _) in &b.picks {
+        layout::centred(ui, w, |ui| pick(ui, fx, th, *k));
+    }
+    if !b.knobs.is_empty() {
+        let knobs = b.knobs.clone();
+        layout::grid(ui, w, knobs.len(), per_row, |ui, i| {
+            let key = fx.ctls[knobs[i]].key.clone();
+            fx.knob(ui, &key, layout::KNOB, "", &[]);
         });
+    }
+    if !b.switches.is_empty() {
+        let widest = b.switches.iter().map(|s| s.1).fold(1.0, f32::max);
+        let fit = ((w / widest).floor() as usize).max(1);
+        let keys: Vec<String> = b
+            .switches
+            .iter()
+            .map(|s| fx.ctls[s.0].key.clone())
+            .collect();
+        if !b.knobs.is_empty() || !b.picks.is_empty() {
+            ui.add_space(layout::GAP_S / 2.0);
+        }
+        if fit == 1 {
+            // One to a row: a single block, the lamps in a line.
+            layout::centred(ui, w, |ui| {
+                for k in &keys {
+                    fx.toggle(ui, k, "");
+                }
+            });
+        } else {
+            layout::grid(ui, w, keys.len(), fit, |ui, i| fx.toggle(ui, &keys[i], ""));
+        }
+    }
+}
+
+/// A pick with its name over it.
+fn pick(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, k: usize) {
+    let c = fx.ctls[k].clone();
+    ui.label(RichText::new(&c.name).size(10.5).color(c_dim(th)));
+    if short_pick(&c) {
+        fx.choice(ui, &c.key, &[]);
+    } else {
+        let cur = (f64::from(fx.vals[k]) - c.min).round().max(0.0) as usize;
+        let cur = cur.min(c.choices.len() - 1);
+        let mut pick = cur;
+        egui::ComboBox::from_id_salt(fx.uid.with(("pick", k)))
+            .selected_text(&c.choices[cur])
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                for (ci, n) in c.choices.iter().enumerate() {
+                    ui.selectable_value(&mut pick, ci, n);
+                }
+            });
+        if pick != cur {
+            fx.set(&c.key, c.min + pick as f64);
+        }
     }
 }
 

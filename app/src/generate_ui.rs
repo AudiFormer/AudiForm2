@@ -26,6 +26,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use af27_core::AudioBuffer;
 use af27_dsp::generate as gen;
 
+use crate::fx_windows::layout;
 use crate::graph::{self, Plot};
 use crate::state::{Mode, State, View};
 use crate::theme::{c, ca, Theme};
@@ -440,23 +441,22 @@ fn doc_shape(st: &State) -> (u32, usize) {
         .map_or((48_000, 2), |d| (d.buf.rate, d.buf.num_channels()))
 }
 
-/// A titled group with a thin frame.
-fn group(ui: &mut egui::Ui, th: &Theme, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::none()
-        .stroke(Stroke::new(1.0_f32, ca(th.border, 160)))
-        .rounding(if th.bevel.is_some() { 0.0 } else { 4.0 })
-        .inner_margin(egui::Margin::same(8.0))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(title.to_uppercase())
-                    .size(10.0)
-                    .strong()
-                    .extra_letter_spacing(1.0)
-                    .color(c(th.text_dim)),
-            );
-            ui.add_space(2.0);
-            ui.vertical(add);
-        });
+/// A titled group `w` wide (the effect windows' frame), at least
+/// `min_h` tall, its contents centred.
+fn group(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    title: &str,
+    w: f32,
+    min_h: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let mut add = Some(add);
+    layout::groups_min(ui, th, w, &[(title, 1.0)], min_h, |ui, _| {
+        if let Some(f) = add.take() {
+            f(ui);
+        }
+    });
 }
 
 /// Duration, placement, channels, Preview and OK / Close.
@@ -656,15 +656,21 @@ fn noise_window(ctx: &egui::Context, st: &mut State) {
             st.generate.preset_name = name;
             ui.add_space(4.0);
             let n = &mut st.generate.noise;
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    group(ui, &th, "Color", |ui| {
+            // The settings in one column as wide as the graph, the
+            // levels beside them as tall as that column.
+            const LEFT: f32 = 420.0 + 2.0 * layout::PAD;
+            const RIGHT: f32 = 168.0;
+            let left_h = layout::last_height(ui, "gen-noise-left", None);
+            let hs = layout::columns(ui, &[LEFT, RIGHT], layout::GAP_L, |ui, col| {
+                if col == 0 {
+                    group(ui, &th, "Color", LEFT, 0.0, |ui| {
                         let names: Vec<&str> = gen::Noise::ALL.iter().map(|c| c.name()).collect();
                         widgets::segmented(ui, &mut n.color, &names, &[]);
                     });
-                    ui.add_space(4.0);
-                    group(ui, &th, "Style", |ui| {
+                    ui.add_space(layout::GAP_S);
+                    group(ui, &th, "Style", LEFT, 0.0, |ui| {
                         widgets::segmented(ui, &mut n.style, &STYLES, &STYLE_TIPS);
+                        ui.add_space(4.0);
                         ui.add_enabled_ui(n.style == 0, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Delay").color(c(th.text_dim)));
@@ -682,35 +688,38 @@ fn noise_window(ctx: &egui::Context, st: &mut State) {
                             });
                         });
                     });
-                    ui.add_space(4.0);
-                    group(ui, &th, "Power spectral density", |ui| {
+                    ui.add_space(layout::GAP_S);
+                    group(ui, &th, "Power spectral density", LEFT, 0.0, |ui| {
                         psd_graph(ui, &th, gen::Noise::ALL[n.color.min(5)], n.intensity);
                     });
-                });
-                ui.add_space(6.0);
-                group(ui, &th, "Levels", |ui| {
-                    ui.horizontal_top(|ui| {
-                        ui.add(
-                            VFader::new(&mut n.intensity, -60.0..=0.0)
-                                .label("Intensity")
-                                .unit("dB")
-                                .default_value(-20.0)
-                                .height(214.0)
-                                .ticks(&[0.0, -6.0, -12.0, -20.0, -30.0, -40.0, -60.0]),
-                        )
-                        .on_hover_text("The noise's RMS level (dBFS)");
-                        ui.add(
-                            VFader::new(&mut n.dc, -100.0..=100.0)
-                                .label("DC Offset")
-                                .unit("%")
-                                .default_value(0.0)
-                                .height(214.0)
-                                .ticks(&[100.0, 50.0, 0.0, -50.0, -100.0]),
-                        )
-                        .on_hover_text("A steady offset added to every sample, % of full scale");
+                } else {
+                    group(ui, &th, "Levels", RIGHT, left_h, |ui| {
+                        ui.horizontal_top(|ui| {
+                            ui.add(
+                                VFader::new(&mut n.intensity, -60.0..=0.0)
+                                    .label("Intensity")
+                                    .unit("dB")
+                                    .default_value(-20.0)
+                                    .height(214.0)
+                                    .ticks(&[0.0, -6.0, -12.0, -20.0, -30.0, -40.0, -60.0]),
+                            )
+                            .on_hover_text("The noise's RMS level (dBFS)");
+                            ui.add(
+                                VFader::new(&mut n.dc, -100.0..=100.0)
+                                    .label("DC Offset")
+                                    .unit("%")
+                                    .default_value(0.0)
+                                    .height(214.0)
+                                    .ticks(&[100.0, 50.0, 0.0, -50.0, -100.0]),
+                            )
+                            .on_hover_text(
+                                "A steady offset added to every sample, % of full scale",
+                            );
+                        });
                     });
-                });
+                }
             });
+            layout::last_height(ui, "gen-noise-left", Some(hs[0]));
             let spec = st.generate.noise.spec();
             let secs = st.generate.noise.secs;
             let make =
@@ -819,120 +828,141 @@ fn tones_window(ctx: &egui::Context, st: &mut State) {
             let editing_end = g.editing_end && g.tones.sweep;
             let wave = g.tones.wave;
             let shape = g.tones.shape;
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
+            // Base and Waveform in one column, the components beside them
+            // as tall as that column.
+            const LEFT: f32 = 4.0 * layout::CELL + 2.0 * layout::PAD;
+            const RIGHT: f32 = 5.0 * 76.0 + 84.0 + 2.0 * layout::PAD;
+            let left_h = layout::last_height(ui, "gen-tones-left", None);
+            let hs = layout::columns(ui, &[LEFT, RIGHT], layout::GAP_L, |ui, col| {
+                if col == 0 {
                     let set = if editing_end {
                         &mut g.tones.end
                     } else {
                         &mut g.tones.start
                     };
-                    group(ui, &th, "Base", |ui| {
-                        ui.horizontal_top(|ui| {
-                            let id = ui.id();
-                            widgets::knob(
-                                ui,
-                                id.with("base"),
-                                &mut set.base,
-                                1.0,
-                                20_000.0,
-                                440.0,
-                                true,
-                                86.0,
-                                "Base Frequency",
-                                &[20.0, 200.0, 2000.0, 20_000.0],
-                                &|v| crate::widgets::fmt_unit(v, "Hz"),
-                            );
-                            widgets::knob(
-                                ui,
-                                id.with("depth"),
-                                &mut set.mod_depth,
-                                0.0,
-                                5000.0,
-                                0.0,
-                                false,
-                                66.0,
-                                "Mod Depth",
-                                &[],
-                                &|v| crate::widgets::fmt_unit(v, "Hz"),
-                            )
-                            .on_hover_text("How far the frequency swings (Hz)");
-                            widgets::knob(
-                                ui,
-                                id.with("rate"),
-                                &mut set.mod_rate,
-                                0.0,
-                                100.0,
-                                0.0,
-                                false,
-                                66.0,
-                                "Mod Rate",
-                                &[],
-                                &|v| format!("{v:.2} Hz"),
-                            )
-                            .on_hover_text("How fast it swings (Hz)");
-                        });
-                    });
-                    ui.add_space(4.0);
-                    group(ui, &th, "Waveform", |ui| {
-                        let names: Vec<&str> = gen::Wave::ALL.iter().map(|w| w.name()).collect();
-                        widgets::segmented(ui, &mut g.tones.wave, &names, &[]);
-                        ui.horizontal_top(|ui| {
-                            let w = gen::Wave::ALL[g.tones.wave.min(4)];
-                            ui.add_enabled_ui(w.has_shape(), |ui| {
+                    group(ui, &th, "Base", LEFT, 0.0, |ui| {
+                        let iw = ui.available_width();
+                        let id = ui.id();
+                        layout::row(ui, iw, &[1.4, 1.0, 1.0], |ui, k| match k {
+                            0 => {
                                 widgets::knob(
                                     ui,
-                                    ui.id().with("shape"),
-                                    &mut g.tones.shape,
+                                    id.with("base"),
+                                    &mut set.base,
                                     1.0,
-                                    99.0,
-                                    50.0,
+                                    20_000.0,
+                                    440.0,
+                                    true,
+                                    86.0,
+                                    "Base Frequency",
+                                    &[20.0, 200.0, 2000.0, 20_000.0],
+                                    &|v| crate::widgets::fmt_unit(v, "Hz"),
+                                );
+                            }
+                            1 => {
+                                widgets::knob(
+                                    ui,
+                                    id.with("depth"),
+                                    &mut set.mod_depth,
+                                    0.0,
+                                    5000.0,
+                                    0.0,
                                     false,
                                     66.0,
-                                    if w == gen::Wave::Square {
-                                        "Duty"
-                                    } else {
-                                        "Symmetry"
-                                    },
+                                    "Mod Depth",
                                     &[],
-                                    &|v| format!("{v:.0}%"),
+                                    &|v| crate::widgets::fmt_unit(v, "Hz"),
                                 )
-                                .on_hover_text(
-                                    "The square's duty cycle, or how far the triangle leans",
-                                );
-                            });
-                            let set = if editing_end {
-                                &g.tones.end
-                            } else {
-                                &g.tones.start
-                            };
-                            wave_preview(ui, &th, set, wave, shape);
+                                .on_hover_text("How far the frequency swings (Hz)");
+                            }
+                            _ => {
+                                widgets::knob(
+                                    ui,
+                                    id.with("rate"),
+                                    &mut set.mod_rate,
+                                    0.0,
+                                    100.0,
+                                    0.0,
+                                    false,
+                                    66.0,
+                                    "Mod Rate",
+                                    &[],
+                                    &|v| format!("{v:.2} Hz"),
+                                )
+                                .on_hover_text("How fast it swings (Hz)");
+                            }
                         });
                     });
-                });
-                ui.add_space(6.0);
-                let set = if editing_end {
-                    &mut g.tones.end
-                } else {
-                    &mut g.tones.start
-                };
-                group(ui, &th, "Frequency components", |ui| {
-                    ui.horizontal_top(|ui| {
-                        for k in 0..gen::COMPONENTS {
-                            component(ui, &th, set, k);
-                            ui.add_space(2.0);
-                        }
-                        ui.add_space(8.0);
-                        ui.add(
-                            VFader::new(&mut set.volume, -60.0..=0.0)
-                                .label("Volume")
-                                .unit("dB")
-                                .default_value(-6.0)
-                                .height(150.0)
-                                .ticks(&[0.0, -6.0, -12.0, -24.0, -36.0, -60.0]),
-                        );
+                    ui.add_space(layout::GAP_S);
+                    group(ui, &th, "Waveform", LEFT, 0.0, |ui| {
+                        let iw = ui.available_width();
+                        layout::centred(ui, iw, |ui| {
+                            let names: Vec<&str> =
+                                gen::Wave::ALL.iter().map(|w| w.name()).collect();
+                            widgets::segmented(ui, &mut g.tones.wave, &names, &[]);
+                        });
+                        ui.add_space(layout::GAP_S);
+                        layout::row(ui, iw, &[76.0, iw - 76.0], |ui, k| {
+                            if k == 0 {
+                                let w = gen::Wave::ALL[g.tones.wave.min(4)];
+                                ui.add_enabled_ui(w.has_shape(), |ui| {
+                                    widgets::knob(
+                                        ui,
+                                        ui.id().with("shape"),
+                                        &mut g.tones.shape,
+                                        1.0,
+                                        99.0,
+                                        50.0,
+                                        false,
+                                        66.0,
+                                        if w == gen::Wave::Square {
+                                            "Duty"
+                                        } else {
+                                            "Symmetry"
+                                        },
+                                        &[],
+                                        &|v| format!("{v:.0}%"),
+                                    )
+                                    .on_hover_text(
+                                        "The square's duty cycle, or how far the triangle leans",
+                                    );
+                                });
+                            } else {
+                                let set = if editing_end {
+                                    &g.tones.end
+                                } else {
+                                    &g.tones.start
+                                };
+                                wave_preview(ui, &th, set, wave, shape);
+                            }
+                        });
                     });
-                });
+                } else {
+                    let set = if editing_end {
+                        &mut g.tones.end
+                    } else {
+                        &mut g.tones.start
+                    };
+                    group(ui, &th, "Frequency components", RIGHT, left_h, |ui| {
+                        ui.horizontal_top(|ui| {
+                            for k in 0..gen::COMPONENTS {
+                                component(ui, &th, set, k);
+                                ui.add_space(2.0);
+                            }
+                            ui.add_space(8.0);
+                            ui.add(
+                                VFader::new(&mut set.volume, -60.0..=0.0)
+                                    .label("Volume")
+                                    .unit("dB")
+                                    .default_value(-6.0)
+                                    .height(150.0)
+                                    .ticks(&[0.0, -6.0, -12.0, -24.0, -36.0, -60.0]),
+                            );
+                        });
+                    });
+                }
             });
+            layout::last_height(ui, "gen-tones-left", Some(hs[0]));
             ui.add_space(4.0);
             egui::CollapsingHeader::new(RichText::new("Advanced").color(c(th.text_dim)))
                 .id_salt("gen-tones-advanced")
