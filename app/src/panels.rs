@@ -229,9 +229,10 @@ fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
             if !r.is_empty() {
                 let seg = d.buf.slice(r);
                 if let Some(out) = crate::fx::process_offline(&slot, &seg) {
+                    let out = d.chans.fit_len(out, seg.frames());
                     let mut b = (*d.buf).clone();
                     b.replace(r, &out);
-                    d.set_buffer(&crate::fx::name(&id), b);
+                    d.set_buffer_on(&crate::fx::name(&id), b);
                 }
             }
         }

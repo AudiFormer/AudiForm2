@@ -18,6 +18,10 @@
 //! the wheel zooms the frequencies at the pointer, and dragging the scale
 //! slides through the frequencies when zoomed in; a right-click on the
 //! spectrum offers its zoom, scale and resolution.
+//!
+//! Each channel's name at the right of its lane (L, R, C, LFE...) is a
+//! switch: click to switch the channel off or on, Ctrl+click to keep it
+//! alone (again for every channel). See [`crate::wave_channels`].
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Rounding, Sense, Shape, Stroke};
 
@@ -225,7 +229,7 @@ fn spectrogram_texture(
     let rate = d.buf.rate as f64;
     let start = (d.view.start * rate) as usize;
     let end = ((d.view.start + d.view.len) * rate) as usize;
-    let nch = d.buf.num_channels().min(8);
+    let nch = d.buf.num_channels().min(SPEC_MAX_CH);
     let size = st.spec.fft;
     let ny = rate / 2.0;
     let bins = size / 2;
@@ -318,6 +322,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if spec_area.is_some() {
         crate::spectral_select::divider(ui, st, body, (wave_area.bottom() + 2.0).round());
     }
+    // The channel names switch channels on and off (on top of the rest).
+    let switches = channel_switches(ui, st, wave_area, spec_area);
 
     // Interaction first so drawing shows this frame's state.
     st.wave_px = body.width();
@@ -537,14 +543,6 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             None,
             d.amp,
         );
-        let label = channel_name(nch, ch);
-        p.text(
-            lane.right_top() + vec2(-6.0, 4.0),
-            Align2::RIGHT_TOP,
-            label,
-            FontId::proportional(10.0),
-            c(th.text_dim),
-        );
         // dB scale at the right edge, following the amplitude zoom:
         // zoomed in, the quieter marks get room and show.
         let mut last_label = f32::NEG_INFINITY;
@@ -580,7 +578,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     // Spectral display.
     if let Some(sa) = spec_area {
         let cols = ((sa.width() / 2.0) as usize).clamp(32, 1024);
-        let rows = ((sa.height() / nch.min(8) as f32) as usize).clamp(64, 512);
+        let rows = ((sa.height() / nch.min(SPEC_MAX_CH) as f32) as usize).clamp(64, 512);
         if let Some(tex) = spectrogram_texture(ui, st, caches, cols, rows) {
             p.image(
                 tex.id(),
@@ -590,11 +588,11 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             );
         }
         let d = st.doc().unwrap();
-        let lane_h = sa.height() / nch.min(8) as f32;
+        let lane_h = sa.height() / nch.min(SPEC_MAX_CH) as f32;
         let ny = d.buf.rate as f64 / 2.0;
         let scale = Rect::from_min_max(pos2(sa.right() - SCALE_W, sa.top()), sa.max);
         p.rect_filled(scale, Rounding::ZERO, ca(th.panel, 150));
-        for ch in 0..nch.min(8) {
+        for ch in 0..nch.min(SPEC_MAX_CH) {
             let lane = Rect::from_min_size(
                 pos2(sa.left(), sa.top() + lane_h * ch as f32),
                 vec2(sa.width(), lane_h),
@@ -640,6 +638,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             }
         }
     }
+    // Channels switched off: dimmed, over the selection too.
+    draw_channel_switches(&p, d, &th, wave_area, spec_area, &switches);
     // Markers.
     for m in &d.markers {
         let x = time_to_x(&v, body, m.time);
@@ -688,6 +688,180 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
 /// Width of the spectrum's frequency scale at its right edge.
 const SCALE_W: f32 = 44.0;
 
+/// Most channels the spectral display shows a band for (7.1.4 is 12).
+pub const SPEC_MAX_CH: usize = 16;
+
+/// One channel name's place on screen: its switch.
+struct Switch {
+    ch: usize,
+    rect: Rect,
+    hovered: bool,
+}
+
+const SWITCH_FONT: f32 = 10.5;
+
+/// Where each channel's name sits: in the waveform lanes left of the
+/// level scale, and in the spectrum bands left of the frequency scale.
+fn switch_rects(ui: &egui::Ui, nch: usize, wave: Rect, spec: Option<Rect>) -> Vec<(usize, Rect)> {
+    let size = |name: &str| {
+        ui.fonts(|f| {
+            f.layout_no_wrap(
+                name.to_string(),
+                FontId::proportional(SWITCH_FONT),
+                Color32::WHITE,
+            )
+            .size()
+        })
+    };
+    let place = |ch: usize, right: f32, top: f32| {
+        let s = size(channel_name(nch, ch));
+        Rect::from_min_max(pos2(right - s.x, top), pos2(right, top + s.y)).expand2(vec2(4.0, 1.5))
+    };
+    let lane_h = wave.height() / nch as f32;
+    let mut out: Vec<(usize, Rect)> = (0..nch)
+        .map(|ch| {
+            (
+                ch,
+                place(
+                    ch,
+                    wave.right() - 30.0,
+                    wave.top() + lane_h * ch as f32 + 3.0,
+                ),
+            )
+        })
+        .collect();
+    if let Some(sa) = spec {
+        let bands = nch.min(SPEC_MAX_CH);
+        let band_h = sa.height() / bands as f32;
+        out.extend((0..bands).map(|ch| {
+            (
+                ch,
+                place(
+                    ch,
+                    sa.right() - SCALE_W - 8.0,
+                    sa.top() + band_h * ch as f32 + 3.0,
+                ),
+            )
+        }));
+    }
+    out
+}
+
+/// The channel names as switches: a click switches that channel off or
+/// on, Ctrl+click keeps it alone (or every channel again).
+fn channel_switches(ui: &egui::Ui, st: &mut State, wave: Rect, spec: Option<Rect>) -> Vec<Switch> {
+    let Some(d) = st.doc() else {
+        return Vec::new();
+    };
+    let nch = d.buf.num_channels().max(1);
+    let set = d.chans;
+    let solo_key = if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    };
+    let mut out = Vec::new();
+    let mut new_set = None;
+    for (i, (ch, rect)) in switch_rects(ui, nch, wave, spec).into_iter().enumerate() {
+        let r = ui.interact(
+            rect,
+            ui.id().with(("af2-chan-switch", i)),
+            Sense::click_and_drag(),
+        );
+        let name = channel_long_name(nch, ch);
+        let r = if nch == 1 {
+            r.on_hover_text("Mono: the only channel, always on")
+        } else if set.is_on(ch) {
+            r.on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(format!(
+                    "{name}: click to switch this channel off (silent in playback; edits, \
+                     effects and selections pass it by). {solo_key}+click: this channel alone."
+                ))
+        } else {
+            r.on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(format!(
+                "{name} is off: click to switch it back on. {solo_key}+click: this channel alone."
+            ))
+        };
+        if r.clicked() && nch > 1 {
+            let solo = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+            new_set = Some(if solo { set.solo(ch) } else { set.toggle(ch) });
+        }
+        out.push(Switch {
+            ch,
+            rect,
+            hovered: r.hovered(),
+        });
+    }
+    if let (Some(n), Some(d)) = (new_set, st.doc_mut()) {
+        d.chans = n;
+    }
+    out
+}
+
+/// Dims the lanes of channels switched off and draws every channel's
+/// name: struck through and faint when off.
+fn draw_channel_switches(
+    p: &egui::Painter,
+    d: &crate::state::Doc,
+    th: &Theme,
+    wave: Rect,
+    spec: Option<Rect>,
+    switches: &[Switch],
+) {
+    let nch = d.buf.num_channels().max(1);
+    let set = d.chans;
+    let lane_h = wave.height() / nch as f32;
+    for ch in (0..nch).filter(|&k| !set.is_on(k)) {
+        let lane = Rect::from_min_size(
+            pos2(wave.left(), wave.top() + lane_h * ch as f32),
+            vec2(wave.width(), lane_h),
+        );
+        p.rect_filled(lane, Rounding::ZERO, ca(th.wave_background, 200));
+        if let Some(sa) = spec {
+            let bands = nch.min(SPEC_MAX_CH);
+            if ch < bands {
+                let band_h = sa.height() / bands as f32;
+                let band = Rect::from_min_size(
+                    pos2(sa.left(), sa.top() + band_h * ch as f32),
+                    vec2(sa.width() - SCALE_W, band_h),
+                );
+                p.rect_filled(band, Rounding::ZERO, Color32::from_black_alpha(175));
+            }
+        }
+    }
+    for s in switches {
+        let on = set.is_on(s.ch);
+        if s.hovered && nch > 1 {
+            p.rect_filled(s.rect, Rounding::same(3.0), ca(th.panel, 220));
+            p.rect_stroke(
+                s.rect,
+                Rounding::same(3.0),
+                Stroke::new(1.0_f32, ca(th.accent, 160)),
+            );
+        }
+        let col = match (on, set.some_off()) {
+            (true, true) => c(th.text),
+            (true, false) => c(th.text_dim),
+            (false, _) => ca(th.text_dim, 110),
+        };
+        p.text(
+            s.rect.center(),
+            Align2::CENTER_CENTER,
+            channel_name(nch, s.ch),
+            FontId::proportional(SWITCH_FONT),
+            col,
+        );
+        if !on {
+            let y = s.rect.center().y;
+            p.line_segment(
+                [pos2(s.rect.left() + 2.0, y), pos2(s.rect.right() - 2.0, y)],
+                Stroke::new(1.2_f32, ca(th.text_dim, 170)),
+            );
+        }
+    }
+}
+
 /// The Waveform editor's parts, for the wheel.
 struct Areas {
     overview: Rect,
@@ -713,7 +887,7 @@ pub fn level_marks(amp: f32, half: f32) -> Vec<(f32, f32)> {
 
 /// The frequency under `y` on the spectrum `sa` (the band it is in).
 fn freq_at_y(st: &State, sa: Rect, y: f32, nch: usize, ny: f64) -> f64 {
-    let nch = nch.clamp(1, 8);
+    let nch = nch.clamp(1, SPEC_MAX_CH);
     let lane_h = sa.height() / nch as f32;
     let k = (((y - sa.top()) / lane_h).floor().max(0.0) as usize).min(nch - 1);
     let bottom = sa.top() + lane_h * (k + 1) as f32;
@@ -737,7 +911,10 @@ fn freq_scale_drag(ui: &egui::Ui, st: &mut State, sa: Rect) {
         });
     }
     if r.dragged() {
-        let nch = st.doc().map_or(1, |d| d.buf.num_channels()).clamp(1, 8);
+        let nch = st
+            .doc()
+            .map_or(1, |d| d.buf.num_channels())
+            .clamp(1, SPEC_MAX_CH);
         let band = sa.height() / nch as f32;
         let ny = st.doc().map_or(24_000.0, |d| d.buf.rate as f64 / 2.0);
         let dy = r.drag_delta().y;
@@ -921,12 +1098,36 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
 
 pub fn channel_name(n: usize, ch: usize) -> &'static str {
     const STEREO: [&str; 2] = ["L", "R"];
-    const SURROUND: [&str; 8] = ["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb"];
+    // 7.1, then 7.1.4's height channels.
+    const SURROUND: [&str; 12] = [
+        "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Ltf", "Rtf", "Ltb", "Rtb",
+    ];
     match n {
         1 => "M",
-        2 => STEREO[ch],
+        2 => STEREO.get(ch).copied().unwrap_or("·"),
         _ => SURROUND.get(ch).copied().unwrap_or("·"),
     }
+}
+
+/// [`channel_name`] spelled out, for hover hints.
+pub fn channel_long_name(n: usize, ch: usize) -> String {
+    let name = match channel_name(n, ch) {
+        "M" => "Mono",
+        "L" => "Left",
+        "R" => "Right",
+        "C" => "Centre",
+        "LFE" => "LFE",
+        "Ls" => "Left surround",
+        "Rs" => "Right surround",
+        "Lb" => "Left back",
+        "Rb" => "Right back",
+        "Ltf" => "Left top front",
+        "Rtf" => "Right top front",
+        "Ltb" => "Left top back",
+        "Rtb" => "Right top back",
+        _ => return format!("Channel {}", ch + 1),
+    };
+    name.to_string()
 }
 
 /// The playhead: the HUD's laser. The motion and music state come from

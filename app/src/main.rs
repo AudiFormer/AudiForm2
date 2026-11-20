@@ -58,6 +58,7 @@ mod transport;
 mod tube_master_ui;
 mod ui;
 mod visualizer;
+mod wave_channels;
 mod waveform;
 mod widgets;
 mod workspace;
