@@ -158,11 +158,15 @@ fn an_unkeyed_or_unresolvable_key_hears_its_own_input_never_silence() {
     // A key naming no track, or the track itself: its own input.
     assert_eq!(own[0], own[1]);
     assert_eq!(own[0], own[2]);
-    // A muted source has no sound to key with: its own input, not the
-    // silence (which would leave the music uncompressed).
+    // Keys are taken before the fader and mute: a muted voice still
+    // ducks the music.
+    f.t(music).clips[0].gain_db = 0.0;
     f.t(music).chain = vec![compressor(Some(voice))];
     f.t(voice).mute = true;
-    assert_eq!(f.render(0.9), own[0]);
+    let muted = f.render(2.0);
+    assert!(at(&muted, 1.5) < 0.25 * 0.5, "{}", at(&muted, 1.5));
+    assert!((at(&muted, 0.5) - 0.25).abs() < 1e-3);
+    f.t(voice).mute = false;
     // An effect that takes no key ignores one.
     f.t(voice).mute = false;
     f.t(music).chain = vec![amp(0.0)];

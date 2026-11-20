@@ -704,10 +704,61 @@ fn scale(l: &mut [f32], r: &mut [f32], g: f32) {
     }
 }
 
+/// A fixed stereo delay (a ring of `d` frames), preallocated.
+#[derive(Default)]
+pub struct Delay {
+    l: Vec<f32>,
+    r: Vec<f32>,
+    pos: usize,
+}
+
+impl Delay {
+    pub fn new(frames: usize) -> Delay {
+        Delay {
+            l: vec![0.0; frames],
+            r: vec![0.0; frames],
+            pos: 0,
+        }
+    }
+
+    pub fn frames(&self) -> usize {
+        self.l.len()
+    }
+
+    /// Delays `l` and `r` in place. No allocation.
+    pub fn run(&mut self, l: &mut [f32], r: &mut [f32]) {
+        let d = self.l.len();
+        if d == 0 {
+            return;
+        }
+        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+            let p = self.pos;
+            *a = std::mem::replace(&mut self.l[p], *a);
+            *b = std::mem::replace(&mut self.r[p], *b);
+            self.pos = if p + 1 == d { 0 } else { p + 1 };
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.l.fill(0.0);
+        self.r.fill(0.0);
+        self.pos = 0;
+    }
+}
+
 /// A chain of live effects, plus its own input and output gain and mix
 /// (the rack's controls).
+///
+/// The chain's delay never changes with bypass: a bypassed effect that
+/// looks ahead still holds the sound back by its latency, and the dry
+/// part of the mix is held back by the whole chain's, so the mix graph
+/// can line every path up once.
 pub struct Chain {
     pub slots: Vec<(Box<dyn Live>, bool)>,
+    /// Per slot: the delay a bypassed look-ahead effect leaves in place.
+    pads: Vec<Delay>,
+    /// The dry sound, held back by the chain's latency.
+    dry_pad: Delay,
     dry_l: Vec<f32>,
     dry_r: Vec<f32>,
     /// Dry/wet: the dry sound is the chain's input after the input gain.
@@ -725,8 +776,12 @@ pub type Key<'k> = Option<(&'k [f32], &'k [f32])>;
 
 impl Chain {
     pub fn new(slots: Vec<(Box<dyn Live>, bool)>, max_block: usize) -> Chain {
+        let pads: Vec<Delay> = slots.iter().map(|(p, _)| Delay::new(p.latency())).collect();
+        let total = pads.iter().map(Delay::frames).sum();
         Chain {
             slots,
+            pads,
+            dry_pad: Delay::new(total),
             dry_l: vec![0.0; max_block],
             dry_r: vec![0.0; max_block],
             mix: 1.0,
@@ -748,6 +803,17 @@ impl Chain {
         self.slots.iter().all(|(_, bypass)| *bypass)
     }
 
+    /// How many frames late the chain's output is (as built).
+    pub fn latency(&self) -> usize {
+        self.pads.iter().map(Delay::frames).sum()
+    }
+
+    /// The delay of the slots before `slot` (a key for that slot is held
+    /// back by this much so it meets the sound in step).
+    pub fn latency_before(&self, slot: usize) -> usize {
+        self.pads.iter().take(slot).map(Delay::frames).sum()
+    }
+
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         self.process_keyed(l, r, |_| None);
     }
@@ -760,20 +826,30 @@ impl Chain {
         r: &mut [f32],
         key: impl Fn(usize) -> Key<'k>,
     ) {
-        if self.bypass {
-            return;
-        }
         let n = l.len().min(r.len()).min(self.dry_l.len());
         let (l, r) = (&mut l[..n], &mut r[..n]);
+        if self.bypass {
+            // Untouched, but as late as the chain always is.
+            for pad in &mut self.pads {
+                pad.run(l, r);
+            }
+            return;
+        }
         scale(l, r, self.input);
-        if !self.is_empty() {
+        if self.is_empty() {
+            for pad in &mut self.pads {
+                pad.run(l, r);
+            }
+        } else {
             let wet_only = self.mix >= 0.999;
             if !wet_only {
                 self.dry_l[..n].copy_from_slice(l);
                 self.dry_r[..n].copy_from_slice(r);
+                self.dry_pad.run(&mut self.dry_l[..n], &mut self.dry_r[..n]);
             }
             for (i, (p, bypass)) in self.slots.iter_mut().enumerate() {
                 if *bypass {
+                    self.pads[i].run(l, r);
                     continue;
                 }
                 match key(i) {
@@ -802,6 +878,11 @@ impl Chain {
 
     pub fn set_bypass(&mut self, slot: usize, bypass: bool) {
         if let Some((_, b)) = self.slots.get_mut(slot) {
+            if bypass && !*b {
+                if let Some(pad) = self.pads.get_mut(slot) {
+                    pad.clear();
+                }
+            }
             *b = bypass;
         }
     }
@@ -810,6 +891,10 @@ impl Chain {
         for (p, _) in &mut self.slots {
             p.reset();
         }
+        for pad in &mut self.pads {
+            pad.clear();
+        }
+        self.dry_pad.clear();
     }
 }
 

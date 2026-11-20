@@ -506,6 +506,78 @@ impl ControlEvent {
     }
 }
 
+/// A note as it will play: timeline seconds, velocity 0..1 after the
+/// clip level.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlannedNote {
+    pub start: f64,
+    pub end: f64,
+    pub pitch: u8,
+    pub velocity: f32,
+    pub channel: u8,
+    pub pan: f32,
+}
+
+/// Every note of `clips` as it plays through the tempo map: muted clips
+/// are silent, notes starting at or past their clip's end are not played
+/// and the rest are cut at it, the clip level scales velocity (within
+/// 1/127..1), and a sustain pedal held down in the clip keeps released
+/// notes sounding until it comes up (the built-in instruments have no
+/// pedal of their own). Sorted by start; a note always lasts a frame.
+pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
+    let mut out = Vec::new();
+    for c in clips.iter().filter(|c| !c.muted) {
+        let mut pedal: Vec<&ControlEvent> = c
+            .controls
+            .iter()
+            .filter(|e| e.controller == SUSTAIN && e.at < c.length)
+            .collect();
+        pedal.sort_by(|a, b| a.at.total_cmp(&b.at));
+        // Where the pedal (on `ch`) next comes up after it was down at `b`.
+        let held_until = |ch: u8, b: f64| -> Option<f64> {
+            let down = pedal
+                .iter()
+                .rev()
+                .find(|e| e.channel == ch && e.at <= b)
+                .is_some_and(|e| e.value >= 0.5);
+            if !down {
+                return None;
+            }
+            Some(
+                pedal
+                    .iter()
+                    .find(|e| e.channel == ch && e.at > b && e.value < 0.5)
+                    .map_or(c.length, |e| e.at),
+            )
+        };
+        for n in &c.notes {
+            if n.start >= c.length || n.length <= 0.0 || n.start < 0.0 {
+                continue;
+            }
+            let mut end = (n.start + n.length).min(c.length);
+            if let Some(up) = held_until(n.channel, end) {
+                end = up.max(end);
+            }
+            let start = tempo.secs(c.start + n.start);
+            let stop = tempo.secs(c.start + end);
+            out.push(PlannedNote {
+                start,
+                end: stop.max(start + 1e-6),
+                pitch: n.pitch.min(127),
+                velocity: c.velocity(n),
+                channel: n.channel.min(15),
+                pan: if n.pan.is_nan() {
+                    0.0
+                } else {
+                    n.pan.clamp(-1.0, 1.0)
+                },
+            });
+        }
+    }
+    out.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+    out
+}
+
 /// The controllers controller lanes offer first.
 pub const LANE_CONTROLLERS: [u8; 10] = [64, 1, 11, 7, 10, 2, 66, 67, PITCH_BEND, AFTERTOUCH];
 

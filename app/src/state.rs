@@ -1747,19 +1747,26 @@ impl State {
 
     /// Sends a track's fader, pan and mute or solo state to the mix.
     pub fn live_track(&mut self, ti: usize) {
-        let space = self.session.space.is_some();
-        let audible: Vec<bool> = self
-            .session
-            .tracks
-            .iter()
-            .map(|t| self.session.audible(t))
-            .collect();
+        let audible = self.session.heard();
         let Some(t) = self.session.tracks.get(ti) else {
             return;
         };
-        let (l, r) = af27_engine::track_gains(t, space);
+        let fader = af27_core::session::fader_gain(t.volume_db);
+        let pan = t.pan;
+        let sends: Vec<(f32, f32, bool)> = t
+            .sends
+            .iter()
+            .filter(|s| self.session.track_index(s.bus).is_some())
+            .map(|s| {
+                let level = af27_core::time::db_to_gain(s.level_db.clamp(-96.0, 12.0));
+                (level, s.pan, s.enabled)
+            })
+            .collect();
         if let Some(e) = &mut self.engine {
-            e.set_gains(ti, l, r);
+            e.set_strip(ti, fader, pan);
+            for (k, (level, pan, on)) in sends.into_iter().enumerate() {
+                e.set_send(ti, k, level, pan, on);
+            }
             // Solo on one track changes what every track does.
             for (i, a) in audible.into_iter().enumerate() {
                 e.set_audible(i, a);

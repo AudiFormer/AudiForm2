@@ -1,33 +1,58 @@
 // SPDX-License-Identifier: LicenseRef-Audiform27
 // Copyright (c) The Audiform27 contributors.
 
-//! The mix graph, run in blocks of up to [`BLOCK`] frames.
+//! The mix graph, run in blocks of up to [`BLOCK`] frames on the audio
+//! thread itself, so every fader, pan, send and mute reacts within one
+//! device buffer (there is no render-ahead and no fader lag).
 //!
-//! Per block: buses are cleared; every audio and MIDI track renders its
-//! clips (or notes), runs its effect chain (inside its rack: input gain,
-//! the effects, dry/wet mix, output gain), feeds pre-fader sends, takes
-//! its fader and pan, feeds post-fader sends, then goes to its output (a
-//! bus or the master). Buses then run in session order. An effect keyed
-//! by another track or bus (a sidechain) hears that source's sound after
-//! its chain and before its fader, so the source runs first; see `plan`.
-//! A 3D Space
-//! session spreads each track over the speaker bed instead of panning;
-//! its master chain then runs on the bed's speakers (every channel, see
-//! `af27_dsp::wide`), before the bed is heard binaurally or folded to
-//! stereo, or exported as it is. Bus tracks stay stereo. In a stereo
-//! session the master chain runs on the stereo mix. The master fader
-//! comes last. The metronome is not part of the mix: the live engine adds
-//! it after the meters and the scope (see `Mix::click_into`), so it never
-//! reaches an export.
+//! Each track or bus is a strip. Per block: every audio and MIDI track
+//! renders its clips (or notes) and runs its effect chain (inside its
+//! rack: input gain, the effects, dry/wet mix, output gain); buses run
+//! their chain on what was fed to them. Then the strip's sound, folded to
+//! mono if asked (after the chain, before the fader), goes out on its
+//! routes: the output (a bus or the master) at fader times balance pan,
+//! and each send at its own level and pan (post-fader sends also follow
+//! the fader, pre-fader sends do not; every send follows mute and solo).
+//! Gains move in a straight line across a block, so faders never click.
+//!
+//! Order and loops: outputs and sends (on or off) and sidechain keys are
+//! edges; the strips run in an order where every feeder comes first. An
+//! edge that would close a loop (only in a damaged file: edits refuse
+//! them) is dropped: such an output goes to the master instead, such a
+//! send plays nowhere, such a key leaves its effect hearing its own
+//! input.
+//!
+//! Delay compensation: each strip's input time `in_t` (the latest of its
+//! feeders' and key sources' output times) and output time `out_t`
+//! (`in_t` plus its chain's latency) are worked out once; every route,
+//! key and late track input is held back so it lands in step, and the
+//! whole mix is late by one `lead`. Sources are read `lead` ahead, so the
+//! output still lines up with the timeline exactly; starting playback
+//! primes the graph with `lead` frames.
+//!
+//! Sidechain keys are the source's sound after its chain and before its
+//! fader (muting or turning the source down does not change the duck),
+//! held back by the latency of the stages before the keyed effect.
+//!
+//! A 3D Space session spreads each track over the speaker bed instead of
+//! panning; its master chain then runs on the bed's speakers (every
+//! channel, see `af27_dsp::wide`), before the bed is heard binaurally or
+//! folded to stereo, or exported as it is. Bus tracks stay stereo. In a
+//! stereo session the master chain runs on the stereo mix. The master
+//! fader comes last, ramped. The metronome is not part of the mix: the
+//! live engine adds it after the meters and the scope (see
+//! `Mix::click_into`), so it never reaches an export.
 //!
 //! Everything a block needs is allocated when the program is built, on
 //! the UI thread. The audio thread only reads and writes those buffers.
 
 use std::sync::Arc;
 
+use af27_core::automation::{LanePoint, LaneTarget, SILENT_DB};
+use af27_core::session::{balance, fader_gain};
 use af27_core::time::db_to_gain;
 use af27_core::{AudioBuffer, Session, TrackKind};
-use af27_dsp::live::{build_chain, Chain};
+use af27_dsp::live::{build_chain, Chain, Delay};
 use af27_dsp::wide::{build_wide_chain, WideChain};
 
 use crate::synth::{self, Synth};
@@ -35,6 +60,8 @@ use crate::synth::{self, Synth};
 pub const BLOCK: usize = 2048;
 /// Speaker channels at most (7.1.4 is 12).
 pub const MAX_SPEAKERS: usize = 16;
+/// Effect lanes move their effect's settings this often (frames).
+pub const FX_STEP: usize = 256;
 
 #[derive(Clone)]
 pub struct MixClip {
@@ -82,28 +109,117 @@ impl MixClip {
     }
 }
 
+/// A send from a strip to a bus.
 pub struct MixSend {
     pub bus: usize,
-    pub gain: f32,
     pub pre: bool,
+    pub on: bool,
+    /// Linear level and the send's own pan (-1..1).
+    pub level: f32,
+    pub pan: f32,
+    /// False when the send would close a loop (a damaged file): it plays
+    /// nowhere.
+    pub kept: bool,
+    cur: [f32; 2],
+    delay: Delay,
+}
+
+/// What an automation lane on a strip moves, for [`crate::Engine`]'s live
+/// lane switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneKind {
+    Volume,
+    Pan,
+    Effect { slot: u8, param: u8 },
+}
+
+struct FxLane {
+    slot: usize,
+    param: usize,
+    points: Vec<LanePoint>,
+    /// The slot's settings, with the automated one moved.
+    vals: Vec<f32>,
+    live: bool,
+}
+
+/// A strip's playing lanes. A lane switched to live (being written)
+/// steps aside, and its control is heard as it is set.
+#[derive(Default)]
+struct StripAuto {
+    vol: Vec<LanePoint>,
+    pan: Vec<LanePoint>,
+    vol_live: bool,
+    pan_live: bool,
+    fx: Vec<FxLane>,
+}
+
+impl StripAuto {
+    fn plays_vol(&self) -> bool {
+        !self.vol.is_empty() && !self.vol_live
+    }
+    fn plays_pan(&self) -> bool {
+        !self.pan.is_empty() && !self.pan_live
+    }
+    fn plays_fx(&self) -> bool {
+        self.fx.iter().any(|f| !f.live)
+    }
+}
+
+/// A volume lane's value as a gain.
+#[inline]
+fn lane_gain(points: &[LanePoint], t: f64) -> f32 {
+    match af27_core::automation::value_at(points, t) {
+        Some(db) if db > SILENT_DB => db_to_gain(db as f32),
+        _ => 0.0,
+    }
+}
+
+/// A sidechain key one chain slot hears: the source's sound, held back.
+struct KeyTap {
+    src: usize,
+    delay: Delay,
+    l: Vec<f32>,
+    r: Vec<f32>,
+}
+
+impl KeyTap {
+    fn new(src: usize, frames: usize) -> KeyTap {
+        KeyTap {
+            src,
+            delay: Delay::new(frames),
+            l: vec![0.0; BLOCK],
+            r: vec![0.0; BLOCK],
+        }
+    }
+
+    /// Takes this block of the source's sound (`sl`, `sr`) and delays it.
+    fn fill(&mut self, sl: &[f32], sr: &[f32], n: usize) {
+        self.l[..n].copy_from_slice(&sl[..n]);
+        self.r[..n].copy_from_slice(&sr[..n]);
+        self.delay.run(&mut self.l[..n], &mut self.r[..n]);
+    }
 }
 
 pub struct MixTrack {
     pub is_bus: bool,
+    /// Heard, given mute and solo (see `Session::heard`).
     pub audible: bool,
-    /// Fader and pan (pan is ignored in 3D sessions).
-    pub gain_l: f32,
-    pub gain_r: f32,
+    /// Fader (linear) and pan (-1..1; ignored in 3D sessions).
+    pub fader: f32,
+    pub pan: f32,
+    /// -1 when the track's polarity is flipped.
+    pub sign: f32,
+    /// Folds left and right together after the chain.
+    pub mono: bool,
     pub clips: Vec<MixClip>,
     pub synth: Option<Synth>,
     /// A SoundFont in place of the built-in synth.
     pub font: Option<Box<crate::soundfont::SfPlayer>>,
     pub chain: Chain,
-    /// Index of the bus track it feeds, or None for the master.
+    /// Index of the bus track it feeds, or None for the master (also
+    /// when the output would close a loop).
     pub output: Option<usize>,
     pub sends: Vec<MixSend>,
-    /// Has a pre-fader send (so the fader waits for the sends).
-    pub has_pre: bool,
     /// 3D: gains per speaker for the left and right side, and the LFE send.
     pub space_l: [f32; MAX_SPEAKERS],
     pub space_r: [f32; MAX_SPEAKERS],
@@ -112,18 +228,71 @@ pub struct MixTrack {
     /// the effect takes a key and the source can run first; None hears
     /// its own input.
     pub keys: Vec<Option<usize>>,
+    /// When the strip's input and output happen, in frames after the
+    /// sources are read (delay compensation).
+    pub in_t: usize,
+    pub out_t: usize,
+    taps: Vec<Option<KeyTap>>,
+    /// Holds a track's own sound back to its input time.
+    in_delay: Delay,
+    /// Holds the output route back to its destination's input time.
+    out_delay: Delay,
+    main_cur: [f32; 2],
+    auto: Option<Box<StripAuto>>,
+    /// Another strip's effect listens to this one.
+    keyed: bool,
+    /// The strip's sound this block: after the chain and the mono fold,
+    /// before the fader.
     l: Vec<f32>,
     r: Vec<f32>,
-    /// This track's sound after its chain and before its fader, kept for
-    /// the effects it keys (empty when it keys nothing).
-    kl: Vec<f32>,
-    kr: Vec<f32>,
 }
 
 impl MixTrack {
     /// Whether another track's effect listens to this one.
     pub fn is_key(&self) -> bool {
-        !self.kl.is_empty()
+        self.keyed
+    }
+
+    /// The output route's gains as set now (before automation).
+    fn main_target(&self, space: bool) -> [f32; 2] {
+        if !self.audible {
+            return [0.0; 2];
+        }
+        let auto = self.auto.as_deref();
+        let fader = if auto.is_some_and(StripAuto::plays_vol) {
+            1.0
+        } else {
+            self.fader
+        };
+        let g = self.sign * fader;
+        if space || auto.is_some_and(StripAuto::plays_pan) {
+            [g, g]
+        } else {
+            let [l, r] = balance(self.pan);
+            [g * l, g * r]
+        }
+    }
+
+    fn send_target(&self, s: &MixSend) -> [f32; 2] {
+        if !self.audible || !s.on || !s.kept {
+            return [0.0; 2];
+        }
+        let mut g = self.sign * s.level;
+        if !s.pre {
+            let lane = self.auto.as_deref().is_some_and(StripAuto::plays_vol);
+            g *= if lane { 1.0 } else { self.fader };
+        }
+        let [l, r] = balance(s.pan);
+        [g * l, g * r]
+    }
+
+    /// Has anything to do this block (heard, keying another strip, or
+    /// still ramping down).
+    fn active(&self) -> bool {
+        self.audible
+            || self.keyed
+            || self.main_cur != [0.0; 2]
+            || self.sends.iter().any(|s| s.cur != [0.0; 2])
     }
 }
 
@@ -141,15 +310,32 @@ pub struct Mix {
     /// The master chain of a stereo session (empty in a 3D session, whose
     /// master chain is `space.chain`).
     pub master_chain: Chain,
+    /// The master fader (linear), ramped to across each block.
     pub master: f32,
+    master_cur: f32,
+    master_lane: Vec<LanePoint>,
+    master_lane_live: bool,
+    master_taps: Vec<Option<KeyTap>>,
     pub duration: f64,
     pub space: Option<SpaceMix>,
     /// The click is on.
     pub metronome: bool,
     /// The tempo map's stretches, for the click.
     pub click: Vec<af27_core::midi::Segment>,
+    /// How late the whole mix is (frames); sources are read this far
+    /// ahead.
+    pub lead: usize,
+    /// When the master's input happens (frames after the sources).
+    pub master_in: usize,
     ml: Vec<f32>,
     mr: Vec<f32>,
+    /// Scratch for one route.
+    sl: Vec<f32>,
+    sr: Vec<f32>,
+    /// Per-frame lane factors for the strip being routed.
+    av: Vec<f32>,
+    apl: Vec<f32>,
+    apr: Vec<f32>,
     /// Every track grouped so none in a group feeds or keys another in
     /// it: each group's own work (clips, notes, chains) runs in parallel,
     /// groups in order. Without sidechains the audio and MIDI tracks form
@@ -157,6 +343,7 @@ pub struct Mix {
     levels: Vec<Vec<usize>>,
     /// Spread track work over the engine's threads (false: all on the caller).
     pub parallel: bool,
+    rate: f64,
 }
 
 /// Stereo at fractional index `x`, folding wide files (see `stereo_frame`).
@@ -211,10 +398,9 @@ pub fn stereo_frame(buf: &AudioBuffer, x: f64) -> (f32, f32) {
     }
 }
 
-/// Whether `from` needs `to`'s sound first, directly or through others
-/// (`deps[x]`: what `x` needs first; the graph has no loops).
-fn needs(deps: &[Vec<usize>], from: usize, to: usize) -> bool {
-    let mut seen = vec![false; deps.len()];
+/// Whether `to` can be reached from `from` along `edges`.
+fn reaches(edges: &[(usize, usize)], n: usize, from: usize, to: usize) -> bool {
+    let mut seen = vec![false; n];
     let mut stack = vec![from];
     while let Some(x) = stack.pop() {
         if x == to {
@@ -223,78 +409,75 @@ fn needs(deps: &[Vec<usize>], from: usize, to: usize) -> bool {
         if std::mem::replace(&mut seen[x], true) {
             continue;
         }
-        stack.extend(deps[x].iter().copied().filter(|&d| !seen[d]));
+        stack.extend(edges.iter().filter(|e| e.0 == x && !seen[e.1]).map(|e| e.1));
     }
     false
 }
 
-/// Works out the order tracks run in, on the UI thread.
-///
-/// A bus runs after everything that feeds it (by output or send); feeds
-/// to an earlier bus arrive after it has run, as they always have, and are
-/// ignored here. A track whose effect is keyed by another track or bus
-/// (`wanted[i][slot]`, already limited to effects that take a key) runs
-/// after that source. A key to itself, to a track that is not there, or
-/// one that would close a loop (the source needs this track's sound
-/// first) is dropped, and that effect hears its own input.
-///
-/// Returns the keys kept, per track and slot, and the levels: each track
-/// sits one above everything it needs, so the tracks within a level are
-/// independent of one another.
-fn plan(
-    tracks: &[MixTrack],
-    wanted: &[Vec<Option<usize>>],
-) -> (Vec<Vec<Option<usize>>>, Vec<Vec<usize>>) {
-    let n = tracks.len();
-    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (a, t) in tracks.iter().enumerate() {
-        for b in t.output.into_iter().chain(t.sends.iter().map(|s| s.bus)) {
-            let counts = b != a && b < n && tracks[b].is_bus && (!t.is_bus || a < b);
-            if counts && !deps[b].contains(&a) {
-                deps[b].push(a);
-            }
+/// The graph's shape, worked out on the UI thread: which edges are kept
+/// and the levels strips run in.
+struct Plan {
+    /// Kept edges (from, to): routes and keys.
+    kept: Vec<(usize, usize)>,
+    /// Per track and slot: the key kept.
+    keys: Vec<Vec<Option<usize>>>,
+    levels: Vec<Vec<usize>>,
+}
+
+/// Works out the order strips run in. Routes (`routes[i]`: every bus a
+/// strip outputs or sends to, on or off) come first, then keys (`wanted
+/// [i][slot]`, already limited to effects that take a key), each in
+/// session order. An edge to itself, to nothing, or one that would close
+/// a loop is dropped. Each strip sits one level above everything it
+/// needs, so the strips within a level are independent of one another.
+fn plan(n: usize, routes: &[Vec<usize>], wanted: &[Vec<Option<usize>>]) -> Plan {
+    let mut kept: Vec<(usize, usize)> = Vec::new();
+    let try_edge = |kept: &mut Vec<(usize, usize)>, a: usize, b: usize| {
+        let ok = a != b && a < n && b < n && !reaches(kept, n, b, a);
+        if ok && !kept.contains(&(a, b)) {
+            kept.push((a, b));
+        }
+        ok
+    };
+    for (a, to) in routes.iter().enumerate() {
+        for &b in to {
+            try_edge(&mut kept, a, b);
         }
     }
     let mut keys = Vec::with_capacity(n);
     for (i, slots) in wanted.iter().enumerate() {
-        let mut kept = Vec::with_capacity(slots.len());
-        for k in slots {
-            let src = k.filter(|&s| s != i && s < n && !needs(&deps, s, i));
-            if let Some(s) = src {
-                if !deps[i].contains(&s) {
-                    deps[i].push(s);
-                }
-            }
-            kept.push(src);
-        }
-        keys.push(kept);
+        keys.push(
+            slots
+                .iter()
+                .map(|k| k.filter(|&s| try_edge(&mut kept, s, i)))
+                .collect(),
+        );
     }
-    // Longest path from the tracks that need nothing (Kahn's order).
-    let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut waiting: Vec<usize> = deps.iter().map(Vec::len).collect();
-    for (i, d) in deps.iter().enumerate() {
-        for &x in d {
-            users[x].push(i);
-        }
+    // Longest path from the strips that need nothing (Kahn's order).
+    let mut waiting = vec![0usize; n];
+    for &(_, b) in &kept {
+        waiting[b] += 1;
     }
     let mut level = vec![0usize; n];
     let mut ready: Vec<usize> = (0..n).filter(|&i| waiting[i] == 0).collect();
     while let Some(x) = ready.pop() {
-        for &u in &users[x] {
-            level[u] = level[u].max(level[x] + 1);
-            waiting[u] -= 1;
-            if waiting[u] == 0 {
-                ready.push(u);
+        for &(a, b) in &kept {
+            if a == x {
+                level[b] = level[b].max(level[x] + 1);
+                waiting[b] -= 1;
+                if waiting[b] == 0 {
+                    ready.push(b);
+                }
             }
         }
     }
     let top = level.iter().copied().max().unwrap_or(0);
-    let mut out = vec![Vec::new(); top + 1];
+    let mut levels = vec![Vec::new(); top + 1];
     for (i, l) in level.iter().enumerate() {
-        out[*l].push(i);
+        levels[*l].push(i);
     }
-    out.retain(|l| !l.is_empty());
-    (keys, out)
+    levels.retain(|l| !l.is_empty());
+    Plan { kept, keys, levels }
 }
 
 /// A track list shared with the engine's threads for one block.
@@ -312,77 +495,125 @@ impl TrackPtr {
     }
 }
 
-/// Runs a track's chain over its block, each keyed slot hearing its
-/// source's kept sound, then keeps this track's own sound if it keys
-/// others. Reads only the key sources, which have finished this block
-/// (they sit at an earlier level) and are not written meanwhile.
-fn run_chain(t: &mut MixTrack, tracks: TrackPtr, n: usize) {
-    {
-        let MixTrack {
-            chain, keys, l, r, ..
-        } = &mut *t;
-        chain.process_keyed(&mut l[..n], &mut r[..n], |slot| {
-            let src = keys.get(slot).copied().flatten()?;
-            // A different track from `t` (keys to itself are dropped),
-            // only read here.
-            let s = unsafe { &*tracks.get(src) };
-            // A source that is not heard has no sound to key with: the
-            // effect hears its own input rather than silence.
-            (s.audible && s.is_key()).then(|| (&s.kl[..n], &s.kr[..n]))
-        });
+/// Runs a strip's chain over its block, each keyed slot hearing its
+/// source's sound (taken into the slot's tap and held back), then folds
+/// to mono if asked. `tin` is the timeline time of the chain's input at
+/// the block's first frame, for effect lanes. Reads only the key
+/// sources, which have finished this block (they sit at an earlier level)
+/// and are not written meanwhile.
+fn run_chain(t: &mut MixTrack, tracks: TrackPtr, n: usize, tin: f64, dt: f64) {
+    let MixTrack {
+        chain,
+        taps,
+        l,
+        r,
+        auto,
+        mono,
+        ..
+    } = &mut *t;
+    for tap in taps.iter_mut().flatten() {
+        // A different strip (keys to itself are dropped), only read here.
+        let s = unsafe { &*tracks.get(tap.src) };
+        tap.fill(&s.l, &s.r, n);
     }
-    if t.is_key() {
-        t.kl[..n].copy_from_slice(&t.l[..n]);
-        t.kr[..n].copy_from_slice(&t.r[..n]);
+    let fx = auto.as_deref_mut().filter(|a| a.plays_fx());
+    let step = if fx.is_some() { FX_STEP } else { n.max(1) };
+    let mut fx = fx;
+    let mut a = 0;
+    while a < n {
+        let b = (a + step).min(n);
+        if let Some(au) = fx.as_deref_mut() {
+            let at = tin + dt * a as f64;
+            for f in au.fx.iter_mut().filter(|f| !f.live) {
+                if let (Some(v), Some(slot)) = (
+                    af27_core::automation::value_at(&f.points, at),
+                    f.vals.get_mut(f.param),
+                ) {
+                    *slot = v as f32;
+                    chain.set(f.slot, &f.vals);
+                }
+            }
+        }
+        chain.process_keyed(&mut l[a..b], &mut r[a..b], |slot| {
+            let tap = taps.get(slot)?.as_ref()?;
+            Some((&tap.l[a..b], &tap.r[a..b]))
+        });
+        a = b;
+    }
+    if *mono {
+        for (x, y) in l[..n].iter_mut().zip(r[..n].iter_mut()) {
+            let m = (*x + *y) * 0.5;
+            *x = m;
+            *y = m;
+        }
     }
 }
 
-/// A track's own sound for one block: silence, then its clips or notes,
-/// then its effect chain. Writes nothing but the track itself.
-fn render_source(t: &mut MixTrack, tracks: TrackPtr, t0: f64, dt: f64, n: usize) {
+/// A track's own sound for one block: silence, then its clips or notes
+/// (read at source time `ts`), held back to its input time, then its
+/// effect chain. Writes nothing but the track itself.
+fn render_source(t: &mut MixTrack, tracks: TrackPtr, ts: f64, dt: f64, n: usize) {
     t.l[..n].fill(0.0);
     t.r[..n].fill(0.0);
-    if !t.audible {
-        return;
-    }
-    let t1 = t0 + dt * n as f64;
+    let t1 = ts + dt * n as f64;
     for c in &t.clips {
-        if c.start >= t1 || c.start + c.length <= t0 {
+        if c.start >= t1 || c.start + c.length <= ts {
             continue;
         }
-        read_clip(c, t0, dt, &mut t.l[..n], &mut t.r[..n]);
+        read_clip(c, ts, dt, &mut t.l[..n], &mut t.r[..n]);
     }
     if let Some(s) = &mut t.synth {
-        s.render(t0, dt, &mut t.l[..n], &mut t.r[..n]);
+        s.render(ts, dt, &mut t.l[..n], &mut t.r[..n]);
     }
     if let Some(f) = &mut t.font {
-        f.render(t0, dt, &mut t.l[..n], &mut t.r[..n]);
+        f.render(ts, dt, &mut t.l[..n], &mut t.r[..n]);
     }
-    run_chain(t, tracks, n);
-    // With no pre-fader send, the fader can go on here, in parallel too.
-    if !t.has_pre {
-        apply_fader(t, n);
+    t.in_delay.run(&mut t.l[..n], &mut t.r[..n]);
+    let tin = ts - dt * t.in_t as f64;
+    run_chain(t, tracks, n, tin, dt);
+}
+
+/// Adds `src * gain` into `dst`, the gain moving in a straight line from
+/// `from` to `to` across the block, times per-frame factors (`v` for
+/// both sides, `pl`/`pr` per side) when given.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn gain_into(
+    sl: &mut [f32],
+    sr: &mut [f32],
+    src_l: &[f32],
+    src_r: &[f32],
+    from: [f32; 2],
+    to: [f32; 2],
+    v: Option<&[f32]>,
+    pan: Option<(&[f32], &[f32])>,
+) {
+    let n = sl.len();
+    let k = 1.0 / n.max(1) as f32;
+    let dl = (to[0] - from[0]) * k;
+    let dr = (to[1] - from[1]) * k;
+    for i in 0..n {
+        let x = (i + 1) as f32;
+        let mut gl = from[0] + dl * x;
+        let mut gr = from[1] + dr * x;
+        if let Some(v) = v {
+            gl *= v[i];
+            gr *= v[i];
+        }
+        if let Some((pl, pr)) = pan {
+            gl *= pl[i];
+            gr *= pr[i];
+        }
+        sl[i] = src_l[i] * gl;
+        sr[i] = src_r[i] * gr;
     }
 }
 
 #[inline]
-fn apply_fader(t: &mut MixTrack, n: usize) {
-    let (gl, gr) = (t.gain_l, t.gain_r);
-    for (l, r) in t.l[..n].iter_mut().zip(&mut t.r[..n]) {
-        *l *= gl;
-        *r *= gr;
-    }
-}
-
-/// Track `a` to read and track `b` to add into (`a != b`).
-#[inline]
-fn pair(tracks: &mut [MixTrack], a: usize, b: usize) -> (&MixTrack, &mut MixTrack) {
-    if a < b {
-        let (x, y) = tracks.split_at_mut(b);
-        (&x[a], &mut y[0])
-    } else {
-        let (x, y) = tracks.split_at_mut(a);
-        (&y[0], &mut x[b])
+fn add_into(dl: &mut [f32], dr: &mut [f32], sl: &[f32], sr: &[f32]) {
+    for ((a, b), (x, y)) in dl.iter_mut().zip(dr.iter_mut()).zip(sl.iter().zip(sr)) {
+        *a += x;
+        *b += y;
     }
 }
 
@@ -529,11 +760,79 @@ pub fn space_gains(
 /// Fader and pan gains for a track (fader only in 3D sessions).
 pub fn track_gains(t: &af27_core::Track, space: bool) -> (f32, f32) {
     if space {
-        let g = db_to_gain(t.volume_db);
+        let g = fader_gain(t.volume_db);
         (g, g)
     } else {
         t.gains()
     }
+}
+
+/// A note's 0..1 velocity as MIDI's 1..127.
+fn velocity_u8(v: f32) -> u8 {
+    (v * 127.0).round().clamp(1.0, 127.0) as u8
+}
+
+/// A MIDI track's instrument with its notes: its SoundFont, or else the
+/// built-in synth. A font that is missing or cannot play leaves the track
+/// silent.
+fn instruments(
+    t: &af27_core::Track,
+    tempo: &af27_core::midi::Tempo,
+    rate: u32,
+) -> (Option<Synth>, Option<Box<crate::soundfont::SfPlayer>>) {
+    let notes = af27_core::midi::plan_notes(&t.midi, tempo);
+    if let Some(sf) = &t.soundfont {
+        let list = notes
+            .iter()
+            .map(|n| crate::soundfont::SfNote {
+                start: n.start,
+                end: n.end,
+                key: n.pitch,
+                velocity: velocity_u8(n.velocity),
+                pan: n.pan,
+            })
+            .collect();
+        let font = crate::soundfont::SfPlayer::new(sf, list, rate)
+            .ok()
+            .map(Box::new);
+        return (None, font);
+    }
+    let list = notes
+        .iter()
+        .map(|n| synth::note(n.start, n.end, n.pitch, velocity_u8(n.velocity), n.pan))
+        .collect();
+    (Some(Synth::new(t.instrument, list, rate)), None)
+}
+
+/// A strip's playing lanes, as the engine plays them (None with none).
+fn strip_auto(t: &af27_core::Track) -> Option<Box<StripAuto>> {
+    let mut a = StripAuto::default();
+    for lane in t.lanes.iter().filter(|l| l.plays()) {
+        match &lane.target {
+            LaneTarget::Volume if a.vol.is_empty() => a.vol = lane.points.clone(),
+            LaneTarget::Pan if a.pan.is_empty() => a.pan = lane.points.clone(),
+            LaneTarget::Effect { slot, param, .. } => {
+                let Some(si) = t
+                    .chain
+                    .iter()
+                    .position(|s| s.ext_id.as_deref() == Some(slot.as_str()))
+                else {
+                    continue;
+                };
+                if *param < t.chain[si].values.len() {
+                    a.fx.push(FxLane {
+                        slot: si,
+                        param: *param,
+                        points: lane.points.clone(),
+                        vals: t.chain[si].values.clone(),
+                        live: false,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    (!a.vol.is_empty() || !a.pan.is_empty() || !a.fx.is_empty()).then(|| Box::new(a))
 }
 
 /// Builds the mix for `session` at `rate`. `media` gives each media item's
@@ -544,66 +843,39 @@ pub fn build(
     rate: u32,
 ) -> Mix {
     let space = session.space;
+    let heard = session.heard();
     let index_of = |id: af27_core::TrackId| session.tracks.iter().position(|t| t.id == id);
-    let tracks: Vec<MixTrack> = session
+    let bus_index =
+        |id: af27_core::TrackId| index_of(id).filter(|&i| session.tracks[i].kind == TrackKind::Bus);
+    let mut tracks: Vec<MixTrack> = session
         .tracks
         .iter()
-        .map(|t| {
+        .zip(&heard)
+        .map(|(t, &audible)| {
             let clips: Vec<MixClip> = t
                 .clips
                 .iter()
                 .filter(|c| !c.muted)
                 .filter_map(|c| Some(MixClip::new(c, media(c.media)?)))
                 .collect();
-            // Notes in seconds, through the tempo map, cut at their clip's end.
-            let notes = || {
-                t.midi.iter().filter(|c| !c.muted).flat_map(|c| {
-                    c.notes
-                        .iter()
-                        .filter(move |n| n.start < c.length)
-                        .map(move |n| {
-                            let s = session.tempo.secs(c.start + n.start);
-                            let e = session
-                                .tempo
-                                .secs(c.start + (n.start + n.length).min(c.length));
-                            (s, e, n)
-                        })
-                })
+            let (synth, font) = if t.kind == TrackKind::Midi {
+                instruments(t, &session.tempo, rate)
+            } else {
+                (None, None)
             };
-            let midi = t.kind == TrackKind::Midi;
-            let font = t.soundfont.as_ref().filter(|_| midi).and_then(|sf| {
-                let list = notes()
-                    .map(|(s, e, n)| crate::soundfont::SfNote {
-                        start: s,
-                        end: e,
-                        key: n.pitch,
-                        velocity: n.velocity.clamp(1, 127),
-                        pan: n.pan,
-                    })
-                    .collect();
-                // A font that is missing or cannot play leaves the track silent.
-                crate::soundfont::SfPlayer::new(sf, list, rate)
-                    .ok()
-                    .map(Box::new)
-            });
-            let synth = (midi && t.soundfont.is_none()).then(|| {
-                let list = notes()
-                    .map(|(s, e, n)| synth::note(s, e, n.pitch, n.velocity, n.pan))
-                    .collect();
-                Synth::new(t.instrument, list, rate)
-            });
             let stereo =
                 t.kind != TrackKind::Audio || clips.iter().any(|c| c.buf.num_channels() >= 2);
             let (space_l, space_r, lfe) = match space {
                 Some(layout) => space_gains(layout, &t.pos, stereo),
                 None => ([0.0; MAX_SPEAKERS], [0.0; MAX_SPEAKERS], 0.0),
             };
-            let (gain_l, gain_r) = track_gains(t, space.is_some());
             MixTrack {
                 is_bus: t.kind == TrackKind::Bus,
-                audible: session.audible(t),
-                gain_l,
-                gain_r,
+                audible,
+                fader: fader_gain(t.volume_db),
+                pan: t.pan,
+                sign: if t.polarity { -1.0 } else { 1.0 },
+                mono: t.mono,
                 clips,
                 synth,
                 font,
@@ -612,36 +884,41 @@ pub fn build(
                     c.set_rack(&t.rack);
                     c
                 },
-                output: t
-                    .output
-                    .and_then(index_of)
-                    .filter(|&i| session.tracks[i].kind == TrackKind::Bus),
+                output: t.output.and_then(bus_index),
                 sends: t
                     .sends
                     .iter()
                     .filter_map(|s| {
-                        let bus = index_of(s.bus)
-                            .filter(|&i| session.tracks[i].kind == TrackKind::Bus)?;
                         Some(MixSend {
-                            bus,
-                            gain: db_to_gain(s.level_db),
+                            bus: bus_index(s.bus)?,
                             pre: s.pre_fader,
+                            on: s.enabled,
+                            level: db_to_gain(s.level_db.clamp(-96.0, 12.0)),
+                            pan: s.pan,
+                            kept: true,
+                            cur: [0.0; 2],
+                            delay: Delay::default(),
                         })
                     })
                     .collect(),
-                has_pre: t.sends.iter().any(|s| s.pre_fader),
                 space_l,
                 space_r,
                 lfe,
                 keys: Vec::new(),
+                in_t: 0,
+                out_t: 0,
+                taps: Vec::new(),
+                in_delay: Delay::default(),
+                out_delay: Delay::default(),
+                main_cur: [0.0; 2],
+                auto: strip_auto(t),
+                keyed: false,
                 l: vec![0.0; BLOCK],
                 r: vec![0.0; BLOCK],
-                kl: Vec::new(),
-                kr: Vec::new(),
             }
         })
         .collect();
-    let mut tracks = tracks;
+    let n = tracks.len();
     // Sidechains: which track keys each slot, for effects that take a key.
     let wanted: Vec<Vec<Option<usize>>> = session
         .tracks
@@ -655,18 +932,114 @@ pub fn build(
                 .collect()
         })
         .collect();
-    let (keys, levels) = plan(&tracks, &wanted);
-    for (t, k) in tracks.iter_mut().zip(keys) {
-        t.keys = k;
-    }
-    for i in 0..tracks.len() {
-        let used = tracks.iter().any(|t| t.keys.contains(&Some(i)));
-        if used {
-            tracks[i].kl = vec![0.0; BLOCK];
-            tracks[i].kr = vec![0.0; BLOCK];
+    let routes: Vec<Vec<usize>> = tracks
+        .iter()
+        .map(|t| {
+            t.output
+                .into_iter()
+                .chain(t.sends.iter().map(|s| s.bus))
+                .collect()
+        })
+        .collect();
+    let plan = plan(n, &routes, &wanted);
+    for (i, t) in tracks.iter_mut().enumerate() {
+        if let Some(b) = t.output {
+            if !plan.kept.contains(&(i, b)) {
+                t.output = None;
+            }
+        }
+        for s in &mut t.sends {
+            s.kept = plan.kept.contains(&(i, s.bus));
         }
     }
-    let space = space.map(|layout| {
+    for (t, k) in tracks.iter_mut().zip(plan.keys) {
+        t.keys = k;
+    }
+    // Keys on the master chain: any strip, no loops possible (the master
+    // runs last).
+    let master_slots: &[af27_core::EffectSlot] = if space.is_some() {
+        &[]
+    } else {
+        &session.master_chain
+    };
+    let mut master_chain = build_chain(master_slots, rate, BLOCK);
+    let master_keys: Vec<Option<usize>> = master_slots
+        .iter()
+        .zip(&master_chain.slots)
+        .map(|(slot, (p, _))| slot.sidechain.and_then(index_of).filter(|_| p.takes_key()))
+        .collect();
+    for i in 0..n {
+        let used =
+            tracks.iter().any(|t| t.keys.contains(&Some(i))) || master_keys.contains(&Some(i));
+        tracks[i].keyed = used;
+    }
+
+    // Delay compensation, in run order.
+    let order: Vec<usize> = plan.levels.iter().flatten().copied().collect();
+    let mut master_in = 0usize;
+    for &i in &order {
+        let mut t_in = 0usize;
+        for &(a, b) in &plan.kept {
+            if b == i {
+                t_in = t_in.max(tracks[a].out_t);
+            }
+        }
+        let t = &mut tracks[i];
+        t.in_t = t_in;
+        t.out_t = t_in + t.chain.latency();
+        if t.output.is_none() {
+            master_in = master_in.max(t.out_t);
+        }
+    }
+    for k in master_keys.iter().flatten() {
+        master_in = master_in.max(tracks[*k].out_t);
+    }
+    let lead = master_in + master_chain.latency();
+    for i in 0..n {
+        let dest_in = |b: Option<usize>| b.map_or(master_in, |b| tracks[b].in_t);
+        let out_t = tracks[i].out_t;
+        let in_t = tracks[i].in_t;
+        let main = dest_in(tracks[i].output) - out_t;
+        let sends: Vec<usize> = tracks[i]
+            .sends
+            .iter()
+            .map(|s| tracks[s.bus].in_t.saturating_sub(out_t))
+            .collect();
+        let taps: Vec<Option<KeyTap>> = tracks[i]
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(slot, k)| {
+                k.map(|src| {
+                    let d = in_t - tracks[src].out_t + tracks[i].chain.latency_before(slot);
+                    KeyTap::new(src, d)
+                })
+            })
+            .collect();
+        let t = &mut tracks[i];
+        t.out_delay = Delay::new(main);
+        for (s, d) in t.sends.iter_mut().zip(sends) {
+            s.delay = Delay::new(d);
+        }
+        if !t.is_bus {
+            t.in_delay = Delay::new(in_t);
+        }
+        t.taps = taps;
+    }
+    let master_taps: Vec<Option<KeyTap>> = master_keys
+        .iter()
+        .enumerate()
+        .map(|(slot, k)| {
+            k.map(|src| {
+                KeyTap::new(
+                    src,
+                    master_in - tracks[src].out_t + master_chain.latency_before(slot),
+                )
+            })
+        })
+        .collect();
+
+    let space_mix = space.map(|layout| {
         let speakers = af27_space::speakers(layout);
         let channels = speakers.len();
         let names: Vec<String> = speakers.iter().map(|s| s.name.to_string()).collect();
@@ -682,31 +1055,46 @@ pub fn build(
             bed: vec![0.0; BLOCK * channels],
         }
     });
-    let master_slots: &[af27_core::EffectSlot] = if space.is_some() {
-        &[]
-    } else {
-        &session.master_chain
-    };
     // Start the engine's threads here, on the UI thread, never on the
     // audio thread.
     let _ = crate::pool::pool();
-    let mut master_chain = build_chain(master_slots, rate, BLOCK);
     if space.is_none() {
         master_chain.set_rack(&session.master_rack);
     }
-    Mix {
-        levels,
+    let master_lane = session
+        .master_lanes
+        .iter()
+        .find(|l| l.target == LaneTarget::Volume && l.plays())
+        .map(|l| l.points.clone())
+        .unwrap_or_default();
+    let master = fader_gain(session.master_db);
+    let mut mix = Mix {
+        levels: plan.levels,
         parallel: true,
         tracks,
         master_chain,
-        master: db_to_gain(session.master_db),
+        master,
+        master_cur: master,
+        master_lane,
+        master_lane_live: false,
+        master_taps,
         duration: session.duration(),
-        space,
+        space: space_mix,
         metronome: session.tempo.metronome,
         click: session.tempo.segments().collect(),
+        lead,
+        master_in,
         ml: vec![0.0; BLOCK],
         mr: vec![0.0; BLOCK],
-    }
+        sl: vec![0.0; BLOCK],
+        sr: vec![0.0; BLOCK],
+        av: vec![1.0; BLOCK],
+        apl: vec![1.0; BLOCK],
+        apr: vec![1.0; BLOCK],
+        rate: rate as f64,
+    };
+    mix.settle();
+    mix
 }
 
 impl Mix {
@@ -714,6 +1102,19 @@ impl Mix {
     /// tracks independent of one another (see `plan`).
     pub fn levels(&self) -> &[Vec<usize>] {
         &self.levels
+    }
+
+    /// Every gain jumps to where it is set (no ramp), as at a start.
+    fn settle(&mut self) {
+        let space = self.space.is_some();
+        for t in &mut self.tracks {
+            t.main_cur = t.main_target(space);
+            let targets: Vec<[f32; 2]> = t.sends.iter().map(|s| t.send_target(s)).collect();
+            for (s, g) in t.sends.iter_mut().zip(targets) {
+                s.cur = g;
+            }
+        }
+        self.master_cur = self.master;
     }
 
     /// Works out every stretched clip's audio now (waiting for any the
@@ -732,10 +1133,18 @@ impl Mix {
         self.space.as_ref().map_or(2, |s| s.channels)
     }
 
-    /// Clears effect tails, after a jump.
+    /// Clears effect tails and delay lines, after a jump.
     pub fn reset(&mut self) {
         for t in &mut self.tracks {
             t.chain.reset();
+            t.in_delay.clear();
+            t.out_delay.clear();
+            for s in &mut t.sends {
+                s.delay.clear();
+            }
+            for tap in t.taps.iter_mut().flatten() {
+                tap.delay.clear();
+            }
             if let Some(s) = &mut t.synth {
                 s.reset();
             }
@@ -743,9 +1152,84 @@ impl Mix {
                 f.reset();
             }
         }
+        for tap in self.master_taps.iter_mut().flatten() {
+            tap.delay.clear();
+        }
         self.master_chain.reset();
         if let Some(sp) = &mut self.space {
             sp.chain.reset();
+        }
+        self.settle();
+    }
+
+    /// Starts playing from `t` (seconds): clears everything, then primes
+    /// the delay lines with `lead` frames so the first frame out is the
+    /// sound at `t`. No allocation.
+    pub fn start(&mut self, t: f64) {
+        self.reset();
+        self.prime(t);
+    }
+
+    /// Renders the `lead` frames before `t` into nothing, so what comes
+    /// out from `t` on is in step. Used at a start and when a new program
+    /// arrives while playing.
+    pub fn prime(&mut self, t: f64) {
+        let dt = 1.0 / self.rate;
+        let mut left = self.lead;
+        let mut scratch = [0.0f32; BLOCK * 2];
+        while left > 0 {
+            let n = left.min(BLOCK);
+            let at = t - dt * left as f64;
+            // A bed renders its stereo view here: only the state matters.
+            self.render(at, dt, n, &mut scratch[..n * 2], false);
+            left -= n;
+        }
+    }
+
+    /// New fader (linear) and pan for a strip, ramped to over the next
+    /// block. No allocation.
+    pub fn set_strip(&mut self, track: usize, fader: f32, pan: f32) {
+        if let Some(t) = self.tracks.get_mut(track) {
+            t.fader = fader;
+            t.pan = pan;
+        }
+    }
+
+    /// New settings for one send of a strip. No allocation.
+    pub fn set_send(&mut self, track: usize, send: usize, level: f32, pan: f32, on: bool) {
+        if let Some(s) = self
+            .tracks
+            .get_mut(track)
+            .and_then(|t| t.sends.get_mut(send))
+        {
+            s.level = level;
+            s.pan = pan;
+            s.on = on;
+        }
+    }
+
+    /// Switches a lane to its live control (true: being written) or back
+    /// to its points. `track` None is the master.
+    pub fn set_lane_live(&mut self, track: Option<usize>, kind: LaneKind, live: bool) {
+        let Some(ti) = track else {
+            if kind == LaneKind::Volume {
+                self.master_lane_live = live;
+            }
+            return;
+        };
+        let Some(a) = self.tracks.get_mut(ti).and_then(|t| t.auto.as_deref_mut()) else {
+            return;
+        };
+        match kind {
+            LaneKind::Volume => a.vol_live = live,
+            LaneKind::Pan => a.pan_live = live,
+            LaneKind::Effect { slot, param } => {
+                for f in &mut a.fx {
+                    if f.slot == slot as usize && f.param == param as usize {
+                        f.live = live;
+                    }
+                }
+            }
         }
     }
 
@@ -807,26 +1291,103 @@ impl Mix {
         }
     }
 
-    fn route(&mut self, ti: usize, n: usize) {
-        let out = self.tracks[ti].output;
-        match out {
-            Some(bus) if bus != ti && (bus > ti || !self.tracks[ti].is_bus) => {
-                let (t, b) = pair(&mut self.tracks, ti, bus);
-                for ((bl, br), (l, r)) in b.l[..n]
-                    .iter_mut()
-                    .zip(&mut b.r[..n])
-                    .zip(t.l[..n].iter().zip(&t.r[..n]))
-                {
-                    *bl += l;
-                    *br += r;
+    /// Sends strip `ti`'s sound out on its output and sends. `tp` is the
+    /// timeline time of its sound's first frame this block.
+    fn route(&mut self, ti: usize, n: usize, tp: f64, dt: f64) {
+        let space = self.space.is_some();
+        // Per-frame lane factors.
+        let (has_v, has_p) = {
+            let t = &self.tracks[ti];
+            match t.auto.as_deref() {
+                Some(a) => {
+                    let (v, p) = (a.plays_vol(), a.plays_pan() && !space);
+                    for i in 0..n {
+                        let at = tp + dt * i as f64;
+                        if v {
+                            self.av[i] = lane_gain(&a.vol, at);
+                        }
+                        if p {
+                            let pan = af27_core::automation::value_at(&a.pan, at).unwrap_or(0.0);
+                            let [l, r] = balance(pan as f32);
+                            self.apl[i] = l;
+                            self.apr[i] = r;
+                        }
+                    }
+                    (v, p)
                 }
+                None => (false, false),
+            }
+        };
+        let v = has_v.then_some(&self.av[..n]);
+        let pan = has_p.then_some((&self.apl[..n], &self.apr[..n]));
+        // Sends first, each into its bus.
+        for k in 0..self.tracks[ti].sends.len() {
+            let (bus, target, cur, pre) = {
+                let t = &self.tracks[ti];
+                let s = &t.sends[k];
+                (s.bus, t.send_target(s), s.cur, s.pre)
+            };
+            if target == [0.0; 2] && cur == [0.0; 2] {
+                continue;
+            }
+            {
+                let t = &self.tracks[ti];
+                gain_into(
+                    &mut self.sl[..n],
+                    &mut self.sr[..n],
+                    &t.l[..n],
+                    &t.r[..n],
+                    cur,
+                    target,
+                    if pre { None } else { v },
+                    None,
+                );
+            }
+            let t = &mut self.tracks[ti];
+            t.sends[k].cur = target;
+            t.sends[k].delay.run(&mut self.sl[..n], &mut self.sr[..n]);
+            if bus != ti {
+                let b = &mut self.tracks[bus];
+                add_into(&mut b.l[..n], &mut b.r[..n], &self.sl[..n], &self.sr[..n]);
+            }
+        }
+        // Then the output.
+        let (target, cur, out) = {
+            let t = &self.tracks[ti];
+            (t.main_target(space), t.main_cur, t.output)
+        };
+        if target == [0.0; 2] && cur == [0.0; 2] {
+            return;
+        }
+        {
+            let t = &self.tracks[ti];
+            gain_into(
+                &mut self.sl[..n],
+                &mut self.sr[..n],
+                &t.l[..n],
+                &t.r[..n],
+                cur,
+                target,
+                v,
+                pan,
+            );
+        }
+        {
+            let t = &mut self.tracks[ti];
+            t.main_cur = target;
+            t.out_delay.run(&mut self.sl[..n], &mut self.sr[..n]);
+        }
+        match out {
+            Some(bus) if bus != ti => {
+                let b = &mut self.tracks[bus];
+                add_into(&mut b.l[..n], &mut b.r[..n], &self.sl[..n], &self.sr[..n]);
             }
             _ => match &mut self.space {
                 Some(sp) => {
                     let t = &self.tracks[ti];
                     let ch = sp.channels;
                     for i in 0..n {
-                        let (l, r) = (t.l[i], t.r[i]);
+                        let (l, r) = (self.sl[i], self.sr[i]);
                         let frame = &mut sp.bed[i * ch..(i + 1) * ch];
                         for c in 0..ch.min(MAX_SPEAKERS) {
                             frame[c] += l * t.space_l[c] + r * t.space_r[c];
@@ -836,52 +1397,27 @@ impl Mix {
                         }
                     }
                 }
-                None => {
-                    let t = &self.tracks[ti];
-                    for ((ml, mr), (l, r)) in self.ml[..n]
-                        .iter_mut()
-                        .zip(&mut self.mr[..n])
-                        .zip(t.l[..n].iter().zip(&t.r[..n]))
-                    {
-                        *ml += l;
-                        *mr += r;
-                    }
-                }
+                None => add_into(
+                    &mut self.ml[..n],
+                    &mut self.mr[..n],
+                    &self.sl[..n],
+                    &self.sr[..n],
+                ),
             },
         }
     }
 
-    fn sends(&mut self, ti: usize, n: usize, pre: bool) {
-        for s in 0..self.tracks[ti].sends.len() {
-            let (bus, g, is_pre) = {
-                let x = &self.tracks[ti].sends[s];
-                (x.bus, x.gain, x.pre)
-            };
-            if is_pre != pre || bus == ti {
-                continue;
-            }
-            let (t, b) = pair(&mut self.tracks, ti, bus);
-            for ((bl, br), (l, r)) in b.l[..n]
-                .iter_mut()
-                .zip(&mut b.r[..n])
-                .zip(t.l[..n].iter().zip(&t.r[..n]))
-            {
-                *bl += l * g;
-                *br += r * g;
-            }
+    /// The master fader's gain per frame from `from` to `to`, times its
+    /// volume lane when one plays (at output time `t0`).
+    #[inline]
+    fn master_gain(&self, i: usize, n: usize, t0: f64, dt: f64) -> f32 {
+        let x = (i + 1) as f32 / n.max(1) as f32;
+        let g = self.master_cur + (self.master - self.master_cur) * x;
+        if !self.master_lane.is_empty() && !self.master_lane_live {
+            lane_gain(&self.master_lane, t0 + dt * i as f64)
+        } else {
+            g
         }
-    }
-
-    /// After the chain: pre-fader sends, fader (unless `faded`: already
-    /// applied in the parallel stage), post-fader sends, output.
-    fn mix_out(&mut self, ti: usize, n: usize, faded: bool) {
-        if !faded {
-            self.sends(ti, n, true);
-            let t = &mut self.tracks[ti];
-            apply_fader(t, n);
-        }
-        self.sends(ti, n, false);
-        self.route(ti, n);
     }
 
     /// Renders `n` frames (n <= BLOCK) from `t0` into `out`, interleaved
@@ -896,6 +1432,8 @@ impl Mix {
         bed_out: bool,
     ) -> (f32, f32) {
         let n = n.min(BLOCK);
+        // The sources are read `lead` ahead of what comes out.
+        let ts = t0 + dt * self.lead as f64;
         self.ml[..n].fill(0.0);
         self.mr[..n].fill(0.0);
         if let Some(sp) = &mut self.space {
@@ -907,7 +1445,7 @@ impl Mix {
                 t.r[..n].fill(0.0);
             }
         }
-        // Every track's own work (its clips or notes and its effect chain)
+        // Every strip's own work (its clips or notes and its effect chain)
         // is independent of the others in its level, so it is spread over
         // the engine's threads. Sends and outputs, which add into shared
         // buses, follow in order on this thread.
@@ -920,10 +1458,14 @@ impl Mix {
                     // pool runs each `k` exactly once, so these borrows never
                     // overlap; key sources sit at earlier levels.
                     let t = unsafe { &mut *tracks.get(level[k]) };
-                    if !t.is_bus {
-                        render_source(t, tracks, t0, dt, n);
-                    } else if t.audible {
-                        run_chain(t, tracks, n);
+                    if !t.active() {
+                        t.l[..n].fill(0.0);
+                        t.r[..n].fill(0.0);
+                    } else if !t.is_bus {
+                        render_source(t, tracks, ts, dt, n);
+                    } else {
+                        let tin = ts - dt * t.in_t as f64;
+                        run_chain(t, tracks, n, tin, dt);
                     }
                 };
                 if self.parallel && level.len() >= 2 {
@@ -933,28 +1475,31 @@ impl Mix {
                 }
             }
             for &ti in level {
-                let t = &self.tracks[ti];
-                if t.audible {
-                    // A track with no pre-fader send took its fader above.
-                    let faded = !t.is_bus && !t.has_pre;
-                    self.mix_out(ti, n, faded);
-                }
+                let tp = ts - dt * self.tracks[ti].out_t as f64;
+                self.route(ti, n, tp, dt);
             }
         }
         self.levels = levels;
         if let Some(sp) = &mut self.space {
             // The master chain on the speakers, before listening or export.
             sp.chain.process(&mut sp.bed[..n * sp.channels]);
-            if bed_out {
-                let ch = sp.channels;
-                let mut peak = (0.0f32, 0.0f32);
-                for i in 0..n * ch {
-                    out[i] = sp.bed[i] * self.master;
-                    peak.0 = peak.0.max(out[i].abs());
+        }
+        if let (true, Some(sp)) = (bed_out, self.space.as_ref()) {
+            let ch = sp.channels;
+            let mut peak = (0.0f32, 0.0f32);
+            for i in 0..n {
+                let g = self.master_gain(i, n, t0, dt);
+                let span = i * ch..(i + 1) * ch;
+                for (o, b) in out[span.clone()].iter_mut().zip(&sp.bed[span]) {
+                    *o = b * g;
+                    peak.0 = peak.0.max(o.abs());
                 }
-                peak.1 = peak.0;
-                return peak;
             }
+            self.master_cur = self.master;
+            peak.1 = peak.0;
+            return peak;
+        }
+        if let Some(sp) = &mut self.space {
             let mut st = [0.0f32; BLOCK * 2];
             sp.monitor
                 .process(&sp.bed[..n * sp.channels], &mut st[..n * 2]);
@@ -964,18 +1509,29 @@ impl Mix {
             }
         }
         {
+            let tracks = &self.tracks;
+            for tap in self.master_taps.iter_mut().flatten() {
+                let s = &tracks[tap.src];
+                tap.fill(&s.l, &s.r, n);
+            }
+            let taps = &self.master_taps;
             let (l, r) = (&mut self.ml[..n], &mut self.mr[..n]);
-            self.master_chain.process(l, r);
+            self.master_chain.process_keyed(l, r, |slot| {
+                let tap = taps.get(slot)?.as_ref()?;
+                Some((&tap.l[..n], &tap.r[..n]))
+            });
         }
         let (mut pl, mut pr) = (0.0f32, 0.0f32);
         for i in 0..n {
-            let l = self.ml[i] * self.master;
-            let r = self.mr[i] * self.master;
+            let g = self.master_gain(i, n, t0, dt);
+            let l = self.ml[i] * g;
+            let r = self.mr[i] * g;
             pl = pl.max(l.abs());
             pr = pr.max(r.abs());
             out[i * 2] = l;
             out[i * 2 + 1] = r;
         }
+        self.master_cur = self.master;
         (pl, pr)
     }
 }
