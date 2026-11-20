@@ -47,6 +47,7 @@ mod waveform;
 mod widgets;
 mod workspace;
 mod zoom;
+mod zoom_bench;
 
 fn main() -> eframe::Result<()> {
     fx::register();

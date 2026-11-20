@@ -83,7 +83,9 @@ pub fn draw_channel(
                 pos2(time_to_x(v, rect, t), mid - s * half)
             })
             .collect();
-        if th.glow > 0.0 {
+        // The glow only once samples are spread out (dense lines cost a
+        // lot to draw and the glow would not show between them).
+        if th.glow > 0.0 && spp <= 0.25 {
             p.add(Shape::line(
                 pts.clone(),
                 Stroke::new(4.0_f32, ca(centre, (40.0 * th.glow) as u8)),
@@ -102,9 +104,47 @@ pub fn draw_channel(
         }
         return;
     }
+    // One strip of triangles for the whole channel: per pixel column a
+    // vertex at the top, the centre line and the bottom (and, with glow,
+    // a faded one just outside each edge), joined to the next column.
+    // Far fewer vertices than a quad per column plus stroked outlines, so
+    // dozens of tracks stay quick to zoom and scroll.
+    // (Too thin to see on short lanes, where it is left out.)
+    let glow = th.glow > 0.0 && half >= 12.0;
+    let per = if glow { 5 } else { 3 };
     let mut mesh = Mesh::default();
-    let mut top_line = Vec::with_capacity(w);
-    let mut bot_line = Vec::with_capacity(w);
+    mesh.vertices.reserve(w * per + per);
+    mesh.indices.reserve(w * (per - 1) * 6);
+    let clear = ca(peak, 0);
+    let glow_w = th.glow.clamp(0.0, 1.5);
+    let centre_c = c(centre);
+    let mut cols = 0u32;
+    let mut push = |mesh: &mut Mesh, xf: f32, yt: f32, yb: f32, edge: Color32| {
+        let i = mesh.vertices.len() as u32;
+        let yt = yt.min(mid - 0.5);
+        let yb = yb.max(mid + 0.5);
+        if glow {
+            // The edge fades out over a few pixels: the glow.
+            mesh.colored_vertex(pos2(xf, yt - 1.0 - 2.0 * glow_w), clear);
+        }
+        mesh.colored_vertex(pos2(xf, yt), edge);
+        mesh.colored_vertex(pos2(xf, mid), centre_c);
+        mesh.colored_vertex(pos2(xf, yb), edge);
+        if glow {
+            mesh.colored_vertex(pos2(xf, yb + 1.0 + 2.0 * glow_w), clear);
+        }
+        if cols > 0 {
+            let prev = i - per as u32;
+            for k in 0..(per as u32 - 1) {
+                let (a, b) = (prev + k, prev + k + 1);
+                let (c2, d) = (i + k, i + k + 1);
+                mesh.add_triangle(a, c2, b);
+                mesh.add_triangle(b, c2, d);
+            }
+        }
+        cols += 1;
+    };
+    let mut last: Option<(f32, f32, f32, Color32)> = None;
     for x in 0..w {
         let t0 = v.start + v.len * x as f64 / w as f64;
         let t1 = v.start + v.len * (x + 1) as f64 / w as f64;
@@ -118,26 +158,14 @@ pub fn draw_channel(
         let xf = rect.left() + x as f32;
         let yt = mid - hi.clamp(-1.0, 1.0) * half;
         let yb = mid - lo.clamp(-1.0, 1.0) * half;
-        let amp = hi.abs().max(lo.abs()).min(1.0);
-        let edge = crate::theme::lerp(centre, peak, amp.sqrt());
-        let i = mesh.vertices.len() as u32;
-        mesh.colored_vertex(pos2(xf, yt.min(mid - 0.5)), edge);
-        mesh.colored_vertex(pos2(xf + 1.0, yt.min(mid - 0.5)), edge);
-        mesh.colored_vertex(pos2(xf + 1.0, mid), c(centre));
-        mesh.colored_vertex(pos2(xf, mid), c(centre));
-        mesh.colored_vertex(pos2(xf, yb.max(mid + 0.5)), edge);
-        mesh.colored_vertex(pos2(xf + 1.0, yb.max(mid + 0.5)), edge);
-        mesh.add_triangle(i, i + 1, i + 2);
-        mesh.add_triangle(i, i + 2, i + 3);
-        mesh.add_triangle(i + 3, i + 2, i + 5);
-        mesh.add_triangle(i + 3, i + 5, i + 4);
-        top_line.push(pos2(xf, yt));
-        bot_line.push(pos2(xf, yb));
+        let level = hi.abs().max(lo.abs()).min(1.0);
+        let edge = crate::theme::lerp(centre, peak, level.sqrt());
+        push(&mut mesh, xf, yt, yb, edge);
+        last = Some((xf, yt, yb, edge));
     }
-    if th.glow > 0.0 && top_line.len() > 1 {
-        let s = Stroke::new(3.0_f32, ca(peak, (45.0 * th.glow) as u8));
-        p.add(Shape::line(top_line, s));
-        p.add(Shape::line(bot_line, s));
+    // Close the last pixel column.
+    if let Some((xf, yt, yb, edge)) = last {
+        push(&mut mesh, xf + 1.0, yt, yb, edge);
     }
     p.add(Shape::mesh(mesh));
 }
