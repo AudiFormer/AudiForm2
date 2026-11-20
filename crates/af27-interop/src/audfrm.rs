@@ -871,6 +871,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
     let mut notices = Vec::new();
     let secs = |x: &Value| x.as_f64().unwrap_or(0.0) / rate as f64;
     out.playhead = secs(&v["view"]["playhead"]);
+    out.bit_depth = v["bit_depth"].as_u64().map_or(32, |b| b as u16);
 
     if let Some(t) = v.get("tempo").filter(|t| t.is_object()) {
         out.tempo.bpm = t["bpm"].as_f64().unwrap_or(120.0);
@@ -1255,7 +1256,11 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
     doc.entry("id").or_insert_with(|| json!(new_uuid()));
     doc.insert("name".into(), json!(session.name));
     doc.insert("sample_rate".into(), json!(session.rate));
-    doc.entry("bit_depth").or_insert_with(|| json!(32));
+    // Written only when it changed, so an untouched file stays the same.
+    let file_bits = doc.get("bit_depth").and_then(Value::as_u64);
+    if file_bits != Some(session.bit_depth as u64) {
+        doc.insert("bit_depth".into(), json!(session.bit_depth));
+    }
     doc.entry("created").or_insert_with(|| json!(now));
     doc.insert("modified".into(), json!(now));
     doc.entry("view").or_insert_with(|| json!({"samples_per_pixel": 512.0, "scroll": 0, "scroll_y": 0, "playhead": 0, "selection": null}));
@@ -2130,6 +2135,20 @@ mod tests {
             out["tracks"][0]["clips"][0]["source_in"],
             json!(441_000 - 88_200)
         );
+    }
+
+    #[test]
+    fn bit_depth_maps_and_is_only_written_when_changed() {
+        let imp = import(SAMPLE, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let was = base["bit_depth"].as_u64().unwrap_or(32) as u16;
+        assert_eq!(s.bit_depth, was);
+        let out = export(&mut s, Some(&base));
+        assert_eq!(out["bit_depth"], base["bit_depth"]);
+        s.bit_depth = 16;
+        let out = export(&mut s, Some(&base));
+        assert_eq!(out["bit_depth"], json!(16));
     }
 
     #[test]

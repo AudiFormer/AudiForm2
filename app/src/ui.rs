@@ -275,6 +275,7 @@ impl TabViewer for Viewer<'_> {
                     .doc()
                     .map(|d| format!("{}{}", d.name, if d.dirty { " *" } else { "" }))
                     .unwrap_or_else(|| "no file".into()),
+                Mode::Multitrack if self.st.no_session() => "(none)".into(),
                 Mode::Multitrack => format!(
                     "{}{}",
                     self.st.session.name,
@@ -381,7 +382,7 @@ impl App {
     fn run_cmd(&mut self, cmd: Cmd) {
         let st = &mut self.st;
         match cmd {
-            Cmd::NewFile => st.new_file(48_000, 2),
+            Cmd::NewFile => crate::new_dialogs::open_new_file(st),
             Cmd::Open => open_dialog(st),
             Cmd::Save => save(st),
             Cmd::Undo => st.undo(),
@@ -686,11 +687,11 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
         ui.menu_button("File", |ui| {
             cmd_item(ui, km, Cmd::NewFile, "New Audio File", true, &mut cmd);
             if ui
-                .button("New Multitrack Session")
+                .button("New Multitrack Session...")
                 .on_hover_text("The session open now is set aside, not closed")
                 .clicked()
             {
-                st.new_session(None);
+                crate::new_dialogs::open_new_session(st, None);
                 ui.close_menu();
             }
             ui.menu_button("New Session from Template", |ui| {
@@ -704,7 +705,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if ui.button(name).clicked() {
-                        st.new_session(Some(&t));
+                        crate::new_dialogs::open_new_session(st, Some(t.clone()));
                         ui.close_menu();
                     }
                 }
@@ -2120,6 +2121,13 @@ impl eframe::App for App {
         // panel once at start.
         if !self.shown_env_tab {
             self.shown_env_tab = true;
+            // AF2_OPEN=new-file | new-session | multitrack, for shots.
+            match std::env::var("AF2_OPEN").as_deref() {
+                Ok("new-file") => crate::new_dialogs::open_new_file(&mut self.st),
+                Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
+                Ok("multitrack") => self.st.mode = Mode::Multitrack,
+                _ => {}
+            }
             if let Ok(name) = std::env::var("AF2_SHOW_TAB") {
                 if let Some(t) = Tab::ALL
                     .iter()
@@ -2503,6 +2511,7 @@ impl eframe::App for App {
             self.show_tab(Tab::Effects);
         }
         crate::rack::windows(ctx, &mut self.st);
+        crate::new_dialogs::show(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
         generate_window(ctx, &mut self.st);

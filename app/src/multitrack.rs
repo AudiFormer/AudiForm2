@@ -163,6 +163,10 @@ pub(crate) fn track_at(st: &State, lanes_top: f32, scroll: f32, y: f32) -> Optio
 }
 
 pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
+    if st.no_session() {
+        no_session(ui, st);
+        return;
+    }
     let th = st.theme.clone();
     let full = ui.available_rect_before_wrap();
     let (rect, resp) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
@@ -1267,6 +1271,87 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         );
     }
     file_drop(ui, st, &resp, &p, lanes, scroll, &v, &snap_marks);
+}
+
+/// No session open (all were closed, or none made yet): say so, offer New
+/// and Open, and start a session for files dropped here.
+fn no_session(ui: &mut egui::Ui, st: &mut State) {
+    let th = st.theme.clone();
+    let rect = ui.available_rect_before_wrap();
+    let resp = ui.allocate_rect(rect, Sense::hover());
+    ui.painter()
+        .rect_filled(rect, Rounding::ZERO, c(th.wave_background));
+    // Dropped here: a new session takes them, one track each.
+    let alt = ui.input(|i| i.modifiers.alt);
+    if let Some(files) = resp.dnd_release_payload::<crate::files_panel::DragFiles>() {
+        st.new_session(None);
+        st.import_docs(
+            files.0.clone(),
+            crate::sessions::Layout::Drop {
+                track: None,
+                at: 0.0,
+                alt,
+            },
+        );
+        return;
+    }
+    let os = st
+        .sessions
+        .os_drop
+        .as_ref()
+        .and_then(|d| d.pos)
+        .is_some_and(|pp| rect.contains(pp));
+    if os {
+        if let Some(d) = st.sessions.os_drop.take() {
+            st.new_session(None);
+            st.import_paths(
+                d.paths,
+                crate::sessions::Layout::Drop {
+                    track: None,
+                    at: 0.0,
+                    alt: d.alt,
+                },
+            );
+            return;
+        }
+    }
+    let hovering =
+        egui::DragAndDrop::has_payload_of_type::<crate::files_panel::DragFiles>(ui.ctx())
+            && resp.contains_pointer();
+    if hovering {
+        ui.painter().rect_stroke(
+            rect.shrink(6.0),
+            Rounding::same(6.0),
+            Stroke::new(2.0_f32, c(th.accent)),
+        );
+    }
+    let col = Rect::from_center_size(rect.center(), vec2(360.0, 150.0));
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(col), |ui| {
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("No session open")
+                    .size(18.0)
+                    .color(c(th.text)),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Make a new session, open one, or drop audio here to start a session with it.",
+                )
+                .color(c(th.text_dim)),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.add_space(70.0);
+                if ui.button("New Multitrack Session...").clicked() {
+                    crate::new_dialogs::open_new_session(st, None);
+                }
+                if ui.button("Open...").clicked() {
+                    crate::ui::open_dialog(st);
+                }
+            });
+        });
+    });
 }
 
 /// Files dragged onto the lanes, from the Files panel or the file manager.

@@ -76,7 +76,7 @@ pub struct ExportPrefs {
 impl Default for ExportPrefs {
     fn default() -> Self {
         ExportPrefs {
-            container: Container::Wav,
+            container: Container::Flac,
             wav: FormatPrefs::default(),
             flac: FormatPrefs {
                 format: SampleFormat::I16,
@@ -243,12 +243,24 @@ pub fn open_save_as(st: &mut State) {
             .and_then(|p| p.parent().map(Path::to_path_buf)),
     );
     open_with(st, Purpose::SaveDoc(id), name, folder);
-    // A file already in FLAC or WAV keeps its format.
-    let ext = st
-        .doc()
-        .and_then(|d| d.path.as_deref().and_then(Container::from_path));
-    if let (Some(c), Some(p)) = (ext, st.export.prefs.as_mut()) {
+    // A file already in FLAC or WAV keeps its format; one never saved
+    // starts as FLAC (lossless and compressed) at the depth it was made.
+    let (ext, new_bits) = st.doc().map_or((None, None), |d| {
+        (d.path.as_deref().and_then(Container::from_path), d.new_bits)
+    });
+    let unsaved = st.doc().is_some_and(|d| d.path.is_none());
+    let c = ext.or(unsaved.then_some(Container::Flac));
+    if let (Some(c), Some(p)) = (c, st.export.prefs.as_mut()) {
         p.container = c;
+        if c == Container::Flac {
+            if let Some(b) = new_bits {
+                p.flac.format = if b == 16 {
+                    SampleFormat::I16
+                } else {
+                    SampleFormat::I24
+                };
+            }
+        }
         st.export.name = with_ext(&st.export.name, c);
     }
 }

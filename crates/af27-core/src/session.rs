@@ -167,6 +167,10 @@ pub struct ClipProps {
     pub fold_channels: bool,
 }
 
+fn default_bit_depth() -> u16 {
+    32
+}
+
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
@@ -510,6 +514,10 @@ pub struct Session {
     /// Where the playhead was when playback last stopped (seconds).
     #[serde(default)]
     pub playhead: f64,
+    /// Bits per sample new audio in the session is kept at (16, 24 or 32
+    /// float). Recordings are written as FLAC at 24 bits for 32.
+    #[serde(default = "default_bit_depth")]
+    pub bit_depth: u16,
 }
 
 const PALETTE: [[u8; 3]; 8] = [
@@ -547,6 +555,7 @@ impl Session {
             monitor: Default::default(),
             tempo: Default::default(),
             playhead: 0.0,
+            bit_depth: 32,
         };
         for _ in 0..tracks {
             s.add_track();

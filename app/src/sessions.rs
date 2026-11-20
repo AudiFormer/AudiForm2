@@ -842,6 +842,12 @@ impl State {
         s
     }
 
+    /// No session is open: the one in front is the blank stand-in and
+    /// none is set aside. The Multitrack editor shows an empty state.
+    pub fn no_session(&self) -> bool {
+        self.front_is_blank() && self.sessions.parked.is_empty()
+    }
+
     /// The session in front was never saved and nobody has touched it.
     pub fn front_is_blank(&self) -> bool {
         self.session_path.is_none()
@@ -1517,7 +1523,9 @@ impl State {
             let buf = doc.buf.clone();
             let src = doc.path.clone();
             let wav_inside = src.as_deref().is_some_and(|p| {
-                inside(p, &dir) && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+                inside(p, &dir)
+                    && p.extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("flac"))
             });
             let dest = if wav_inside {
                 src.clone().unwrap()
@@ -1526,7 +1534,7 @@ impl State {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Audio".into());
-                let name = format!("{stem} (edited).wav");
+                let name = format!("{stem} (edited).flac");
                 let _ = std::fs::create_dir_all(&media_dir);
                 let mut dest = media_dir.join(&name);
                 let mut n = 2;
@@ -1536,8 +1544,8 @@ impl State {
                 }
                 dest
             };
-            let part = dest.with_extension("wav.part");
-            let written = af27_io::write_wav(&part, &buf, af27_io::WavFormat::Float32)
+            let part = dest.with_extension("flac.part");
+            let written = crate::new_dialogs::write_flac(&part, &buf, self.session.bit_depth)
                 .and_then(|_| std::fs::rename(&part, &dest).map_err(|e| e.to_string()));
             match written {
                 Ok(()) => {

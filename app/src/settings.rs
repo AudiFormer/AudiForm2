@@ -94,6 +94,9 @@ pub struct Prefs {
     pub stretch_handles: bool,
     /// The metronome's sound and level (kept here, not in sessions).
     pub metronome: af27_core::midi::MetronomeSettings,
+    /// What New Audio File and New Multitrack Session start with.
+    pub new_file: crate::new_dialogs::NewFileDefaults,
+    pub new_session: crate::new_dialogs::NewSessionDefaults,
     /// Soloing a track or bus unsolos every other (Ctrl+click always
     /// does, whatever this says).
     pub solo_exclusive: bool,
@@ -220,6 +223,8 @@ impl Default for Prefs {
             header_view: Default::default(),
             stretch_handles: false,
             metronome: Default::default(),
+            new_file: Default::default(),
+            new_session: Default::default(),
             solo_exclusive: false,
             midi_monitor: true,
         }
@@ -403,6 +408,8 @@ impl Draft {
         prefs.header_view = st.prefs.header_view;
         prefs.stretch_handles = st.prefs.stretch_handles;
         prefs.metronome = st.prefs.metronome;
+        prefs.new_file = st.prefs.new_file.clone();
+        prefs.new_session = st.prefs.new_session.clone();
         if prefs != st.prefs {
             let reopen = prefs.audio != st.prefs.audio;
             st.prefs = prefs;

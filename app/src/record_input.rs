@@ -256,8 +256,9 @@ pub fn finish(st: &mut State, takes: Vec<Take>, target: Option<RecordTarget>) {
         } else {
             format!("-{}", i + 1)
         };
-        let path = dir.join(format!("Recording {stamp}{suffix}.wav"));
-        let saved = af27_io::write_wav(&path, &buf, af27_io::WavFormat::Float32).is_ok();
+        let path = dir.join(format!("Recording {stamp}{suffix}.flac"));
+        let bits = if to_track { st.session.bit_depth } else { 24 };
+        let saved = crate::new_dialogs::write_flac(&path, &buf, bits).is_ok();
         let id = st.add_doc(take_name(n, &take.source), saved.then_some(path), buf);
         first_doc.get_or_insert(id);
         if let Some(RecordTarget::Track(_, at)) = target {

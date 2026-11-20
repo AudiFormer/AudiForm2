@@ -127,14 +127,14 @@ pub fn files(ui: &mut egui::Ui, st: &mut State) {
             .on_hover_text("New Multitrack session (the one open is set aside, not closed)")
             .clicked()
         {
-            st.new_session(None);
+            crate::new_dialogs::open_new_session(st, None);
         }
         if ui
             .button("New Audio File")
             .on_hover_text("New empty audio file, listed here")
             .clicked()
         {
-            st.new_file(48_000, 2);
+            crate::new_dialogs::open_new_file(st);
         }
         if ui
             .button("Open")

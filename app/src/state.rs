@@ -75,6 +75,8 @@ pub struct Doc {
     pub spec_sel: crate::spectral_select::SpecSel,
     /// Tags and the markers/chapters found in the file when it was opened.
     pub info: af27_io::meta::FileInfo,
+    /// Made with New Audio File at this bit depth (Save As starts there).
+    pub new_bits: Option<u16>,
 }
 
 impl Doc {
@@ -88,6 +90,7 @@ impl Doc {
             buf: Arc::new(buf),
             peaks,
             history: History::new(100),
+            new_bits: None,
             dirty: false,
             view: View::fit(dur),
             sel: None,
@@ -311,6 +314,9 @@ pub struct State {
     pub want_effects: bool,
     /// The Effects menu's apply window is open.
     pub effect_dialog: bool,
+    /// File > New Audio File / New Multitrack Session dialogs.
+    pub new_file_ui: Option<crate::new_dialogs::NewFileDraft>,
+    pub new_session_ui: Option<crate::new_dialogs::NewSessionDraft>,
     /// The clip whose Properties show, and a floating window for them.
     pub want_properties: bool,
     /// A live-edit drag is under way (one undo step per drag).
@@ -561,6 +567,8 @@ impl State {
             rack_preset_name: None,
             want_effects: false,
             effect_dialog: false,
+            new_file_ui: None,
+            new_session_ui: None,
             want_properties: false,
             gesture: false,
             want_piano: false,
