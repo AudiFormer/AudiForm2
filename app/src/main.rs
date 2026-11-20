@@ -35,6 +35,7 @@ mod pictures;
 mod plugins;
 mod pointers;
 mod rack;
+mod rack_builtins;
 mod record_input;
 mod retro;
 mod ruler;

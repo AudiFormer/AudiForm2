@@ -266,9 +266,14 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     crate::overview::input(ui, st, overview, full_btn);
     vzoom_bar(ui, st, drag, &vresp, lanes, vbar);
     let total_h: f32 = st.session.tracks.iter().map(|t| t.height).sum();
-    drag.scroll_y = drag
-        .scroll_y
-        .clamp(0.0, (total_h - lanes.height() + TAIL_H).max(0.0));
+    // Tracks that all fit never scroll (the tail below them alone is no
+    // reason to).
+    let max_scroll = if total_h > lanes.height() {
+        total_h - lanes.height() + TAIL_H
+    } else {
+        0.0
+    };
+    drag.scroll_y = drag.scroll_y.clamp(0.0, max_scroll);
     let lim = st.session_limits();
     st.session_view.limit(&lim);
     let v = st.session_view;
@@ -289,8 +294,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         {
             st.session_view
                 .pan_px(-dv.x as f64, lanes.width() as f64, &lim);
-            drag.scroll_y =
-                (drag.scroll_y - dv.y).clamp(0.0, (total_h - lanes.height() + TAIL_H).max(0.0));
+            drag.scroll_y = (drag.scroll_y - dv.y).clamp(0.0, max_scroll);
             st.hand_moved_view();
         }
     }

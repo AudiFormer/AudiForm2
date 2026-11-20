@@ -989,6 +989,18 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                                 load = Some(n.clone());
                             }
                         }
+                        // The presets that come with the app, by group.
+                        let mut group = "";
+                        for p in crate::rack_builtins::all() {
+                            if p.group != group {
+                                group = p.group;
+                                ui.separator();
+                                ui.label(RichText::new(group).small().color(c(th.text_dim)));
+                            }
+                            if ui.selectable_label(false, p.name).clicked() {
+                                load = Some(format!("\u{1}{}", p.name));
+                            }
+                        }
                     });
             });
         },
@@ -1001,6 +1013,8 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                     chain: Vec::new(),
                     rack: Rack::default(),
                 })
+            } else if let Some(name) = n.strip_prefix('\u{1}') {
+                crate::rack_builtins::find(name).map(|(chain, rack)| Preset { chain, rack })
             } else {
                 std::fs::read_to_string(presets_dir().join(format!("{n}.json")))
                     .ok()
