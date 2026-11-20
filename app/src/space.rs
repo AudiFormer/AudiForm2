@@ -412,8 +412,8 @@ fn room_view(
         Stroke::new(1.0_f32, c(th.grid)),
     );
     p.text(
-        pos2(room.center().x, room.top() - 3.0),
-        Align2::CENTER_BOTTOM,
+        pos2(room.center().x, room.top() + 9.0),
+        Align2::CENTER_TOP,
         "FRONT",
         FontId::proportional(9.0),
         c(th.text_dim),
@@ -556,11 +556,8 @@ fn room_view(
         }
         let mut tag = t.name.clone();
         if pos.z.abs() > 0.005 {
-            tag += &format!(
-                " {}{:.0}%",
-                if pos.z > 0.0 { "↑" } else { "↓" },
-                pos.z.abs() * 100.0
-            );
+            // Height as a signed percentage (up from ear level).
+            tag += &format!(" {:+.0}%", pos.z * 100.0);
         }
         if pos.lfe > 0.0 {
             tag += " LFE";
