@@ -47,6 +47,10 @@ pub enum Cmd {
     ZoomIn,
     ZoomOut,
     ZoomFull,
+    ZoomSession,
+    ZoomSelection,
+    ZoomInVertical,
+    ZoomOutVertical,
     MoveTool,
     RazorTool,
     TimeSelectTool,
@@ -93,6 +97,10 @@ impl Cmd {
         Cmd::ZoomIn,
         Cmd::ZoomOut,
         Cmd::ZoomFull,
+        Cmd::ZoomSession,
+        Cmd::ZoomSelection,
+        Cmd::ZoomInVertical,
+        Cmd::ZoomOutVertical,
         Cmd::MoveTool,
         Cmd::RazorTool,
         Cmd::TimeSelectTool,
@@ -139,6 +147,10 @@ impl Cmd {
             Cmd::ZoomIn => "Zoom In",
             Cmd::ZoomOut => "Zoom Out",
             Cmd::ZoomFull => "Zoom Out Full",
+            Cmd::ZoomSession => "Zoom to Session",
+            Cmd::ZoomSelection => "Zoom to Selection",
+            Cmd::ZoomInVertical => "Taller Tracks",
+            Cmd::ZoomOutVertical => "Shorter Tracks",
             Cmd::MoveTool => "Move Tool",
             Cmd::RazorTool => "Razor Tool",
             Cmd::TimeSelectTool => "Time Selection Tool",
@@ -190,7 +202,11 @@ impl Cmd {
             | Cmd::MultitrackView
             | Cmd::ZoomIn
             | Cmd::ZoomOut
-            | Cmd::ZoomFull => "View",
+            | Cmd::ZoomFull
+            | Cmd::ZoomSession
+            | Cmd::ZoomSelection
+            | Cmd::ZoomInVertical
+            | Cmd::ZoomOutVertical => "View",
             Cmd::MoveTool | Cmd::RazorTool | Cmd::TimeSelectTool => "Tools",
         }
     }
@@ -249,6 +265,17 @@ impl Cmd {
             Cmd::MultitrackView => vec![p(K::Num0)],
             Cmd::ZoomIn => vec![p(K::Equals), p(K::Plus)],
             Cmd::ZoomOut => vec![p(K::Minus)],
+            Cmd::ZoomSession => vec![p(K::Backslash)],
+            // Shift+\ (the key gives "|").
+            Cmd::ZoomFull => vec![p(K::Pipe)],
+            Cmd::ZoomInVertical => vec![Binding {
+                alt: true,
+                ..p(K::Equals)
+            }],
+            Cmd::ZoomOutVertical => vec![Binding {
+                alt: true,
+                ..p(K::Minus)
+            }],
             Cmd::MoveTool => vec![p(K::V)],
             Cmd::RazorTool => vec![p(K::R)],
             Cmd::TimeSelectTool => vec![p(K::T)],
@@ -267,7 +294,7 @@ impl Cmd {
             | Cmd::Reverse
             | Cmd::Silence
             | Cmd::MatchLoudness
-            | Cmd::ZoomFull
+            | Cmd::ZoomSelection
             | Cmd::ExportMixdown
             | Cmd::ExportStems
             | Cmd::BounceTrack => Vec::new(),

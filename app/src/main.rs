@@ -18,6 +18,7 @@ mod inspector;
 mod keymap;
 mod lane_menu;
 mod multitrack;
+mod overview;
 mod panels;
 mod phasewheel;
 mod pianoroll;
@@ -46,6 +47,7 @@ mod waveform;
 mod widgets;
 mod workspace;
 mod zoom;
+mod zoom_bench;
 
 fn main() -> eframe::Result<()> {
     fx::register();

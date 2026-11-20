@@ -579,10 +579,9 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
             });
             group(ui, th, "Wheel zoom centers on", |ui| {
                 for (a, label) in [
-                    (WheelAnchor::Pointer, "The mouse pointer"),
                     (
-                        WheelAnchor::BetweenPointerAndMiddle,
-                        "Between the pointer and the middle of the view (drifts less)",
+                        WheelAnchor::Pointer,
+                        "The mouse pointer (as over the time ruler)",
                     ),
                     (WheelAnchor::Playhead, "The playhead"),
                 ] {
