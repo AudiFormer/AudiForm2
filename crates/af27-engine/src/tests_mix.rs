@@ -530,3 +530,62 @@ fn midi_clip_level_scales_velocity_and_notes_follow_the_tempo() {
     c.muted = true;
     assert!(plan_notes(&[c], &tempo).is_empty());
 }
+
+/// A mix rebuilt while playing (any edit does this) carries on the running
+/// effects: the sound goes on exactly as if nothing had been rebuilt, so
+/// the echo's tail and the compressor's envelope do not restart.
+#[test]
+fn a_rebuilt_mix_keeps_its_effects_running() {
+    let mut f = Fx::new();
+    let a = f.impulse(0.8, 100, 4000);
+    let mut echo = EffectSlot {
+        effect: "echo".into(),
+        values: vec![120.0, 0.6, 0.5, 6000.0],
+        bypass: false,
+        position: None,
+        sidechain: None,
+        data: None,
+        ext_id: None,
+    };
+    echo.values.truncate(4);
+    let comp = EffectSlot {
+        effect: "compressor".into(),
+        values: vec![-30.0, 6.0, 5.0, 200.0, 6.0, 0.0],
+        ..echo.clone()
+    };
+    f.t(a).chain = vec![echo, comp];
+    let dt = 1.0 / RATE as f64;
+    let n = 256usize;
+    let run = |m: &mut mix::Mix, from: usize, blocks: usize, out: &mut Vec<f32>| {
+        let mut buf = vec![0.0f32; n * 2];
+        for b in 0..blocks {
+            let t0 = (from + b * n) as f64 * dt;
+            m.render(t0, dt, n, &mut buf, false);
+            out.extend_from_slice(&buf);
+        }
+    };
+    // Straight through.
+    let mut whole = f.mix();
+    whole.start(0.0);
+    let mut want = Vec::new();
+    run(&mut whole, 0, 20, &mut want);
+    // Rebuilt after 4 blocks (the echo's tail is ringing).
+    let mut first = f.mix();
+    first.start(0.0);
+    let mut got = Vec::new();
+    run(&mut first, 0, 4, &mut got);
+    let mut second = f.mix();
+    assert!(second.adopt(&mut first));
+    run(&mut second, 4 * n, 16, &mut got);
+    assert_eq!(want.len(), got.len());
+    let worst = want
+        .iter()
+        .zip(&got)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(worst < 1e-6, "rebuilt mix differs by {worst}");
+    assert!(
+        want.iter().skip(4 * n * 2).any(|v| v.abs() > 1e-3),
+        "the tail rings"
+    );
+}

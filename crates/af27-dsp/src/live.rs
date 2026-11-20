@@ -798,6 +798,31 @@ impl Chain {
     }
 
     /// Takes a rack's settings (no allocation: safe on the audio thread).
+    /// Takes `old`'s running effects in place of this chain's fresh ones
+    /// (the caller checks they are the same effects in the same order), so
+    /// reverb tails, compressor envelopes and plug-in streams carry on
+    /// when the mix is rebuilt. This chain's settings stay: each effect is
+    /// given `vals`. No allocation.
+    pub fn adopt(&mut self, old: &mut Chain, vals: &[Vec<f32>]) {
+        if self.slots.len() != old.slots.len() {
+            return;
+        }
+        for (k, ((p, _), (q, _))) in self.slots.iter_mut().zip(old.slots.iter_mut()).enumerate() {
+            std::mem::swap(p, q);
+            if let Some(v) = vals.get(k) {
+                p.set(v);
+            }
+        }
+        for (a, b) in self.pads.iter_mut().zip(old.pads.iter_mut()) {
+            if a.frames() == b.frames() {
+                std::mem::swap(a, b);
+            }
+        }
+        if self.dry_pad.frames() == old.dry_pad.frames() {
+            std::mem::swap(&mut self.dry_pad, &mut old.dry_pad);
+        }
+    }
+
     pub fn set_rack(&mut self, rack: &af27_core::Rack) {
         self.bypass = rack.bypass;
         self.input = db_to_gain(rack.input_db);

@@ -113,6 +113,24 @@ pub struct ClipFx {
     lat: usize,
     /// Ran last block (a fresh start clears the chain first).
     running: bool,
+    /// Which effects the rack holds and their settings (see `Mix::adopt`).
+    sig: ChainSig,
+    vals: Vec<Vec<f32>>,
+}
+
+/// What a chain is made of (each slot's effect and its own data), to tell
+/// whether a rebuilt mix can keep the running effects.
+type ChainSig = Vec<(String, Option<String>)>;
+
+fn chain_sig(slots: &[af27_core::EffectSlot]) -> ChainSig {
+    slots
+        .iter()
+        .map(|s| (s.effect.clone(), s.data.clone()))
+        .collect()
+}
+
+fn chain_vals(slots: &[af27_core::EffectSlot]) -> Vec<Vec<f32>> {
+    slots.iter().map(|s| s.values.clone()).collect()
 }
 
 impl ClipFx {
@@ -154,6 +172,8 @@ impl ClipFx {
             l: vec![0.0; BLOCK],
             r: vec![0.0; BLOCK],
             running: false,
+            sig: chain_sig(slots),
+            vals: chain_vals(slots),
         }))
     }
 
@@ -332,6 +352,10 @@ fn peak_into(a: &std::sync::atomic::AtomicU32, l: &[f32], r: &[f32], gain: f32) 
 }
 
 pub struct MixTrack {
+    /// The session track it plays (to carry state into a rebuilt mix).
+    pub tid: af27_core::TrackId,
+    sig: ChainSig,
+    vals: Vec<Vec<f32>>,
     /// The rack's meters, shared with the UI.
     pub meter: std::sync::Arc<RackMeter>,
     pub is_bus: bool,
@@ -448,6 +472,8 @@ pub struct Mix {
     /// The master chain of a stereo session (empty in a 3D session, whose
     /// master chain is `space.chain`).
     pub master_chain: Chain,
+    master_sig: ChainSig,
+    master_vals: Vec<Vec<f32>>,
     /// The master fader (linear), ramped to across each block.
     pub master: f32,
     master_cur: f32,
@@ -1124,6 +1150,9 @@ pub fn build(
             let sp =
                 space.map(|layout| space::for_track(layout, t, wide, stereo, rate, ti, steer_lead));
             MixTrack {
+                tid: t.id,
+                sig: chain_sig(&t.chain),
+                vals: chain_vals(&t.chain),
                 meter: Default::default(),
                 is_bus: t.kind == TrackKind::Bus,
                 audible,
@@ -1273,6 +1302,8 @@ pub fn build(
         parallel: true,
         tracks,
         master_chain,
+        master_sig: chain_sig(&session.master_chain),
+        master_vals: chain_vals(&session.master_chain),
         master,
         master_cur: master,
         master_pan: session.master_pan.clamp(-1.0, 1.0),
@@ -1484,6 +1515,61 @@ impl Mix {
     pub fn start(&mut self, t: f64) {
         self.reset();
         self.prime(t);
+    }
+
+    /// A new mix arriving while `old` plays: takes over `old`'s running
+    /// effects (and delay lines) wherever a track, clip rack or the master
+    /// is made of the same effects, so an edit does not restart every
+    /// reverb tail, compressor and plug-in (heard as a dip). True when it
+    /// did, and no priming is needed; false (a 3D session, or the delay
+    /// compensation changed) means prime as before. No allocation.
+    pub fn adopt(&mut self, old: &mut Mix) -> bool {
+        if self.lead != old.lead
+            || self.steer_lead != old.steer_lead
+            || self.space.is_some()
+            || old.space.is_some()
+        {
+            return false;
+        }
+        for t in &mut self.tracks {
+            let Some(o) = old.tracks.iter_mut().find(|o| o.tid == t.tid) else {
+                continue;
+            };
+            if o.sig == t.sig {
+                t.chain.adopt(&mut o.chain, &t.vals);
+            }
+            if o.in_t == t.in_t {
+                std::mem::swap(&mut t.in_delay, &mut o.in_delay);
+            }
+            if o.out_t == t.out_t {
+                std::mem::swap(&mut t.out_delay, &mut o.out_delay);
+            }
+            t.main_cur = o.main_cur;
+            for c in &mut t.clips {
+                let Some(fx) = c.fx.as_deref_mut() else {
+                    continue;
+                };
+                let Some(of) = o
+                    .clips
+                    .iter_mut()
+                    .find(|x| x.id == c.id)
+                    .and_then(|x| x.fx.as_deref_mut())
+                else {
+                    continue;
+                };
+                if of.sig == fx.sig && of.lat == fx.lat {
+                    fx.chain.adopt(&mut of.chain, &fx.vals);
+                    fx.running = of.running;
+                }
+            }
+        }
+        if self.master_sig == old.master_sig {
+            self.master_chain
+                .adopt(&mut old.master_chain, &self.master_vals);
+        }
+        self.master_cur = old.master_cur;
+        self.primed = true;
+        true
     }
 
     /// Renders the frames the mix is late by (delay compensation and the

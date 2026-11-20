@@ -224,8 +224,16 @@ impl Voice {
         match cmd {
             Cmd::Program(mut p) => {
                 // Arriving while playing: prime it so it carries on in step.
+                // Its effects carry on from the playing mix where they are
+                // the same (no restart, no dip); otherwise it is primed.
                 if let (true, Program::Mix(m)) = (self.playing, p.as_mut()) {
-                    m.prime(self.t);
+                    let kept = match self.program.as_deref_mut() {
+                        Some(Program::Mix(old)) => m.adopt(old),
+                        _ => false,
+                    };
+                    if !kept {
+                        m.prime(self.t);
+                    }
                 }
                 if let Some(old) = self.program.replace(p) {
                     if let Err(rtrb::PushError::Full(old)) = trash.push(Garbage::Program(old)) {
