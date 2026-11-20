@@ -1,23 +1,11 @@
-//! Opens the ASIO driver AudiForm 2 would pick, plays silence for two
-//! seconds and reports what opened: `cargo run --example asio_probe
-//! --features asio -p af27-engine`.
+//! Lists the ASIO drivers and opens one for a moment (by hand):
+//! `cargo run --release -p af27-engine --features asio --example asio_probe`.
 fn main() {
-    let drivers = af27_engine::devices::asio_drivers();
     println!("ASIO built: {}", af27_engine::ASIO_BUILT);
-    println!("drivers: {drivers:?}");
-    let choice = af27_engine::DeviceChoice {
-        host: af27_engine::HostKind::Asio,
-        ..Default::default()
-    };
-    match af27_engine::Engine::open(&choice) {
-        Ok(e) => {
-            println!(
-                "opened: {} @ {} Hz, buffer {:?}",
-                e.device, e.rate, e.buffer
-            );
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            println!("lost after 2 s: {}", e.is_lost());
-        }
-        Err(err) => println!("open failed: {err}"),
-    }
+    let l = af27_engine::devices::list(af27_engine::HostKind::Asio, None, None);
+    println!("drivers: {:?}", l.asio_drivers);
+    println!("using: {:?}", l.asio_driver);
+    println!("outputs: {:?}", l.outputs.iter().map(|d| &d.name).collect::<Vec<_>>());
+    println!("inputs: {:?}", l.inputs.iter().map(|d| &d.name).collect::<Vec<_>>());
+    println!("rates {:?}, now {:?}, buffers {:?}, error {:?}", l.rates, l.rate, l.buffer_range, l.error);
 }
