@@ -148,9 +148,11 @@ dependencies = [
  "af27-core",
  "af27-dsp",
  "af27-space",
+ "asio-sys",
  "cpal",
  "rtrb",
  "rustysynth",
+ "serde",
  "windows 0.58.0",
  "windows-core 0.58.0",
 ]
@@ -361,6 +363,20 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "zbus 5.19.0",
+]
+
+[[package]]
+name = "asio-sys"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "826194e1612938c9be09b78b58323fbb2e326de3d491b4230186cf6e832d8ded"
+dependencies = [
+ "bindgen",
+ "cc",
+ "num-derive",
+ "num-traits",
+ "parse_cfg",
+ "walkdir",
 ]
 
 [[package]]
@@ -614,6 +630,8 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -1002,6 +1020,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "873dab07c8f743075e57f524c583985fbaf745602acbe916a01539364369a779"
 dependencies = [
  "alsa",
+ "asio-sys",
  "core-foundation-sys",
  "coreaudio-rs",
  "dasp_sample",
@@ -1011,6 +1030,7 @@ dependencies = [
  "mach2",
  "ndk 0.8.0",
  "ndk-context",
+ "num-traits",
  "oboe",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2958,6 +2978,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_cfg"
+version = "4.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "905787a434a2c721408e7c9a252e85f3d93ca0f118a5283022636c0e05a7ea49"
+dependencies = [
+ "nom",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3080,6 +3109,16 @@ name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
+
+[[package]]
+name = "prettyplease"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "primal-check"

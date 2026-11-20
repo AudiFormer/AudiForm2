@@ -233,6 +233,9 @@ pub struct State {
 
     pub engine: Option<Engine>,
     pub engine_error: Option<String>,
+    /// Waits between attempts to open the audio device again after it
+    /// went away or would not open.
+    pub audio_retry: af27_engine::health::Backoff,
     program_key: (Mode, DocId, u64, u64),
     /// Where playback began, shown on the ruler while playing or paused;
     /// Stop folds it into the playhead.
@@ -448,6 +451,8 @@ pub fn data_dir() -> PathBuf {
 
 impl State {
     pub fn new() -> State {
+        af27_engine::health::set_log_path(data_dir().join("audio.log"));
+        af27_engine::health::install_panic_log();
         let audio = crate::settings::Prefs::load().audio.choice();
         let (engine, engine_error) = match Engine::open(&audio) {
             Ok(e) => (Some(e), None),
@@ -489,6 +494,7 @@ impl State {
             media_docs: HashMap::new(),
             engine,
             engine_error,
+            audio_retry: Default::default(),
             program_key: (Mode::Waveform, 0, 0, 0),
             start_marker: None,
             paused: false,
@@ -1293,11 +1299,18 @@ impl State {
         if self.is_playing() || self.is_recording() {
             self.stop();
         }
+        // The old stream closes (on silence) before the new one opens: an
+        // ASIO driver serves one set of buffers.
         self.engine = None;
         match af27_engine::Engine::open(&self.prefs.audio.choice()) {
             Ok(e) => {
+                if let Some(n) = &e.note {
+                    let n = n.clone();
+                    self.error(n);
+                }
                 self.engine = Some(e);
                 self.engine_error = None;
+                self.audio_retry.reset();
             }
             Err(e) => self.engine_error = Some(e),
         }
@@ -1307,20 +1320,44 @@ impl State {
         self.live_metronome();
     }
 
-    pub fn tick(&mut self) {
-        // The output went away (unplugged): play through what is there.
-        if self.engine.as_ref().is_some_and(|e| e.is_lost()) {
+    /// Keeps the output healthy, called every frame: a device that went
+    /// away, failed or stopped calling back is opened again (the system
+    /// default where the chosen one is gone), and with no output at all
+    /// it keeps trying, waiting longer each time. Also hands the engine
+    /// the 3D layout (for speakers to their own outputs) and the track
+    /// input menus the ASIO driver's inputs.
+    fn watch_audio(&mut self, now: Instant) {
+        let why = self.engine.as_mut().and_then(|e| e.check(now));
+        if let Some(why) = why {
             self.reopen_audio();
             let text = match &self.engine {
-                Some(e) => format!("The audio device went away; playing through {}.", e.device),
-                None => "The audio device went away.".to_string(),
+                Some(e) => format!("{why} Playing through {}.", e.device),
+                None => format!("{why} Trying again…"),
             };
-            self.toasts.push(Toast {
-                text,
-                at: Instant::now(),
-                error: true,
-            });
+            self.error(text);
+        } else if self.engine.is_none() && self.audio_retry.due(now) && self.audio_retry.tries() > 1
+        {
+            // (The first `due` only starts the clock: the failure was just
+            // reported.)
+            self.reopen_audio();
+            if let Some(e) = &self.engine {
+                let text = format!("Audio is back: playing through {}.", e.device);
+                self.toast(text);
+            }
         }
+        let layout = match self.mode {
+            Mode::Multitrack => self.session.space,
+            Mode::Waveform => None,
+        };
+        if let Some(e) = &mut self.engine {
+            e.set_layout(layout);
+        }
+        let asio = self.engine.as_ref().and_then(|e| e.asio_inputs.as_ref());
+        self.rec_inputs.follow_driver(asio);
+    }
+
+    pub fn tick(&mut self) {
+        self.watch_audio(Instant::now());
         self.poll_jobs();
         crate::separation::poll(self);
         crate::spectral_select::poll(self);

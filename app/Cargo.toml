@@ -36,3 +36,7 @@ embed-resource = "3"
 [dev-dependencies]
 # Checks the caustics shader in tests (already in the tree through wgpu).
 naga = { version = "22", features = ["wgsl-in"] }
+
+[features]
+# ASIO on Windows (off by default): see docs/asio.md.
+asio = ["af27-engine/asio"]

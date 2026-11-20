@@ -14,7 +14,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use af27_core::TrackId;
-use af27_engine::{AudioApp, CaptureSupport, OutputDevice, RecordSource, Take};
+use af27_engine::{
+    AudioApp, CaptureSupport, DeviceInfo, InputPick, OutputDevice, RecordSource, Take,
+};
 use egui::{RichText, Ui};
 
 use crate::state::{data_dir, Mode, RecordTarget, State};
@@ -22,6 +24,7 @@ use crate::state::{data_dir, Mode, RecordTarget, State};
 type Listing = (
     Result<Vec<AudioApp>, String>,
     Result<Vec<OutputDevice>, String>,
+    Vec<DeviceInfo>,
 );
 
 pub struct RecordInputs {
@@ -34,6 +37,10 @@ pub struct RecordInputs {
     support: CaptureSupport,
     apps: Vec<AudioApp>,
     outputs: Vec<OutputDevice>,
+    /// The system driver's input devices and their channels.
+    inputs: Vec<DeviceInfo>,
+    /// On ASIO: the driver's inputs (the only input device there).
+    asio: Option<DeviceInfo>,
     list_error: Option<String>,
     listed_at: Option<Instant>,
     pending: Option<mpsc::Receiver<Listing>>,
@@ -65,6 +72,8 @@ impl RecordInputs {
             support,
             apps: Vec::new(),
             outputs: Vec::new(),
+            inputs: Vec::new(),
+            asio: None,
             list_error: None,
             listed_at: None,
             pending: None,
@@ -106,7 +115,9 @@ impl RecordInputs {
             .spawn(move || {
                 let apps = af27_engine::capture::list_audio_apps();
                 let outs = af27_engine::capture::list_output_devices();
-                let _ = tx.send((apps, outs));
+                let ins =
+                    af27_engine::devices::list(af27_engine::HostKind::System, None, None).inputs;
+                let _ = tx.send((apps, outs, ins));
             });
         match spawned {
             Ok(_) => self.pending = Some(rx),
@@ -117,7 +128,8 @@ impl RecordInputs {
     fn poll(&mut self) {
         let Some(rx) = &self.pending else { return };
         match rx.try_recv() {
-            Ok((apps, outs)) => {
+            Ok((apps, outs, ins)) => {
+                self.inputs = ins;
                 self.pending = None;
                 self.listed_at = Some(Instant::now());
                 self.list_error = None;
@@ -135,6 +147,24 @@ impl RecordInputs {
                 self.pending = None;
                 self.list_error = Some("Listing sources failed.".into());
             }
+        }
+    }
+}
+
+impl RecordInputs {
+    /// Follows the driver the output opened with: on ASIO the track input
+    /// menus offer the driver's inputs, elsewhere the system's devices.
+    pub fn follow_driver(&mut self, asio: Option<&DeviceInfo>) {
+        if self.asio.as_ref() != asio {
+            self.asio = asio.cloned();
+        }
+    }
+
+    /// The input devices the menus offer, with their channels.
+    pub fn input_devices(&self) -> Vec<DeviceInfo> {
+        match &self.asio {
+            Some(a) => vec![a.clone()],
+            None => self.inputs.clone(),
         }
     }
 }
@@ -260,6 +290,7 @@ fn clip(s: &str, n: usize) -> String {
 fn short(s: &RecordSource) -> String {
     let t: String = match s {
         RecordSource::Input => "Mic".into(),
+        RecordSource::Channels(p) => p.channels_label(),
         RecordSource::SystemExceptSelf => "System".into(),
         RecordSource::System(None) => "System (all)".into(),
         RecordSource::System(Some(d)) => d.name.clone(),
@@ -307,6 +338,32 @@ fn source_menu(
         "Microphone / line in",
         "The default recording device",
     );
+    let devices = inputs.input_devices();
+    ui.menu_button("Input channels…", |ui| {
+        if devices.is_empty() {
+            let text = if inputs.pending.is_some() {
+                "Listing…"
+            } else {
+                "No recording devices were found."
+            };
+            ui.label(RichText::new(text).weak());
+        }
+        for d in &devices {
+            let picks = af27_engine::routing::input_choices(d.channels);
+            let text = format!("{} ({} in)", d.name, d.channels);
+            ui.menu_button(text, |ui| {
+                for channels in picks {
+                    let p = InputPick {
+                        device: Some(d.name.clone()),
+                        channels,
+                    };
+                    let label = p.channels_label();
+                    let tip = format!("Record {}", p.label());
+                    item(ui, RecordSource::Channels(p), &label, &tip);
+                }
+            });
+        }
+    });
     ui.separator();
     ui.label(RichText::new("System audio").strong());
     let sup = inputs.support;
