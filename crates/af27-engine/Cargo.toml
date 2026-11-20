@@ -37,7 +37,7 @@ windows-core = "0.58"
 
 [features]
 # ASIO on Windows (off by default). Needs LLVM (libclang) and the
-# Steinberg ASIO SDK to build, and Steinberg's licence to ship: see
+# Steinberg ASIO SDK (used under its GPLv3 option) to build: see
 # docs/asio.md.
 asio = ["cpal/asio", "dep:asio-sys"]
 

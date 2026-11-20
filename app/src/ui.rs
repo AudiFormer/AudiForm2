@@ -2022,9 +2022,10 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.label("A fast, themeable audio editor written entirely in Rust.");
         ui.label("Free software under the GNU General Public License, version 3 or later (see LICENSE and COPYING). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
-        #[cfg(feature = "asio")]
-        ui.label("ASIO is a trademark and software of Steinberg Media Technologies GmbH.");
         ui.label("The sequel to Audiform, by the same project lead.");
+        if let Some(credit) = af27_engine::ASIO_CREDIT {
+            ui.label(credit);
+        }
     });
     st.show_about = open;
 }
