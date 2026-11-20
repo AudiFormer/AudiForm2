@@ -53,6 +53,7 @@ pub const LEVEL_FLOOR: f64 = -48.0;
 pub fn center_extractor_info() -> EffectInfo {
     EffectInfo {
         id: ID,
+        sidechain: false,
         name: "Center Channel Extractor",
         category: "Stereo",
         description: "Turns the sound at one place in a stereo mix (the center, usually the vocal) up or down apart from the rest: take a vocal out, or keep only the vocal.",

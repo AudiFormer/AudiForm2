@@ -31,6 +31,17 @@ pub trait Live: Send {
     fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], _key: &[f32]) {
         self.process(l, r);
     }
+    /// Processes with a sidechain: another track's sound (`kl`, `kr`, the
+    /// same length as `l`) drives the effect's level detector in place of
+    /// its own input. Effects with no detector ignore it. Must not allocate.
+    fn process_sidechain(&mut self, l: &mut [f32], r: &mut [f32], _kl: &[f32], _kr: &[f32]) {
+        self.process(l, r);
+    }
+    /// Whether [`Live::process_sidechain`] does anything (the effect has a
+    /// level detector a sidechain can drive).
+    fn takes_key(&self) -> bool {
+        false
+    }
     /// Sets this copy apart from other copies of the same effect on a
     /// bed's other speaker pairs (copy `k`), so sweeps and tails do not
     /// move in lockstep. Called once, after building, off the audio thread.
@@ -47,6 +58,14 @@ fn coeff(ms: f32, rate: f32) -> f32 {
     } else {
         (-1.0 / (ms * 0.001 * rate)).exp()
     }
+}
+
+/// The louder side of a stereo key at frame `i` (0 past its end).
+#[inline(always)]
+fn stereo_level(kl: &[f32], kr: &[f32], i: usize) -> f32 {
+    let a = kl.get(i).copied().unwrap_or(0.0).abs();
+    let b = kr.get(i).copied().unwrap_or(0.0).abs();
+    a.max(b)
 }
 
 fn level_db(x: f32) -> f32 {
@@ -333,6 +352,12 @@ impl Live for Compressor {
     fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], key: &[f32]) {
         self.run(l, r, Some(key));
     }
+    fn takes_key(&self) -> bool {
+        true
+    }
+    fn process_sidechain(&mut self, l: &mut [f32], r: &mut [f32], kl: &[f32], kr: &[f32]) {
+        self.run_with(l, r, |i, _, _| stereo_level(kl, kr, i));
+    }
     fn set(&mut self, vals: &[f32]) {
         self.thr = v(vals, 0, -18.0);
         self.ratio = v(vals, 1, 3.0).max(1.0);
@@ -384,14 +409,21 @@ impl Limiter {
 
 impl Limiter {
     fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<&[f32]>) {
+        match key {
+            Some(k) => self.run_with(l, r, |i, _, _| k.get(i).copied().unwrap_or(0.0).abs()),
+            None => self.run_with(l, r, |_, a, b| a.abs().max(b.abs())),
+        }
+    }
+
+    /// `level(i, a, b)`: the detector's level for frame `i` (`a`, `b` the
+    /// frame before the boost); the boost is applied to it here.
+    #[inline(always)]
+    fn run_with(&mut self, l: &mut [f32], r: &mut [f32], level: impl Fn(usize, f32, f32) -> f32) {
         let mask = self.dl.len() - 1;
         let step = 1.0 / self.look as f32;
         for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
             let (xa, xb) = (*a * self.boost, *b * self.boost);
-            let peak = match key {
-                Some(k) => k[i] * self.boost,
-                None => xa.abs().max(xb.abs()),
-            };
+            let peak = level(i, *a, *b) * self.boost;
             let need = if peak > self.ceiling {
                 self.ceiling / peak
             } else {
@@ -428,6 +460,12 @@ impl Live for Limiter {
     }
     fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], key: &[f32]) {
         self.run(l, r, Some(key));
+    }
+    fn takes_key(&self) -> bool {
+        true
+    }
+    fn process_sidechain(&mut self, l: &mut [f32], r: &mut [f32], kl: &[f32], kr: &[f32]) {
+        self.run_with(l, r, |i, _, _| stereo_level(kl, kr, i));
     }
     fn set(&mut self, vals: &[f32]) {
         self.ceiling = db_to_gain(v(vals, 0, -1.0));
@@ -478,11 +516,16 @@ impl Gate {
 
 impl Gate {
     fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<&[f32]>) {
+        match key {
+            Some(k) => self.run_with(l, r, |i, _, _| k.get(i).copied().unwrap_or(0.0).abs()),
+            None => self.run_with(l, r, |_, a, b| a.abs().max(b.abs())),
+        }
+    }
+
+    #[inline(always)]
+    fn run_with(&mut self, l: &mut [f32], r: &mut [f32], level: impl Fn(usize, f32, f32) -> f32) {
         for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-            let x = match key {
-                Some(k) => k[i],
-                None => a.abs().max(b.abs()),
-            };
+            let x = level(i, *a, *b);
             self.env = self.det * self.env + (1.0 - self.det) * x;
             let open = if self.env >= self.thr {
                 self.held = self.hold_n;
@@ -508,6 +551,12 @@ impl Live for Gate {
     }
     fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], key: &[f32]) {
         self.run(l, r, Some(key));
+    }
+    fn takes_key(&self) -> bool {
+        true
+    }
+    fn process_sidechain(&mut self, l: &mut [f32], r: &mut [f32], kl: &[f32], kr: &[f32]) {
+        self.run_with(l, r, |i, _, _| stereo_level(kl, kr, i));
     }
     fn set(&mut self, vals: &[f32]) {
         self.thr = db_to_gain(v(vals, 0, -40.0));
@@ -645,13 +694,34 @@ impl Live for Echo {
     }
 }
 
-/// A chain of live effects, plus its own input and output gain and mix.
+/// Multiplies both sides by `g`, skipping the work at unity.
+#[inline]
+fn scale(l: &mut [f32], r: &mut [f32], g: f32) {
+    if g != 1.0 {
+        for s in l.iter_mut().chain(r.iter_mut()) {
+            *s *= g;
+        }
+    }
+}
+
+/// A chain of live effects, plus its own input and output gain and mix
+/// (the rack's controls).
 pub struct Chain {
     pub slots: Vec<(Box<dyn Live>, bool)>,
     dry_l: Vec<f32>,
     dry_r: Vec<f32>,
+    /// Dry/wet: the dry sound is the chain's input after the input gain.
     pub mix: f32,
+    /// Gain before the first effect (linear).
+    pub input: f32,
+    /// Gain after the mix (linear).
+    pub output: f32,
+    /// The whole rack is off: the sound passes untouched (no gains either).
+    pub bypass: bool,
 }
+
+/// The stereo sidechain key one slot hears, if any.
+pub type Key<'k> = Option<(&'k [f32], &'k [f32])>;
 
 impl Chain {
     pub fn new(slots: Vec<(Box<dyn Live>, bool)>, max_block: usize) -> Chain {
@@ -660,7 +730,18 @@ impl Chain {
             dry_l: vec![0.0; max_block],
             dry_r: vec![0.0; max_block],
             mix: 1.0,
+            input: 1.0,
+            output: 1.0,
+            bypass: false,
         }
+    }
+
+    /// Takes a rack's settings (no allocation: safe on the audio thread).
+    pub fn set_rack(&mut self, rack: &af27_core::Rack) {
+        self.bypass = rack.bypass;
+        self.input = db_to_gain(rack.input_db);
+        self.output = db_to_gain(rack.output_db);
+        self.mix = rack.mix.clamp(0.0, 1.0);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -668,27 +749,49 @@ impl Chain {
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
-        if self.is_empty() {
+        self.process_keyed(l, r, |_| None);
+    }
+
+    /// Processes with sidechain keys: `key(slot)` is the key that slot
+    /// hears, or None for its own input.
+    pub fn process_keyed<'k>(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        key: impl Fn(usize) -> Key<'k>,
+    ) {
+        if self.bypass {
             return;
         }
-        let n = l.len().min(self.dry_l.len());
-        let wet_only = self.mix >= 0.999;
-        if !wet_only {
-            self.dry_l[..n].copy_from_slice(&l[..n]);
-            self.dry_r[..n].copy_from_slice(&r[..n]);
-        }
-        for (p, bypass) in &mut self.slots {
-            if !*bypass {
-                p.process(&mut l[..n], &mut r[..n]);
+        let n = l.len().min(r.len()).min(self.dry_l.len());
+        let (l, r) = (&mut l[..n], &mut r[..n]);
+        scale(l, r, self.input);
+        if !self.is_empty() {
+            let wet_only = self.mix >= 0.999;
+            if !wet_only {
+                self.dry_l[..n].copy_from_slice(l);
+                self.dry_r[..n].copy_from_slice(r);
+            }
+            for (i, (p, bypass)) in self.slots.iter_mut().enumerate() {
+                if *bypass {
+                    continue;
+                }
+                match key(i) {
+                    Some((kl, kr)) if kl.len() >= n && kr.len() >= n => {
+                        p.process_sidechain(l, r, &kl[..n], &kr[..n])
+                    }
+                    _ => p.process(l, r),
+                }
+            }
+            if !wet_only {
+                let m = self.mix.max(0.0);
+                for i in 0..n {
+                    l[i] = l[i] * m + self.dry_l[i] * (1.0 - m);
+                    r[i] = r[i] * m + self.dry_r[i] * (1.0 - m);
+                }
             }
         }
-        if !wet_only {
-            let m = self.mix;
-            for i in 0..n {
-                l[i] = l[i] * m + self.dry_l[i] * (1.0 - m);
-                r[i] = r[i] * m + self.dry_r[i] * (1.0 - m);
-            }
-        }
+        scale(l, r, self.output);
     }
 
     pub fn set(&mut self, slot: usize, vals: &[f32]) {
@@ -783,6 +886,76 @@ mod tests {
         for (a, b) in whole.iter().zip(&small) {
             assert!((a - b).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn dynamics_follow_a_sidechain_key() {
+        let quiet = vec![0.2f32; 4800]; // -14 dBFS
+        let loud = vec![0.9f32; 4800];
+        let silent = vec![0.0f32; 4800];
+        let cases = [
+            (Effect::Compressor, vec![-10.0, 10.0, 1.0, 20.0, 0.0, 0.0]),
+            (Effect::Limiter, vec![-12.0, 0.0, 1.0, 20.0]),
+        ];
+        for (e, vals) in cases {
+            assert!(e.takes_key());
+            let run = |key: Option<&[f32]>| {
+                let mut p = build(e, 48_000, &vals).unwrap();
+                assert!(p.takes_key());
+                let (mut l, mut r) = (quiet.clone(), quiet.clone());
+                match key {
+                    Some(k) => p.process_sidechain(&mut l, &mut r, k, k),
+                    None => p.process(&mut l, &mut r),
+                }
+                l[4000]
+            };
+            let own = run(None);
+            assert!((own - 0.2).abs() < 1e-3, "{e:?} leaves quiet sound alone");
+            assert!(run(Some(&loud)) < 0.15, "{e:?} ducks under a loud key");
+            assert!((run(Some(&silent)) - own).abs() < 1e-6, "{e:?}");
+        }
+        // The gate opens for a loud key and stays shut for a quiet one.
+        let gate = vec![-20.0, 0.5, 0.0, 5.0, -60.0];
+        let run = |key: &[f32]| {
+            let mut p = build(Effect::NoiseGate, 48_000, &gate).unwrap();
+            let (mut l, mut r) = (vec![0.05f32; 4800], vec![0.05f32; 4800]);
+            p.process_sidechain(&mut l, &mut r, key, key);
+            l[4000]
+        };
+        assert!(run(&loud) > 0.04);
+        assert!(run(&silent) < 0.001);
+        assert!(!Effect::Echo.takes_key());
+        assert!(!build(Effect::Echo, 48_000, &[]).unwrap().takes_key());
+    }
+
+    #[test]
+    fn chain_rack_gains_mix_and_bypass() {
+        let slots = vec![af27_core::EffectSlot {
+            sidechain: None,
+            effect: "amplify".into(),
+            values: vec![6.0206],
+            bypass: false,
+            data: None,
+            ext_id: None,
+        }];
+        let mut c = build_chain(&slots, 48_000, 512);
+        let run = |c: &mut Chain| {
+            let (mut l, mut r) = (vec![1.0f32; 16], vec![1.0f32; 16]);
+            c.process(&mut l, &mut r);
+            l[0]
+        };
+        c.set_rack(&af27_core::Rack {
+            bypass: false,
+            input_db: -6.0206,
+            output_db: 6.0206,
+            mix: 0.5,
+        });
+        // In 0.5, wet 1.0, dry 0.5, mixed 0.75, out 1.5.
+        assert!((run(&mut c) - 1.5).abs() < 1e-3);
+        c.set_bypass(0, true);
+        assert!((run(&mut c) - 1.0).abs() < 1e-3);
+        c.bypass = true;
+        assert_eq!(run(&mut c), 1.0);
     }
 
     #[test]

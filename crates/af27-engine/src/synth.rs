@@ -9,7 +9,9 @@
 //! after the note ends, velocity and pan. Only the track's resonant
 //! low-pass filter keeps state. Nothing allocates while playing.
 
-use af27_core::midi::{note_freq, Instrument, Segment, Wave};
+use af27_core::midi::{
+    note_freq, ClickSound, Instrument, MetronomeSettings, Segment, Subdivide, Wave,
+};
 use af27_core::time::db_to_gain;
 use std::f32::consts::{PI, TAU};
 
@@ -205,33 +207,115 @@ impl Svf {
     }
 }
 
+/// How long one click lasts (seconds).
+pub const CLICK_LEN: f64 = 0.08;
+
 /// The metronome click at time `t` on a tempo map's stretches (in
-/// order): a short ping on every beat of the time signature (eighths in
-/// 6/8), higher on the first beat of each bar.
+/// order), with the default settings.
 #[inline]
 pub fn click(t: f64, segs: &[Segment]) -> f32 {
+    click_with(t, segs, &MetronomeSettings::default())
+}
+
+/// White noise in -1..1 for step `n` (a hash: the same every time, no
+/// state, no allocation).
+#[inline]
+fn noise(n: u32) -> f32 {
+    let mut x = n.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7FEB_352D);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846C_A68B);
+    x ^= x >> 16;
+    (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+}
+
+/// One click of `sound`, `local` seconds after it starts, its pitch
+/// times `pitch`; peaks near 1.
+#[inline]
+pub fn click_sound(sound: ClickSound, local: f32, pitch: f32) -> f32 {
+    if !(0.0..CLICK_LEN as f32).contains(&local) {
+        return 0.0;
+    }
+    match sound {
+        ClickSound::Tick => (TAU * 1600.0 * pitch * local).sin() * (-local / 0.006).exp(),
+        ClickSound::Wood => {
+            let f = 820.0 * pitch;
+            let tone = 0.7 * (TAU * f * local).sin() + 0.3 * (TAU * f * 2.63 * local).sin();
+            tone * (-local / 0.018).exp()
+        }
+        ClickSound::Beep => {
+            let env = if local < 0.003 {
+                local / 0.003
+            } else if local < 0.05 {
+                1.0
+            } else {
+                (1.0 - (local - 0.05) / 0.01).max(0.0)
+            };
+            (TAU * 880.0 * pitch * local).sin() * env * 0.8
+        }
+        // Noise steps at 48 kHz (faster for a higher click), whatever
+        // the output rate.
+        ClickSound::Shaker => {
+            noise((local * 48_000.0 * pitch) as u32) * (-local / 0.012).exp() * 0.7
+        }
+    }
+}
+
+/// Clicks per beat for a subdivision.
+pub fn per_beat(s: Subdivide) -> u32 {
+    match s {
+        Subdivide::None => 1,
+        Subdivide::Halves => 2,
+        Subdivide::Triplets => 3,
+        Subdivide::Quarters => 4,
+    }
+}
+
+/// The metronome at time `t` on a tempo map's stretches (in order): a
+/// click on every beat of the time signature (eighths in 6/8), and on
+/// the subdivisions between them. The first beat of each bar is higher
+/// (pitch times 1.5) and louder (1.0) when `accent` is on; other beats
+/// are at 0.75 and subdivisions at 0.4, at the beat's pitch. Scaled by
+/// `level_db`; silent when muted. It depends on `t` alone, so it follows
+/// loops, jumps and tempo changes by itself.
+#[inline]
+pub fn click_with(t: f64, segs: &[Segment], s: &MetronomeSettings) -> f32 {
+    if s.muted || t < 0.0 {
+        return 0.0;
+    }
     let Some(first) = segs.first() else {
         return 0.0;
     };
     let mut seg = first;
-    for s in &segs[1..] {
-        if s.secs > t {
+    for x in &segs[1..] {
+        if x.secs > t {
             break;
         }
-        seg = s;
+        seg = x;
     }
-    let spb = seg.spq() * seg.unit_beats();
+    let per = per_beat(s.subdivide) as i64;
+    let step = seg.spq() * seg.unit_beats() / per as f64;
     let into = (t - seg.secs).max(0.0);
-    // A hair of slack so a beat computed a little late still sounds.
-    let k = ((into + 1e-9) / spb).floor();
-    let local = (into - k * spb) as f32;
-    if !(0.0..0.04).contains(&local) || t < 0.0 {
+    // A hair of slack so a click computed a little late still sounds.
+    let k = ((into + 1e-9) / step).floor();
+    let local = (into - k * step).max(0.0);
+    if local >= CLICK_LEN {
         return 0.0;
     }
+    let k = k as i64;
+    let (beat, sub) = (k.div_euclid(per), k.rem_euclid(per));
     // Each stretch starts on a bar line.
-    let accent = (k as i64).rem_euclid(seg.beats_per_bar.max(1) as i64) == 0;
-    let f = if accent { 1760.0 } else { 1320.0 };
-    (TAU * f * local).sin() * (-local * 120.0).exp() * if accent { 0.5 } else { 0.35 }
+    let downbeat = beat.rem_euclid(seg.beats_per_bar.max(1) as i64) == 0;
+    let (pitch, level) = if sub != 0 {
+        (1.0, 0.4)
+    } else if downbeat && s.accent {
+        (1.5, 1.0)
+    } else {
+        (1.0, 0.75)
+    };
+    let gain = af27_core::time::db_to_gain(s.level_db) * level;
+    click_sound(s.sound, local as f32, pitch) * gain
 }
 
 #[cfg(test)]

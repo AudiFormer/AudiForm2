@@ -112,6 +112,8 @@ fn params_for(id: &str, values: &[f32]) -> Option<af27_fx::Params> {
 struct FxLive {
     p: Box<dyn af27_fx::Processor>,
     buf: Vec<f32>,
+    /// The sidechain key, interleaved (empty for effects without one).
+    key: Vec<f32>,
     info: af27_fx::EffectInfo,
     /// The current values, every key present, so a new setting replaces
     /// a value in place and never allocates on the audio thread.
@@ -152,6 +154,35 @@ impl Live for FxLive {
         }
     }
 
+    fn takes_key(&self) -> bool {
+        !self.key.is_empty()
+    }
+
+    fn process_sidechain(&mut self, l: &mut [f32], r: &mut [f32], kl: &[f32], kr: &[f32]) {
+        if self.key.is_empty() {
+            return self.process(l, r);
+        }
+        let len = l.len().min(r.len()).min(kl.len()).min(kr.len());
+        let step = (self.buf.len() / 2).min(self.key.len() / 2).max(1);
+        let mut at = 0;
+        while at < len {
+            let n = (len - at).min(step);
+            for i in 0..n {
+                self.buf[i * 2] = l[at + i];
+                self.buf[i * 2 + 1] = r[at + i];
+                self.key[i * 2] = kl[at + i];
+                self.key[i * 2 + 1] = kr[at + i];
+            }
+            self.p
+                .process_keyed(&mut self.buf[..n * 2], &self.key[..n * 2]);
+            for i in 0..n {
+                l[at + i] = self.buf[i * 2];
+                r[at + i] = self.buf[i * 2 + 1];
+            }
+            at += n;
+        }
+    }
+
     fn set(&mut self, vals: &[f32]) {
         take(self.p.as_mut(), &self.info, &mut self.params, vals);
     }
@@ -173,9 +204,15 @@ fn factory(slot: &EffectSlot, rate: u32) -> Option<Box<dyn Live>> {
     let info = af27_fx::info(&slot.effect)?;
     let params = params_for(&slot.effect, &slot.values)?;
     let p = af27_fx::build_with(&slot.effect, rate, &params, slot.data.as_deref(), None)?;
+    let key = if info.sidechain {
+        vec![0.0; af27_engine::BLOCK * 2]
+    } else {
+        Vec::new()
+    };
     Some(Box::new(FxLive {
         p,
         buf: vec![0.0; af27_engine::BLOCK * 2],
+        key,
         info,
         params,
     }))
@@ -224,6 +261,15 @@ fn wide_factory(
 pub fn register() {
     af27_dsp::live::register_factory(factory);
     af27_dsp::wide::register_wide_factory(wide_factory);
+}
+
+/// Whether an effect can be keyed by another track or bus (a sidechain),
+/// built-in (Compressor, Limiter, Noise Gate) or Audiform's (Opto Leveler).
+/// For the Inspector's sidechain picker.
+#[allow(dead_code)]
+pub fn takes_key(effect_id: &str) -> bool {
+    af27_dsp::Effect::from_id(effect_id).is_some_and(|e| e.takes_key())
+        || af27_fx::takes_sidechain(effect_id)
 }
 
 /// Whether an effect takes new settings while playing; others are rebuilt
@@ -338,6 +384,37 @@ mod tests {
             }
         }
         assert!(count >= 25, "{count}");
+    }
+
+    #[test]
+    fn takes_key_covers_both_families_and_the_opto_runs_keyed() {
+        register();
+        for id in [
+            "compressor",
+            "limiter",
+            "noise-gate",
+            af27_fx::effects::tube::OPTO,
+        ] {
+            assert!(takes_key(id), "{id}");
+        }
+        for id in ["echo", "amplify", af27_fx::effects::verb::ID, "nope"] {
+            assert!(!takes_key(id), "{id}");
+        }
+        let mut s = slot(af27_fx::effects::tube::OPTO);
+        s.values[4] = 0.0; // no tube color
+        let quiet = vec![0.02f32; 9600];
+        let loud = vec![0.9f32; 9600];
+        let run = |key: &[f32]| {
+            let mut p = af27_dsp::live::build_slot(&s, 48_000).unwrap();
+            assert!(p.takes_key());
+            let (mut l, mut r) = (quiet.clone(), quiet.clone());
+            for (i, (a, b)) in l.chunks_mut(4096).zip(r.chunks_mut(4096)).enumerate() {
+                let k = &key[i * 4096..i * 4096 + a.len()];
+                p.process_sidechain(a, b, k, k);
+            }
+            l[9000].abs()
+        };
+        assert!(run(&loud) < run(&quiet) * 0.7);
     }
 
     #[test]

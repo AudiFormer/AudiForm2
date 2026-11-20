@@ -44,6 +44,7 @@ const LFO_SHAPES: [&str; 3] = ["Sine", "Triangle", "Random"];
 pub fn modulation_info() -> EffectInfo {
     EffectInfo {
         id: ID,
+        sidechain: false,
         name: "Modulation",
         category: "Modulation",
         description: "Chorus, Flanger, Phaser and Double Track: a moving copy of the sound mixed back with it, for width, shimmer, sweeping notches or a second take.",

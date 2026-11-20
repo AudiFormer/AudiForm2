@@ -46,6 +46,12 @@ pub fn info(id: &str) -> Option<EffectInfo> {
     registry().into_iter().find(|i| i.id == id)
 }
 
+/// Whether effect `id` can be keyed by another track's sound (a
+/// sidechain; see [`EffectInfo::sidechain`]). False for an unknown effect.
+pub fn takes_sidechain(id: &str) -> bool {
+    info(id).is_some_and(|i| i.sidechain)
+}
+
 /// An effect's values: its defaults, with `saved` in their place where
 /// given (each kept inside its range). None for an unknown effect.
 pub fn params_from(id: &str, saved: &[(String, f64)]) -> Option<Params> {
@@ -273,6 +279,41 @@ mod tests {
                 assert!(fx.update(&p) || !fx.update(&p));
             }
         }
+    }
+
+    #[test]
+    fn only_the_opto_leveler_takes_a_sidechain() {
+        for i in registry() {
+            assert_eq!(takes_sidechain(i.id), i.id == tube::OPTO, "{}", i.id);
+        }
+        assert!(!takes_sidechain("af.nope"));
+    }
+
+    #[test]
+    fn the_opto_leveler_follows_its_key() {
+        let p = params_from(tube::OPTO, &[("tube".into(), 0.0)]).unwrap();
+        let loud = testing::stereo_sine(48_000, 48_000);
+        let quiet: Vec<f32> = loud.iter().map(|x| x * 0.05).collect();
+        let silent = vec![0.0f32; loud.len()];
+        let run = |key: Option<&[f32]>| {
+            let mut fx = build(tube::OPTO, 48_000, &p).unwrap();
+            let mut b = quiet.clone();
+            for (i, blk) in b.chunks_mut(1024).enumerate() {
+                match key {
+                    Some(k) => fx.process_keyed(blk, &k[i * 1024..i * 1024 + blk.len()]),
+                    None => fx.process(blk),
+                }
+            }
+            b[b.len() / 2..].iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        let own = run(None);
+        // Keyed by its own sound: the same as listening to itself.
+        assert_eq!(run(Some(&quiet)), own);
+        // A loud key turns it down; a silent one leaves it alone.
+        let ducked = run(Some(&loud));
+        let open = run(Some(&silent));
+        assert!(ducked < own * 0.7, "{ducked} vs {own}");
+        assert!(open >= own, "{open} vs {own}");
     }
 
     #[test]

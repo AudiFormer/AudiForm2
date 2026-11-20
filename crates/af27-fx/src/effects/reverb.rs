@@ -45,6 +45,7 @@ const HIGH_CUT_OFF: f64 = 20_000.0;
 pub fn reverb_info() -> EffectInfo {
     EffectInfo {
         id: ID,
+        sidechain: false,
         name: "Convolution Reverb",
         category: "Delay and Reverb",
         description: "Plays the sound through a recorded space: load an impulse response (any audio file of a room, hall, plate or spring echo) in its window.",

@@ -197,6 +197,15 @@ impl Effect {
         )
     }
 
+    /// Whether the effect has a level detector another track can key
+    /// (a sidechain): the Compressor, Limiter and Noise Gate.
+    pub fn takes_key(self) -> bool {
+        matches!(
+            self,
+            Effect::Compressor | Effect::Limiter | Effect::NoiseGate
+        )
+    }
+
     pub fn params(self) -> Vec<ParamSpec> {
         match self {
             Effect::Amplify => vec![p("Gain", -40.0, 40.0, 0.0, "dB")],

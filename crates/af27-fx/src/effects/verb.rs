@@ -46,6 +46,7 @@ const SIZE_MAX: f64 = 1.6;
 pub fn verb_info() -> EffectInfo {
     EffectInfo {
         id: ID,
+        sidechain: false,
         name: "Reverb",
         category: "Delay and Reverb",
         description: "A made space: Room, Hall, Plate, Spring or Tape, each shaped by size, decay, early reflections, damping, diffusion and modulation. Impulse Response (a recorded space) is in the same window.",
