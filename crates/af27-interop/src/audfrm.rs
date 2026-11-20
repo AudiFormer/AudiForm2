@@ -9,7 +9,7 @@
 //! the file (`ext_id`). Saving starts from the document that was opened
 //! (the "base") and, for each object, takes the original by its id and
 //! writes only the fields Audiform27 owns back into it. Everything else
-//! (automation envelopes, clip stretch, slot routing and presets, the
+//! (automation envelopes, slot routing and presets, the
 //! view, libraries, playlist, episode metadata, fields added by later
 //! Audiform versions) passes through untouched. New objects get every
 //! field Audiform requires.
@@ -30,7 +30,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use af27_core::midi::{MidiClip, MidiNote, SoundFontRef, TempoChange};
-use af27_core::session::{Clip, EffectSlot, Marker, MediaItem, Send, Session, TrackKind};
+use af27_core::session::{
+    Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Send, Session, StretchKind,
+    StretchMode, TrackKind,
+};
 use af27_core::space::{Monitor, SpaceLayout};
 use serde_json::{json, Map, Value};
 
@@ -112,6 +115,139 @@ fn hex_color(v: &Value) -> Option<[u8; 3]> {
     }
     let p = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
     Some([p(0)?, p(2)?, p(4)?])
+}
+
+/// A clip's stretch as the file has it. Absent, null, or on a looped clip
+/// (Audiform ignores it there): off. `ratio` is timeline length over the
+/// source's (as Audiform27's); `keep_pitch: false` is varispeed.
+fn stretch_from(c: &Value) -> ClipStretch {
+    let v = &c["stretch"];
+    let d = ClipStretch::default();
+    if !v.is_object() || !c["looped"].is_null() {
+        return d;
+    }
+    let adv = &v["advanced"];
+    let f32_or = |x: &Value, or: f32| x.as_f64().map_or(or, |x| x as f32);
+    ClipStretch {
+        mode: if v["rendered"].as_bool().unwrap_or(false) {
+            StretchMode::Rendered
+        } else {
+            StretchMode::Live
+        },
+        kind: if !v["keep_pitch"].as_bool().unwrap_or(true) {
+            StretchKind::Varispeed
+        } else if v["polyphonic"].as_bool().unwrap_or(false) {
+            StretchKind::Polyphonic
+        } else {
+            StretchKind::Monophonic
+        },
+        ratio: v["ratio"].as_f64().filter(|r| *r > 0.0).unwrap_or(1.0),
+        pitch: f32_or(&v["pitch"], 0.0),
+        window_ms: f32_or(&adv["window_ms"], d.window_ms),
+        transients: f32_or(&adv["transient_sensitivity"], d.transients),
+        preserve_formants: adv["preserve_formants"]
+            .as_bool()
+            .unwrap_or(d.preserve_formants),
+        high_precision: adv["high_precision"].as_bool().unwrap_or(d.high_precision),
+    }
+}
+
+/// A fade's skew (-100..100) from Audiform's shape and curve bend: the
+/// linear shape bent by `curve` maps straight across; the other shapes
+/// map to the skew closest in feel, plus their bend.
+fn skew_from(fade: &Value) -> f32 {
+    let base = match fade["shape"].as_str() {
+        Some("logarithmic") => 50.0,
+        Some("exponential") => -50.0,
+        _ => 0.0,
+    };
+    let curve = fade["curve"].as_f64().unwrap_or(0.0) * 100.0;
+    ((base + curve) as f32).clamp(-100.0, 100.0)
+}
+
+/// Everything in [`ClipProps`] as the file has it (also what a saved
+/// clip's original implies, so only changes are written back).
+fn props_from(c: &Value) -> ClipProps {
+    ClipProps {
+        stretch: stretch_from(c),
+        reversed: c["reversed"].as_bool().unwrap_or(false),
+        inverted: c["inverted"].as_bool().unwrap_or(false),
+        locked: c["locked"].as_bool().unwrap_or(false),
+        color: hex_color(&c["color"]),
+        fade_in_skew: skew_from(&c["fade_in"]),
+        fade_out_skew: skew_from(&c["fade_out"]),
+    }
+}
+
+/// A float setting as JSON, rounded to six places (so 0.1 stays 0.1 and
+/// does not become 0.10000000149).
+fn short(x: f32) -> Value {
+    json!((x as f64 * 1e6).round() / 1e6)
+}
+
+/// Writes the clip settings that differ from what `co` (the original
+/// clip, or a new one) already says.
+fn write_props(co: &mut Map<String, Value>, p: &ClipProps) {
+    let had = props_from(&Value::Object(co.clone()));
+    for (key, now, was) in [
+        ("reversed", p.reversed, had.reversed),
+        ("inverted", p.inverted, had.inverted),
+        ("locked", p.locked, had.locked),
+    ] {
+        // `locked` is required, so a new clip always gets it.
+        if now != was || (key == "locked" && !co.contains_key(key)) {
+            co.insert(key.into(), json!(now));
+        }
+    }
+    if p.color != had.color {
+        co.insert(
+            "color".into(),
+            match p.color {
+                Some([r, g, b]) => json!(format!("#{r:02x}{g:02x}{b:02x}")),
+                None => Value::Null,
+            },
+        );
+    }
+    for (key, now, was) in [
+        ("fade_in", p.fade_in_skew, had.fade_in_skew),
+        ("fade_out", p.fade_out_skew, had.fade_out_skew),
+    ] {
+        if now != was {
+            if let Some(f) = co.get_mut(key).and_then(Value::as_object_mut) {
+                f.insert("shape".into(), json!("linear"));
+                f.insert("curve".into(), short(now / 100.0));
+            }
+        }
+    }
+    let st = &p.stretch;
+    if *st == had.stretch {
+        return;
+    }
+    if st.mode == StretchMode::Off {
+        if co.contains_key("stretch") {
+            co.insert("stretch".into(), Value::Null);
+        }
+        return;
+    }
+    let mut so = obj(co.get("stretch").cloned().unwrap_or(Value::Null));
+    set_num(&mut so, "ratio", st.ratio);
+    let vari = st.kind == StretchKind::Varispeed;
+    so.insert("keep_pitch".into(), json!(!vari));
+    if !vari {
+        so.insert("pitch".into(), short(st.pitch));
+        so.insert(
+            "polyphonic".into(),
+            json!(st.kind == StretchKind::Polyphonic),
+        );
+    }
+    so.insert("rendered".into(), json!(st.mode == StretchMode::Rendered));
+    let mut adv = obj(so.get("advanced").cloned().unwrap_or(Value::Null));
+    adv.insert("window_ms".into(), short(st.window_ms));
+    adv.insert("transient_sensitivity".into(), short(st.transients));
+    adv.insert("preserve_formants".into(), json!(st.preserve_formants));
+    adv.insert("high_precision".into(), json!(st.high_precision));
+    so.insert("advanced".into(), Value::Object(adv));
+    co.insert("stretch".into(), Value::Object(so));
 }
 
 /// `altaudio.X` -> `af.X` when Audiform27 has the effect.
@@ -214,7 +350,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
         };
     }
 
-    let mut media_ids: HashMap<String, (u64, u32)> = HashMap::new();
+    let mut media_ids: HashMap<String, (u64, u32, f64)> = HashMap::new();
     for m in v["media"].as_array().into_iter().flatten() {
         let key = m["id"].as_str().unwrap_or_default().to_string();
         let path = crate::resolve(m["path"].as_str(), m["relative_path"].as_str(), base_dir);
@@ -232,7 +368,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
             channels: m["channels"].as_u64().unwrap_or(0) as u16,
             ext_id: Some(key.clone()),
         });
-        media_ids.insert(key, (id, mrate));
+        media_ids.insert(key, (id, mrate, m["length"].as_f64().unwrap_or(0.0)));
     }
 
     // Tracks first, then buses (as bus tracks); outputs and sends resolve after.
@@ -259,23 +395,34 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
             pending.push((tid, t.clone()));
             let mut clips = Vec::new();
             for c in t["clips"].as_array().into_iter().flatten() {
-                let Some(&(media, mrate)) = c["media_id"].as_str().and_then(|k| media_ids.get(k))
+                let Some(&(media, mrate, mlen)) =
+                    c["media_id"].as_str().and_then(|k| media_ids.get(k))
                 else {
                     continue;
                 };
                 let src_in = c["source_in"].as_f64().unwrap_or(0.0);
                 let src_out = c["source_out"].as_f64().unwrap_or(src_in);
+                let props = props_from(c);
+                // A reversed clip's source points count from the file's
+                // end (positions in a reversed copy); `offset` is where its
+                // span starts in the file itself.
+                let first = if props.reversed {
+                    (mlen - src_out).max(0.0)
+                } else {
+                    src_in
+                };
                 envelopes += c["envelopes"].as_array().map_or(0, Vec::len);
                 silent_fx += c["effects"]["slots"].as_array().map_or(0, Vec::len);
                 let id = out.alloc_id();
                 clips.push(Clip {
-                    props: Default::default(),
                     id,
                     media,
                     name: c["name"].as_str().unwrap_or("Clip").to_string(),
                     start: secs(&c["start"]),
-                    offset: src_in / mrate as f64,
-                    length: (src_out - src_in).max(0.0) / mrate as f64,
+                    offset: first / mrate as f64,
+                    length: (src_out - src_in).max(0.0) / mrate as f64
+                        * props.stretch.applied_ratio(),
+                    props,
                     gain_db: c["gain_db"].as_f64().unwrap_or(0.0) as f32,
                     fade_in: secs(&c["fade_in"]["length"]),
                     fade_out: secs(&c["fade_out"]["length"]),
@@ -590,10 +737,16 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
         })
         .collect();
     doc.insert("media".into(), Value::Array(media));
-    let media_rate: HashMap<u64, (String, f64)> = session
+    let media_rate: HashMap<u64, (String, f64, f64)> = session
         .media
         .iter()
-        .map(|m| (m.id, (m.ext_id.clone().unwrap_or_default(), m.rate as f64)))
+        .map(|m| {
+            let len = (m.duration * m.rate as f64).round();
+            (
+                m.id,
+                (m.ext_id.clone().unwrap_or_default(), m.rate as f64, len),
+            )
+        })
         .collect();
 
     // Ids for every track first, so outputs and sends can name buses.
@@ -697,7 +850,8 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 let mut co = obj(by_id(base_clips, c.ext_id.as_deref())
                     .cloned()
                     .unwrap_or(Value::Null));
-                let (media_uuid, mrate) = media_rate.get(&c.media).cloned().unwrap_or_default();
+                let (media_uuid, mrate, mlen) =
+                    media_rate.get(&c.media).cloned().unwrap_or_default();
                 co.insert(
                     "id".into(),
                     json!(c.ext_id.get_or_insert_with(new_uuid).clone()),
@@ -705,17 +859,18 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 co.insert("name".into(), json!(c.name));
                 co.insert("media_id".into(), json!(media_uuid));
                 co.insert("start".into(), json!(samples(c.start)));
-                co.insert(
-                    "source_in".into(),
-                    json!((c.offset * mrate).round().max(0.0) as u64),
-                );
-                co.insert(
-                    "source_out".into(),
-                    json!(((c.offset + c.length) * mrate).round().max(0.0) as u64),
-                );
+                // The span in the file, in samples (from the file's end for
+                // a reversed clip, as Audiform counts it).
+                let (a, b) = (c.offset * mrate, (c.offset + c.source_len()) * mrate);
+                let (src_in, src_out) = if c.props.reversed {
+                    (mlen - b, mlen - a)
+                } else {
+                    (a, b)
+                };
+                co.insert("source_in".into(), json!(src_in.round().max(0.0) as u64));
+                co.insert("source_out".into(), json!(src_out.round().max(0.0) as u64));
                 co.insert("gain_db".into(), json!(c.gain_db as f64));
                 co.insert("muted".into(), json!(c.muted));
-                co.entry("locked").or_insert_with(|| json!(false));
                 for (key, len) in [("fade_in", c.fade_in), ("fade_out", c.fade_out)] {
                     let mut f = obj(co.get(key).cloned().unwrap_or(Value::Null));
                     f.insert("length".into(), json!(samples(len)));
@@ -723,6 +878,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                     f.entry("curve").or_insert_with(|| json!(0.0));
                     co.insert(key.into(), Value::Object(f));
                 }
+                write_props(&mut co, &c.props);
                 co.entry("envelopes").or_insert_with(|| json!([]));
                 co.entry("effects").or_insert_with(empty_chain);
                 Value::Object(co)
@@ -951,12 +1107,19 @@ mod tests {
         assert!(host.sends[0].pre_fader);
         assert_eq!(host.color, [0xff, 0x88, 0x00]);
         let c = &host.clips[0];
+        // One second of source stretched 1.1 times.
         assert!(
             (c.start - 2.0).abs() < 1e-9
                 && (c.offset - 1.0).abs() < 1e-9
-                && (c.length - 1.0).abs() < 1e-9
+                && (c.length - 1.1).abs() < 1e-9
         );
         assert!((c.fade_in - 0.1).abs() < 1e-9);
+        let st = &c.props.stretch;
+        assert_eq!(st.mode, StretchMode::Live);
+        assert_eq!(st.kind, StretchKind::Polyphonic);
+        assert_eq!((st.ratio, st.pitch), (1.1, -1.0));
+        assert!(c.props.locked && !c.props.reversed && c.props.color.is_none());
+        assert_eq!(c.props.fade_in_skew, 30.0);
         // Audiform's Stereo Width loads as the ported effect, bypassed.
         let w = &host.chain[1];
         assert_eq!(w.effect, "af.stereo_width");
@@ -1004,6 +1167,68 @@ mod tests {
         );
         assert_eq!(out["a_field_from_the_future"]["keep"], json!("me"));
         assert_eq!(out["tempo"]["changes"][0]["bar"], json!(9));
+    }
+
+    #[test]
+    fn clip_stretch_reverse_and_looks_round_trip() {
+        let imp = import(SAMPLE, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        {
+            let c = &mut s.tracks[0].clips[0];
+            c.props.reversed = true;
+            c.props.inverted = true;
+            c.props.locked = false;
+            c.props.color = Some([0x12, 0xab, 0xff]);
+            c.props.fade_out_skew = -40.0;
+            let st = &mut c.props.stretch;
+            st.kind = StretchKind::Varispeed;
+            st.mode = StretchMode::Rendered;
+            st.ratio = 2.0;
+            st.window_ms = 45.0;
+            c.length = 2.0; // the same second of source, at ratio 2
+        }
+        let want = s.tracks[0].clips[0].clone();
+        let out = export(&mut s, Some(&base));
+        let co = &out["tracks"][0]["clips"][0];
+        // 441000 samples in the file; the span 1 s..2 s counts from its end.
+        assert_eq!(co["source_in"], json!(441_000 - 88_200));
+        assert_eq!(co["source_out"], json!(441_000 - 44_100));
+        assert_eq!(co["reversed"], json!(true));
+        assert_eq!(co["inverted"], json!(true));
+        assert_eq!(co["locked"], json!(false));
+        assert_eq!(co["color"], json!("#12abff"));
+        assert_eq!(co["fade_out"]["curve"], json!(-0.4));
+        // Unedited fade: as it was.
+        assert_eq!(co["fade_in"], base["tracks"][0]["clips"][0]["fade_in"]);
+        let st = &co["stretch"];
+        assert_eq!(st["ratio"], json!(2));
+        assert_eq!(st["keep_pitch"], json!(false));
+        assert_eq!(st["rendered"], json!(true));
+        assert_eq!(st["advanced"]["window_ms"], json!(45.0));
+        // Read back: the same clip.
+        let back = import(&out.to_string(), Path::new(".")).unwrap();
+        let c = &back.session.tracks[0].clips[0];
+        assert_eq!(c.props, want.props);
+        assert!((c.offset - want.offset).abs() < 1e-9);
+        assert!((c.length - want.length).abs() < 1e-9);
+        // And saving that again changes nothing.
+        let base2 = back.base.clone().unwrap();
+        let mut s2 = back.session;
+        let mut again = export(&mut s2, Some(&base2));
+        let mut was = base2;
+        again.as_object_mut().unwrap().remove("modified");
+        was.as_object_mut().unwrap().remove("modified");
+        assert_eq!(again, was);
+        // Stretch off: the field goes to null.
+        s2.tracks[0].clips[0].props.stretch.mode = StretchMode::Off;
+        s2.tracks[0].clips[0].length = 1.0;
+        let out = export(&mut s2, Some(&was));
+        assert!(out["tracks"][0]["clips"][0]["stretch"].is_null());
+        assert_eq!(
+            out["tracks"][0]["clips"][0]["source_in"],
+            json!(441_000 - 88_200)
+        );
     }
 
     #[test]

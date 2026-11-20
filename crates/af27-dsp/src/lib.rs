@@ -5,7 +5,8 @@
 //! published, textbook descriptions (see docs/clean-room.md):
 //! RBJ biquads, ITU-R BS.1770 loudness, a Schroeder-style reverb with
 //! Freeverb's public-domain tunings, windowed-sinc resampling and STFT
-//! spectral noise reduction.
+//! spectral noise reduction, and a phase-locked phase vocoder for time
+//! stretch and pitch shift (Laroche & Dolson).
 
 pub mod biquad;
 pub mod effects;
@@ -19,6 +20,7 @@ pub mod phase;
 pub mod resample;
 pub mod reverb;
 pub mod spectral_edit;
+pub mod stretch;
 pub mod wide;
 
 pub use effects::{Effect, ParamSpec};

@@ -166,12 +166,45 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
+/// A fade's gain at `x` (0 at the silent end, 1 at full level) with a
+/// skew of -100..100: 0 is the straight line (exactly `x`), positive
+/// bows the curve up (louder sooner), negative bows it down.
+#[inline]
+pub fn fade_curve(x: f64, skew: f32) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    if skew == 0.0 {
+        return x;
+    }
+    // A power curve: skew 100 is x^(1/4), -100 is x^4.
+    let e = 2f64.powf(-(skew.clamp(-100.0, 100.0) as f64) / 50.0);
+    x.powf(e)
+}
+
 impl Clip {
     pub fn end(&self) -> f64 {
         self.start + self.length
     }
 
-    /// Clip gain at timeline time `t` (seconds), fades included.
+    /// How many seconds of the source the clip covers (its timeline
+    /// length over the applied stretch ratio).
+    pub fn source_len(&self) -> f64 {
+        self.length / self.props.stretch.applied_ratio()
+    }
+
+    /// The source position (seconds into the media) heard at timeline
+    /// time `t` (seconds). Reversed clips run from the end of their span
+    /// back to `offset`. Not clamped to the clip.
+    pub fn timeline_to_source(&self, t: f64) -> f64 {
+        let local = (t - self.start) / self.props.stretch.applied_ratio();
+        if self.props.reversed {
+            self.offset + self.source_len() - local
+        } else {
+            self.offset + local
+        }
+    }
+
+    /// Clip gain at timeline time `t` (seconds), fades included. The
+    /// polarity flip of an inverted clip is not part of it.
     pub fn gain_at(&self, t: f64) -> f32 {
         if self.muted {
             return 0.0;
@@ -179,11 +212,11 @@ impl Clip {
         let local = t - self.start;
         let mut g = 1.0f64;
         if self.fade_in > 0.0 && local < self.fade_in {
-            g *= (local / self.fade_in).clamp(0.0, 1.0);
+            g *= fade_curve(local / self.fade_in, self.props.fade_in_skew);
         }
         let to_end = self.length - local;
         if self.fade_out > 0.0 && to_end < self.fade_out {
-            g *= (to_end / self.fade_out).clamp(0.0, 1.0);
+            g *= fade_curve(to_end / self.fade_out, self.props.fade_out_skew);
         }
         (g as f32) * crate::time::db_to_gain(self.gain_db)
     }
@@ -504,15 +537,26 @@ impl Session {
         }
         let new_id = self.alloc_id();
         let left_len = t - c.start;
+        let right_len = c.length - left_len;
+        let ratio = c.props.stretch.applied_ratio();
+        // A reversed clip plays its span backwards, so its right part
+        // comes from the earlier source and the left part from the later.
+        let (left_off, right_off) = if c.props.reversed {
+            (c.offset + right_len / ratio, c.offset)
+        } else {
+            (c.offset, c.offset + left_len / ratio)
+        };
         let right = Clip {
             id: new_id,
             start: t,
-            offset: c.offset + left_len,
-            length: c.length - left_len,
+            offset: right_off,
+            length: right_len,
             fade_in: 0.0,
+            ext_id: None,
             ..c.clone()
         };
         let left = &mut self.tracks[ti].clips[ci];
+        left.offset = left_off;
         left.length = left_len;
         left.fade_out = 0.0;
         self.tracks[ti].clips.insert(ci + 1, right);
@@ -617,6 +661,39 @@ mod tests {
     }
 
     #[test]
+    fn split_follows_stretch_and_reverse() {
+        let (mut s, m) = with_media();
+        let t = s.tracks[0].id;
+        let c = s.add_clip(t, m, 0.0).unwrap();
+        {
+            let cl = &mut s.tracks[0].clips[0];
+            cl.offset = 1.0;
+            cl.length = 8.0; // 4 s of source at ratio 2
+            cl.props.stretch.mode = StretchMode::Live;
+            cl.props.stretch.ratio = 2.0;
+            cl.ext_id = Some("x".into());
+        }
+        assert_eq!(s.tracks[0].clips[0].source_len(), 4.0);
+        assert_eq!(s.tracks[0].clips[0].timeline_to_source(2.0), 2.0);
+        let r = s.split_clip(c, 2.0).unwrap();
+        let (l, rt) = (&s.tracks[0].clips[0], &s.tracks[0].clips[1]);
+        assert_eq!((l.offset, l.length), (1.0, 2.0));
+        assert_eq!((rt.offset, rt.length, rt.id), (2.0, 6.0, r));
+        assert!(rt.ext_id.is_none());
+        // Reversed: the right part is the earlier source.
+        let cl = &mut s.tracks[0].clips[1];
+        cl.props.reversed = true;
+        assert_eq!(cl.timeline_to_source(2.0), 5.0);
+        assert_eq!(cl.timeline_to_source(8.0), 2.0);
+        s.split_clip(r, 4.0).unwrap();
+        let (l, rt) = (&s.tracks[0].clips[1], &s.tracks[0].clips[2]);
+        assert_eq!((l.offset, l.length), (4.0, 2.0));
+        assert_eq!((rt.offset, rt.length), (2.0, 4.0));
+        assert_eq!(l.timeline_to_source(2.0), 5.0);
+        assert_eq!(rt.timeline_to_source(8.0), 2.0);
+    }
+
+    #[test]
     fn json_round_trip() {
         let (mut s, m) = with_media();
         let t = s.tracks[1].id;
@@ -658,6 +735,17 @@ mod tests {
         assert!((c.gain_at(0.5) - 0.5).abs() < 1e-6);
         assert!((c.gain_at(2.0) - 1.0).abs() < 1e-6);
         assert!((c.gain_at(3.5) - 0.5).abs() < 1e-6);
+        // Skew 0 is the straight line exactly; skew bows it up or down.
+        for x in [0.0, 0.1, 0.37, 0.5, 0.99, 1.0] {
+            assert_eq!(fade_curve(x, 0.0), x);
+            assert!(fade_curve(x, 60.0) >= x && fade_curve(x, -60.0) <= x);
+        }
+        assert_eq!(fade_curve(1.0, 100.0), 1.0);
+        assert_eq!(fade_curve(0.0, -100.0), 0.0);
+        let mut up = c.clone();
+        up.props.fade_in_skew = 50.0;
+        up.props.fade_out_skew = -50.0;
+        assert!(up.gain_at(0.5) > 0.5 && up.gain_at(3.5) < 0.5);
         let (s, _) = with_media();
         let (l, r) = s.tracks[0].gains();
         assert!((l - 1.0).abs() < 1e-5 && (r - 1.0).abs() < 1e-5);
