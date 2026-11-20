@@ -470,13 +470,13 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                         }
                     }
                 });
-                if h >= 76.0 && kind != TrackKind::Bus {
+                if h >= 60.0 && kind != TrackKind::Bus {
                     input_row(ui, st, id, &th);
                 }
-                if h >= 98.0 || (kind == TrackKind::Bus && h >= 76.0) {
+                if h >= 80.0 || (kind == TrackKind::Bus && h >= 60.0) {
                     structural |= output_row(ui, st, ti, &th);
                 }
-                if h >= 146.0 {
+                if h >= 124.0 {
                     structural |= sends_rows(ui, st, ti, &th, 3);
                 }
             }
@@ -584,9 +584,9 @@ fn sends_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, room: us
             .find(|b| b.0 == s.bus)
             .map_or("(gone)".to_string(), |b| b.1.clone());
         ui.horizontal(|ui| {
-            ui.label(RichText::new("⤷").color(c(th.text_dim)));
+            ui.label(RichText::new("Send").size(9.5).color(c(th.text_dim)));
             ui.add_sized(
-                vec2(52.0, 18.0),
+                vec2(44.0, 18.0),
                 egui::Label::new(RichText::new(name).size(10.5)).truncate(),
             );
             changed |= dial(
@@ -687,7 +687,7 @@ fn key_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -> bool {
         let shown = cur.map_or("own input".into(), |id| name_of(st, id));
         let mut pick = None;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("🔑").size(10.0).color(c(th.text_dim)))
+            ui.label(RichText::new("Key").size(9.5).color(c(th.text_dim)))
                 .on_hover_text("Sidechain key");
             egui::ComboBox::from_id_salt(("key-in", me, i))
                 .selected_text(RichText::new(format!("{name}: {shown}")).size(10.5))

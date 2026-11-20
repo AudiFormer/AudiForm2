@@ -1787,9 +1787,15 @@ impl State {
     }
 
     /// A rack's power, levels or mix changed.
-    pub fn live_rack(&mut self, _track: u16) {
-        // MERGE: send live with Engine::set_rack once the engine has it.
-        self.session_version += 1;
+    pub fn live_rack(&mut self, track: u16) {
+        let rack = if track == af27_engine::MASTER {
+            Some(self.session.master_rack)
+        } else {
+            self.session.tracks.get(track as usize).map(|t| t.rack)
+        };
+        if let (Some(r), Some(e)) = (rack, &mut self.engine) {
+            e.set_rack(track, r);
+        }
     }
 
     pub fn live_slot(&mut self, track: u16, slot: usize) {
@@ -1836,8 +1842,10 @@ impl State {
 
     pub fn live_metronome(&mut self) {
         let on = self.session.tempo.metronome;
+        let m = self.prefs.metronome;
         if let Some(e) = &mut self.engine {
             e.set_metronome(on);
+            e.set_metronome_settings(m);
         }
     }
 

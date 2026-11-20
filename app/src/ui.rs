@@ -178,6 +178,7 @@ fn load_layout(w: crate::workspace::Workspace) -> DockState<Tab> {
 impl App {
     pub fn new(cc: &eframe::CreationContext, files: Vec<std::path::PathBuf>) -> App {
         let mut st = State::new();
+        st.live_metronome();
         crate::hwcursor::install(cc);
         crate::caustics::install(cc);
         crate::app_icon::install(cc);

@@ -31,7 +31,7 @@ const VBAR_W: f32 = 12.0;
 const MIN_TRACK_H: f32 = 40.0;
 const MAX_TRACK_H: f32 = 480.0;
 /// Room under the last track (the Add Track row and the Master row).
-const TAIL_H: f32 = 40.0 + crate::track_views::MASTER_H;
+const TAIL_H: f32 = 40.0;
 
 /// What a drag on the vertical zoom bar holds.
 #[derive(Debug, Clone, Copy)]
@@ -206,15 +206,23 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         pos2(rect.left(), ruler.bottom()),
         pos2(ruler.right(), ruler.bottom() + metro_h),
     );
-    let lanes = Rect::from_min_max(
-        pos2(ruler.left(), metro.bottom()),
+    // The Master row is pinned to the bottom of the editor.
+    let master_band = Rect::from_min_max(
+        pos2(rect.left(), rect.bottom() - crate::track_views::MASTER_H),
         pos2(ruler.right(), rect.bottom()),
     );
-    let vbar = Rect::from_min_max(pos2(lanes.right(), lanes.top()), rect.max);
+    let lanes = Rect::from_min_max(
+        pos2(ruler.left(), metro.bottom()),
+        pos2(ruler.right(), master_band.top()),
+    );
+    let vbar = Rect::from_min_max(
+        pos2(lanes.right(), lanes.top()),
+        pos2(rect.right(), lanes.bottom()),
+    );
     st.session_px = lanes.width();
     let headers = Rect::from_min_max(
         pos2(rect.left(), metro.bottom()),
-        pos2(ruler.left(), rect.bottom()),
+        pos2(ruler.left(), master_band.top()),
     );
     let vresp = ui.interact(vbar, ui.id().with("af27-vzoom"), Sense::click_and_drag());
     // The ruler is its own widget on top: it moves the playhead.
@@ -870,13 +878,13 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             );
             let mut badges = String::new();
             if clip.props.locked {
-                badges.push_str("🔒 ");
+                badges.push_str("LOCK ");
             }
             if clip.props.reversed {
-                badges.push_str("◀ ");
+                badges.push_str("REV ");
             }
             if clip.props.inverted {
-                badges.push_str("Ø ");
+                badges.push_str("INV ");
             }
             let s = &clip.props.stretch;
             if s.is_on() {
@@ -1179,26 +1187,27 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             st.add_track();
         }
     }
-    // The Master row closes the list.
-    let master_row = Rect::from_min_size(
-        pos2(headers.left(), add_row.bottom() + 6.0),
-        vec2(HEADER_W, crate::track_views::MASTER_H),
-    );
-    if master_row.top() < headers.bottom() && master_row.bottom() > headers.top() {
-        let hp = ui.painter_at(headers);
-        hp.rect_filled(master_row, Rounding::ZERO, lerp(th.panel, th.accent, 0.06));
-        hp.rect_filled(
+    // The Master row, pinned to the bottom of the frame.
+    {
+        let master_row =
+            Rect::from_min_max(master_band.min, pos2(headers.right(), master_band.bottom()));
+        let mlane = Rect::from_min_max(pos2(lanes.left(), master_band.top()), master_band.max);
+        p.rect_filled(
+            mlane,
+            Rounding::ZERO,
+            lerp(th.wave_background, th.panel, 0.4),
+        );
+        p.rect_filled(master_row, Rounding::ZERO, lerp(th.panel, th.accent, 0.06));
+        p.rect_filled(
             Rect::from_min_size(master_row.min, vec2(4.0, master_row.height())),
             Rounding::ZERO,
             c(th.text_dim),
         );
-        hp.line_segment(
-            [master_row.left_top(), master_row.right_top()],
+        p.line_segment(
+            [master_band.left_top(), master_band.right_top()],
             Stroke::new(1.0_f32, c(th.border)),
         );
-        if master_row.top() >= headers.top() {
-            crate::track_views::master_header(ui, st, master_row.shrink2(vec2(8.0, 4.0)));
-        }
+        crate::track_views::master_header(ui, st, master_row.shrink2(vec2(8.0, 4.0)));
     }
     // Selection, markers, playhead.
     if let Some((a, b)) = st.session_sel {

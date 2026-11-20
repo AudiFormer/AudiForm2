@@ -161,7 +161,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
                         }
                     });
                 if ui
-                    .small_button("⟲")
+                    .small_button("Reset")
                     .on_hover_text("Remove the stretch and pitch")
                     .clicked()
                 {
