@@ -470,6 +470,11 @@ pub struct Track {
     /// every input, `Some("none")` none, otherwise a port name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_in: Option<String>,
+    /// Audio tracks: the hardware input they record from, by the name a
+    /// project file gave it (Audiform's `input`, a `.sesx` input port).
+    /// None is the default input. Kept so files carry it across.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
     /// The object's id in an `.audfrm` file it came from, so saving back
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -793,6 +798,7 @@ impl Session {
             lanes: Vec::new(),
             show_lanes: false,
             midi_in: None,
+            input: None,
             ext_id: None,
         });
         id

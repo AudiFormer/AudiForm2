@@ -2,10 +2,14 @@
 // Copyright (c) The Audiform27 contributors.
 
 //! Writing a session as a `.sesx`, a copy for the other editor. It is an
-//! export, never the session's own file: a `.sesx` cannot hold most of
-//! Audiform27's effects, clip automation, reversed clips, MIDI or 3D
-//! Space, and saving to it would quietly lose them. What is left out is
-//! counted in the [`ExportReport`].
+//! export, never the session's own file: a `.sesx` cannot hold
+//! Audiform27's effects that have no built-in counterpart there, reversed
+//! clips, MIDI or 3D Space, and saving to it would quietly lose them.
+//! Effects with a counterpart go back as the built-in effect (see
+//! [`crate::sesx::builtin`]), kept components as they came, plug-ins
+//! with their settings and drawn controls, and volume, pan, mute, send
+//! and effect lines on tracks and clips. What is left out is counted in
+//! the [`ExportReport`].
 //!
 //! Units are the ones [`crate::sesx`] reads, so an export reads back the
 //! same: positions and source points in samples at the session rate
@@ -15,7 +19,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use af27_core::automation::LaneTarget;
+use af27_core::automation::{Lane, LaneTarget};
 use af27_core::session::{Clip, EffectSlot, Rack, Session, StretchKind, StretchMode, TrackKind};
 
 /// What a `.sesx` export could not hold.
@@ -63,7 +67,7 @@ impl ExportReport {
 
 /// XML text: `& < > " '` escaped, control characters (other than tab)
 /// left out.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -124,13 +128,19 @@ fn fader(out: &mut String, g: &mut Guids, id: &str, volume: f64, static_gain: f6
     );
 }
 
-fn mute(out: &mut String, g: &mut Guids, id: &str, on: bool) {
+/// A mute, with its drawn line (`keys`) on the "mute" parameter.
+fn mute(out: &mut String, g: &mut Guids, id: &str, on: bool, keys: &str) {
     let v = on as u8;
     let _ = write!(
         out,
-        r#"<component componentGuid="{}" componentID="Audition.Mute" id="{id}" name="Mute" powered="true"><parameter index="0" parameterValue="{v}"/><parameter index="1" name="mute" parameterValue="{v}"/></component>"#,
+        r#"<component componentGuid="{}" componentID="Audition.Mute" id="{id}" name="Mute" powered="true"><parameter index="0" parameterValue="{v}"/><parameter index="1" name="mute" parameterValue="{v}">{keys}</parameter></component>"#,
         g.next()
     );
+}
+
+/// Keyframes for a mute line (each point holds).
+fn hold_keyframes(points: &[(f64, f64)]) -> String {
+    keyframes(points).replace(r#"type="linear""#, r#"type="hold""#)
 }
 
 fn keyframes(points: &[(f64, f64)]) -> String {
@@ -149,26 +159,70 @@ fn keyframes(points: &[(f64, f64)]) -> String {
     s
 }
 
+/// A slot value's drawn line: (value index, key, points as (file sample,
+/// value)).
+type SlotLane = (usize, Option<String>, Vec<(f64, f64)>);
+
+/// The playing lanes of `chain`'s slot `s`: (value index, key, points as
+/// (file sample, value)). Lane times are seconds after `origin` samples.
+fn slot_lanes(s: &EffectSlot, lanes: &[Lane], origin: f64, rate: f64) -> Vec<SlotLane> {
+    let Some(id) = s.ext_id.as_deref() else {
+        return Vec::new();
+    };
+    lanes
+        .iter()
+        .filter(|l| l.plays())
+        .filter_map(|l| match &l.target {
+            LaneTarget::Effect { slot, param, key } if slot == id => Some((
+                *param,
+                key.clone(),
+                l.points
+                    .iter()
+                    .map(|p| (origin + p.time * rate, p.value))
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A plug-in lane named by the control's id (`p<id>`, from Audiform)
+/// rather than its number in the plug-in: a `.sesx` cannot place it.
+fn by_id(key: &Option<String>) -> bool {
+    key.as_deref()
+        .is_some_and(|k| af27_core::plugin::param_id(k).is_some())
+}
+
+/// Writes a rack. Returns how many of `lanes` (effect lanes) went in.
+#[allow(clippy::too_many_arguments)]
 fn rack(
     out: &mut String,
     g: &mut Guids,
     chain: &[EffectSlot],
     r: &Rack,
+    lanes: &[Lane],
+    origin: f64,
+    rate: f64,
     report: &mut ExportReport,
-) {
-    let plugins: Vec<&EffectSlot> = chain
+) -> usize {
+    let writable = |s: &EffectSlot| {
+        af27_core::plugin::is_plugin(&s.effect)
+            || crate::sesx::is_kept(&s.effect)
+            || crate::sesx::builtin::exports(s)
+    };
+    let slots: Vec<&EffectSlot> = chain
         .iter()
         .filter(|s| {
-            let p = af27_core::plugin::is_plugin(&s.effect);
-            if !p {
+            let w = writable(s);
+            if !w {
                 report.effects_left_out += 1;
             }
-            p
+            w
         })
         .collect();
     let plain = *r == Rack::default();
-    if plugins.is_empty() && plain {
-        return;
+    if slots.is_empty() && plain {
+        return 0;
     }
     let level = |db: f32| 10f64.powf(db as f64 / 20.0);
     let _ = write!(
@@ -179,34 +233,93 @@ fn rack(
         (1.0 - r.mix.clamp(0.0, 1.0)) as f64
     );
     let mut next = 0usize;
-    for s in plugins {
+    let mut written = 0usize;
+    for s in slots {
         let index = s.position.map_or(next, |p| (p as usize).max(next));
         next = index + 1;
-        let data = s.plugin_data();
-        let Some(cid) = vst3_component(&s.effect, cfg!(windows)) else {
-            continue;
-        };
-        let chunk = data
-            .state
-            .as_deref()
-            .and_then(crate::b64::decode)
-            .and_then(|st| crate::sesx::state_to_chunk(&st))
-            .map(|c| crate::b64::encode(&c))
-            .unwrap_or_default();
-        let name = if data.name.is_empty() {
-            "Plug-in".to_string()
+        let powered = !s.bypass && !r.bypass;
+        let mine = slot_lanes(s, lanes, origin, rate);
+        let component = if crate::sesx::is_kept(&s.effect) {
+            // As the file had it, with a fresh component id.
+            crate::sesx::kept_xml(s).map(|x| fresh_guid(&x, &g.next()))
+        } else if af27_core::plugin::is_plugin(&s.effect) {
+            plugin_component(s, &mine, &mut written, g)
         } else {
-            data.name.clone()
+            let pts: Vec<(usize, Vec<(f64, f64)>)> =
+                mine.into_iter().map(|(k, _, p)| (k, p)).collect();
+            crate::sesx::builtin::to_component(s, &pts, &g.next()).map(|(x, n)| {
+                written += n;
+                x
+            })
+        };
+        let Some(component) = component else {
+            report.effects_left_out += 1;
+            continue;
         };
         let _ = write!(
             out,
-            r#"<slot powered="{}" slotIndex="{index}"><component componentGuid="{}" componentID="{cid}" name="{}" presetName="(Custom)"><presetChunkData><![CDATA[{chunk}]]></presetChunkData></component></slot>"#,
-            !s.bypass && !r.bypass,
-            g.next(),
-            esc(&name)
+            r#"<slot powered="{powered}" slotIndex="{index}">{component}</slot>"#
         );
     }
     out.push_str("</effectsRack>");
+    written
+}
+
+/// A kept component's XML with its `componentGuid` replaced (a copied
+/// clip must not share one).
+fn fresh_guid(xml: &str, guid: &str) -> String {
+    const KEY: &str = "componentGuid=\"";
+    let Some(a) = xml.find(KEY).map(|i| i + KEY.len()) else {
+        return xml.to_string();
+    };
+    let Some(len) = xml[a..].find('"') else {
+        return xml.to_string();
+    };
+    format!("{}{guid}{}", &xml[..a], &xml[a + len..])
+}
+
+/// A plug-in's component: its settings chunk and, for each drawn control
+/// named by its number in the plug-in, that control's line.
+fn plugin_component(
+    s: &EffectSlot,
+    lanes: &[SlotLane],
+    written: &mut usize,
+    g: &mut Guids,
+) -> Option<String> {
+    let data = s.plugin_data();
+    let cid = vst3_component(&s.effect, cfg!(windows))?;
+    let chunk = data
+        .state
+        .as_deref()
+        .and_then(crate::b64::decode)
+        .and_then(|st| crate::sesx::state_to_chunk(&st))
+        .map(|c| crate::b64::encode(&c))
+        .unwrap_or_default();
+    let name = if data.name.is_empty() {
+        "Plug-in".to_string()
+    } else {
+        data.name.clone()
+    };
+    let mut params = String::new();
+    for (index, key, pts) in lanes {
+        if by_id(key) || pts.is_empty() {
+            continue;
+        }
+        let pname = key.clone().unwrap_or_else(|| format!("Control {index}"));
+        let _ = write!(
+            params,
+            r#"<parameter index="{index}" name="{}" parameterValue="{}">{}</parameter>"#,
+            esc(&pname),
+            pts[0].1,
+            keyframes(pts)
+        );
+        *written += 1;
+    }
+    Some(format!(
+        r#"<component componentGuid="{}" componentID="{cid}" name="{}" presetName="(Custom)"><presetChunkData><![CDATA[{chunk}]]></presetChunkData>{params}</component>"#,
+        g.next(),
+        esc(&name)
+    ))
 }
 
 /// The other way from [`crate::sesx::vst3_effect`]: `vst3:<32 hex>` as
@@ -271,6 +384,16 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
         s.rate
     );
     x.push_str("    <tracks>\n");
+    // Hardware inputs by name, numbered as `<inputPort>`s (1 is the
+    // default input).
+    let mut inputs: Vec<&str> = Vec::new();
+    for t in &s.tracks {
+        if let Some(n) = t.input.as_deref().filter(|_| t.kind == TrackKind::Audio) {
+            if !inputs.contains(&n) {
+                inputs.push(n);
+            }
+        }
+    }
     let mut clip_no = 0usize;
     for (i, t) in s.tracks.iter().enumerate() {
         let is_bus = t.kind == TrackKind::Bus;
@@ -280,9 +403,14 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
         let tag = if is_bus { "busTrack" } else { "audioTrack" };
         let _ = write!(
             x,
-            r#"      <{tag} automationLaneOpenState="false" id="{}" index="{}" select="false" visible="true">"#,
+            r#"      <{tag} automationLaneOpenState="false" id="{}" index="{}"{} select="false" visible="true">"#,
             xml_id[&t.id],
-            i + 1
+            i + 1,
+            if t.prerender && !is_bus {
+                r#" preRendered="true""#
+            } else {
+                ""
+            }
         );
         let _ = write!(
             x,
@@ -306,8 +434,14 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
             .unwrap_or(10_000);
         let _ = write!(
             x,
-            r#"<trackOutput outputID="{out_id}" type="trackID"/><trackInput inputID="-1"/>"#
+            r#"<trackOutput outputID="{out_id}" type="trackID"/><trackInput inputID="{}"/>"#,
+            match t.input.as_deref().filter(|_| t.kind == TrackKind::Audio) {
+                Some(n) => inputs.iter().position(|i| *i == n).map_or(1, |k| k + 2) as i64,
+                None if is_bus => -1,
+                None => 1,
+            }
         );
+        let mut lanes_written = 0usize;
         // Volume and pan, with their lines.
         let lane = |target: LaneTarget| t.lanes.iter().find(|l| l.target == target && l.plays());
         let (volume, sg, vkeys) = match lane(LaneTarget::Volume) {
@@ -324,7 +458,18 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
             None => (gain(t.volume_db), 1.0, String::new()),
         };
         fader(&mut x, &mut g, "trackFader", volume, sg, &vkeys);
-        mute(&mut x, &mut g, "trackMute", t.mute);
+        let mkeys = lane(LaneTarget::Mute).map_or(String::new(), |l| {
+            lanes_written += 1;
+            hold_keyframes(
+                &l.points
+                    .iter()
+                    .map(|p| (p.time * rate, p.value.round().clamp(0.0, 1.0)))
+                    .collect::<Vec<_>>(),
+            )
+        });
+        lanes_written += lane(LaneTarget::Volume).is_some() as usize;
+        lanes_written += lane(LaneTarget::Pan).is_some() as usize;
+        mute(&mut x, &mut g, "trackMute", t.mute, &mkeys);
         let pkeys = lane(LaneTarget::Pan).map_or(String::new(), |l| {
             keyframes(
                 &l.points
@@ -339,21 +484,45 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
             g.next(),
             (t.pan.clamp(-1.0, 1.0) * 100.0) as f64
         );
-        report.lanes_left_out += t
-            .lanes
-            .iter()
-            .filter(|l| !matches!(l.target, LaneTarget::Volume | LaneTarget::Pan) && l.plays())
-            .count()
-            + t.spatial.lanes.len();
         if !t.sends.is_empty() {
             x.push_str("<sendList>");
             for (k, sd) in t.sends.iter().enumerate() {
                 let Some(dest) = xml_id.get(&sd.bus) else {
                     continue;
                 };
+                // Its drawn level and pan lines.
+                let id = sd.ext_id.as_deref();
+                let send_lane = |f: &dyn Fn(&LaneTarget) -> bool| {
+                    t.lanes.iter().find(|l| f(&l.target) && l.plays())
+                };
+                let lkeys = send_lane(
+                    &|tg| matches!(tg, LaneTarget::SendLevel(s) if Some(s.as_str()) == id),
+                )
+                .map_or(String::new(), |l| {
+                    lanes_written += 1;
+                    keyframes(
+                        &l.points
+                            .iter()
+                            .map(|p| (p.time * rate, gain(p.value as f32)))
+                            .collect::<Vec<_>>(),
+                    )
+                });
+                let pkeys =
+                    send_lane(&|tg| matches!(tg, LaneTarget::SendPan(s) if Some(s.as_str()) == id))
+                        .map_or(String::new(), |l| {
+                            lanes_written += 1;
+                            keyframes(
+                                &l.points
+                                    .iter()
+                                    .map(|p| {
+                                        (p.time * rate, (p.value.clamp(-1.0, 1.0) + 1.0) / 2.0)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        });
                 let _ = write!(
                     x,
-                    r#"<sendSlot preFader="{}" sendOutputID="{dest}" slotIndex="{k}"><component componentGuid="{}" componentID="Audition.Send" id="sendComponent" powered="true"><parameter index="0" name="Power On/Off" parameterValue="{}"/><parameter index="1" name="Level" parameterValue="{}"/></component><component componentGuid="{}" componentID="Audition.StereoPanner" id="sendPan" name="StereoPanner" powered="true"><parameter index="0" name="Pan" parameterValue="{}"/></component></sendSlot>"#,
+                    r#"<sendSlot preFader="{}" sendOutputID="{dest}" slotIndex="{k}"><component componentGuid="{}" componentID="Audition.Send" id="sendComponent" powered="true"><parameter index="0" name="Power On/Off" parameterValue="{}"/><parameter index="1" name="Level" parameterValue="{}">{lkeys}</parameter></component><component componentGuid="{}" componentID="Audition.StereoPanner" id="sendPan" name="StereoPanner" powered="true"><parameter index="0" name="Pan" parameterValue="{}">{pkeys}</parameter></component></sendSlot>"#,
                     sd.pre_fader,
                     g.next(),
                     sd.enabled as u8,
@@ -365,7 +534,18 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
             x.push_str("</sendList>");
         }
         x.push_str("</trackAudioParameters>");
-        rack(&mut x, &mut g, &t.chain, &t.rack, &mut report);
+        lanes_written += rack(
+            &mut x,
+            &mut g,
+            &t.chain,
+            &t.rack,
+            &t.lanes,
+            0.0,
+            rate,
+            &mut report,
+        );
+        let playing = t.lanes.iter().filter(|l| l.plays()).count();
+        report.lanes_left_out += playing.saturating_sub(lanes_written) + t.spatial.lanes.len();
         for (z, c) in t.clips.iter().enumerate() {
             let Some(&fid) = file_ids.get(&c.media) else {
                 report.clips_without_files += 1;
@@ -401,9 +581,24 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
         None => (gain(s.master_db), 1.0, String::new()),
     };
     fader(&mut x, &mut g, "trackFader", volume, sg, &keys);
-    mute(&mut x, &mut g, "trackMute", false);
+    mute(&mut x, &mut g, "trackMute", false, "");
     x.push_str("</trackAudioParameters>");
-    rack(&mut x, &mut g, &s.master_chain, &s.master_rack, &mut report);
+    let fx_written = rack(
+        &mut x,
+        &mut g,
+        &s.master_chain,
+        &s.master_rack,
+        &s.master_lanes,
+        0.0,
+        rate,
+        &mut report,
+    );
+    let master_written = fx_written
+        + s.master_lanes
+            .iter()
+            .any(|l| l.target == LaneTarget::Volume && l.plays()) as usize;
+    let master_playing = s.master_lanes.iter().filter(|l| l.plays()).count();
+    report.lanes_left_out += master_playing.saturating_sub(master_written);
     x.push_str("</masterTrack>\n    </tracks>\n");
     let cti = at(s.playhead);
     let _ = writeln!(
@@ -424,7 +619,17 @@ pub fn to_sesx(s: &Session, dir: Option<&Path>) -> (String, ExportReport) {
             esc(&p.to_string_lossy())
         );
     }
-    x.push_str("  </files>\n</sesx>\n");
+    x.push_str("  </files>\n");
+    if !inputs.is_empty() {
+        // The inputs the tracks record from, by name; the editor matches
+        // them to its own device's ports.
+        x.push_str("  <audioDevice>\n    <inputPort id=\"1\" name=\"Default Stereo Input\"/>\n");
+        for (k, n) in inputs.iter().enumerate() {
+            let _ = writeln!(x, r#"    <inputPort id="{}" name="{}"/>"#, k + 2, esc(n));
+        }
+        x.push_str("    <outputPort id=\"1\" name=\"Default Output\"/>\n  </audioDevice>\n");
+    }
+    x.push_str("</sesx>\n");
     (x, report)
 }
 
@@ -475,7 +680,24 @@ fn write_clip(
         }
         None => fader(x, g, "clipGain", gain(c.gain_db), 1.0, ""),
     }
-    mute(x, g, "clipMute", c.muted);
+    let mut lanes_written = 0usize;
+    let mkeys = lane(LaneTarget::Mute).map_or(String::new(), |l| {
+        lanes_written += 1;
+        hold_keyframes(
+            &l.points
+                .iter()
+                .map(|p| {
+                    (
+                        src_in as f64 + p.time * rate,
+                        p.value.round().clamp(0.0, 1.0),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    lanes_written += lane(LaneTarget::Volume).is_some() as usize;
+    lanes_written += lane(LaneTarget::Pan).is_some() as usize;
+    mute(x, g, "clipMute", c.muted, &mkeys);
     let (pan_v, pan_keys) = match lane(LaneTarget::Pan) {
         Some(l) if l.points.len() == 1 => (l.points[0].value, String::new()),
         Some(l) => (0.0, line(&l.points, &|v| (v.clamp(-1.0, 1.0) + 1.0) / 2.0)),
@@ -487,11 +709,18 @@ fn write_clip(
         g.next(),
         pan_v.clamp(-1.0, 1.0) * 100.0
     );
-    report.lanes_left_out += lanes
-        .iter()
-        .filter(|l| !matches!(l.target, LaneTarget::Volume | LaneTarget::Pan) && l.plays())
-        .count();
-    rack(x, g, &c.props.chain, &c.props.rack, report);
+    lanes_written += rack(
+        x,
+        g,
+        &c.props.chain,
+        &c.props.rack,
+        &lanes,
+        src_in as f64,
+        rate,
+        report,
+    );
+    let playing = lanes.iter().filter(|l| l.plays()).count();
+    report.lanes_left_out += playing.saturating_sub(lanes_written);
     if let Some(map) = &c.props.channel_map {
         if let Some(text) = channel_map_xml(map) {
             x.push_str(&text);

@@ -72,6 +72,15 @@ pub enum LaneTarget {
     },
     /// A 3D Space setting (by Audiform's name), kept but not played here.
     Space(String),
+    /// The owner's mute: 1 muted, 0 heard (points hold). Read from files
+    /// that have it and kept; not played here yet.
+    Mute,
+    /// The level (dB) of the owner's send whose `ext_id` this is. Kept;
+    /// not played here yet.
+    SendLevel(String),
+    /// The pan (-1..1) of the owner's send whose `ext_id` this is. Kept;
+    /// not played here yet.
+    SendPan(String),
 }
 
 impl LaneTarget {
@@ -80,8 +89,9 @@ impl LaneTarget {
     pub fn range(&self) -> (f64, f64) {
         match self {
             LaneTarget::Volume => (-60.0, 12.0),
-            LaneTarget::Pan => (-1.0, 1.0),
-            LaneTarget::Effect { .. } | LaneTarget::Space(_) => (0.0, 1.0),
+            LaneTarget::Pan | LaneTarget::SendPan(_) => (-1.0, 1.0),
+            LaneTarget::SendLevel(_) => (-60.0, 12.0),
+            LaneTarget::Effect { .. } | LaneTarget::Space(_) | LaneTarget::Mute => (0.0, 1.0),
         }
     }
     pub fn label(&self) -> String {
@@ -92,6 +102,9 @@ impl LaneTarget {
                 key.clone().unwrap_or(format!("Value {param}"))
             }
             LaneTarget::Space(p) => format!("3D {p}"),
+            LaneTarget::Mute => "Mute".into(),
+            LaneTarget::SendLevel(_) => "Send Level".into(),
+            LaneTarget::SendPan(_) => "Send Pan".into(),
         }
     }
 }
