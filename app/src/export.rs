@@ -38,7 +38,8 @@ impl Default for FormatPrefs {
             channels: ChannelChoice::Keep,
             format: SampleFormat::I24,
             dither: true,
-            flac_level: 5,
+            // The smallest files: every level is lossless.
+            flac_level: 8,
         }
     }
 }
@@ -1245,7 +1246,7 @@ mod tests {
         assert_eq!(o.loudness.unwrap().lufs, -16.0);
         // Old or partial files still load.
         let partial: ExportPrefs = serde_json::from_str(r#"{"container":"Wav"}"#).unwrap();
-        assert_eq!(partial.flac.flac_level, 5);
+        assert_eq!(partial.flac.flac_level, 8);
     }
 
     #[test]

@@ -1522,10 +1522,10 @@ impl State {
             };
             let buf = doc.buf.clone();
             let src = doc.path.clone();
+            // FLAC, or float WAV for audio past full scale.
+            let ext = crate::new_dialogs::lossless_ext(&buf);
             let wav_inside = src.as_deref().is_some_and(|p| {
-                inside(p, &dir)
-                    && p.extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("flac"))
+                inside(p, &dir) && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
             });
             let dest = if wav_inside {
                 src.clone().unwrap()
@@ -1534,7 +1534,7 @@ impl State {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Audio".into());
-                let name = format!("{stem} (edited).flac");
+                let name = format!("{stem} (edited).{ext}");
                 let _ = std::fs::create_dir_all(&media_dir);
                 let mut dest = media_dir.join(&name);
                 let mut n = 2;
@@ -1544,8 +1544,8 @@ impl State {
                 }
                 dest
             };
-            let part = dest.with_extension("flac.part");
-            let written = crate::new_dialogs::write_flac(&part, &buf, self.session.bit_depth)
+            let part = dest.with_extension(format!("{ext}.part"));
+            let written = crate::new_dialogs::write_lossless(&part, &buf, self.session.bit_depth)
                 .and_then(|_| std::fs::rename(&part, &dest).map_err(|e| e.to_string()));
             match written {
                 Ok(()) => {

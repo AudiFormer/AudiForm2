@@ -453,14 +453,37 @@ fn create_session(st: &mut State, d: NewSessionDraft) {
     }
 }
 
-/// Writes `buf` as FLAC (level 5): 16-bit for a 16-bit choice, else 24-bit
-/// (FLAC holds no float). Used for recordings and kept edits.
-pub fn write_flac(
+/// The extension new audio from the app is written with: FLAC (lossless
+/// and compressed), or 32-bit float WAV when the audio goes past full
+/// scale, which FLAC's whole numbers would clip.
+pub fn lossless_ext(buf: &af27_core::AudioBuffer) -> &'static str {
+    let over = buf
+        .channels
+        .iter()
+        .any(|ch| ch.iter().any(|s| s.abs() > 1.0));
+    if over {
+        "wav"
+    } else {
+        "flac"
+    }
+}
+
+/// Writes `buf` by its path's extension: a `.wav` (also `.wav.part`) as
+/// 32-bit float, anything else as FLAC at the smallest size (level 8),
+/// 16-bit for a 16-bit choice, else 24-bit (FLAC holds no float).
+pub fn write_lossless(
     path: &std::path::Path,
     buf: &af27_core::AudioBuffer,
     bits: u16,
 ) -> Result<(), String> {
     use af27_io::export::{Container, Options, SampleFormat};
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if name.ends_with(".wav") || name.ends_with(".wav.part") {
+        return af27_io::write_wav(path, buf, af27_io::WavFormat::Float32);
+    }
     let opts = Options {
         container: Container::Flac,
         format: if bits == 16 {
@@ -469,7 +492,7 @@ pub fn write_flac(
             SampleFormat::I24
         },
         dither: bits == 16,
-        flac_level: 5,
+        flac_level: 8,
         ..Options::default()
     };
     af27_io::export::export_buffer(path, buf, &opts, &Default::default()).map(|_| ())
@@ -487,11 +510,29 @@ mod tests {
         }
         for bits in [16u16, 24, 32] {
             let p = dir.join(format!("t{bits}.flac"));
-            super::write_flac(&p, &b, bits).unwrap();
+            super::write_lossless(&p, &b, bits).unwrap();
             let back = af27_io::decode_file(&p).unwrap();
             assert_eq!(back.frames(), 4800);
             assert_eq!(back.num_channels(), 2);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_past_full_scale_goes_to_float_wav() {
+        let mut b = af27_core::AudioBuffer::new(48_000, 1, 10);
+        assert_eq!(super::lossless_ext(&b), "flac");
+        b.channels[0][3] = 1.5;
+        assert_eq!(super::lossless_ext(&b), "wav");
+        let dir = std::env::temp_dir().join(format!("af2-wav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("hot.wav");
+        super::write_lossless(&p, &b, 24).unwrap();
+        let back = af27_io::decode_file(&p).unwrap();
+        assert!(
+            (back.channels[0][3] - 1.5).abs() < 1e-6,
+            "kept above full scale"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

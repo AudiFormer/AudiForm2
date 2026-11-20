@@ -242,7 +242,7 @@ impl Default for Options {
             channels: ChannelChoice::Keep,
             format: SampleFormat::I24,
             dither: true,
-            flac_level: 5,
+            flac_level: 8,
             loudness: None,
             channel_mask: None,
         }
