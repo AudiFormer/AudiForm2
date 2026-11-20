@@ -301,7 +301,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if let Some(hp) = hover {
         let input = ui.input(|i| {
             crate::zoom::WheelInput::read(
-                i.smooth_scroll_delta.into(),
+                i.raw_scroll_delta.into(),
                 i.zoom_delta(),
                 i.modifiers.command || i.modifiers.ctrl,
                 i.modifiers.shift,

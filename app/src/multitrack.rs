@@ -232,7 +232,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if let Some(hp) = pointer {
         let input = ui.input(|i| {
             crate::zoom::WheelInput::read(
-                i.smooth_scroll_delta.into(),
+                i.raw_scroll_delta.into(),
                 i.zoom_delta(),
                 i.modifiers.command || i.modifiers.ctrl,
                 i.modifiers.shift,
@@ -1676,10 +1676,14 @@ fn vzoom_bar(
     }
     let (top, bottom, content) = vbar_thumb(st, drag.scroll_y, lanes, vbar);
     if resp.drag_started() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            drag.vgrab = Some(if (p.y - top).abs() < 6.0 {
+        // Where the press began: by the time a drag is seen the pointer has
+        // already moved off a narrow end.
+        let origin = ui.input(|i| i.pointer.press_origin());
+        if let Some(p) = origin.or(resp.interact_pointer_pos()) {
+            let grip = ((bottom - top) * 0.2).clamp(8.0, 16.0);
+            drag.vgrab = Some(if (p.y - top).abs() < grip {
                 VGrab::Top
-            } else if (p.y - bottom).abs() < 6.0 {
+            } else if (p.y - bottom).abs() < grip {
                 VGrab::Bottom
             } else if p.y > top && p.y < bottom {
                 VGrab::Body(p.y - top)

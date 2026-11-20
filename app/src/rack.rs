@@ -161,6 +161,27 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
         ui.label(RichText::new("Select a track to see its effects rack.").color(c(th.text_dim)));
         return;
     };
+    // The track's (or the master's) own settings, folded above the rack.
+    if target != FILE {
+        egui::CollapsingHeader::new(
+            RichText::new(if target == MASTER {
+                "Master".to_string()
+            } else {
+                format!("Track: {}", target_name(st, target))
+            })
+            .strong(),
+        )
+        .id_salt("rack-track-settings")
+        .default_open(true)
+        .show(ui, |ui| {
+            if target == MASTER {
+                crate::inspector::master_settings(ui, st);
+            } else {
+                crate::inspector::track_settings(ui, st, target as usize);
+            }
+        });
+        ui.separator();
+    }
     presets_row(ui, st, target, &th);
     let kind = match target {
         FILE => "File",
@@ -600,41 +621,54 @@ struct Preset {
 }
 
 fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Presets:").color(c(th.text_dim)));
-        let names = preset_names();
-        let mut load: Option<String> = None;
-        egui::ComboBox::from_id_salt("rack-preset")
-            .selected_text("(Default)")
-            .width((ui.available_width() - 70.0).max(80.0))
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(false, "(Default)").clicked() {
-                    load = Some(String::new());
+    let names = preset_names();
+    let mut load: Option<String> = None;
+    let w = ui.available_width();
+    // Laid out from the right: the buttons always fit whole, and the list
+    // takes the room that is left.
+    ui.allocate_ui_with_layout(
+        vec2(w, 22.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.menu_button("Delete", |ui| {
+                if names.is_empty() {
+                    ui.label("No presets saved yet.");
                 }
                 for n in &names {
-                    if ui.selectable_label(false, n).clicked() {
-                        load = Some(n.clone());
+                    if ui.button(n).clicked() {
+                        let _ = std::fs::remove_file(presets_dir().join(format!("{n}.json")));
+                        ui.close_menu();
                     }
                 }
+            })
+            .response
+            .on_hover_text("Delete a saved preset");
+            if ui
+                .button("Save")
+                .on_hover_text("Save this rack as a preset")
+                .clicked()
+            {
+                st.rack_preset_name = Some(format!("{} rack", target_name(st, target)));
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(RichText::new("Presets:").color(c(th.text_dim)));
+                egui::ComboBox::from_id_salt("rack-preset")
+                    .selected_text("(Default)")
+                    .width((ui.available_width() - 8.0).max(40.0))
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(false, "(Default)").clicked() {
+                            load = Some(String::new());
+                        }
+                        for n in &names {
+                            if ui.selectable_label(false, n).clicked() {
+                                load = Some(n.clone());
+                            }
+                        }
+                    });
             });
-        if ui
-            .small_button("Save")
-            .on_hover_text("Save this rack as a preset")
-            .clicked()
-        {
-            st.rack_preset_name = Some(format!("{} rack", target_name(st, target)));
-        }
-        ui.menu_button("Delete", |ui| {
-            if names.is_empty() {
-                ui.label("No presets saved yet.");
-            }
-            for n in &names {
-                if ui.button(n).clicked() {
-                    let _ = std::fs::remove_file(presets_dir().join(format!("{n}.json")));
-                    ui.close_menu();
-                }
-            }
-        });
+        },
+    );
+    {
         if let Some(n) = load {
             let before = st.session.clone();
             let preset = if n.is_empty() {
@@ -658,7 +692,7 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 structural(st, target, "Rack preset", before);
             }
         }
-    });
+    }
     // Naming a new preset.
     if let Some(mut name) = st.rack_preset_name.take() {
         let mut keep = true;

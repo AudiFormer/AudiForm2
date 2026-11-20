@@ -1406,6 +1406,102 @@ fn effect_dialog(ctx: &egui::Context, st: &mut State) {
     st.effect_dialog = open;
 }
 
+/// A tool button with a drawn icon: Move (a four-way arrow), Razor (a
+/// blade over a dashed cut line) and Time Selection (an I-beam).
+fn tool_button(
+    ui: &mut egui::Ui,
+    tool: Tool,
+    on: bool,
+    th: &crate::theme::Theme,
+) -> egui::Response {
+    use egui::{pos2, vec2, Stroke};
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 24.0), egui::Sense::click());
+    let p = ui.painter_at(rect.expand(1.0));
+    let hot = resp.hovered();
+    if th.bevel.is_some() {
+        p.rect_filled(
+            rect,
+            0.0,
+            if on {
+                crate::theme::lerp(th.panel_raised, th.accent, 0.25)
+            } else {
+                c(th.panel_raised)
+            },
+        );
+        crate::skin::bevel(&p, rect, th, on || resp.is_pointer_button_down_on());
+    } else if on || hot {
+        p.rect_filled(
+            rect,
+            3.0,
+            if on {
+                crate::theme::ca(th.accent, 60)
+            } else {
+                crate::theme::ca(th.text, 16)
+            },
+        );
+    }
+    let col = if on {
+        c(th.accent)
+    } else if hot {
+        c(th.text)
+    } else {
+        crate::theme::lerp(th.text, th.text_dim, 0.3)
+    };
+    let s = Stroke::new(1.6_f32, col);
+    let m = rect.center();
+    match tool {
+        Tool::Move => {
+            for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let tip = m + vec2(dx, dy) * 7.5;
+                p.line_segment([m + vec2(dx, dy) * 1.5, tip], s);
+                let side = vec2(-dy, dx) * 2.6;
+                let back = tip - vec2(dx, dy) * 2.8;
+                p.add(egui::Shape::convex_polygon(
+                    vec![tip, back + side, back - side],
+                    col,
+                    Stroke::NONE,
+                ));
+            }
+        }
+        Tool::Razor => {
+            // The cut: a dashed vertical line.
+            let mut y = rect.top() + 3.0;
+            while y < rect.bottom() - 3.0 {
+                p.line_segment(
+                    [pos2(m.x, y), pos2(m.x, (y + 2.5).min(rect.bottom() - 3.0))],
+                    Stroke::new(1.0_f32, col),
+                );
+                y += 4.5;
+            }
+            // The blade, tilted across it: a slim parallelogram with its
+            // sharp edge lit.
+            let a = pos2(m.x - 8.0, m.y + 3.0);
+            let b = pos2(m.x + 6.0, m.y - 5.0);
+            let up = vec2(1.6, 2.8);
+            let blade = vec![a, b, b + up, a + up];
+            p.add(egui::Shape::convex_polygon(
+                blade,
+                crate::theme::ca(th.background, 200),
+                s,
+            ));
+            p.line_segment([a, b], Stroke::new(2.0_f32, col));
+        }
+        _ => {
+            // I-beam.
+            p.line_segment([pos2(m.x, m.y - 7.0), pos2(m.x, m.y + 7.0)], s);
+            for y in [m.y - 7.0, m.y + 7.0] {
+                p.line_segment([pos2(m.x - 3.5, y), pos2(m.x + 3.5, y)], s);
+            }
+        }
+    }
+    resp
+}
+
+/// Every node of the main dock surface, to adjust tab bar scrolls.
+fn viewer_dock_nodes(dock: &mut DockState<Tab>) -> impl Iterator<Item = &mut egui_dock::Node<Tab>> {
+    dock.main_surface_mut().iter_mut()
+}
+
 /// The spectral selection tools (Waveform editor only) and the brush size.
 fn spectral_tools(ui: &mut egui::Ui, st: &mut State) {
     ui.separator();
@@ -1466,13 +1562,12 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
             _ => {}
         }
         ui.add_space(14.0);
-        for (tool, label, tip) in [
-            (Tool::Move, "↔", "Move (V)"),
-            (Tool::Razor, "✂", "Razor (R)"),
-            (Tool::TimeSelect, "I", "Time Selection (T)"),
+        for (tool, tip) in [
+            (Tool::Move, "Move (V)"),
+            (Tool::Razor, "Razor (R)"),
+            (Tool::TimeSelect, "Time Selection (T)"),
         ] {
-            if ui
-                .selectable_label(st.tool == tool, RichText::new(label).size(16.0))
+            if tool_button(ui, tool, st.tool == tool, &th)
                 .on_hover_text(tip)
                 .clicked()
             {
@@ -2384,6 +2479,26 @@ impl eframe::App for App {
                     crowded: &self.crowded,
                     showing: &self.showing,
                 };
+                // The wheel over a tab bar slides its tabs sideways (the
+                // dock only listens on the bar's empty part, which a
+                // crowded bar has none of).
+                let bar_h = style.tab_bar.height;
+                let (hover, wheel) = ui.input(|i| (i.pointer.hover_pos(), i.smooth_scroll_delta));
+                if let (Some(hp), true) = (hover, wheel != egui::Vec2::ZERO) {
+                    for node in viewer_dock_nodes(&mut self.dock) {
+                        if let egui_dock::Node::Leaf { rect, scroll, .. } = node {
+                            let bar = egui::Rect::from_min_size(
+                                rect.min,
+                                egui::vec2(rect.width(), bar_h),
+                            );
+                            if bar.contains(hp) {
+                                *scroll += wheel.y + wheel.x;
+                                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                                break;
+                            }
+                        }
+                    }
+                }
                 DockArea::new(&mut self.dock)
                     .style(style)
                     .show_inside(ui, &mut viewer);

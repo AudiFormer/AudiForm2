@@ -101,6 +101,10 @@ fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Re
         // wgpu (DirectX 12, Vulkan or Metal) presents reliably on more
         // machines than OpenGL; AF2_RENDERER=glow switches back.
         renderer,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(

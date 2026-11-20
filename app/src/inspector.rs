@@ -64,6 +64,14 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
 }
 
 fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
+    track_settings(ui, st, ti);
+    ui.separator();
+    rack_link(ui, st, ti as u16);
+}
+
+/// A track's own settings (level, pan, output, sends, 3D place,
+/// instrument), shown in the Effects tab above its rack.
+pub fn track_settings(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     let th = st.theme.clone();
     let before = st.session.clone();
     let kind = st.session.tracks[ti].kind;
@@ -317,8 +325,22 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             live_commit(st, ui, "Instrument", &b2, ch);
         });
     }
-    ui.separator();
-    rack_link(ui, st, ti as u16);
+}
+
+/// The master level, for the Effects tab's Master rack.
+pub fn master_settings(ui: &mut egui::Ui, st: &mut State) {
+    let before = st.session.clone();
+    let changed = ui
+        .add(
+            crate::widgets::Slider::new(&mut st.session.master_db, -60.0..=12.0)
+                .suffix(" dB")
+                .text("Master level"),
+        )
+        .changed();
+    if changed {
+        st.live_master();
+    }
+    live_commit(st, ui, "Master level", &before, changed);
 }
 
 /// The rack lives in the Effects panel; here, how many and a way there.

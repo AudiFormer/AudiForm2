@@ -69,8 +69,8 @@ impl Workspace {
     /// saved from the old one is set aside for the new.
     pub fn version(self) -> u32 {
         match self {
-            Workspace::Music => 3,
-            _ => 2,
+            Workspace::Music => 4,
+            _ => 3,
         }
     }
 
@@ -87,37 +87,20 @@ impl Workspace {
     pub fn build(self) -> DockState<Tab> {
         use Tab::*;
         match self {
-            Workspace::Default => {
+            // The project lead's arrangement: files, effects and history
+            // down the left; the scopes, then 3D Space and AI Stems down the
+            // right; Levels and Range along the bottom.
+            Workspace::Default | Workspace::Music => {
                 let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
                 let s = d.main_surface_mut();
-                let [centre, left] = s.split_left(NodeIndex::root(), 0.17, vec![Files, Markers]);
-                let [_files, rack] = s.split_below(
-                    left,
-                    0.36,
-                    vec![Properties, Inspector, Effects, AiSeparation],
-                );
-                let [_rack, _history] = s.split_below(rack, 0.7, vec![History]);
+                let [centre, left] = s.split_left(NodeIndex::root(), 0.215, vec![Files, Markers]);
+                let [_files, rack] = s.split_below(left, 0.40, vec![Effects, Properties]);
+                let [_rack, _history] = s.split_below(rack, 0.69, vec![History]);
                 let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
-                let [_editor, right] = s.split_right(centre, 0.78, vec![Phase, Visualizer]);
-                let [_phase, _more] = s.split_below(right, 0.48, vec![Spectrum, Statistics, Space]);
-                d
-            }
-            Workspace::Music => {
-                let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
-                let s = d.main_surface_mut();
-                let [centre, left] = s.split_left(NodeIndex::root(), 0.17, vec![Files, Markers]);
-                let [_files, rack] =
-                    s.split_below(left, 0.36, vec![Properties, Inspector, Effects, Statistics]);
-                let [_rack, _history] = s.split_below(rack, 0.7, vec![History]);
-                let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
-                let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
-                // The scopes share one panel; 3D Space and AI Stems each
-                // have their own below it.
                 let [_editor, right] =
-                    s.split_right(centre, 0.76, vec![Phase, Visualizer, Spectrum]);
-                let [_scopes, lower] = s.split_below(right, 0.42, vec![Space]);
-                let [_space, _stems] = s.split_below(lower, 0.55, vec![AiSeparation]);
+                    s.split_right(centre, 0.77, vec![Phase, Visualizer, Spectrum, Statistics]);
+                let [_scopes, _lower] = s.split_below(right, 0.48, vec![Space, AiSeparation]);
                 d
             }
             Workspace::Mixing => {
@@ -127,8 +110,7 @@ impl Workspace {
                 let [_files, _markers] = s.split_below(left, 0.55, vec![Markers, History]);
                 let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.8, vec![Selection]);
-                let [_mixer, _right] =
-                    s.split_right(centre, 0.78, vec![Properties, Inspector, Effects]);
+                let [_mixer, _right] = s.split_right(centre, 0.78, vec![Effects, Properties]);
                 d
             }
             Workspace::FocusedEdit => {
@@ -143,11 +125,8 @@ impl Workspace {
             Workspace::Mastering => {
                 let mut d = DockState::new(vec![Editor, Mixer]);
                 let s = d.main_surface_mut();
-                let [centre, left] = s.split_left(
-                    NodeIndex::root(),
-                    0.18,
-                    vec![Properties, Inspector, Effects],
-                );
+                let [centre, left] =
+                    s.split_left(NodeIndex::root(), 0.18, vec![Effects, Properties]);
                 let [_rack, _files] = s.split_below(left, 0.62, vec![Files, History]);
                 let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
@@ -181,7 +160,6 @@ mod tests {
         let node = |t: Tab| d.find_tab(&t).map(|(s, n, _)| (s, n)).unwrap();
         assert_eq!(node(Tab::Phase), node(Tab::Visualizer));
         assert_eq!(node(Tab::Phase), node(Tab::Spectrum));
-        assert_ne!(node(Tab::Space), node(Tab::AiSeparation));
         assert_ne!(node(Tab::Space), node(Tab::Phase));
         assert_ne!(node(Tab::AiSeparation), node(Tab::Phase));
     }
@@ -192,7 +170,7 @@ mod tests {
         for t in [
             Tab::Files,
             Tab::Markers,
-            Tab::Inspector,
+            Tab::Properties,
             Tab::Effects,
             Tab::AiSeparation,
             Tab::History,

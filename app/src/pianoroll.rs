@@ -205,6 +205,8 @@ enum NoteDrag {
 }
 
 pub struct PianoState {
+    /// A note drawn on the press itself, held until the button comes up.
+    press_new: bool,
     tool: Tool,
     lane: Lane,
     grid: Grid,
@@ -251,6 +253,7 @@ pub struct PianoState {
 impl Default for PianoState {
     fn default() -> Self {
         PianoState {
+            press_new: false,
             tool: Tool::Draw,
             lane: Lane::Velocity,
             grid: Grid::Sixteenth,
@@ -669,6 +672,28 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                     let n = notes[i];
                     st.audition_on(ti, n.pitch, n.velocity, n.pan);
                     ps.held = Some(n.pitch);
+                } else if ps.tool == Tool::Draw && !shift {
+                    // Draw: the note appears the moment the button goes
+                    // down and sounds while held; moving the pointer moves it.
+                    let b = b_of(q.x);
+                    ps.click_at = b.max(0.0);
+                    ps.before = Some(st.session.clone());
+                    let i = add_note(st, ps, ti, ci, snap_down(b).max(0.0), p_of(q.y), step);
+                    ps.sel = vec![i];
+                    ps.orig = st.session.tracks[ti].midi[ci].notes.clone();
+                    let n = ps.orig[i];
+                    if let Some(h) = ps.held.take() {
+                        st.audition_off(h);
+                    }
+                    st.audition_on(ti, n.pitch, n.velocity, n.pan);
+                    ps.held = Some(n.pitch);
+                    ps.held_until = 0.0;
+                    ps.drag = Some(NoteDrag::Move {
+                        grabbed: i,
+                        grab_beats: b,
+                        grab_pitch: p_of(q.y),
+                    });
+                    ps.press_new = true;
                 }
             }
         }
@@ -678,7 +703,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     if resp.drag_started_by(PointerButton::Secondary) {
         ps.before = Some(st.session.clone());
         ps.drag = Some(NoteDrag::Erase);
-    } else if resp.drag_started_by(PointerButton::Primary) {
+    } else if resp.drag_started_by(PointerButton::Primary) && !ps.press_new {
         if let Some(q) = resp.interact_pointer_pos() {
             ps.before = Some(st.session.clone());
             ps.drag = if lane_r.contains(q) {
@@ -924,7 +949,8 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         }
                     }
                     (Tool::Draw, None) => {
-                        if shift {
+                        if shift || ps.press_new {
+                            // Drawn already, on the press.
                             // Shift-click on empty space never draws.
                         } else {
                             let before = st.session.clone();
@@ -950,6 +976,20 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         }
                     }
                 }
+            }
+        }
+    }
+    // A note drawn on the press: done when the button comes up (a drag
+    // that moved it was finished above).
+    if ps.press_new && released {
+        ps.press_new = false;
+        if ps.drag.is_some() {
+            ps.drag = None;
+            ps.box_now = None;
+        }
+        if let Some(b) = ps.before.take() {
+            if b != st.session {
+                st.commit_session("Add note", b);
             }
         }
     }

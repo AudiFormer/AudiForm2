@@ -30,6 +30,9 @@ pub enum HeaderView {
     Effects,
 }
 
+/// One header row (a control line and its spacing).
+const ROW_H: f32 = 22.0;
+
 /// Height of the metronome row.
 pub const METRO_H: f32 = 62.0;
 /// Height of the Master row at the end of the list.
@@ -450,7 +453,10 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                 }
             });
         });
+        // Nothing draws past the header's own rows.
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
         match st.prefs.header_view {
+            HeaderView::Mix if ui.available_height() < ROW_H => {}
             HeaderView::Mix => {
                 ui.horizontal(|ui| {
                     let tr = &mut st.session.tracks[ti];
@@ -497,17 +503,21 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                         }
                     }
                 });
-                if h >= 100.0 {
-                    structural |= strip_options_row(ui, st, ti, &th);
-                }
-                if h >= 60.0 && kind != TrackKind::Bus {
+                // Rows come and go with the track's height, in order of
+                // use, only when a whole row fits (none is ever cut off).
+                let fits = |ui: &egui::Ui| ui.available_height() >= ROW_H;
+                if kind != TrackKind::Bus && fits(ui) {
                     input_row(ui, st, id, &th);
                 }
-                if h >= 80.0 || (kind == TrackKind::Bus && h >= 60.0) {
+                if fits(ui) {
                     structural |= output_row(ui, st, ti, &th);
                 }
-                if h >= 124.0 {
-                    structural |= sends_rows(ui, st, ti, &th, 3);
+                if fits(ui) {
+                    structural |= strip_options_row(ui, st, ti, &th);
+                }
+                let room = (ui.available_height() / ROW_H).floor() as usize;
+                if room >= 2 {
+                    structural |= sends_rows(ui, st, ti, &th, room - 1);
                 }
             }
             HeaderView::Routing => {

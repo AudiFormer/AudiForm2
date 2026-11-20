@@ -38,13 +38,17 @@ pub struct ZoomPrefs {
     /// The plain wheel zooms over the Waveform editor's waveform and
     /// spectrum; off, it scrolls in time there (Ctrl+wheel still zooms).
     pub wheel_zooms_waveform: bool,
+    /// Settings revision, for one-time moves of old defaults.
+    #[serde(default)]
+    pub rev: u32,
 }
 
 impl Default for ZoomPrefs {
     fn default() -> Self {
         ZoomPrefs {
             wheel_anchor: WheelAnchor::Pointer,
-            step_percent: 25.0,
+            step_percent: 60.0,
+            rev: 2,
             wheel_zooms_waveform: true,
         }
     }
@@ -75,7 +79,13 @@ impl ZoomPrefs {
 
     pub fn sanitized(mut self) -> ZoomPrefs {
         if !self.step_percent.is_finite() {
-            self.step_percent = 25.0;
+            self.step_percent = 60.0;
+        }
+        if self.rev < 2 {
+            if (self.step_percent - 25.0).abs() < 0.01 {
+                self.step_percent = 60.0;
+            }
+            self.rev = 2;
         }
         self.step_percent = self.step_percent.clamp(1.0, 100.0);
         self
@@ -286,6 +296,7 @@ pub enum Anchor {
     /// The pointer or the playhead, per the "Wheel zoom centers on" setting.
     Setting,
     /// The middle of the view.
+    #[allow(dead_code)]
     Center,
 }
 
@@ -340,7 +351,7 @@ pub fn wheel_action(r: Region, m: WheelMods, sideways: bool, wheel_zooms: bool) 
     match r {
         Region::Lanes => {
             if m.ctrl {
-                zoom_set
+                A::ScrollTracks
             } else if m.alt && m.shift {
                 A::ZoomAmp
             } else if m.alt {
@@ -348,12 +359,12 @@ pub fn wheel_action(r: Region, m: WheelMods, sideways: bool, wheel_zooms: bool) 
             } else if m.shift || sideways {
                 A::ScrollTime
             } else {
-                A::ScrollTracks
+                zoom_ptr
             }
         }
         Region::Headers => {
             if m.ctrl {
-                A::ZoomTime(Anchor::Center)
+                A::ScrollTracks
             } else if m.alt && m.shift {
                 A::ScaleAllTracks
             } else if m.alt {
@@ -495,7 +506,7 @@ pub const TRACK_MIN_H: f32 = 40.0;
 pub const TRACK_MAX_H: f32 = 600.0;
 /// Each wheel notch over the headers or the track bar, or with Alt over a
 /// track, makes tracks this much taller (or shorter).
-pub const TRACK_WHEEL_STEP: f32 = 1.12;
+pub const TRACK_WHEEL_STEP: f32 = 1.3;
 /// Taller Tracks / Shorter Tracks (keys and buttons).
 pub const TRACK_KEY_STEP: f32 = 1.25;
 /// How long the wheel must rest before a track height change becomes one
@@ -961,12 +972,12 @@ mod tests {
     #[test]
     fn wheel_steps_by_the_percent_setting() {
         let p = ZoomPrefs::default();
-        // One notch in: the length shrinks by 1/1.25; one notch out grows by 1.25.
-        assert!((p.wheel_factor(NOTCH) - 1.0 / 1.25).abs() < 1e-9);
-        assert!((p.wheel_factor(-NOTCH) - 1.25).abs() < 1e-9);
+        // One notch in: the length shrinks by 1/1.6; one notch out grows by 1.6.
+        assert!((p.wheel_factor(NOTCH) - 1.0 / 1.6).abs() < 1e-6);
+        assert!((p.wheel_factor(-NOTCH) - 1.6).abs() < 1e-6);
         // Spread over frames, the parts multiply to one notch.
         let f: f64 = (0..4).map(|_| p.wheel_factor(NOTCH / 4.0)).product();
-        assert!((f - 0.8).abs() < 1e-9);
+        assert!((f - 1.0 / 1.6).abs() < 1e-6);
         // Ctrl+wheel's egui factor maps back to the same points.
         let z = (NOTCH / 200.0).exp();
         assert!((ctrl_points(z) - NOTCH).abs() < 1e-3);
@@ -1318,15 +1329,17 @@ mod tests {
         let alt_shift = m(false, true, true);
         let t = |r, mm, side| wheel_action(r, mm, side, true);
         // Lanes.
-        assert_eq!(t(Lanes, plain, false), A::ScrollTracks);
-        assert_eq!(t(Lanes, ctrl, false), A::ZoomTime(Setting));
+        // Over the tracks the wheel zooms time at the pointer, as over the
+        // ruler; Ctrl scrolls up and down.
+        assert_eq!(t(Lanes, plain, false), A::ZoomTime(Pointer));
+        assert_eq!(t(Lanes, ctrl, false), A::ScrollTracks);
         assert_eq!(t(Lanes, shift, false), A::ScrollTime);
         assert_eq!(t(Lanes, alt, false), A::ResizeOneTrack);
         assert_eq!(t(Lanes, alt_shift, false), A::ZoomAmp);
         assert_eq!(t(Lanes, plain, true), A::ScrollTime);
         // Headers.
         assert_eq!(t(Headers, plain, false), A::ZoomTracksEven);
-        assert_eq!(t(Headers, ctrl, false), A::ZoomTime(Center));
+        assert_eq!(t(Headers, ctrl, false), A::ScrollTracks);
         assert_eq!(t(Headers, shift, false), A::None);
         assert_eq!(t(Headers, alt, false), A::ResizeOneTrack);
         assert_eq!(t(Headers, alt_shift, false), A::ScaleAllTracks);
@@ -1397,8 +1410,8 @@ mod tests {
 
     #[test]
     fn track_heights_step_and_stay_in_limits() {
-        assert!((wheel_height(100.0, 1.0) - 112.0).abs() < 1e-3);
-        assert!((wheel_height(112.0, -1.0) - 100.0).abs() < 1e-3);
+        assert!((wheel_height(100.0, 1.0) - 130.0).abs() < 1e-3);
+        assert!((wheel_height(130.0, -1.0) - 100.0).abs() < 1e-3);
         assert_eq!(wheel_height(590.0, 5.0), TRACK_MAX_H);
         assert_eq!(wheel_height(45.0, -5.0), TRACK_MIN_H);
         assert_eq!(fit_height(400.0, 40.0, 4), 90.0);
