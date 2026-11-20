@@ -18,7 +18,7 @@ use egui::{pos2, vec2, Pos2, RichText, Sense};
 
 use af27_fx::effects::phase_curve::{curve_at, FREQ_KEYS, MAX_POINTS, PHASE_KEYS};
 
-use super::{Env, Fx};
+use super::{layout, Env, Fx};
 use crate::graph::{self, Plot};
 use crate::theme::c;
 
@@ -195,69 +195,99 @@ pub fn panel(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
     if hot.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    // Below the graph.
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!(
-                "Click to add a point (up to {MAX_POINTS}), drag to move it, right-click to remove it."
-            ))
-            .size(10.5)
-            .color(c(th.text_dim)),
-        );
-    });
-    ui.horizontal(|ui| {
-        fx.toggle(ui, "spline", "Spline Curves");
-        if crate::widgets::button(ui, "Reset", false)
-            .on_hover_text("A flat curve at 0°")
-            .clicked()
-        {
-            fx.set("points", 2.0);
-            fx.set(FREQ_KEYS[0], 20.0);
-            fx.set(PHASE_KEYS[0], 0.0);
-            fx.set(FREQ_KEYS[1], 20_000.0);
-            fx.set(PHASE_KEYS[1], 0.0);
-            for i in 2..MAX_POINTS {
-                fx.set(FREQ_KEYS[i], SPREAD[i]);
-                fx.set(PHASE_KEYS[i], 0.0);
-            }
-        }
-    });
-    egui::Grid::new(fx.uid.with("phase-form"))
-        .num_columns(2)
-        .spacing([10.0, 4.0])
-        .show(ui, |ui| {
-            ui.label(RichText::new("Frequency scale").color(c(th.text_dim)));
-            let mut s = usize::from(!linear);
-            if crate::widgets::segmented(ui, &mut s, &["Linear", "Logarithmic"], &[]).changed() {
-                linear = s == 0;
-                ui.ctx().data_mut(|d| d.insert_persisted(scale_id, linear));
-            }
-            ui.end_row();
-            ui.label(RichText::new("Range").color(c(th.text_dim)));
-            fx.choice(ui, "range", &[]);
-            ui.end_row();
-            ui.label(RichText::new("Channel").color(c(th.text_dim)));
-            fx.choice(ui, "channels", &[]);
-            ui.end_row();
-            ui.label(RichText::new("FFT size").color(c(th.text_dim)));
-            if let Some(ctl) = fx.ctl("fft").cloned() {
-                let cur = (fx.get("fft").round().max(0.0) as usize).min(ctl.choices.len() - 1);
-                let mut pick = cur;
-                egui::ComboBox::from_id_salt(fx.uid.with("fft"))
-                    .selected_text(&ctl.choices[cur])
-                    .show_ui(ui, |ui| {
-                        for (k, n) in ctl.choices.iter().enumerate() {
-                            ui.selectable_value(&mut pick, k, n);
+    // Below the graph: how to use it, then the curve's own settings and
+    // how it is shown and worked out, side by side in matching frames.
+    let w = size.x;
+    ui.add_space(layout::GAP_S);
+    layout::note(
+        ui,
+        w,
+        RichText::new(format!(
+            "Click to add a point (up to {MAX_POINTS}), drag to move it, right-click to remove it."
+        ))
+        .size(10.5)
+        .color(c(th.text_dim)),
+    );
+    ui.add_space(layout::GAP_S);
+    let label = |ui: &mut egui::Ui, t: &str| {
+        ui.label(RichText::new(t).color(c(th.text_dim)));
+    };
+    layout::groups(
+        ui,
+        th,
+        w,
+        // As wide as each needs: the channel pick is the widest control.
+        &[("Curve", 240.0), ("Processing", 268.0)],
+        |ui, g| {
+            egui::Grid::new(fx.uid.with(("phase-form", g)))
+                .num_columns(2)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    if g == 0 {
+                        label(ui, "Shape");
+                        ui.horizontal(|ui| {
+                            fx.toggle(ui, "spline", "Spline Curves");
+                            if crate::widgets::button(ui, "Reset", false)
+                                .on_hover_text("A flat curve at 0°")
+                                .clicked()
+                            {
+                                fx.set("points", 2.0);
+                                fx.set(FREQ_KEYS[0], 20.0);
+                                fx.set(PHASE_KEYS[0], 0.0);
+                                fx.set(FREQ_KEYS[1], 20_000.0);
+                                fx.set(PHASE_KEYS[1], 0.0);
+                                for i in 2..MAX_POINTS {
+                                    fx.set(FREQ_KEYS[i], SPREAD[i]);
+                                    fx.set(PHASE_KEYS[i], 0.0);
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        label(ui, "Scale");
+                        let mut s = usize::from(!linear);
+                        if crate::widgets::segmented(ui, &mut s, &["Linear", "Logarithmic"], &[])
+                            .changed()
+                        {
+                            linear = s == 0;
+                            ui.ctx().data_mut(|d| d.insert_persisted(scale_id, linear));
                         }
-                    });
-                if pick != cur {
-                    fx.set("fft", pick as f64);
-                }
-            }
-            ui.end_row();
-        });
+                        ui.end_row();
+                        label(ui, "Range");
+                        fx.choice(ui, "range", &[]);
+                        ui.end_row();
+                    } else {
+                        // Names over the controls: the channel pick is wide.
+                        label(ui, "Channel");
+                        ui.end_row();
+                        fx.choice(ui, "channels", &[]);
+                        ui.end_row();
+                        label(ui, "FFT size");
+                        ui.end_row();
+                        if let Some(ctl) = fx.ctl("fft").cloned() {
+                            let cur = (fx.get("fft").round().max(0.0) as usize)
+                                .min(ctl.choices.len() - 1);
+                            let mut pick = cur;
+                            egui::ComboBox::from_id_salt(fx.uid.with("fft"))
+                                .selected_text(&ctl.choices[cur])
+                                .show_ui(ui, |ui| {
+                                    for (k, n) in ctl.choices.iter().enumerate() {
+                                        ui.selectable_value(&mut pick, k, n);
+                                    }
+                                });
+                            if pick != cur {
+                                fx.set("fft", pick as f64);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+        },
+    );
     if env.spatial {
-        ui.label(
+        ui.add_space(layout::GAP_S);
+        layout::note(
+            ui,
+            w,
             RichText::new("On the speaker bed: the same curve on every speaker pair (the LFE stays as it is, in time).")
                 .size(10.5)
                 .color(c(th.accent_alt)),

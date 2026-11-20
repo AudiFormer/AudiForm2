@@ -9,15 +9,17 @@ use egui::{
     pos2, vec2, Align2, Color32, FontId, Pos2, Rect, RichText, Rounding, Sense, Shape, Stroke,
 };
 
-use super::Env;
+use super::{layout, Env};
 use crate::theme::{c, ca, lerp, Theme};
 
-/// The unit's faceplate: a raised plate with a title strip.
+/// The unit's faceplate: a raised plate with a title strip, `w` wide
+/// inside its margin (the face lays its rows out across `w`).
 pub fn faceplate(
     ui: &mut egui::Ui,
     th: &Theme,
     title: &str,
     sub: &str,
+    w: f32,
     add: impl FnOnce(&mut egui::Ui),
 ) {
     let square = th.bevel.is_some();
@@ -25,8 +27,9 @@ pub fn faceplate(
         .fill(lerp(th.panel_raised, th.background, 0.35))
         .stroke(Stroke::new(1.0_f32, ca(th.border, 220)))
         .rounding(if square { 0.0 } else { 6.0 })
-        .inner_margin(egui::Margin::same(10.0))
+        .inner_margin(egui::Margin::same(layout::GAP))
         .show(ui, |ui| {
+            ui.set_width(w);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(title.to_uppercase())
@@ -44,40 +47,14 @@ pub fn faceplate(
                     );
                 }
             });
-            let r = ui.max_rect();
+            let x = ui.cursor().left();
+            let y = ui.cursor().top();
             ui.painter().line_segment(
-                [
-                    pos2(r.left(), ui.cursor().top()),
-                    pos2(r.right(), ui.cursor().top()),
-                ],
+                [pos2(x, y), pos2(x + w, y)],
                 Stroke::new(1.0_f32, ca(th.accent, 70)),
             );
-            ui.add_space(6.0);
+            ui.add_space(layout::GAP_S);
             ui.vertical(add);
-        });
-}
-
-/// A module on the faceplate: a framed column with a small heading.
-pub fn module(ui: &mut egui::Ui, th: &Theme, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::none()
-        .fill(ca(th.background, 70))
-        .stroke(Stroke::new(1.0_f32, ca(th.border, 150)))
-        .rounding(if th.bevel.is_some() { 0.0 } else { 4.0 })
-        .inner_margin(egui::Margin::symmetric(6.0, 5.0))
-        .show(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(title.to_uppercase())
-                            .size(9.5)
-                            .strong()
-                            .extra_letter_spacing(1.5)
-                            .color(c(th.text_dim)),
-                    )
-                    .extend(),
-                );
-                add(ui);
-            });
         });
 }
 
@@ -216,68 +193,79 @@ pub fn needle(
 /// Input and output bars (dBFS, -60 to 0) from the rack's levels, with a
 /// peak readout under each.
 pub fn io_bars(ui: &mut egui::Ui, env: &Env, height: f32) {
-    let th = &env.th;
-    let (lin, lout) = env.levels.unwrap_or((0.0, 0.0));
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        for (name, v) in [("IN", lin), ("OUT", lout)] {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                let (rect, _) = ui.allocate_exact_size(vec2(16.0, height), Sense::hover());
-                let p = ui.painter();
-                p.rect_filled(rect, Rounding::same(2.0), c(th.wave_background));
-                let db = Env::db(v);
-                let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
-                if f > 0.0 {
-                    let top = rect.bottom() - rect.height() * f;
-                    let mut m = egui::Mesh::default();
-                    let lit = Rect::from_min_max(
-                        pos2(rect.left() + 2.0, top),
-                        rect.right_bottom() - vec2(2.0, 1.0),
-                    );
-                    let tc = if db > -6.0 {
-                        c(th.meter_high)
-                    } else if db > -18.0 {
-                        c(th.meter_mid)
-                    } else {
-                        c(th.meter_low)
-                    };
-                    m.colored_vertex(lit.left_top(), tc);
-                    m.colored_vertex(lit.right_top(), tc);
-                    m.colored_vertex(lit.right_bottom(), c(th.meter_low));
-                    m.colored_vertex(lit.left_bottom(), c(th.meter_low));
-                    m.add_triangle(0, 1, 2);
-                    m.add_triangle(0, 2, 3);
-                    p.add(Shape::mesh(m));
-                }
-                for mark in [0.0, -6.0, -12.0, -24.0, -48.0] {
-                    let y = rect.bottom() - rect.height() * ((mark + 60.0) / 60.0) as f32;
-                    p.line_segment(
-                        [pos2(rect.right(), y), pos2(rect.right() + 3.0, y)],
-                        Stroke::new(1.0_f32, ca(th.text_dim, 140)),
-                    );
-                }
-                p.rect_stroke(
-                    rect,
-                    Rounding::same(2.0),
-                    Stroke::new(1.0_f32, ca(th.border, 220)),
-                );
-                ui.label(RichText::new(name).size(9.0).color(c(th.text_dim)));
-                ui.label(
-                    RichText::new(if db <= -89.0 {
-                        "-∞".to_string()
-                    } else {
-                        format!("{db:.0}")
-                    })
-                    .size(9.0)
-                    .monospace()
-                    .color(c(th.accent)),
-                );
-            });
+        level_bar(ui, env, false, height);
+        level_bar(ui, env, true, height);
+    });
+}
+
+/// The rack's input (or, `out`, output) bar with its name and peak under
+/// it, for a face that puts the input on one side and the output on the
+/// other.
+pub fn level_bar(ui: &mut egui::Ui, env: &Env, out: bool, height: f32) {
+    let th = &env.th;
+    let (lin, lout) = env.levels.unwrap_or((0.0, 0.0));
+    let (name, v) = if out { ("OUT", lout) } else { ("IN", lin) };
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(16.0, height), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, Rounding::same(2.0), c(th.wave_background));
+        let db = Env::db(v);
+        let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+        if f > 0.0 {
+            let top = rect.bottom() - rect.height() * f;
+            let mut m = egui::Mesh::default();
+            let lit = Rect::from_min_max(
+                pos2(rect.left() + 2.0, top),
+                rect.right_bottom() - vec2(2.0, 1.0),
+            );
+            let tc = if db > -6.0 {
+                c(th.meter_high)
+            } else if db > -18.0 {
+                c(th.meter_mid)
+            } else {
+                c(th.meter_low)
+            };
+            m.colored_vertex(lit.left_top(), tc);
+            m.colored_vertex(lit.right_top(), tc);
+            m.colored_vertex(lit.right_bottom(), c(th.meter_low));
+            m.colored_vertex(lit.left_bottom(), c(th.meter_low));
+            m.add_triangle(0, 1, 2);
+            m.add_triangle(0, 2, 3);
+            p.add(Shape::mesh(m));
         }
+        for mark in [0.0, -6.0, -12.0, -24.0, -48.0] {
+            let y = rect.bottom() - rect.height() * ((mark + 60.0) / 60.0) as f32;
+            p.line_segment(
+                [pos2(rect.right(), y), pos2(rect.right() + 3.0, y)],
+                Stroke::new(1.0_f32, ca(th.text_dim, 140)),
+            );
+        }
+        p.rect_stroke(
+            rect,
+            Rounding::same(2.0),
+            Stroke::new(1.0_f32, ca(th.border, 220)),
+        );
+        ui.label(RichText::new(name).size(9.0).color(c(th.text_dim)));
+        ui.label(
+            RichText::new(if db <= -89.0 {
+                "-∞".to_string()
+            } else {
+                format!("{db:.0}")
+            })
+            .size(9.0)
+            .monospace()
+            .color(c(th.accent)),
+        );
     })
     .response
-    .on_hover_text("The rack's input and output (dBFS)");
+    .on_hover_text(if out {
+        "The rack's output (dBFS)"
+    } else {
+        "The rack's input (dBFS)"
+    });
 }
 
 /// A transfer graph: input level across, output level up (both -60 to
