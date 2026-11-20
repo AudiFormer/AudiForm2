@@ -212,6 +212,15 @@ fn processes_with_latency_gain_changes_and_long_blocks() {
     q.process(&impulse(256, 10), None, &[], &mut out, &mut bytes, t)
         .unwrap();
     assert!((peak_at(&out).1 - 1.5).abs() < 1e-6, "restored 1.5x");
+    // Settings given to a running copy (an undo, a .vstpreset) take hold.
+    let blob = af27_vst3::protocol::join_state(&0.125f64.to_le_bytes(), b"ctrl");
+    let preset = af27_vst3::presets::build(&gain.cid, &blob);
+    let (_, back) = af27_vst3::presets::parse(&preset).unwrap();
+    q.set_state(&af27_vst3::protocol::base64_encode(&back))
+        .unwrap();
+    q.process(&impulse(256, 10), None, &[], &mut out, &mut bytes, t)
+        .unwrap();
+    assert!((peak_at(&out).1 - 0.25).abs() < 1e-6, "preset 0.25x");
     // Two plug-ins in one process.
     let k = Plug::load(&conn, &bundle(), &gain.cid, 48_000, None, vec![(0, 0.5)]).unwrap();
     k.process(&impulse(256, 10), None, &[], &mut out, &mut bytes, t)

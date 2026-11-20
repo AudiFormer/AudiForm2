@@ -38,6 +38,8 @@ struct Ui {
     synced_version: u64,
     filter: HashMap<String, String>,
     new_folder: String,
+    /// `.vstpreset` files per plug-in, read when its window first shows.
+    presets: HashMap<String, Vec<PathBuf>>,
 }
 
 thread_local! {
@@ -294,6 +296,7 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
             ui.label(RichText::new("No window of its own").color(c(th.text_dim)));
         }
     });
+    presets_row(ui, st, target, i, &slot, &f, inst.as_ref());
     if let Some(inst) = &inst {
         let own = inst.plugin_latency();
         let text = if inst.offline || inst.pipeline == 0 {
@@ -405,6 +408,106 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
     }
     if released {
         st.gesture = false;
+    }
+}
+
+/// Loads a `.vstpreset` into a slot (undoable) and the running plug-in.
+fn load_preset(st: &mut State, target: u16, i: usize, path: &std::path::Path) {
+    let Some(slot) = slot_at(st, target, i) else {
+        return;
+    };
+    match af27_vst3::presets::read(path) {
+        Ok((pcid, blob)) if af27_vst3::presets::matches(&pcid, cid(&slot.effect)) => {
+            let b64 = af27_vst3::protocol::base64_encode(&blob);
+            let before = st.session.clone();
+            edit_slot(st, target, i, |d| d.state = Some(b64.clone()));
+            if target != crate::rack::FILE {
+                st.commit_live("Load Preset", before);
+            }
+            if let Some(inst) = manager().get(&slot.plugin_data().inst) {
+                inst.push_state(&b64);
+            }
+        }
+        Ok(_) => st.toast("That preset is for another plug-in."),
+        Err(e) => st.toast(format!("The preset could not be read: {e}")),
+    }
+}
+
+fn presets_row(
+    ui: &mut egui::Ui,
+    st: &mut State,
+    target: u16,
+    i: usize,
+    slot: &EffectSlot,
+    f: &Found,
+    inst: Option<&Arc<Instance>>,
+) {
+    let id = f.info.cid.clone();
+    let list = UI.with(|u| {
+        u.borrow_mut()
+            .presets
+            .entry(id.clone())
+            .or_insert_with(|| af27_vst3::presets::list(&id))
+            .clone()
+    });
+    let mut load: Option<PathBuf> = None;
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(("vst-preset", target, i))
+            .selected_text("Presets")
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                if list.is_empty() {
+                    ui.label("No presets found.");
+                }
+                for p in &list {
+                    let name = p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if ui.selectable_label(false, name).clicked() {
+                        load = Some(p.clone());
+                    }
+                }
+            });
+        if ui.small_button("Load...").clicked() {
+            let mut dlg = rfd::FileDialog::new().add_filter("VST3 preset", &["vstpreset"]);
+            if let Some(d) = af27_vst3::presets::user_folder(&f.maker(), &f.info.name) {
+                dlg = dlg.set_directory(d);
+            }
+            load = dlg.pick_file();
+        }
+        if ui
+            .small_button("Save...")
+            .on_hover_text("Save the plug-in's settings as a .vstpreset")
+            .clicked()
+        {
+            let state = inst
+                .and_then(|x| x.state_now())
+                .or_else(|| slot.plugin_data().state);
+            match state.and_then(|s| af27_vst3::protocol::base64_decode(&s)) {
+                Some(blob) => {
+                    let mut dlg = rfd::FileDialog::new()
+                        .add_filter("VST3 preset", &["vstpreset"])
+                        .set_file_name(format!("{}.vstpreset", f.info.name));
+                    if let Some(d) = af27_vst3::presets::user_folder(&f.maker(), &f.info.name) {
+                        let _ = std::fs::create_dir_all(&d);
+                        dlg = dlg.set_directory(d);
+                    }
+                    if let Some(p) = dlg.save_file() {
+                        match af27_vst3::presets::save(&p, &f.info.cid, &blob) {
+                            Ok(()) => {
+                                UI.with(|u| u.borrow_mut().presets.remove(&id));
+                            }
+                            Err(e) => st.toast(format!("The preset could not be saved: {e}")),
+                        }
+                    }
+                }
+                None => st.toast("The plug-in has no settings to save yet."),
+            }
+        }
+    });
+    if let Some(p) = load {
+        load_preset(st, target, i, &p);
     }
 }
 
@@ -548,6 +651,17 @@ pub fn tick(st: &mut State) {
                 }
             }
             Notice::Error(e) => st.toast(e),
+            Notice::Space(record) => {
+                if record {
+                    if st.is_recording() {
+                        st.stop_recording();
+                    } else {
+                        st.start_recording();
+                    }
+                } else {
+                    st.toggle_play();
+                }
+            }
             Notice::Latency(_) | Notice::BeginEdit(_) | Notice::Started => {}
         }
     }

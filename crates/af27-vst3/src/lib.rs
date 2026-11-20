@@ -19,6 +19,7 @@
 pub mod client;
 pub mod host;
 pub mod live;
+pub mod presets;
 pub mod protocol;
 pub mod registry;
 

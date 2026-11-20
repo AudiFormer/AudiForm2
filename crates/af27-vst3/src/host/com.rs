@@ -35,6 +35,8 @@ pub enum Edit {
     Resize(i32, i32),
     EditorClosed,
     Bypass(bool),
+    /// Space in the plug-in's window, outside a text box (Shift: record).
+    Space(bool),
 }
 
 pub type Edits = Arc<Mutex<Vec<Edit>>>;

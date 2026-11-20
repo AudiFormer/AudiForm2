@@ -44,6 +44,8 @@ pub enum Event {
     Dirty,
     EditorClosed,
     BypassPicked(bool),
+    /// Space in its window (true: Shift+Space, record).
+    Space(bool),
     /// The plug-in stopped (crashed, hung); the reason in words.
     Stopped(String),
 }
@@ -146,6 +148,7 @@ impl Conn {
                                     Message::BypassPicked { bypassed } => {
                                         Event::BypassPicked(bypassed)
                                     }
+                                    Message::SpacePressed { record } => Event::Space(record),
                                     _ => continue,
                                 };
                                 if let Some(r) = routes.lock().unwrap().get(&f.id) {

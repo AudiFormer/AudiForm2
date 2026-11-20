@@ -224,6 +224,7 @@ version = "0.1.0"
 dependencies = [
  "af27-core",
  "af27-dsp",
+ "af27-engine",
  "rtrb",
  "serde",
  "serde_json",

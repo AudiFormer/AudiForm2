@@ -234,6 +234,10 @@ pub enum Message {
     BypassPicked {
         bypassed: bool,
     },
+    /// Space pressed in the plug-in's window (Shift+Space: record).
+    SpacePressed {
+        record: bool,
+    },
 }
 
 /// A control frame's JSON: a request id plus the request or message.

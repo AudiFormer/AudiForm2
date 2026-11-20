@@ -180,6 +180,7 @@ fn main_loop(out: Out, rx: mpsc::Receiver<ToMain>, audio_tx: mpsc::Sender<(u32, 
                         Message::EditorClosed
                     }
                     Edit::Bypass(b) => Message::BypassPicked { bypassed: b },
+                    Edit::Space(record) => Message::SpacePressed { record },
                 };
                 reply(&out, id, 0, &m);
             }

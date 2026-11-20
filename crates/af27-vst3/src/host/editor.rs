@@ -485,10 +485,45 @@ mod win {
         unsafe {
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                if space_for_app(&msg) {
+                    continue;
+                }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
+    }
+
+    /// Space (no Ctrl or Alt) in a plug-in window, outside a text box,
+    /// plays or stops the app instead: reported, and kept from the plug-in.
+    unsafe fn space_for_app(msg: &MSG) -> bool {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT, VK_SPACE,
+        };
+        let key = matches!(msg.message, WM_KEYDOWN | WM_KEYUP) && msg.wParam == VK_SPACE as usize;
+        let ch = msg.message == WM_CHAR && msg.wParam == ' ' as usize;
+        if !key && !ch {
+            return false;
+        }
+        if GetKeyState(VK_CONTROL as i32) < 0 || GetKeyState(VK_MENU as i32) < 0 {
+            return false;
+        }
+        let root = GetAncestor(msg.hwnd, GA_ROOT);
+        let Some(st) = (if root.is_null() { None } else { state_of(root) }) else {
+            return false;
+        };
+        let mut class = [0u16; 64];
+        let n = GetClassNameW(msg.hwnd, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
+        let name = String::from_utf16_lossy(&class[..n]).to_ascii_lowercase();
+        if name.contains("edit") || name.contains("text") {
+            return false;
+        }
+        if msg.message == WM_KEYDOWN && (msg.lParam >> 30) & 1 == 0 {
+            if let Ok(mut e) = st.edits.lock() {
+                e.push(Edit::Space(GetKeyState(VK_SHIFT as i32) < 0));
+            }
+        }
+        true
     }
 }
 

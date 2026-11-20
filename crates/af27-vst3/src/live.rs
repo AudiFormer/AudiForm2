@@ -303,6 +303,8 @@ pub enum Notice {
     Latency(u32),
     EditorClosed,
     BypassPicked(bool),
+    /// Space in the plug-in's window: play or stop (true: record).
+    Space(bool),
     Started,
     Stopped(String),
     /// A request (opening the window) failed.
@@ -426,6 +428,7 @@ impl Instance {
                     Notice::EditorClosed
                 }
                 Event::BypassPicked(b) => Notice::BypassPicked(b),
+                Event::Space(r) => Notice::Space(r),
                 Event::Stopped(why) => {
                     self.editor_open.store(false, Ordering::Relaxed);
                     *self.status.lock().unwrap() = Status::Stopped(why.clone());
