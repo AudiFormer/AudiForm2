@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Audiform27
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) The Audiform27 contributors.
 
 //! Ogg Opus reading (RFC 7845) with the pure-Rust `opus-pure` decoder

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Audiform27
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) The Audiform27 contributors.
 // Ported from Audiform's Phase Wheel ring (engine/scope.rs), written by
 // its author (nwh212) for Audiform and relicensed here by them.

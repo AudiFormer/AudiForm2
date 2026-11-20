@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Audiform27
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) The Audiform27 contributors.
 
 //! A stand-alone plug-in host, for this crate's tests. The app hosts

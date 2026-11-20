@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Audiform27
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) The Audiform27 contributors.
 
 //! The mix graph, run in blocks of up to [`BLOCK`] frames on the audio

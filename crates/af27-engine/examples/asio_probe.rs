@@ -11,7 +11,10 @@ fn main() {
     };
     match af27_engine::Engine::open(&choice) {
         Ok(e) => {
-            println!("opened: {} @ {} Hz, buffer {:?}", e.device, e.rate, e.buffer);
+            println!(
+                "opened: {} @ {} Hz, buffer {:?}",
+                e.device, e.rate, e.buffer
+            );
             std::thread::sleep(std::time::Duration::from_secs(2));
             println!("lost after 2 s: {}", e.is_lost());
         }
