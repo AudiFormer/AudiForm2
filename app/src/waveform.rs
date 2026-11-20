@@ -54,7 +54,32 @@ pub fn draw_channel(
     tint: Option<[u8; 3]>,
     amp: f32,
 ) {
+    draw_channel_gained(p, rect, data, peaks, ch, rate, v, th, tint, amp, None);
+}
+
+/// [`draw_channel`] with a level applied as it draws: `gain(x)` scales
+/// the samples drawn at screen x (a clip's gain and volume line), so the
+/// picture is what plays. The peaks stay as cached; only the drawing
+/// scales, clipped at the lane's edges.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_channel_gained(
+    p: &egui::Painter,
+    rect: Rect,
+    data: &[f32],
+    peaks: &Peaks,
+    ch: usize,
+    rate: u32,
+    v: &View,
+    th: &Theme,
+    tint: Option<[u8; 3]>,
+    amp: f32,
+    gain: Option<&dyn Fn(f32) -> f32>,
+) {
     let amp = amp.clamp(1.0, crate::zoom::MAX_AMP);
+    let amp_at = |x: f32| match gain {
+        Some(g) => amp * g(x).max(0.0),
+        None => amp,
+    };
     let mid = rect.center().y;
     let half = rect.height() * 0.46;
     let w = rect.width().max(1.0) as usize;
@@ -79,8 +104,9 @@ pub fn draw_channel(
         let pts: Vec<Pos2> = (a..b)
             .map(|i| {
                 let t = i as f64 / rate as f64;
-                let s = (data[i] * amp).clamp(-1.08, 1.08);
-                pos2(time_to_x(v, rect, t), mid - s * half)
+                let x = time_to_x(v, rect, t);
+                let s = (data[i] * amp_at(x)).clamp(-1.08, 1.08);
+                pos2(x, mid - s * half)
             })
             .collect();
         // The glow only once samples are spread out (dense lines cost a
@@ -154,8 +180,9 @@ pub fn draw_channel(
             break;
         }
         let (lo, hi) = peaks.range(data, ch, s0, s1);
-        let (lo, hi) = (lo * amp, hi * amp);
         let xf = rect.left() + x as f32;
+        let a = amp_at(xf + 0.5);
+        let (lo, hi) = (lo * a, hi * a);
         let yt = mid - hi.clamp(-1.0, 1.0) * half;
         let yb = mid - lo.clamp(-1.0, 1.0) * half;
         let level = hi.abs().max(lo.abs()).min(1.0);
