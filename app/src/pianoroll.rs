@@ -1228,6 +1228,8 @@ pub fn new_clip(st: &mut State, track: af27_core::TrackId, beats: f64) {
             length,
             notes: Vec::new(),
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         st.piano_clip = Some(id);

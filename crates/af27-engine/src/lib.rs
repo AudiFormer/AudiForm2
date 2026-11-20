@@ -1247,6 +1247,8 @@ mod tests {
             bus,
             level_db: 0.0,
             pre_fader: true,
+            pan: 0.0,
+            enabled: true,
             ext_id: None,
         });
         let b2 = buf.clone();
@@ -1556,6 +1558,8 @@ mod tests {
                 pan: 0.0,
             }],
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         let out = render(mix_program(&s, &|_| None, 48_000), 48_000, 0.0, 1.0);
@@ -1592,6 +1596,8 @@ mod tests {
                 pan: 0.0,
             }],
             muted: false,
+            gain_db: 0.0,
+            controls: Vec::new(),
             ext_id: None,
         });
         let rate = 8_000;
@@ -1688,6 +1694,8 @@ mod bench {
                 bus: if k % 2 == 0 { verb_a } else { verb_b },
                 level_db: -12.0,
                 pre_fader: false,
+                pan: 0.0,
+                enabled: true,
                 ext_id: None,
             });
         }

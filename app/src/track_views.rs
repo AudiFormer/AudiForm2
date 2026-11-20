@@ -650,6 +650,8 @@ fn sends_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, room: us
                                 bus: *id,
                                 level_db: 0.0,
                                 pre_fader: false,
+                                pan: 0.0,
+                                enabled: true,
                                 ext_id: None,
                             });
                             changed = true;

@@ -300,6 +300,8 @@ mod tests {
             bus,
             level_db: 0.0,
             pre_fader: false,
+            pan: 0.0,
+            enabled: true,
             ext_id: None,
         });
         s.delete_track(bus);

@@ -29,7 +29,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use af27_core::midi::{MidiClip, MidiNote, SoundFontRef, TempoChange};
+use af27_core::automation::{AutomationMode, Curve, Lane, LanePoint, LaneTarget};
+use af27_core::midi::{ControlEvent, MidiClip, MidiNote, SoundFontRef, TempoChange};
 use af27_core::session::{
     Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session, StretchKind,
     StretchMode, TrackId, TrackKind,
@@ -332,6 +333,344 @@ fn resolve_sidechains(chain: &mut [EffectSlot], v: &Value, by_uuid: &HashMap<Str
     }
 }
 
+/// The fields of a track or bus object Audiform27 reads (also used to
+/// tell, on saving, which of them changed since the file was read).
+#[derive(Debug, Clone, PartialEq)]
+struct Strip {
+    volume_db: f32,
+    pan: f32,
+    muted: bool,
+    solo: bool,
+    mono: bool,
+    polarity: bool,
+    solo_safe: bool,
+    automation: AutomationMode,
+    show_lanes: bool,
+}
+
+fn strip_from(t: &Value) -> Strip {
+    let flag = |k: &str| t[k].as_bool().unwrap_or(false);
+    Strip {
+        volume_db: t["volume_db"].as_f64().unwrap_or(0.0) as f32,
+        // Audiform pans -100..100; Audiform27 -1..1.
+        pan: (t["pan"].as_f64().unwrap_or(0.0) / 100.0).clamp(-1.0, 1.0) as f32,
+        muted: flag("muted"),
+        solo: flag("solo"),
+        mono: flag("mono"),
+        polarity: flag("polarity_inverted"),
+        solo_safe: flag("af27_solo_safe"),
+        automation: t
+            .get("automation_mode")
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
+            .unwrap_or_default(),
+        show_lanes: flag("show_automation"),
+    }
+}
+
+/// Writes the strip fields that differ from what `o` (the original, or
+/// an empty object for a new one) already says. Required fields are
+/// always present; optional ones Audiform leaves out at their default.
+fn write_strip(o: &mut Map<String, Value>, now: &Strip, is_bus: bool) {
+    let was = strip_from(&Value::Object(o.clone()));
+    let fresh = !o.contains_key("volume_db");
+    if fresh || now.volume_db != was.volume_db {
+        put_f32(o, "volume_db", now.volume_db);
+    }
+    if fresh || now.pan != was.pan {
+        put_f32(o, "pan", now.pan * 100.0);
+    }
+    for (key, n, w) in [
+        ("muted", now.muted, was.muted),
+        ("solo", now.solo, was.solo),
+    ] {
+        if fresh || n != w {
+            o.insert(key.into(), json!(n));
+        }
+    }
+    let mut optional = vec![
+        ("mono", now.mono, was.mono),
+        ("af27_solo_safe", now.solo_safe, was.solo_safe),
+    ];
+    if !is_bus {
+        optional.push(("polarity_inverted", now.polarity, was.polarity));
+        optional.push(("show_automation", now.show_lanes, was.show_lanes));
+    }
+    for (key, n, w) in optional {
+        if n != w {
+            if n {
+                o.insert(key.into(), json!(true));
+            } else {
+                o.remove(key);
+            }
+        }
+    }
+    if now.automation != was.automation {
+        if now.automation == AutomationMode::Read {
+            o.remove("automation_mode");
+        } else {
+            o.insert(
+                "automation_mode".into(),
+                serde_json::to_value(now.automation).unwrap_or(Value::Null),
+            );
+        }
+    }
+}
+
+/// An f32 setting as the shortest decimal that reads back the same.
+fn put_f32(o: &mut Map<String, Value>, key: &str, v: f32) {
+    let x: f64 = format!("{v}").parse().unwrap_or(v as f64);
+    o.insert(key.into(), json!(x));
+}
+
+/// The param index of `key` in the effect `slot_id` names in `chain`.
+fn param_index(chain: &[EffectSlot], slot_id: &str, key: &str) -> usize {
+    let Some(slot) = chain.iter().find(|s| s.ext_id.as_deref() == Some(slot_id)) else {
+        return usize::MAX;
+    };
+    if let Some(info) = af27_fx::info(&slot.effect) {
+        if let Some(i) = info.params.iter().position(|p| p.key == key) {
+            return i;
+        }
+    }
+    key.strip_prefix("values.")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(usize::MAX)
+}
+
+/// A track's, bus's or the master's automation lanes. Positions are
+/// session samples; pan lanes hold -100..100.
+fn lanes_from(envs: &Value, rate: f64, chain: &[EffectSlot]) -> Vec<Lane> {
+    let pan = |t: &LaneTarget, v: f64| {
+        if *t == LaneTarget::Pan {
+            v / 100.0
+        } else {
+            v
+        }
+    };
+    envs.as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| {
+            let tg = &e["target"];
+            let target = match tg["type"].as_str() {
+                Some("volume") => LaneTarget::Volume,
+                Some("pan") => LaneTarget::Pan,
+                Some("effect_param") => {
+                    let slot = tg["slot_id"].as_str().unwrap_or_default().to_string();
+                    let key = tg["param"].as_str().unwrap_or_default().to_string();
+                    LaneTarget::Effect {
+                        param: param_index(chain, &slot, &key),
+                        slot,
+                        key: Some(key),
+                    }
+                }
+                _ => LaneTarget::Space(tg["param"].as_str().unwrap_or_default().to_string()),
+            };
+            let points = e["points"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| LanePoint {
+                    time: p["position"].as_f64().unwrap_or(0.0) / rate,
+                    value: pan(&target, p["value"].as_f64().unwrap_or(0.0)),
+                    curve: match p["curve"].as_str() {
+                        Some("hold") => Curve::Hold,
+                        Some("spline") => Curve::Spline,
+                        _ => Curve::Linear,
+                    },
+                })
+                .collect();
+            Lane {
+                enabled: e["enabled"].as_bool().unwrap_or(true),
+                points,
+                height: e["height"].as_u64().map(|h| h as u32),
+                ext_id: e["id"].as_str().map(str::to_string),
+                target,
+            }
+        })
+        .collect()
+}
+
+/// Writes lanes back as envelopes, unless they read the same as `base`
+/// (then `base` is kept as it was).
+fn lanes_to(lanes: &mut [Lane], base: Option<&Value>, rate: f64, chain: &[EffectSlot]) -> Value {
+    if let Some(b) = base.filter(|b| b.is_array()) {
+        if lanes_from(b, rate, chain) == lanes {
+            return b.clone();
+        }
+    }
+    let base_list = base.and_then(Value::as_array);
+    Value::Array(
+        lanes
+            .iter_mut()
+            .map(|l| {
+                let mut o = obj(by_id(base_list, l.ext_id.as_deref())
+                    .cloned()
+                    .unwrap_or(Value::Null));
+                o.insert(
+                    "id".into(),
+                    json!(l.ext_id.get_or_insert_with(new_uuid).clone()),
+                );
+                let target = match &l.target {
+                    LaneTarget::Volume => json!({"type": "volume"}),
+                    LaneTarget::Pan => json!({"type": "pan"}),
+                    LaneTarget::Effect { slot, param, key } => json!({
+                        "type": "effect_param",
+                        "slot_id": slot,
+                        "param": key.clone().unwrap_or_else(|| format!("values.{param}")),
+                    }),
+                    LaneTarget::Space(p) => json!({"type": "space", "param": p}),
+                };
+                o.insert("target".into(), target);
+                o.insert("enabled".into(), json!(l.enabled));
+                let scale = if l.target == LaneTarget::Pan {
+                    100.0
+                } else {
+                    1.0
+                };
+                let points: Vec<Value> = l
+                    .points
+                    .iter()
+                    .map(|p| {
+                        json!({
+                            "position": (p.time * rate).round().max(0.0) as u64,
+                            "value": (p.value * scale * 1e9).round() / 1e9,
+                            "curve": match p.curve {
+                                Curve::Linear => "linear",
+                                Curve::Hold => "hold",
+                                Curve::Spline => "spline",
+                            },
+                        })
+                    })
+                    .collect();
+                o.insert("points".into(), Value::Array(points));
+                match l.height {
+                    Some(h) => o.insert("height".into(), json!(h)),
+                    None => o.insert("height".into(), Value::Null),
+                };
+                Value::Object(o)
+            })
+            .collect(),
+    )
+}
+
+/// A MIDI clip as the file has it.
+fn midi_clip_from(m: &Value, id: u64) -> MidiClip {
+    MidiClip {
+        id,
+        name: m["name"].as_str().unwrap_or("MIDI").to_string(),
+        start: m["start"].as_f64().unwrap_or(0.0),
+        length: m["length"].as_f64().unwrap_or(4.0),
+        notes: m["notes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|n| MidiNote {
+                pitch: n["pitch"].as_u64().unwrap_or(60).min(127) as u8,
+                start: n["start"].as_f64().unwrap_or(0.0),
+                length: n["length"].as_f64().unwrap_or(1.0),
+                velocity: n["velocity"].as_u64().unwrap_or(100).clamp(1, 127) as u8,
+                channel: n["channel"].as_u64().unwrap_or(0).min(15) as u8,
+                pan: n["pan"].as_f64().unwrap_or(0.0) as f32,
+            })
+            .collect(),
+        muted: m["muted"].as_bool().unwrap_or(false),
+        gain_db: m["gain_db"].as_f64().unwrap_or(0.0) as f32,
+        controls: m["controls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| ControlEvent {
+                at: c["at"].as_f64().unwrap_or(0.0),
+                controller: c["controller"].as_u64().unwrap_or(0).min(129) as u8,
+                value: c["value"].as_f64().unwrap_or(0.0) as f32,
+                channel: c["channel"].as_u64().unwrap_or(0).min(15) as u8,
+            })
+            .collect(),
+        ext_id: m["id"].as_str().map(str::to_string),
+    }
+}
+
+/// Writes the MIDI clip fields that differ from what `mo` (the original
+/// clip, or a new one) already says. Notes and controller moves are
+/// written as Audiform writes them: channel and pan left out at 0.
+fn write_midi_clip(mo: &mut Map<String, Value>, m: &MidiClip) {
+    let fresh = !mo.contains_key("notes");
+    let was = midi_clip_from(&Value::Object(mo.clone()), m.id);
+    if fresh || was.name != m.name {
+        mo.insert("name".into(), json!(m.name));
+    }
+    if fresh || was.start != m.start {
+        mo.insert("start".into(), json!(m.start));
+    }
+    if fresh || was.length != m.length {
+        mo.insert("length".into(), json!(m.length));
+    }
+    if fresh || was.muted != m.muted {
+        mo.insert("muted".into(), json!(m.muted));
+    }
+    if was.gain_db != m.gain_db {
+        put_f32(mo, "gain_db", m.gain_db);
+    }
+    if fresh || was.notes != m.notes {
+        let notes = m
+            .notes
+            .iter()
+            .map(|n| {
+                let mut no = Map::new();
+                no.insert("pitch".into(), json!(n.pitch));
+                no.insert("velocity".into(), json!(n.velocity));
+                no.insert("start".into(), json!(n.start));
+                no.insert("length".into(), json!(n.length));
+                if n.channel != 0 {
+                    no.insert("channel".into(), json!(n.channel));
+                }
+                if n.pan != 0.0 {
+                    put_f32(&mut no, "pan", n.pan);
+                }
+                Value::Object(no)
+            })
+            .collect();
+        mo.insert("notes".into(), Value::Array(notes));
+    }
+    if was.controls != m.controls {
+        if m.controls.is_empty() {
+            mo.remove("controls");
+        } else {
+            let list = m
+                .controls
+                .iter()
+                .map(|c| {
+                    let mut co = Map::new();
+                    co.insert("at".into(), json!(c.at));
+                    co.insert("controller".into(), json!(c.controller));
+                    put_f32(&mut co, "value", c.value);
+                    co.insert("channel".into(), json!(c.channel));
+                    Value::Object(co)
+                })
+                .collect();
+            mo.insert("controls".into(), Value::Array(list));
+        }
+    }
+}
+
+/// Puts buses where `position` says among the tracks (below that many
+/// tracks); a bus with none, or past the last track, goes at the end.
+fn place_buses(s: &mut Session, positions: &HashMap<TrackId, u32>) {
+    let (buses, tracks): (Vec<_>, Vec<_>) = std::mem::take(&mut s.tracks)
+        .into_iter()
+        .partition(|t| t.kind == TrackKind::Bus);
+    let n = tracks.len();
+    let pos = |b: &af27_core::Track| positions.get(&b.id).map_or(n, |&p| (p as usize).min(n));
+    let mut out = Vec::with_capacity(n + buses.len());
+    for (k, t) in tracks.into_iter().enumerate() {
+        out.extend(buses.iter().filter(|b| pos(b) == k).cloned());
+        out.push(t);
+    }
+    out.extend(buses.iter().filter(|b| pos(b) == n).cloned());
+    s.tracks = out;
+}
+
 fn chain_from(v: &Value) -> Vec<EffectSlot> {
     v["slots"]
         .as_array()
@@ -401,6 +740,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
     let mut pending: Vec<(u64, Value)> = Vec::new();
     let mut silent_fx = 0usize;
     let mut envelopes = 0usize;
+    let mut bus_pos: HashMap<TrackId, u32> = HashMap::new();
     let lists = [
         (v["tracks"].as_array(), false),
         (v["buses"].as_array(), true),
@@ -459,27 +799,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|m| MidiClip {
-                    id: out.alloc_id(),
-                    name: m["name"].as_str().unwrap_or("MIDI").to_string(),
-                    start: m["start"].as_f64().unwrap_or(0.0),
-                    length: m["length"].as_f64().unwrap_or(4.0),
-                    notes: m["notes"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|n| MidiNote {
-                            pitch: n["pitch"].as_u64().unwrap_or(60).min(127) as u8,
-                            start: n["start"].as_f64().unwrap_or(0.0),
-                            length: n["length"].as_f64().unwrap_or(1.0),
-                            velocity: n["velocity"].as_u64().unwrap_or(100).clamp(1, 127) as u8,
-                            channel: n["channel"].as_u64().unwrap_or(0).min(15) as u8,
-                            pan: n["pan"].as_f64().unwrap_or(0.0) as f32,
-                        })
-                        .collect(),
-                    muted: m["muted"].as_bool().unwrap_or(false),
-                    ext_id: m["id"].as_str().map(str::to_string),
-                })
+                .map(|m| midi_clip_from(m, out.alloc_id()))
                 .collect();
             let chain = chain_from(&t["effects"]);
             silent_fx += chain
@@ -491,13 +811,21 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                         && af27_fx::info(&s.effect).is_none()
                 })
                 .count();
-            envelopes += t["envelopes"].as_array().map_or(0, Vec::len);
             let tr = out.track_mut(tid).unwrap();
             tr.name = t["name"].as_str().unwrap_or("Track").to_string();
-            tr.volume_db = t["volume_db"].as_f64().unwrap_or(0.0) as f32;
-            tr.pan = t["pan"].as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32;
-            tr.mute = t["muted"].as_bool().unwrap_or(false);
-            tr.solo = t["solo"].as_bool().unwrap_or(false);
+            let sf = strip_from(t);
+            tr.volume_db = sf.volume_db;
+            tr.pan = sf.pan;
+            tr.mute = sf.muted;
+            tr.solo = sf.solo;
+            tr.mono = sf.mono;
+            tr.polarity = sf.polarity;
+            tr.solo_safe = sf.solo_safe;
+            tr.automation = sf.automation;
+            tr.show_lanes = sf.show_lanes;
+            if kind == TrackKind::Midi {
+                tr.midi_in = t["input"].as_str().map(str::to_string);
+            }
             tr.armed = t["record_armed"].as_bool().unwrap_or(false);
             if let Some(h) = t["height"].as_f64() {
                 tr.height = (h as f32).max(40.0);
@@ -546,13 +874,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
             .filter_map(|s| {
                 Some(Send {
                     bus: *by_uuid.get(s["bus_id"].as_str()?)?,
-                    level_db: if s["enabled"].as_bool().unwrap_or(true) {
-                        s["level_db"].as_f64().unwrap_or(0.0) as f32
-                    } else {
-                        -120.0
-                    },
-                    pre_fader: s["pre_fader"].as_bool().unwrap_or(false),
-                    ext_id: s["id"].as_str().map(str::to_string),
+                    ..send_from(s)
                 })
             })
             .collect();
@@ -560,11 +882,17 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
         tr.output = output;
         tr.sends = sends;
         resolve_sidechains(&mut tr.chain, &t["effects"], &by_uuid);
+        tr.lanes = lanes_from(&t["envelopes"], rate as f64, &tr.chain);
+        if let Some(p) = t["position"].as_u64().filter(|_| tr.kind == TrackKind::Bus) {
+            bus_pos.insert(tid, p as u32);
+        }
     }
+    place_buses(&mut out, &bus_pos);
     out.master_db = v["master"]["volume_db"].as_f64().unwrap_or(0.0) as f32;
     out.master_chain = chain_from(&v["master"]["effects"]);
     out.master_rack = rack_from(&v["master"]["effects"]);
     resolve_sidechains(&mut out.master_chain, &v["master"]["effects"], &by_uuid);
+    out.master_lanes = lanes_from(&v["master"]["envelopes"], rate as f64, &out.master_chain);
     for m in v["markers"].as_array().into_iter().flatten() {
         out.markers.push(Marker {
             name: m["name"].as_str().unwrap_or("Marker").to_string(),
@@ -574,7 +902,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
         });
     }
     if envelopes > 0 {
-        notices.push(format!("{envelopes} automation lane(s) are kept in the session and saved back unchanged; Audiform27 does not play automation yet."));
+        notices.push(format!("{envelopes} clip automation lane(s) are kept in the session and saved back unchanged; Audiform27 does not play clip automation yet."));
     }
     if silent_fx > 0 {
         notices.push(format!("{silent_fx} effect(s) Audiform27 does not have stay in their chains, silent here, and are saved back unchanged."));
@@ -584,6 +912,19 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
         notices,
         base: Some(v),
     })
+}
+
+/// A send's own settings as the file has them (the bus is resolved by
+/// the caller). Audiform pans -100..100.
+fn send_from(s: &Value) -> Send {
+    Send {
+        bus: 0,
+        level_db: s["level_db"].as_f64().unwrap_or(0.0) as f32,
+        pre_fader: s["pre_fader"].as_bool().unwrap_or(false),
+        pan: (s["pan"].as_f64().unwrap_or(0.0) / 100.0).clamp(-1.0, 1.0) as f32,
+        enabled: s["enabled"].as_bool().unwrap_or(true),
+        ext_id: s["id"].as_str().map(str::to_string),
+    }
 }
 
 /// Finds an object by id in `list` (for looking up originals).
@@ -850,8 +1191,19 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
     let base_buses = base.and_then(|b| b["buses"].as_array());
     let mut tracks = Vec::new();
     let mut buses = Vec::new();
+    let n_tracks = session
+        .tracks
+        .iter()
+        .filter(|t| t.kind != TrackKind::Bus)
+        .count();
+    // Tracks above the one being written (a bus's `position`).
+    let mut above = 0usize;
+    let rate_f = session.rate as f64;
     for t in &mut session.tracks {
         let is_bus = t.kind == TrackKind::Bus;
+        if !is_bus {
+            above += 1;
+        }
         let orig = by_id(
             if is_bus { base_buses } else { base_tracks },
             t.ext_id.as_deref(),
@@ -866,11 +1218,41 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
         o.insert("id".into(), json!(t.ext_id.clone().unwrap()));
         o.insert("name".into(), json!(t.name));
         o.entry("channels").or_insert_with(|| json!("stereo"));
-        o.insert("height".into(), json!(t.height.round() as u32));
-        o.insert("volume_db".into(), json!(t.volume_db as f64));
-        o.insert("pan".into(), json!(t.pan as f64));
-        o.insert("muted".into(), json!(t.mute));
-        o.insert("solo".into(), json!(t.solo));
+        let had_height = o.get("height").and_then(Value::as_f64);
+        if had_height.map(|h| (h as f32).max(40.0)) != Some(t.height) {
+            o.insert("height".into(), json!(t.height.round() as u32));
+        }
+        write_strip(
+            &mut o,
+            &Strip {
+                volume_db: t.volume_db,
+                pan: t.pan,
+                muted: t.mute,
+                solo: t.solo,
+                mono: t.mono,
+                polarity: t.polarity,
+                solo_safe: t.solo_safe,
+                automation: t.automation,
+                show_lanes: t.show_lanes,
+            },
+            is_bus,
+        );
+        if is_bus {
+            // Display only: below this many tracks (None: below the last).
+            let was = o
+                .get("position")
+                .and_then(Value::as_u64)
+                .map_or(n_tracks, |p| (p as usize).min(n_tracks));
+            if was != above {
+                o.insert("position".into(), json!(above));
+            }
+        }
+        if t.kind == TrackKind::Midi {
+            let was = o.get("input").and_then(Value::as_str).map(str::to_string);
+            if was != t.midi_in {
+                o.insert("input".into(), json!(t.midi_in));
+            }
+        }
         o.insert(
             "output".into(),
             match t.output.and_then(|b| uuid_of.get(&b)) {
@@ -892,10 +1274,20 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                     json!(s.ext_id.get_or_insert_with(new_uuid).clone()),
                 );
                 so.insert("bus_id".into(), json!(bus));
-                so.insert("level_db".into(), json!(s.level_db as f64));
-                so.insert("pre_fader".into(), json!(s.pre_fader));
-                so.entry("pan").or_insert_with(|| json!(0.0));
-                so.entry("enabled").or_insert_with(|| json!(true));
+                let fresh = !so.contains_key("level_db");
+                let was = send_from(&Value::Object(so.clone()));
+                if fresh || was.level_db != s.level_db {
+                    put_f32(&mut so, "level_db", s.level_db);
+                }
+                if fresh || was.pre_fader != s.pre_fader {
+                    so.insert("pre_fader".into(), json!(s.pre_fader));
+                }
+                if fresh || was.pan != s.pan {
+                    put_f32(&mut so, "pan", s.pan * 100.0);
+                }
+                if fresh || was.enabled != s.enabled {
+                    so.insert("enabled".into(), json!(s.enabled));
+                }
                 Some(Value::Object(so))
             })
             .collect();
@@ -904,7 +1296,13 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             "effects".into(),
             write_chain(&mut t.chain, &t.rack, orig.map(|x| &x["effects"]), &uuid_of),
         );
-        o.entry("envelopes").or_insert_with(|| json!([]));
+        let envs = lanes_to(
+            &mut t.lanes,
+            orig.map(|x| &x["envelopes"]),
+            rate_f,
+            &t.chain,
+        );
+        o.insert("envelopes".into(), envs);
         if session.space.is_some() {
             let mut sp = obj(orig.map(|x| x["space"].clone()).unwrap_or(Value::Null));
             sp.insert("x".into(), json!(t.pos.x));
@@ -957,7 +1355,10 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 };
                 co.insert("source_in".into(), json!(src_in.round().max(0.0) as u64));
                 co.insert("source_out".into(), json!(src_out.round().max(0.0) as u64));
-                co.insert("gain_db".into(), json!(c.gain_db as f64));
+                if !co.contains_key("gain_db") {
+                    co.insert("gain_db".into(), json!(c.gain_db as f64));
+                }
+                set_level(&mut co, "gain_db", c.gain_db, 0.0);
                 co.insert("muted".into(), json!(c.muted));
                 for (key, len) in [("fade_in", c.fade_in), ("fade_out", c.fade_out)] {
                     let mut f = obj(co.get(key).cloned().unwrap_or(Value::Null));
@@ -980,29 +1381,33 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 .midi
                 .iter_mut()
                 .map(|m| {
-                    let mut mo = obj(by_id(base_midi, m.ext_id.as_deref()).cloned().unwrap_or(Value::Null));
-                    mo.insert("id".into(), json!(m.ext_id.get_or_insert_with(new_uuid).clone()));
-                    mo.insert("name".into(), json!(m.name));
-                    mo.insert("start".into(), json!(m.start));
-                    mo.insert("length".into(), json!(m.length));
-                    mo.insert("muted".into(), json!(m.muted));
+                    let mut mo = obj(by_id(base_midi, m.ext_id.as_deref())
+                        .cloned()
+                        .unwrap_or(Value::Null));
                     mo.insert(
-                        "notes".into(),
-                        Value::Array(
-                            m.notes
-                                .iter()
-                                .map(|n| json!({"pitch": n.pitch, "velocity": n.velocity, "start": n.start, "length": n.length, "channel": n.channel, "pan": n.pan}))
-                                .collect(),
-                        ),
+                        "id".into(),
+                        json!(m.ext_id.get_or_insert_with(new_uuid).clone()),
                     );
+                    write_midi_clip(&mut mo, m);
                     Value::Object(mo)
                 })
                 .collect();
             o.insert("midi_clips".into(), Value::Array(midi));
-            o.insert(
-                "af27_synth".into(),
-                serde_json::to_value(t.instrument).unwrap_or(Value::Null),
-            );
+            // Audiform27's own synth settings: written when the file had
+            // them or they are not the defaults, so a session from
+            // Audiform saves back unchanged.
+            let had_synth = o.contains_key("af27_synth");
+            let synth = serde_json::to_value(t.instrument).unwrap_or(Value::Null);
+            let default_synth =
+                serde_json::to_value(af27_core::midi::Instrument::default()).unwrap_or(Value::Null);
+            if had_synth || synth != default_synth {
+                let same = o.get("af27_synth").and_then(|s| {
+                    serde_json::from_value::<af27_core::midi::Instrument>(s.clone()).ok()
+                }) == Some(t.instrument);
+                if !same {
+                    o.insert("af27_synth".into(), synth);
+                }
+            }
             // Audiform27's own field, like `af27_synth`: Audiform keeps it.
             match &t.soundfont {
                 Some(sf) => {
@@ -1024,7 +1429,10 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
     let mut master = obj(base.map(|b| b["master"].clone()).unwrap_or(Value::Null));
     master.entry("channels").or_insert_with(|| json!("stereo"));
     master.entry("height").or_insert_with(|| json!(72));
-    master.insert("volume_db".into(), json!(session.master_db as f64));
+    if !master.contains_key("volume_db") {
+        master.insert("volume_db".into(), json!(session.master_db as f64));
+    }
+    set_level(&mut master, "volume_db", session.master_db, 0.0);
     let base_master_fx = base
         .map(|b| &b["master"]["effects"])
         .filter(|v| !v.is_null());
@@ -1037,7 +1445,13 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             &uuid_of,
         ),
     );
-    master.entry("envelopes").or_insert_with(|| json!([]));
+    let envs = lanes_to(
+        &mut session.master_lanes,
+        base.map(|b| &b["master"]["envelopes"]),
+        rate_f,
+        &session.master_chain,
+    );
+    master.insert("envelopes".into(), envs);
     doc.insert("master".into(), Value::Object(master));
 
     let base_markers = base.and_then(|b| b["markers"].as_array());
@@ -1436,6 +1850,139 @@ mod tests {
         s2.tracks[0].soundfont = None;
         let out = export(&mut s2, Some(&base));
         assert!(out["tracks"][0].get("af27_soundfont").is_none());
+    }
+
+    /// An Audiform session using buses, sends, keys, lanes, modes, MIDI
+    /// with controller moves and channels, and bus positions.
+    const MIX: &str = r##"{
+      "format": "altaudio.session", "schema_version": 1, "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Mix", "sample_rate": 48000, "bit_depth": 32, "created": "x", "modified": "x", "media": [],
+      "tracks": [
+        {"id": "a", "name": "Voice", "role": "standard", "channels": "mono", "height": 30, "volume_db": -3.3, "pan": -25.0,
+         "muted": false, "solo": false, "record_armed": false, "monitor_input": false, "mono": true, "polarity_inverted": true,
+         "automation_mode": "touch", "show_automation": true,
+         "output": {"type": "master"},
+         "sends": [{"id": "s1", "bus_id": "rv", "level_db": -7.7, "pan": 40.0, "pre_fader": false, "enabled": false}],
+         "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": [
+            {"id": "sl1", "effect": "altaudio.stereo_width", "enabled": true, "params": {"pan": 0.0, "width": 100.0}}]},
+         "clips": [],
+         "envelopes": [
+           {"id": "e1", "target": {"type": "volume"}, "enabled": true, "height": null, "points": [{"position": 0, "value": -6.0, "curve": "linear"}, {"position": 48000, "value": 0.0, "curve": "hold"}]},
+           {"id": "e2", "target": {"type": "pan"}, "enabled": false, "height": 50, "points": [{"position": 24000, "value": 50.0, "curve": "linear"}]},
+           {"id": "e3", "target": {"type": "effect_param", "slot_id": "sl1", "param": "width"}, "enabled": true, "points": [{"position": 0, "value": 120.0, "curve": "spline"}]}
+         ]},
+        {"id": "k", "name": "Keys", "kind": "midi", "role": "standard", "channels": "stereo", "height": 72, "volume_db": 0.0, "pan": 0.0,
+         "muted": false, "solo": false, "record_armed": true, "monitor_input": false, "input": "Keystation 49",
+         "output": {"type": "bus", "bus_id": "grp"}, "sends": [], "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []},
+         "clips": [], "envelopes": [],
+         "midi_clips": [{"id": "mc", "name": "Chords", "start": 4.0, "length": 8.0, "muted": false, "color": null, "gain_db": -2.5,
+           "notes": [{"pitch": 60, "velocity": 90, "start": 0.0, "length": 1.5}, {"pitch": 64, "velocity": 80, "start": 0.5, "length": 1.0, "channel": 3, "pan": -0.5}],
+           "controls": [{"at": 0.0, "controller": 64, "value": 1.0, "channel": 0}, {"at": 2.0, "controller": 64, "value": 0.0, "channel": 0}]}]}
+      ],
+      "buses": [
+        {"id": "rv", "name": "Reverb", "channels": "stereo", "height": 72, "volume_db": -6.0, "pan": 0.0, "muted": false, "solo": false,
+         "output": {"type": "master"}, "sends": [], "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}, "envelopes": [], "position": 1},
+        {"id": "grp", "name": "Group", "channels": "stereo", "height": 72, "volume_db": 0.0, "pan": 0.0, "muted": false, "solo": false, "mono": true,
+         "output": {"type": "bus", "bus_id": "rv"}, "sends": [], "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}, "envelopes": [], "automation_mode": "latch"}
+      ],
+      "master": {"channels": "stereo", "height": 72, "volume_db": -0.7, "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []},
+        "envelopes": [{"id": "me", "target": {"type": "volume"}, "enabled": true, "points": [{"position": 96000, "value": -3.0, "curve": "linear"}]}]},
+      "markers": [], "view": {"samples_per_pixel": 512.0, "scroll": 0, "scroll_y": 0, "playhead": 0, "selection": null},
+      "modes": {"podcast": false, "voiceover": false}, "libraries": [], "template_id": null, "metadata": {},
+      "tempo": {"bpm": 120.0, "beats_per_bar": 6, "beat_unit": 8, "changes": [{"id": "t2", "bar": 2, "bpm": 90.0, "beats_per_bar": 4, "beat_unit": 4}]}
+    }"##;
+
+    fn same_doc(mut a: Value, mut b: Value) {
+        a.as_object_mut().unwrap().remove("modified");
+        b.as_object_mut().unwrap().remove("modified");
+        assert_eq!(
+            a,
+            b,
+            "\n--- got\n{}\n--- want\n{}",
+            serde_json::to_string_pretty(&a).unwrap(),
+            serde_json::to_string_pretty(&b).unwrap()
+        );
+    }
+
+    #[test]
+    fn mix_fields_load_and_round_trip_exactly() {
+        let imp = import(MIX, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        // The Reverb bus shows below the first track; the Group at the end.
+        let names: Vec<&str> = s.tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Voice", "Reverb", "Keys", "Group"]);
+        let v = &s.tracks[0];
+        assert_eq!((v.pan, v.mono, v.polarity), (-0.25, true, true));
+        assert_eq!(v.automation, AutomationMode::Touch);
+        assert!(v.show_lanes);
+        let send = &v.sends[0];
+        assert_eq!((send.pan, send.enabled, send.level_db), (0.4, false, -7.7));
+        assert_eq!(v.lanes.len(), 3);
+        assert_eq!(v.lanes[0].value_at(0.5), Some(-6.0 + 3.0));
+        assert_eq!(v.lanes[0].points[1].curve, Curve::Hold);
+        assert_eq!(v.lanes[1].points[0].value, 0.5);
+        assert!(!v.lanes[1].enabled);
+        // Stereo Width's "width" is its second value.
+        assert!(matches!(
+            &v.lanes[2].target,
+            LaneTarget::Effect { slot, param: 1, .. } if slot == "sl1"
+        ));
+        let k = &s.tracks[2];
+        assert_eq!(k.midi_in.as_deref(), Some("Keystation 49"));
+        let mc = &k.midi[0];
+        assert_eq!(mc.gain_db, -2.5);
+        assert_eq!(mc.controls.len(), 2);
+        assert_eq!(mc.notes[1].channel, 3);
+        assert_eq!(s.tracks[3].automation, AutomationMode::Latch);
+        assert!(s.tracks[3].mono);
+        assert_eq!(s.master_lanes[0].points[0].time, 2.0);
+        assert_eq!(s.tempo.beat_unit, 8);
+        // Unchanged: the same document.
+        same_doc(export(&mut s, Some(&base)), base.clone());
+
+        // Edits land in Audiform's fields and units.
+        s.tracks[0].sends[0].enabled = true;
+        s.tracks[0].sends[0].pan = -1.0;
+        s.tracks[0].pan = 0.5;
+        s.tracks[0].mono = false;
+        s.tracks[0].automation = AutomationMode::Read;
+        s.tracks[0].lanes[1].points[0].value = -0.25;
+        s.tracks[2].midi[0].notes[0].channel = 2;
+        s.tracks[2].midi[0].controls.clear();
+        s.tracks[2].midi_in = None;
+        // Move the Reverb bus to the end.
+        let rv = s.tracks.remove(1);
+        s.tracks.push(rv);
+        let out = export(&mut s, Some(&base));
+        let t0 = &out["tracks"][0];
+        assert_eq!(t0["pan"], json!(50.0));
+        assert!(t0.get("mono").is_none());
+        assert!(t0.get("automation_mode").is_none());
+        assert_eq!(t0["volume_db"], json!(-3.3));
+        assert_eq!(t0["sends"][0]["enabled"], json!(true));
+        assert_eq!(t0["sends"][0]["pan"], json!(-100.0));
+        assert_eq!(t0["sends"][0]["level_db"], json!(-7.7));
+        assert_eq!(t0["envelopes"][1]["points"][0]["value"], json!(-25.0));
+        assert_eq!(t0["envelopes"][2]["target"]["param"], json!("width"));
+        let notes = &out["tracks"][1]["midi_clips"][0]["notes"];
+        assert_eq!(notes[0]["channel"], json!(2));
+        assert!(notes[1].get("pan").is_some());
+        assert!(out["tracks"][1]["midi_clips"][0].get("controls").is_none());
+        assert!(out["tracks"][1]["input"].is_null());
+        assert!(out["tracks"][1].get("af27_synth").is_none());
+        let rv = out["buses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == "rv")
+            .unwrap();
+        assert_eq!(rv["position"], json!(2));
+        // And it reads back as edited.
+        let back = import(&out.to_string(), Path::new(".")).unwrap().session;
+        assert_eq!(back.tracks[0].sends[0].pan, -1.0);
+        assert_eq!(back.tracks[0].lanes[1].points[0].value, -0.25);
+        assert_eq!(back.tracks.last().unwrap().name, "Reverb");
     }
 
     #[test]

@@ -432,15 +432,96 @@ pub struct MidiClip {
     pub notes: Vec<MidiNote>,
     #[serde(default)]
     pub muted: bool,
+    /// Clip level in dB: scales every note's velocity (-96..24).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gain_db: f32,
+    /// Controller moves (sustain pedal, mod wheel, pitch bend...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<ControlEvent>,
     /// The object's id in an `.audfrm` file it came from, so saving back
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_id: Option<String>,
 }
 
+fn is_zero(x: &f32) -> bool {
+    *x == 0.0
+}
+
+/// Controller number for channel aftertouch in [`ControlEvent`].
+pub const AFTERTOUCH: u8 = 128;
+/// Controller number for pitch bend in [`ControlEvent`].
+pub const PITCH_BEND: u8 = 129;
+/// The sustain pedal.
+pub const SUSTAIN: u8 = 64;
+
+/// One controller move in a MIDI clip.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ControlEvent {
+    /// Beats from the clip's start.
+    pub at: f64,
+    /// 0..127 as in MIDI, 128 channel aftertouch, 129 pitch bend.
+    pub controller: u8,
+    /// 0..1 (pitch bend: 0.5 is the middle).
+    pub value: f32,
+    /// 0..15.
+    #[serde(default)]
+    pub channel: u8,
+}
+
+impl ControlEvent {
+    /// Pedals (64..=69) are only up or down.
+    pub fn is_switch(controller: u8) -> bool {
+        (64..=69).contains(&controller)
+    }
+
+    /// The controller's name, for lane menus.
+    pub fn name(controller: u8) -> String {
+        match controller {
+            1 => "Mod Wheel".into(),
+            2 => "Breath".into(),
+            7 => "Volume".into(),
+            10 => "Pan".into(),
+            11 => "Expression".into(),
+            64 => "Sustain Pedal".into(),
+            66 => "Sostenuto".into(),
+            67 => "Soft Pedal".into(),
+            AFTERTOUCH => "Aftertouch".into(),
+            PITCH_BEND => "Pitch Bend".into(),
+            n => format!("CC {n}"),
+        }
+    }
+
+    /// The value as shown: pedals up or down, pitch bend -8192..8191,
+    /// others 0..127.
+    pub fn value_text(controller: u8, value: f32) -> String {
+        let v = value.clamp(0.0, 1.0);
+        if Self::is_switch(controller) {
+            if v >= 0.5 { "down" } else { "up" }.into()
+        } else if controller == PITCH_BEND {
+            format!("{}", (v * 16383.0).round() as i32 - 8192)
+        } else {
+            format!("{}", (v * 127.0).round() as i32)
+        }
+    }
+}
+
+/// The controllers controller lanes offer first.
+pub const LANE_CONTROLLERS: [u8; 10] = [64, 1, 11, 7, 10, 2, 66, 67, PITCH_BEND, AFTERTOUCH];
+
 impl MidiClip {
     pub fn end(&self) -> f64 {
         self.start + self.length
+    }
+
+    /// The clip's level as a velocity scale.
+    pub fn level(&self) -> f32 {
+        crate::time::db_to_gain(self.gain_db.clamp(-96.0, 24.0))
+    }
+
+    /// A note's velocity after the clip level, 1/127..1.
+    pub fn velocity(&self, n: &MidiNote) -> f32 {
+        (n.velocity.clamp(1, 127) as f32 / 127.0 * self.level()).clamp(1.0 / 127.0, 1.0)
     }
 }
 
