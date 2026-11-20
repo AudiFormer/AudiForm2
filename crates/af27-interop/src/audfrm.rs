@@ -19,23 +19,29 @@
 //! their saved settings. Others stay in the chain, in place, silent here
 //! and saved back as they were. Audiform27-only effects are saved as
 //! `af27.<id>` slots, which Audiform skips when playing but keeps when it
-//! saves.
+//! saves. VST3 plug-in slots (`vst3:<class id>`) keep the same id; their
+//! controls (`params`, `p<id>` keys) and settings (`plugin_state`) live in
+//! the slot's data as `af27_core::plugin::PluginData`, and go back only
+//! when they changed.
 //!
 //! Units: positions are samples at the session rate (clip start, fades,
 //! markers), source points are samples at the file's own rate, MIDI is in
 //! beats.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use af27_core::automation::{AutomationMode, Curve, Lane, LanePoint, LaneTarget};
+use af27_core::automation::{AutomationMode, Curve, Lane, LanePoint as AutoPoint, LaneTarget};
 use af27_core::midi::{ControlEvent, MidiClip, MidiNote, SoundFontRef, TempoChange};
+use af27_core::plugin::PluginData;
 use af27_core::session::{
     Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session, StretchKind,
     StretchMode, TrackId, TrackKind,
 };
-use af27_core::space::{Monitor, SpaceLayout};
+use af27_core::space::{
+    LaneCurve, LanePoint, Monitor, SpaceLane, SpaceLayout, SpaceParam, SpacePos, SpatializeMode,
+};
 use serde_json::{json, Map, Value};
 
 use crate::Imported;
@@ -106,7 +112,113 @@ fn now_iso() -> String {
 }
 
 fn layout_from(s: &str) -> Option<SpaceLayout> {
-    SpaceLayout::ALL.into_iter().find(|l| l.label() == s)
+    SpaceLayout::from_label(s)
+}
+
+fn listen_from(sp: &Value) -> Monitor {
+    match sp["listen"].as_str() {
+        Some("binaural") => Monitor::Binaural,
+        Some("speakers") => Monitor::Speakers,
+        _ => Monitor::StereoFold,
+    }
+}
+
+fn listen_key(m: Monitor) -> &'static str {
+    match m {
+        Monitor::Binaural => "binaural",
+        Monitor::StereoFold => "stereo",
+        Monitor::Speakers => "speakers",
+    }
+}
+
+/// A spot as the file has it (missing values take Audiform's defaults).
+/// Kept as read, untidied, so an unchanged spot saves the same.
+fn pos_from(p: &Value) -> SpacePos {
+    let d = SpacePos::default();
+    let f = |k: &str, or: f64| p[k].as_f64().unwrap_or(or);
+    SpacePos {
+        x: f("x", d.x),
+        y: f("y", d.y),
+        z: f("z", d.z),
+        size: f("size", d.size),
+        width: f("width", d.width),
+        rotation: f("rotation", d.rotation),
+        lfe: f("lfe", d.lfe),
+        spread: f("spread", d.spread),
+        spatialize: f("spatialize", d.spatialize),
+        spatialize_mode: p["spatialize_mode"]
+            .as_str()
+            .map_or(d.spatialize_mode, SpatializeMode::from_key),
+    }
+}
+
+/// Writes a spot into `o` (the file's spot object, or a new one): only
+/// values that differ from what `o` already says. A new spot gets the
+/// values Audiform always writes (x, y, z, size, width); values it leaves
+/// out at their defaults (rotation, lfe, spread, spatialize and the
+/// method) are left out again when set back to the default.
+fn write_pos(o: &mut Map<String, Value>, p: &SpacePos) {
+    let had = pos_from(&Value::Object(o.clone()));
+    let fresh = o.is_empty();
+    for (key, now, was, always) in [
+        ("x", p.x, had.x, true),
+        ("y", p.y, had.y, true),
+        ("z", p.z, had.z, true),
+        ("size", p.size, had.size, true),
+        ("width", p.width, had.width, true),
+        ("rotation", p.rotation, had.rotation, false),
+        ("lfe", p.lfe, had.lfe, false),
+        ("spread", p.spread, had.spread, false),
+        ("spatialize", p.spatialize, had.spatialize, false),
+    ] {
+        if now == was && !(fresh && always) {
+            continue;
+        }
+        if !always && now == 0.0 {
+            o.remove(key);
+        } else {
+            o.insert(key.into(), json!(now));
+        }
+    }
+    if p.spatialize_mode != had.spatialize_mode {
+        if p.spatialize_mode == SpatializeMode::default() {
+            o.remove("spatialize_mode");
+        } else {
+            o.insert("spatialize_mode".into(), json!(p.spatialize_mode.key()));
+        }
+    }
+}
+
+/// A track's or bus's spot automation, from its envelopes.
+fn lanes_from(t: &Value, rate: u32) -> Vec<SpaceLane> {
+    t["envelopes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["target"]["type"].as_str() == Some("space"))
+        .filter_map(|e| {
+            let param = SpaceParam::from_key(e["target"]["param"].as_str()?)?;
+            let points = e["points"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| LanePoint {
+                    t: p["position"].as_f64().unwrap_or(0.0) / rate as f64,
+                    v: p["value"].as_f64().unwrap_or(0.0),
+                    curve: if p["curve"].as_str() == Some("hold") {
+                        LaneCurve::Hold
+                    } else {
+                        LaneCurve::Linear
+                    },
+                })
+                .collect();
+            Some(SpaceLane {
+                param,
+                points,
+                enabled: e["enabled"].as_bool().unwrap_or(true),
+            })
+        })
+        .collect()
 }
 
 fn hex_color(v: &Value) -> Option<[u8; 3]> {
@@ -177,6 +289,9 @@ fn props_from(c: &Value) -> ClipProps {
         color: hex_color(&c["color"]),
         fade_in_skew: skew_from(&c["fade_in"]),
         fade_out_skew: skew_from(&c["fade_out"]),
+        // A Source Channels mix that does not pass through to speakers.
+        fold_channels: c["channel_mix"].is_object()
+            && !c["channel_mix"]["to_speakers"].as_bool().unwrap_or(false),
     }
 }
 
@@ -283,6 +398,16 @@ fn slot_from(v: &Value) -> EffectSlot {
             ext_id,
         };
     }
+    if af27_core::plugin::is_plugin(&effect) {
+        return EffectSlot {
+            sidechain: None,
+            data: Some(plugin_data_from(v, ext_id.as_deref()).to_json()),
+            effect,
+            values: Vec::new(),
+            bypass: !enabled,
+            ext_id,
+        };
+    }
     if let Some(own) = effect.strip_prefix(AF27) {
         let values = v["params"]["values"]
             .as_array()
@@ -305,6 +430,60 @@ fn slot_from(v: &Value) -> EffectSlot {
         bypass: !enabled,
         data,
         ext_id,
+    }
+}
+
+/// A plug-in slot's controls and settings as the file has them. Its
+/// running copy is named after the slot's id in the file.
+fn plugin_data_from(v: &Value, ext_id: Option<&str>) -> PluginData {
+    PluginData {
+        inst: ext_id.map_or_else(af27_core::plugin::new_inst, str::to_string),
+        params: plugin_params(v),
+        state: v["plugin_state"].as_str().map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn plugin_params(v: &Value) -> BTreeMap<String, f64> {
+    v["params"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, x)| Some((k.clone(), x.as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Writes a plug-in slot's controls and settings, each only when it
+/// differs from what the slot already holds (so an unchanged file keeps
+/// its exact text).
+fn write_plugin(o: &mut Map<String, Value>, s: &EffectSlot) {
+    if o.get("effect").and_then(Value::as_str) != Some(s.effect.as_str()) {
+        o.insert("effect".into(), json!(s.effect));
+    }
+    let d = s.plugin_data();
+    let had = Value::Object(o.clone());
+    if plugin_params(&had) != d.params || !had["params"].is_object() {
+        let m: Map<String, Value> = d
+            .params
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect();
+        o.insert("params".into(), Value::Object(m));
+    }
+    let had_state = had["plugin_state"].as_str();
+    if had_state != d.state.as_deref() {
+        match &d.state {
+            Some(st) => {
+                o.insert("plugin_state".into(), json!(st));
+            }
+            None => {
+                if o.contains_key("plugin_state") {
+                    o.insert("plugin_state".into(), Value::Null);
+                }
+            }
+        }
     }
 }
 
@@ -439,7 +618,7 @@ fn param_index(chain: &[EffectSlot], slot_id: &str, key: &str) -> usize {
 
 /// A track's, bus's or the master's automation lanes. Positions are
 /// session samples; pan lanes hold -100..100.
-fn lanes_from(envs: &Value, rate: f64, chain: &[EffectSlot]) -> Vec<Lane> {
+fn auto_lanes_from(envs: &Value, rate: f64, chain: &[EffectSlot]) -> Vec<Lane> {
     let pan = |t: &LaneTarget, v: f64| {
         if *t == LaneTarget::Pan {
             v / 100.0
@@ -470,7 +649,7 @@ fn lanes_from(envs: &Value, rate: f64, chain: &[EffectSlot]) -> Vec<Lane> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|p| LanePoint {
+                .map(|p| AutoPoint {
                     time: p["position"].as_f64().unwrap_or(0.0) / rate,
                     value: pan(&target, p["value"].as_f64().unwrap_or(0.0)),
                     curve: match p["curve"].as_str() {
@@ -493,9 +672,14 @@ fn lanes_from(envs: &Value, rate: f64, chain: &[EffectSlot]) -> Vec<Lane> {
 
 /// Writes lanes back as envelopes, unless they read the same as `base`
 /// (then `base` is kept as it was).
-fn lanes_to(lanes: &mut [Lane], base: Option<&Value>, rate: f64, chain: &[EffectSlot]) -> Value {
+fn auto_lanes_to(
+    lanes: &mut [Lane],
+    base: Option<&Value>,
+    rate: f64,
+    chain: &[EffectSlot],
+) -> Value {
     if let Some(b) = base.filter(|b| b.is_array()) {
-        if lanes_from(b, rate, chain) == lanes {
+        if auto_lanes_from(b, rate, chain) == lanes {
             return b.clone();
         }
     }
@@ -708,10 +892,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
     }
     if let Some(sp) = v.get("space").filter(|s| s.is_object()) {
         out.space = sp["layout"].as_str().and_then(layout_from);
-        out.monitor = match sp["listen"].as_str() {
-            Some("binaural") => Monitor::Binaural,
-            _ => Monitor::StereoFold,
-        };
+        out.monitor = listen_from(sp);
     }
 
     let mut media_ids: HashMap<String, (u64, u32, f64)> = HashMap::new();
@@ -807,6 +988,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                 .filter(|s| {
                     s.values.is_empty()
                         && !s.effect.is_empty()
+                        && !af27_core::plugin::is_plugin(&s.effect)
                         && af27_dsp::Effect::from_id(&s.effect).is_none()
                         && af27_fx::info(&s.effect).is_none()
                 })
@@ -834,15 +1016,14 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                 tr.color = c;
             }
             if let Some(p) = t.get("space").filter(|p| p.is_object()) {
-                tr.pos.x = p["x"].as_f64().unwrap_or(0.0);
-                tr.pos.y = p["y"].as_f64().unwrap_or(1.0);
-                tr.pos.z = p["z"].as_f64().unwrap_or(0.0).max(0.0);
-                tr.pos.size = p["size"].as_f64().unwrap_or(0.0);
-                tr.pos.width = p["width"].as_f64().unwrap_or(1.0);
-                tr.pos.rotation = p["rotation"].as_f64().unwrap_or(0.0);
-                let lfe = p["lfe"].as_f64().unwrap_or(0.0);
-                tr.pos.lfe_db = if lfe > 0.0 { 20.0 * lfe.log10() } else { -96.0 };
+                tr.pos = pos_from(p);
+                tr.spatial.had_spot = true;
             }
+            tr.spatial.room = t["room"].as_bool().unwrap_or(false);
+            tr.spatial.lanes = lanes_from(t, rate);
+            tr.spatial.stereo = Some(
+                t["channels"].as_str() != Some("mono") && !t["mono"].as_bool().unwrap_or(false),
+            );
             if let Some(inst) = t
                 .get("af27_synth")
                 .and_then(|s| serde_json::from_value(s.clone()).ok())
@@ -882,7 +1063,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
         tr.output = output;
         tr.sends = sends;
         resolve_sidechains(&mut tr.chain, &t["effects"], &by_uuid);
-        tr.lanes = lanes_from(&t["envelopes"], rate as f64, &tr.chain);
+        tr.lanes = auto_lanes_from(&t["envelopes"], rate as f64, &tr.chain);
         if let Some(p) = t["position"].as_u64().filter(|_| tr.kind == TrackKind::Bus) {
             bus_pos.insert(tid, p as u32);
         }
@@ -892,7 +1073,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
     out.master_chain = chain_from(&v["master"]["effects"]);
     out.master_rack = rack_from(&v["master"]["effects"]);
     resolve_sidechains(&mut out.master_chain, &v["master"]["effects"], &by_uuid);
-    out.master_lanes = lanes_from(&v["master"]["envelopes"], rate as f64, &out.master_chain);
+    out.master_lanes = auto_lanes_from(&v["master"]["envelopes"], rate as f64, &out.master_chain);
     for m in v["markers"].as_array().into_iter().flatten() {
         out.markers.push(Marker {
             name: m["name"].as_str().unwrap_or("Marker").to_string(),
@@ -1045,6 +1226,8 @@ fn write_chain(
                         serde_json::from_str(d).unwrap_or_else(|_| json!(d)),
                     );
                 }
+            } else if af27_core::plugin::is_plugin(&s.effect) {
+                write_plugin(&mut o, s);
             } else if orig.is_none() || af27_dsp::Effect::from_id(&s.effect).is_some() {
                 // Audiform27's own effect: a slot Audiform skips but keeps.
                 o.insert("effect".into(), json!(format!("{AF27}{}", s.effect)));
@@ -1122,16 +1305,12 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
     match session.space {
         Some(l) => {
             let mut sp = obj(base.map(|b| b["space"].clone()).unwrap_or(Value::Null));
-            sp.insert("layout".into(), json!(l.label()));
-            let keep_speakers = sp.get("listen").and_then(Value::as_str) == Some("speakers");
-            if !keep_speakers {
-                sp.insert(
-                    "listen".into(),
-                    json!(match session.monitor {
-                        Monitor::Binaural => "binaural",
-                        Monitor::StereoFold => "stereo",
-                    }),
-                );
+            if sp.get("layout").and_then(Value::as_str) != Some(l.label()) {
+                sp.insert("layout".into(), json!(l.label()));
+            }
+            // `listen` left out reads as stereo; written only when changed.
+            if listen_from(&Value::Object(sp.clone())) != session.monitor {
+                sp.insert("listen".into(), json!(listen_key(session.monitor)));
             }
             doc.insert("space".into(), Value::Object(sp));
         }
@@ -1296,30 +1475,31 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             "effects".into(),
             write_chain(&mut t.chain, &t.rack, orig.map(|x| &x["effects"]), &uuid_of),
         );
-        let envs = lanes_to(
+        let envs = auto_lanes_to(
             &mut t.lanes,
             orig.map(|x| &x["envelopes"]),
             rate_f,
             &t.chain,
         );
         o.insert("envelopes".into(), envs);
-        if session.space.is_some() {
-            let mut sp = obj(orig.map(|x| x["space"].clone()).unwrap_or(Value::Null));
-            sp.insert("x".into(), json!(t.pos.x));
-            sp.insert("y".into(), json!(t.pos.y));
-            sp.insert("z".into(), json!(t.pos.z));
-            sp.insert("size".into(), json!(t.pos.size));
-            sp.insert("width".into(), json!(t.pos.width));
-            sp.insert("rotation".into(), json!(t.pos.rotation));
-            sp.insert(
-                "lfe".into(),
-                json!(if t.pos.lfe_db <= -60.0 {
-                    0.0
-                } else {
-                    10f64.powf(t.pos.lfe_db / 20.0)
-                }),
-            );
+        // The spot: kept whether or not 3D Space is on (Audiform keeps
+        // every spot when it is turned off). A track with none in the file
+        // and still at the default gets none.
+        let had = orig.and_then(|x| x.get("space")).filter(|v| v.is_object());
+        if had.is_some() || t.spatial.had_spot || t.pos != SpacePos::default() {
+            let mut sp = obj(had.cloned().unwrap_or(Value::Null));
+            write_pos(&mut sp, &t.pos);
             o.insert("space".into(), Value::Object(sp));
+            t.spatial.had_spot = true;
+        }
+        // 3D Bus: written only when on (or when it changed).
+        let was_room = orig.and_then(|x| x["room"].as_bool()).unwrap_or(false);
+        if is_bus && t.spatial.room != was_room {
+            if t.spatial.room {
+                o.insert("room".into(), json!(true));
+            } else {
+                o.remove("room");
+            }
         }
         if is_bus {
             buses.push(Value::Object(o));
@@ -1445,7 +1625,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             &uuid_of,
         ),
     );
-    let envs = lanes_to(
+    let envs = auto_lanes_to(
         &mut session.master_lanes,
         base.map(|b| &b["master"]["envelopes"]),
         rate_f,
@@ -1567,7 +1747,7 @@ mod tests {
 
     /// A session with fields Audiform27 does not use anywhere: they must
     /// all survive a load and save.
-    const SAMPLE: &str = r##"{
+    pub(super) const SAMPLE: &str = r##"{
       "format": "altaudio.session", "schema_version": 1, "id": "11111111-1111-4111-8111-111111111111",
       "name": "Round Trip", "sample_rate": 48000, "bit_depth": 32,
       "created": "2026-11-08T05:29:43Z", "modified": "2026-11-08T05:29:43Z",
@@ -1600,6 +1780,154 @@ mod tests {
       "tempo": {"bpm": 96.0, "beats_per_bar": 3, "beat_unit": 4, "changes": [{"id": "tc1", "bar": 9, "bpm": 120.0, "beats_per_bar": 4, "beat_unit": 4}]},
       "a_field_from_the_future": {"keep": "me"}
     }"##;
+
+    /// SAMPLE as a 3D Space session with every 3D field set.
+    fn sample_3d() -> Value {
+        let mut v: Value = serde_json::from_str(SAMPLE).unwrap();
+        v["space"] = json!({"layout": "7.1.4", "listen": "binaural"});
+        v["tracks"][0]["space"] = json!({"x": -0.5, "y": 0.25, "z": -0.3, "size": 0.2, "width": 0.6,
+            "rotation": 30.0, "lfe": 0.5, "spread": 0.4, "spatialize": 0.7, "spatialize_mode": "ambience"});
+        v["tracks"][0]["envelopes"].as_array_mut().unwrap().push(json!({"id": "e3",
+            "target": {"type": "space", "param": "x"}, "enabled": true, "height": null,
+            "points": [{"position": 0, "value": -1.0, "curve": "hold"}, {"position": 96000, "value": 1.0, "curve": "linear"}]}));
+        v["tracks"][0]["clips"][0]["channel_mix"] =
+            json!({"sends": [{"left": 1.0, "right": 0.0}, {"left": 0.0, "right": 1.0}]});
+        v["buses"][0]["space"] = json!({"x": 0.0, "y": 1.0});
+        v["buses"][0]["room"] = json!(true);
+        v
+    }
+
+    fn reload(v: &Value) -> (Session, Value) {
+        let imp = import(&v.to_string(), Path::new(".")).unwrap();
+        (imp.session, imp.base.unwrap())
+    }
+
+    fn saved(s: &mut Session, base: &Value) -> Value {
+        let mut out = export(s, Some(base));
+        out.as_object_mut().unwrap().remove("modified");
+        out
+    }
+
+    fn unmodified(base: &Value) -> Value {
+        let mut b = base.clone();
+        b.as_object_mut().unwrap().remove("modified");
+        b
+    }
+
+    #[test]
+    fn every_3d_field_reads_and_an_unchanged_session_saves_the_same() {
+        let (mut s, base) = reload(&sample_3d());
+        assert_eq!(s.space, Some(SpaceLayout::Surround714));
+        assert_eq!(s.monitor, Monitor::Binaural);
+        let t = &s.tracks[0];
+        let p = t.pos;
+        assert_eq!(
+            (p.x, p.y, p.z, p.size, p.width),
+            (-0.5, 0.25, -0.3, 0.2, 0.6)
+        );
+        assert_eq!(
+            (p.rotation, p.lfe, p.spread, p.spatialize),
+            (30.0, 0.5, 0.4, 0.7)
+        );
+        assert_eq!(p.spatialize_mode, SpatializeMode::Ambience);
+        assert_eq!(t.spatial.lanes.len(), 1);
+        let lane = &t.spatial.lanes[0];
+        assert_eq!(lane.param, SpaceParam::X);
+        assert_eq!(lane.points[1].t, 2.0);
+        assert_eq!(lane.points[0].curve, LaneCurve::Hold);
+        assert_eq!(t.spatial.stereo, Some(true));
+        assert!(t.clips[0].props.fold_channels);
+        let bus = &s.tracks[1];
+        assert!(bus.spatial.room);
+        // Only x and y in the file: the rest take Audiform's defaults.
+        assert_eq!(bus.pos, SpacePos::default());
+        assert_eq!(saved(&mut s, &base), unmodified(&base));
+    }
+
+    #[test]
+    fn edited_3d_fields_save_as_audiform_writes_them() {
+        let (mut s, base) = reload(&sample_3d());
+        s.monitor = Monitor::Speakers;
+        s.tracks[0].pos.rotation = 0.0;
+        s.tracks[0].pos.spread = 0.9;
+        s.tracks[0].pos.spatialize_mode = SpatializeMode::SideSpread;
+        s.tracks[1].spatial.room = false;
+        s.tracks[1].pos.lfe = 0.25;
+        let out = saved(&mut s, &base);
+        assert_eq!(
+            out["space"],
+            json!({"layout": "7.1.4", "listen": "speakers"})
+        );
+        let sp = &out["tracks"][0]["space"];
+        assert!(sp.get("rotation").is_none() && sp.get("spatialize_mode").is_none());
+        assert_eq!(sp["spread"], json!(0.9));
+        assert_eq!(sp["x"], json!(-0.5));
+        assert!(out["buses"][0].get("room").is_none());
+        assert_eq!(
+            out["buses"][0]["space"],
+            json!({"x": 0.0, "y": 1.0, "lfe": 0.25})
+        );
+        // The envelopes and the clip's channel mix pass through untouched.
+        assert_eq!(
+            out["tracks"][0]["envelopes"],
+            base["tracks"][0]["envelopes"]
+        );
+        assert_eq!(
+            out["tracks"][0]["clips"][0]["channel_mix"],
+            base["tracks"][0]["clips"][0]["channel_mix"]
+        );
+        // It reads back the same.
+        let (again, _) = reload(&out);
+        assert_eq!(again.tracks[0].pos, s.tracks[0].pos);
+        assert_eq!(again.monitor, Monitor::Speakers);
+        assert!(!again.tracks[1].spatial.room);
+    }
+
+    #[test]
+    fn spots_and_layouts_without_optional_fields_stay_that_way() {
+        // No `listen`, no spots: nothing is added on save.
+        let mut v: Value = serde_json::from_str(SAMPLE).unwrap();
+        v["space"] = json!({"layout": "5.1"});
+        let (mut s, base) = reload(&v);
+        assert_eq!(s.monitor, Monitor::StereoFold);
+        assert_eq!(saved(&mut s, &base), unmodified(&base));
+        // A new track gets a spot only once it moves; then the values
+        // Audiform always writes, and none it leaves out at defaults.
+        let a = s.add_track();
+        let b = s.add_track();
+        s.track_mut(b).unwrap().pos.x = 0.5;
+        let out = saved(&mut s, &base);
+        let uuid = |s: &Session, id: u64| {
+            json!(s
+                .tracks
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .ext_id
+                .clone()
+                .unwrap())
+        };
+        let find = |out: &Value, u: &Value| {
+            out["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| &t["id"] == u)
+                .unwrap()
+                .clone()
+        };
+        let (ua, ub) = (uuid(&s, a), uuid(&s, b));
+        assert!(find(&out, &ua).get("space").is_none());
+        assert_eq!(
+            find(&out, &ub)["space"],
+            json!({"x": 0.5, "y": 1.0, "z": 0.0, "size": 0.0, "width": 1.0})
+        );
+        // Turning 3D Space off keeps the spots (and drops the layout).
+        s.space = None;
+        let out = saved(&mut s, &base);
+        assert!(out.get("space").is_none());
+        assert_eq!(find(&out, &ub)["space"]["x"], json!(0.5));
+    }
 
     #[test]
     fn reads_everything_audiform27_uses() {
@@ -2056,6 +2384,81 @@ mod tests {
         assert_eq!(again.tracks[0].chain[0].effect, "compressor");
         assert_eq!(again.tracks[0].chain[0].values, vec![-18.0, 3.0]);
         assert_eq!(again.tracks[0].output, Some(again.tracks[1].id));
+    }
+}
+
+#[cfg(test)]
+mod plugin_slots {
+    use super::*;
+
+    const ID: &str = "vst3:5454535630357432723520636C617373";
+
+    fn doc() -> String {
+        let slot = format!(
+            r#"{{"id": "fx9", "effect": "{ID}", "enabled": true, "params": {{"p458681842": 0.25, "p7": 1}}, "plugin_state": "AAECAw==", "preset": null}}"#
+        );
+        let master = r#""volume_db": -1.0, "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}"#;
+        super::tests::SAMPLE.replacen(
+            master,
+            &master.replace(r#""slots": []"#, &format!(r#""slots": [{slot}]"#)),
+            1,
+        )
+    }
+
+    #[test]
+    fn plug_in_slots_load_with_their_settings_and_round_trip() {
+        let text = doc();
+        assert!(text.contains("vst3:"), "the sample has a slot to replace");
+        let imp = import(&text, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let slot = s.master_chain[0].clone();
+        assert_eq!(slot.effect, ID);
+        let d = slot.plugin_data();
+        assert_eq!(d.inst, "fx9", "the running copy is named after the slot");
+        assert_eq!(d.state.as_deref(), Some("AAECAw=="));
+        assert_eq!(d.param(458_681_842), Some(0.25));
+        assert_eq!(d.param(7), Some(1.0));
+        assert!(!slot.bypass);
+        assert!(
+            imp.notices.iter().any(|n| n.starts_with("1 effect(s)")),
+            "only the sample's own Dynamics counts as missing, not the plug-in: {:?}",
+            imp.notices
+        );
+        // Unchanged: the file comes back exactly (`1` stays `1`).
+        let mut got = export(&mut s.clone(), Some(&base));
+        let mut want = base.clone();
+        want.as_object_mut().unwrap().remove("modified");
+        got.as_object_mut().unwrap().remove("modified");
+        assert_eq!(got, want);
+        // A changed control and new settings go back; the rest stays.
+        let mut d = s.master_chain[0].plugin_data();
+        d.set_param(458_681_842, 0.5);
+        d.state = Some("BBBB".into());
+        s.master_chain[0].set_plugin_data(&d);
+        let out = export(&mut s, Some(&base));
+        let o = &out["master"]["effects"]["slots"][0];
+        assert_eq!(o["params"]["p458681842"], json!(0.5));
+        assert_eq!(o["plugin_state"], json!("BBBB"));
+        assert_eq!(o["preset"], Value::Null);
+        assert_eq!(o["effect"], json!(ID));
+        assert!(o.get("data").is_none(), "no data field on plug-in slots");
+        // A new plug-in slot gets every field Audiform needs.
+        let mut fresh = s.master_chain[0].clone();
+        fresh.ext_id = None;
+        let mut d = fresh.plugin_data();
+        d.params.clear();
+        d.set_param(3, 0.75);
+        d.state = None;
+        fresh.set_plugin_data(&d);
+        s.master_chain.push(fresh);
+        let out = export(&mut s, Some(&base));
+        let n = &out["master"]["effects"]["slots"][1];
+        assert_eq!(n["effect"], json!(ID));
+        assert_eq!(n["enabled"], json!(true));
+        assert_eq!(n["params"], json!({"p3": 0.75}));
+        assert!(n["id"].is_string());
+        assert!(n.get("plugin_state").is_none());
     }
 }
 

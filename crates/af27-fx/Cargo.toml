@@ -3,7 +3,7 @@ name = "af27-fx"
 description = "Audiform27 effects: amp model, tube, delay, reverbs, modulation, stereo tools, vox strip"
 version.workspace = true
 edition.workspace = true
-license-file = "../../LICENSE"
+license = "GPL-3.0-or-later"
 authors.workspace = true
 
 [dependencies]

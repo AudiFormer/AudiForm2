@@ -3,11 +3,12 @@ name = "af27-space"
 description = "Audiform27 3D Space: speaker layouts, room panning and binaural listening"
 version.workspace = true
 edition.workspace = true
-license-file = "../../LICENSE"
+license = "GPL-3.0-or-later"
 authors.workspace = true
 
 [dependencies]
 af27-core.workspace = true
+realfft = "3.4"
 
 [dev-dependencies]
 af27-dsp.workspace = true

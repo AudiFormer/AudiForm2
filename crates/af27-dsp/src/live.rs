@@ -46,6 +46,12 @@ pub trait Live: Send {
     /// bed's other speaker pairs (copy `k`), so sweeps and tails do not
     /// move in lockstep. Called once, after building, off the audio thread.
     fn vary(&mut self, _k: usize) {}
+    /// This copy will run in an offline render (an export, Apply), not
+    /// live: it may take its time on each block but must not leave any
+    /// out. Effects that run in another process (VST3 plug-ins) start a
+    /// copy of their own here. Called once, after building, off the
+    /// audio thread.
+    fn set_offline(&mut self, _offline: bool) {}
 }
 
 fn v(vals: &[f32], i: usize, d: f32) -> f32 {
@@ -895,6 +901,23 @@ impl Chain {
             pad.clear();
         }
         self.dry_pad.clear();
+    }
+
+    /// Marks every effect as running in an offline render (see
+    /// [`Live::set_offline`]).
+    pub fn set_offline(&mut self, offline: bool) {
+        for (p, _) in &mut self.slots {
+            p.set_offline(offline);
+        }
+        // Effects may be late by another amount offline (a plug-in's own
+        // copy has no live buffer): the delays follow. Allocates; called
+        // off the audio thread.
+        self.pads = self
+            .slots
+            .iter()
+            .map(|(p, _)| Delay::new(p.latency()))
+            .collect();
+        self.dry_pad = Delay::new(self.latency());
     }
 }
 

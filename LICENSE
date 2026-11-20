@@ -1,67 +1,23 @@
-AudiForm 2 License, version 1.0
+AudiForm 2
+Copyright (C) 2026 The AudiForm 2 contributors
 
-Copyright (c) 2026 The AudiForm 2 contributors
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
 
-This license covers every file in this repository except those under
-crates/af27-dts/, which are licensed separately under the GNU Lesser
-General Public License, version 2.1 or later (see
-crates/af27-dts/LICENSE-LGPL-2.1).
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+Public License for more details.
 
+You should have received a copy of the GNU General Public License along
+with this program (the file COPYING). If not, see
+<https://www.gnu.org/licenses/>.
 
-1. Excluded Parties
+Exception: the files under crates/af27-dts/ are licensed under the GNU
+Lesser General Public License, version 2.1 or later (see
+crates/af27-dts/LICENSE-LGPL-2.1), which is compatible with this licence.
 
-"Excluded Party" means each of the following:
-
-  (a) The GeekCast Radio Network, LLC, and any successor to it;
-  (b) any person or entity that controls, is controlled by, or is under
-      common control with an entity in (a);
-  (c) any owner, member, officer, employee, contractor or agent of an
-      entity in (a) or (b), when acting for or at the direction of that
-      entity; and
-  (d) anyone else acting for, at the direction of, or for the benefit of
-      a party in (a) to (c), including any software agent, automated
-      tool or artificial intelligence system operated by or for such a
-      party.
-
-Nothing in this license grants any right to an Excluded Party. An
-Excluded Party may not use, copy, modify, merge, publish, distribute,
-sublicense, sell, analyse, index, or use as input to train, fine-tune or
-evaluate any machine learning model, the Software or any part of it, and
-may not have any of these things done on its behalf.
-
-
-2. Permission for everyone else
-
-Subject to section 1 and to the conditions below, permission is hereby
-granted, free of charge, to any person obtaining a copy of this software
-and associated documentation files (the "Software"), to deal in the
-Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-  (a) The above copyright notice, this license and its section 1 shall
-      be included in all copies or substantial portions of the Software.
-  (b) No permission granted under this license may be passed on to an
-      Excluded Party, whether by sublicense, distribution, sale or
-      otherwise. Any copy, modified version or work based on the Software
-      that you distribute must carry this license, including section 1.
-
-
-3. Termination
-
-Any use or distribution of the Software by or for an Excluded Party is
-outside this license and infringes the copyright in the Software. If you
-distribute the Software or a work based on it to an Excluded Party, or
-help one obtain it, your rights under this license end automatically.
-
-
-4. No warranty
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Third-party works used by AudiForm 2 and their licences are listed in
+ATTRIBUTION.md.

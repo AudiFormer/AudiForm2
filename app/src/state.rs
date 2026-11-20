@@ -39,16 +39,6 @@ impl View {
             len: dur.max(0.0005),
         }
     }
-    /// Zooms by `factor` around `anchor` (which keeps its place), never
-    /// shorter than `min_len` seconds nor longer than the file.
-    pub fn zoom_min(&mut self, factor: f64, anchor: f64, total: f64, min_len: f64) {
-        let total = total.max(min_len).max(1e-7);
-        let new_len = (self.len * factor).clamp(min_len.min(total), total);
-        let frac = ((anchor - self.start) / self.len).clamp(0.0, 1.0);
-        self.start = anchor - new_len * frac;
-        self.len = new_len;
-        self.clamp_to(total);
-    }
     /// Keeps the view inside the file: never wider than it, never
     /// scrolled past either end, as in the leading editor.
     pub fn clamp_to(&mut self, total: f64) {
@@ -233,6 +223,9 @@ pub struct State {
 
     pub engine: Option<Engine>,
     pub engine_error: Option<String>,
+    /// Waits between attempts to open the audio device again after it
+    /// went away or would not open.
+    pub audio_retry: af27_engine::health::Backoff,
     program_key: (Mode, DocId, u64, u64),
     /// Where playback began, shown on the ruler while playing or paused;
     /// Stop folds it into the playhead.
@@ -342,6 +335,9 @@ pub struct State {
     /// time areas last frame (for the 32 px per sample zoom limit).
     pub wave_px: f32,
     pub session_px: f32,
+    /// Height in pixels of the Multitrack's lanes last frame (for fitting
+    /// the tracks).
+    pub session_lanes_h: f32,
     /// Display-only amplitude zoom of the Multitrack's waveforms (1 to 16).
     pub session_amp: f32,
     /// Brush Select and Spot Repair brush diameter, in pixels.
@@ -364,6 +360,9 @@ pub struct State {
     pub audition_key: Option<String>,
     /// The session before a drag on a transport field began.
     pub gesture_before: Option<Session>,
+    /// A wheel gesture on track heights, kept as one undo step once the
+    /// wheel rests.
+    pub height_commit: crate::zoom::Debounced<Session>,
     /// Sessions set aside, the recent list, imports on their way in,
     /// recovery copies.
     pub sessions: crate::sessions::Sessions,
@@ -452,6 +451,8 @@ pub fn data_dir() -> PathBuf {
 
 impl State {
     pub fn new() -> State {
+        af27_engine::health::set_log_path(data_dir().join("audio.log"));
+        af27_engine::health::install_panic_log();
         let audio = crate::settings::Prefs::load().audio.choice();
         let (engine, engine_error) = match Engine::open(&audio) {
             Ok(e) => (Some(e), None),
@@ -493,6 +494,7 @@ impl State {
             media_docs: HashMap::new(),
             engine,
             engine_error,
+            audio_retry: Default::default(),
             program_key: (Mode::Waveform, 0, 0, 0),
             start_marker: None,
             paused: false,
@@ -571,12 +573,14 @@ impl State {
             spec: crate::zoom::SpecView::default(),
             wave_px: 1000.0,
             session_px: 1000.0,
+            session_lanes_h: 400.0,
             session_amp: 1.0,
             tempo_ui: Default::default(),
             piano_hover: false,
             piano_cmd: None,
             audition_key: None,
             gesture_before: None,
+            height_commit: Default::default(),
             brush_px: 24.0,
             spec_split: 0.5,
             spec_colors: None,
@@ -882,6 +886,11 @@ impl State {
 
     /// Records `before` as an undo step for the session.
     pub fn commit_session(&mut self, label: &str, before: Session) {
+        // A track height wheel gesture still resting becomes its own step
+        // first.
+        if let Some(h) = self.height_commit.take() {
+            self.session_history.push("Track Height", h);
+        }
         self.session_history.push(label, before);
         self.session_dirty = true;
         self.session_version += 1;
@@ -969,6 +978,7 @@ impl State {
     /// left out, and the file as it was goes into Backups.
     pub fn save_session_to(&mut self, path: PathBuf) {
         self.keep_playhead();
+        crate::plugins::capture_all(self);
         let is_af27 = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("af27"));
@@ -1303,11 +1313,18 @@ impl State {
         if self.is_playing() || self.is_recording() {
             self.stop();
         }
+        // The old stream closes (on silence) before the new one opens: an
+        // ASIO driver serves one set of buffers.
         self.engine = None;
         match af27_engine::Engine::open(&self.prefs.audio.choice()) {
             Ok(e) => {
+                if let Some(n) = &e.note {
+                    let n = n.clone();
+                    self.error(n);
+                }
                 self.engine = Some(e);
                 self.engine_error = None;
+                self.audio_retry.reset();
             }
             Err(e) => self.engine_error = Some(e),
         }
@@ -1317,20 +1334,44 @@ impl State {
         self.live_metronome();
     }
 
-    pub fn tick(&mut self) {
-        // The output went away (unplugged): play through what is there.
-        if self.engine.as_ref().is_some_and(|e| e.is_lost()) {
+    /// Keeps the output healthy, called every frame: a device that went
+    /// away, failed or stopped calling back is opened again (the system
+    /// default where the chosen one is gone), and with no output at all
+    /// it keeps trying, waiting longer each time. Also hands the engine
+    /// the 3D layout (for speakers to their own outputs) and the track
+    /// input menus the ASIO driver's inputs.
+    fn watch_audio(&mut self, now: Instant) {
+        let why = self.engine.as_mut().and_then(|e| e.check(now));
+        if let Some(why) = why {
             self.reopen_audio();
             let text = match &self.engine {
-                Some(e) => format!("The audio device went away; playing through {}.", e.device),
-                None => "The audio device went away.".to_string(),
+                Some(e) => format!("{why} Playing through {}.", e.device),
+                None => format!("{why} Trying again…"),
             };
-            self.toasts.push(Toast {
-                text,
-                at: Instant::now(),
-                error: true,
-            });
+            self.error(text);
+        } else if self.engine.is_none() && self.audio_retry.due(now) && self.audio_retry.tries() > 1
+        {
+            // (The first `due` only starts the clock: the failure was just
+            // reported.)
+            self.reopen_audio();
+            if let Some(e) = &self.engine {
+                let text = format!("Audio is back: playing through {}.", e.device);
+                self.toast(text);
+            }
         }
+        let layout = match self.mode {
+            Mode::Multitrack => self.session.space,
+            Mode::Waveform => None,
+        };
+        if let Some(e) = &mut self.engine {
+            e.set_layout(layout);
+        }
+        let asio = self.engine.as_ref().and_then(|e| e.asio_inputs.as_ref());
+        self.rec_inputs.follow_driver(asio);
+    }
+
+    pub fn tick(&mut self) {
+        self.watch_audio(Instant::now());
         self.poll_jobs();
         crate::separation::poll(self);
         crate::spectral_select::poll(self);
@@ -1379,28 +1420,42 @@ impl State {
                 Mode::Multitrack => Some(self.session_view),
             };
             let in_view = v.is_some_and(|v| pos >= v.start && pos <= v.start + v.len);
-            self.follow.idle(dt, in_view);
+            // The Multitrack picks following up again on its own; the
+            // Waveform editor waits for playback to restart or the
+            // playhead to move.
+            if self.mode == Mode::Multitrack {
+                self.follow.idle(dt, in_view);
+            }
             // The setting, and not let go of by a hand-made move.
             let follow = self.prefs.follow_playhead && self.follow.active();
             match self.mode {
                 Mode::Waveform => {
+                    let px = self.wave_px as f64;
                     if let Some(d) = self.doc_mut() {
                         d.cursor = pos;
-                        if follow && (pos > d.view.start + d.view.len * 0.95 || pos < d.view.start)
-                        {
-                            d.view.start = (pos - d.view.len * 0.05).max(0.0);
+                        if follow {
+                            if let Some(s) = crate::zoom::follow_page(&d.view, pos, px, false) {
+                                d.view.start = s;
+                                d.view.clamp_to(d.duration());
+                            }
                         }
                     }
                 }
                 Mode::Multitrack => {
                     self.session_cursor = pos;
-                    let v = &mut self.session_view;
-                    if follow && (pos > v.start + v.len * 0.95 || pos < v.start) {
-                        v.start = (pos - v.len * 0.05).max(0.0);
+                    if follow {
+                        let lim = self.session_limits();
+                        let v = &mut self.session_view;
+                        let px = self.session_px as f64;
+                        if let Some(s) = crate::zoom::follow_page(v, pos, px, true) {
+                            v.start = s;
+                            v.limit(&lim);
+                        }
                     }
                 }
             }
         }
+        self.settle_track_heights(false);
         self.toasts
             .retain(|t| t.at.elapsed().as_secs_f32() < if t.error { 8.0 } else { 4.0 });
         self.autosave();
@@ -1413,16 +1468,53 @@ impl State {
         self.follow.hand_moved(playing);
     }
 
-    /// The shortest view in the current mode (32 pixels per sample).
-    pub fn min_view_len(&self) -> f64 {
-        match self.mode {
-            Mode::Waveform => self.doc().map_or(0.0005, |d| {
-                crate::zoom::min_len(self.wave_px, d.buf.rate as f64)
-            }),
-            Mode::Multitrack => {
-                crate::zoom::min_len(self.session_px, self.session.rate.max(1) as f64)
+    /// How far the Multitrack's view zooms and scrolls: 32 pixels per
+    /// sample in, four hours (or the content plus a tenth) out, from 0 on.
+    pub fn session_limits(&self) -> crate::zoom::TimeLimits {
+        let min = crate::zoom::min_len(self.session_px, self.session.rate.max(1) as f64);
+        crate::zoom::TimeLimits::session(self.session.duration(), min)
+    }
+
+    /// How far the Waveform editor's view of the open file zooms and
+    /// scrolls: 32 pixels per sample in, the whole file out.
+    pub fn doc_limits(&self) -> crate::zoom::TimeLimits {
+        match self.doc() {
+            Some(d) => crate::zoom::TimeLimits::file(
+                d.duration(),
+                crate::zoom::min_len(self.wave_px, d.buf.rate as f64),
+            ),
+            None => crate::zoom::TimeLimits::file(1.0, 0.0005),
+        }
+    }
+
+    /// Ends a wheel gesture on the track heights once the wheel rests,
+    /// as one undo step.
+    pub fn settle_track_heights(&mut self, force: bool) {
+        let now = self.born.elapsed().as_secs_f64();
+        let before = if force {
+            self.height_commit.take()
+        } else {
+            self.height_commit
+                .due(now, crate::zoom::HEIGHT_COMMIT_QUIET)
+        };
+        if let Some(before) = before {
+            let changed = before.tracks.iter().map(|t| t.height).ne(self
+                .session
+                .tracks
+                .iter()
+                .map(|t| t.height));
+            if changed {
+                self.commit_session("Track Height", before);
             }
         }
+    }
+
+    /// A wheel movement changed track heights: the first of a gesture
+    /// keeps the session from before it for the undo step.
+    pub fn touch_track_heights(&mut self) {
+        let now = self.born.elapsed().as_secs_f64();
+        let session = &self.session;
+        self.height_commit.touch(now, || session.clone());
     }
 
     pub fn position(&self) -> f64 {
@@ -1654,6 +1746,7 @@ impl State {
                 }
             }
             Mode::Multitrack => {
+                self.settle_track_heights(true);
                 if let Some(s) = self.session_history.undo(self.session.clone()) {
                     self.session = s;
                     self.session_version += 1;
@@ -1866,20 +1959,14 @@ impl State {
     }
 
     pub fn live_space(&mut self, ti: usize) {
-        let Some(layout) = self.session.space else {
+        if self.session.space.is_none() {
+            return;
+        }
+        let Some(pos) = self.session.tracks.get(ti).map(|t| t.pos) else {
             return;
         };
-        let Some(t) = self.session.tracks.get(ti) else {
-            return;
-        };
-        let stereo = t.kind != af27_core::TrackKind::Audio
-            || t.clips.iter().any(|c| {
-                self.media_buffer(c.media)
-                    .is_some_and(|b| b.num_channels() >= 2)
-            });
-        let (l, r, lfe) = af27_engine::space_gains(layout, &t.pos, stereo);
         if let Some(e) = &mut self.engine {
-            e.set_space(ti, l, r, lfe);
+            e.set_space(ti, pos);
         }
     }
 
@@ -2069,9 +2156,10 @@ mod view_tests {
     fn the_view_never_runs_past_the_file() {
         let mut v = View::fit(4.12);
         assert_eq!((v.start, v.len), (0.0, 4.12));
-        v.zoom_min(3.0, 2.0, 4.12, 0.0005);
+        let lim = crate::zoom::TimeLimits::file(4.12, 0.0005);
+        v.zoom_at(3.0, 2.0, &lim);
         assert!(v.start >= 0.0 && v.start + v.len <= 4.12 + 1e-9);
-        v.zoom_min(0.25, 4.0, 4.12, 0.0005);
+        v.zoom_at(0.25, 4.0, &lim);
         v.start = 99.0;
         v.clamp_to(4.12);
         assert!((v.start + v.len - 4.12).abs() < 1e-9, "{v:?}");

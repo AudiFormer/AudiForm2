@@ -455,7 +455,11 @@ impl App {
             Cmd::MultitrackView => st.mode = Mode::Multitrack,
             Cmd::ZoomIn => zoom(st, 0.5),
             Cmd::ZoomOut => zoom(st, 2.0),
-            Cmd::ZoomFull => zoom_full(st),
+            Cmd::ZoomFull => zoom_out_full(st),
+            Cmd::ZoomSession => zoom_session(st),
+            Cmd::ZoomSelection => zoom_selection(st),
+            Cmd::ZoomInVertical => zoom_tracks(st, crate::zoom::TRACK_KEY_STEP),
+            Cmd::ZoomOutVertical => zoom_tracks(st, 1.0 / crate::zoom::TRACK_KEY_STEP),
             Cmd::MoveTool => st.tool = Tool::Move,
             Cmd::RazorTool => st.tool = Tool::Razor,
             Cmd::TimeSelectTool => st.tool = Tool::TimeSelect,
@@ -492,66 +496,107 @@ fn apply_now(st: &mut State, e: Effect) {
     st.apply_effect(e);
 }
 
-/// Zoom In / Zoom Out: the playhead keeps its place (the middle of the
-/// view when the playhead is out of view).
+/// Zoom In / Zoom Out (keys, menu, buttons; twice or half the time per
+/// press): the playhead keeps its place, or the middle of the view when
+/// the playhead is out of view.
 pub fn zoom(st: &mut State, f: f64) {
     let pos = st.position();
-    let min = st.min_view_len();
     st.hand_moved_view();
     match st.mode {
         Mode::Waveform => {
+            let lim = st.doc_limits();
             if let Some(d) = st.doc_mut() {
-                let dur = d.duration();
                 let anchor = crate::zoom::button_anchor(&d.view, pos);
-                d.view.zoom_min(f, anchor, dur, min);
+                d.view.zoom_at(f, anchor, &lim);
             }
         }
         Mode::Multitrack => {
-            let dur = st.session.duration().max(30.0);
+            let lim = st.session_limits();
             let anchor = crate::zoom::button_anchor(&st.session_view, pos);
-            st.session_view.zoom_min(f, anchor, dur, min);
+            st.session_view.zoom_at(f, anchor, &lim);
         }
     }
 }
 
-/// Zoom to Selection: the selection fills the view.
-fn zoom_selection(st: &mut State) {
+/// Zoom to Selection: the selection fills the view (a little room on
+/// each side in the Multitrack, 5 % before it in the Waveform editor).
+pub fn zoom_selection(st: &mut State) {
     let Some((a, b)) = st.selection() else { return };
-    let min = st.min_view_len();
     st.hand_moved_view();
-    let fit = |v: &mut crate::state::View, total: f64| {
-        let len = (b - a).max(min);
-        *v = crate::state::View {
-            start: (a + b) / 2.0 - len / 2.0,
-            len,
-        };
-        v.clamp_to(total);
-    };
     match st.mode {
         Mode::Waveform => {
+            let lim = st.doc_limits();
             if let Some(d) = st.doc_mut() {
-                let dur = d.duration();
-                fit(&mut d.view, dur);
+                d.view = crate::state::View::show_range(a, b, 0.05, &lim);
             }
         }
         Mode::Multitrack => {
-            let dur = st.session.duration().max(30.0);
-            fit(&mut st.session_view, dur);
+            let lim = st.session_limits();
+            st.session_view = crate::state::View::show_range(a, b, 0.025, &lim);
         }
     }
 }
 
-fn zoom_full(st: &mut State) {
+/// Zoom to Session: the whole session in view with 5 % room after it, or
+/// in the Waveform editor exactly the whole file.
+pub fn zoom_session(st: &mut State) {
     st.hand_moved_view();
     match st.mode {
         Mode::Waveform => {
+            let lim = st.doc_limits();
             if let Some(d) = st.doc_mut() {
-                d.view = crate::state::View::fit(d.duration());
+                d.view = crate::state::View::fit_room(d.duration(), 1.0, &lim);
             }
         }
         Mode::Multitrack => {
-            st.session_view = crate::state::View::fit(st.session.duration().max(10.0))
+            let lim = st.session_limits();
+            let end = st.session.duration();
+            st.session_view = crate::state::View::fit_room(end.max(10.0), 1.05, &lim);
         }
+    }
+}
+
+/// Zoom Out Full: in the Multitrack every track fitted into the lanes at
+/// one height (one undo step), then Zoom to Session; in the Waveform
+/// editor the whole file.
+pub fn zoom_out_full(st: &mut State) {
+    if st.mode == Mode::Multitrack {
+        let n = st.session.tracks.len();
+        if n > 0 {
+            let h = crate::zoom::fit_height(st.session_lanes_h, crate::multitrack::TAIL_H, n);
+            let before = st.session.clone();
+            for t in &mut st.session.tracks {
+                t.height = h;
+            }
+            if before != st.session {
+                st.commit_session("Track Height", before);
+            }
+        }
+    }
+    zoom_session(st);
+}
+
+/// Taller Tracks / Shorter Tracks: every track times `f`, each keeping
+/// its own size, as one undo step.
+pub fn zoom_tracks(st: &mut State, f: f32) {
+    let before = st.session.clone();
+    for t in &mut st.session.tracks {
+        t.height = (t.height * f).clamp(crate::zoom::TRACK_MIN_H, crate::zoom::TRACK_MAX_H);
+    }
+    if before != st.session {
+        st.commit_session("Track Height", before);
+    }
+}
+
+/// Amplitude In / Out (display only): twice or half as tall.
+pub fn zoom_amp(st: &mut State, notches: f64) {
+    match st.mode {
+        Mode::Waveform => {
+            if let Some(d) = st.doc_mut() {
+                d.amp = crate::zoom::wheel_amp(d.amp, notches);
+            }
+        }
+        Mode::Multitrack => st.session_amp = crate::zoom::wheel_amp(st.session_amp, notches),
     }
 }
 
@@ -629,7 +674,8 @@ fn disabled_submenu(ui: &mut egui::Ui, label: &str, why: &str) {
     });
 }
 
-const PLUGIN_NOTE: &str = "Plug-in hosting is coming";
+const PLUGIN_NOTE: &str =
+    "VST 2 plug-ins are not supported (Steinberg no longer licenses its SDK). Use VST 3.";
 
 fn menus(app: &mut App, ui: &mut egui::Ui) {
     let st = &mut app.st;
@@ -977,24 +1023,31 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             if let Some(d) = st.doc_mut() {
                 ui.checkbox(&mut d.spectral, "Spectral Display");
             }
-            for c in [Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomFull] {
+            for c in [
+                Cmd::ZoomIn,
+                Cmd::ZoomOut,
+                Cmd::ZoomSession,
+                Cmd::ZoomSelection,
+                Cmd::ZoomFull,
+                Cmd::ZoomInVertical,
+                Cmd::ZoomOutVertical,
+            ] {
+                let enabled = match c {
+                    Cmd::ZoomSelection => st.selection().is_some(),
+                    Cmd::ZoomInVertical | Cmd::ZoomOutVertical => st.mode == Mode::Multitrack,
+                    _ => true,
+                };
                 if ui
-                    .add(egui::Button::new(c.label()).shortcut_text(km.text(c)))
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(c.label()).shortcut_text(km.text(c)),
+                    )
                     .clicked()
                 {
                     cmd = Some(c);
                 }
             }
             ui.menu_button("Time Display", |ui| time_display_items(ui, st));
-            if ui
-                .add_enabled(
-                    st.selection().is_some(),
-                    egui::Button::new("Zoom to Selection"),
-                )
-                .clicked()
-            {
-                zoom_selection(st);
-            }
             let mut follow = st.prefs.follow_playhead;
             if ui.checkbox(&mut follow, "Follow Playhead").changed() {
                 st.prefs.follow_playhead = follow;
@@ -1295,9 +1348,21 @@ fn effects_menu(
     }
     ui.separator();
     disabled_submenu(ui, "VST", PLUGIN_NOTE);
-    disabled_submenu(ui, "VST 3", PLUGIN_NOTE);
-    ui.add_enabled(false, egui::Button::new("Audio Plug-In Manager..."))
-        .on_disabled_hover_text(PLUGIN_NOTE);
+    ui.menu_button("VST 3", |ui| {
+        if let Some(id) = crate::plugins::picker_items(ui) {
+            if !add_to_track_rack(st, Some(id.clone())) && st.file_chain.len() < 16 {
+                // The Waveform editor: into the file's rack.
+                st.file_chain.push(crate::rack::new_slot(&id));
+                let at = st.file_chain.len() - 1;
+                crate::rack::open_window(st, crate::rack::FILE, at);
+                st.want_effects = true;
+            }
+        }
+    });
+    if ui.button("Audio Plug-In Manager...").clicked() {
+        crate::plugins::open_manager();
+        ui.close_menu();
+    }
 }
 
 /// In the Multitrack, an effect picked from the Effects menu goes into the
@@ -1830,20 +1895,36 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            for (s, tip, f) in [
-                ("⛶", "Zoom Out Full", 0.0),
-                ("−", "Zoom Out (-)", 2.0),
-                ("+", "Zoom In (=)", 0.5),
+            // Right to left: Zoom Out Full, Zoom to Selection, Zoom Out,
+            // Zoom In, then the amplitude and (Multitrack) track heights.
+            let multitrack = st.mode == Mode::Multitrack;
+            for (s, tip, which) in [
+                ("⛶", "Zoom Out Full (|)", 0u8),
+                ("[ ]", "Zoom to Selection", 1),
+                ("−", "Zoom Out (-)", 2),
+                ("+", "Zoom In (=)", 3),
+                ("A−", "Amplitude Out (display only)", 4),
+                ("A+", "Amplitude In (display only)", 5),
+                ("H−", "Shorter Tracks (Alt+-)", 6),
+                ("H+", "Taller Tracks (Alt+=)", 7),
             ] {
+                if which >= 6 && !multitrack {
+                    continue;
+                }
                 if ui
-                    .button(RichText::new(s).size(16.0))
+                    .button(RichText::new(s).size(if which >= 4 { 12.0 } else { 16.0 }))
                     .on_hover_text(tip)
                     .clicked()
                 {
-                    if f == 0.0 {
-                        zoom_full(st);
-                    } else {
-                        zoom(st, f);
+                    match which {
+                        0 => zoom_out_full(st),
+                        1 => zoom_selection(st),
+                        2 => zoom(st, 2.0),
+                        3 => zoom(st, 0.5),
+                        4 => zoom_amp(st, -1.0),
+                        5 => zoom_amp(st, 1.0),
+                        6 => zoom_tracks(st, 1.0 / crate::zoom::TRACK_KEY_STEP),
+                        _ => zoom_tracks(st, crate::zoom::TRACK_KEY_STEP),
                     }
                 }
             }
@@ -2021,15 +2102,20 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
         ui.label(RichText::new("AUDIFORM 2").size(28.0).strong().extra_letter_spacing(6.0).color(c(st.theme.accent)));
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.label("A fast, themeable audio editor written entirely in Rust.");
-        ui.label("AudiForm 2 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
+        ui.label("Free software under the GNU General Public License, version 3 or later (see LICENSE and COPYING). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
         ui.label("The sequel to Audiform, by the same project lead.");
+        if let Some(credit) = af27_engine::ASIO_CREDIT {
+            ui.label(credit);
+        }
     });
     st.show_about = open;
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::selfshot::tick(ctx, ctx.input(|i| i.time));
+        crate::plugins::remember_window(frame);
+        crate::plugins::tick(&mut self.st);
         // For documentation shots: AF2_SHOW_TAB=Inspector (etc.) opens that
         // panel once at start.
         if !self.shown_env_tab {
@@ -2417,6 +2503,7 @@ impl eframe::App for App {
             self.show_tab(Tab::Effects);
         }
         crate::rack::windows(ctx, &mut self.st);
+        crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
         generate_window(ctx, &mut self.st);
         crate::export::poll(&mut self.st, ctx);

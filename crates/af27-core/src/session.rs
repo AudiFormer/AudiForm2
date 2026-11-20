@@ -160,6 +160,11 @@ pub struct ClipProps {
     pub fade_in_skew: f32,
     #[serde(skip_serializing_if = "is_default")]
     pub fade_out_skew: f32,
+    /// 3D Space: a clip of more than two channels folds to stereo (its
+    /// file had a Source Channels mix) instead of playing each channel
+    /// from its speaker.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fold_channels: bool,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -259,6 +264,9 @@ pub struct Track {
     /// Where the track sits in a 3D Space session's room.
     #[serde(default)]
     pub pos: crate::space::SpacePos,
+    /// 3D Space: the 3D Bus flag and spot automation.
+    #[serde(default, skip_serializing_if = "crate::space::TrackSpace::is_default")]
+    pub spatial: crate::space::TrackSpace,
     /// MIDI tracks: their clips.
     #[serde(default)]
     pub midi: Vec<crate::midi::MidiClip>,
@@ -582,6 +590,7 @@ impl Session {
             chain: Vec::new(),
             rack: Default::default(),
             pos: Default::default(),
+            spatial: Default::default(),
             midi: Vec::new(),
             instrument: Default::default(),
             soundfont: None,

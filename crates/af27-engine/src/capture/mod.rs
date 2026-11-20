@@ -26,8 +26,11 @@ mod wasapi;
 /// Where a recording comes from.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RecordSource {
-    /// The default recording device (microphone / line in).
+    /// The default recording device (microphone / line in), all its
+    /// channels.
     Input,
+    /// One channel or a pair of an input device (or of the ASIO driver).
+    Channels(crate::routing::InputPick),
     /// Everything the computer plays except AudiForm 2, so monitoring
     /// doesn't feed back into the take. On systems without process
     /// loopback this records the whole default output device instead.
@@ -43,6 +46,7 @@ impl RecordSource {
     pub fn label(&self) -> String {
         match self {
             RecordSource::Input => "Microphone / line in".into(),
+            RecordSource::Channels(p) => p.label(),
             RecordSource::SystemExceptSelf => "System audio (except AudiForm 2)".into(),
             RecordSource::System(None) => "System audio (everything)".into(),
             RecordSource::System(Some(d)) => format!("System audio: {}", d.name),
@@ -52,7 +56,7 @@ impl RecordSource {
 
     /// True for the sources that record what the computer plays.
     pub fn is_system(&self) -> bool {
-        !matches!(self, RecordSource::Input)
+        !matches!(self, RecordSource::Input | RecordSource::Channels(_))
     }
 }
 

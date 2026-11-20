@@ -57,9 +57,12 @@ use af27_dsp::wide::{build_wide_chain, WideChain};
 
 use crate::synth::{self, Synth};
 
+mod space;
+pub use space::{bed_names, plays_to_speakers};
+
 pub const BLOCK: usize = 2048;
 /// Speaker channels at most (7.1.4 is 12).
-pub const MAX_SPEAKERS: usize = 16;
+pub const MAX_SPEAKERS: usize = af27_space::MAX_SPEAKERS;
 /// Effect lanes move their effect's settings this often (frames).
 pub const FX_STEP: usize = 256;
 
@@ -220,10 +223,8 @@ pub struct MixTrack {
     /// when the output would close a loop).
     pub output: Option<usize>,
     pub sends: Vec<MixSend>,
-    /// 3D: gains per speaker for the left and right side, and the LFE send.
-    pub space_l: [f32; MAX_SPEAKERS],
-    pub space_r: [f32; MAX_SPEAKERS],
-    pub lfe: f32,
+    /// 3D sessions: its place in the room, 3D Bus bed, multichannel clips.
+    pub sp: Option<Box<space::TrackSpaceMix>>,
     /// Per chain slot: the track whose sound keys it (a sidechain), once
     /// the effect takes a key and the source can run first; None hears
     /// its own input.
@@ -303,6 +304,13 @@ pub struct SpaceMix {
     /// The master chain, on the speakers.
     pub chain: WideChain,
     bed: Vec<f32>,
+    lfe_filter: af27_space::lfe::LfeFilter,
+    /// Each speaker's peak since last read (after the master fader).
+    peaks: [f32; MAX_SPEAKERS],
+    /// Listening on speakers: each on its own device output.
+    speakers: bool,
+    /// Export: the bed channel each output channel takes (None: as is).
+    bed_order: Option<Vec<usize>>,
 }
 
 pub struct Mix {
@@ -327,6 +335,11 @@ pub struct Mix {
     pub lead: usize,
     /// When the master's input happens (frames after the sources).
     pub master_in: usize,
+    /// 3D: frames placed sound is held back by for Place Elements (on
+    /// top of `lead`), 0 when nothing steers; see `space`.
+    steer_lead: usize,
+    primed: bool,
+    prime_out: Vec<f32>,
     ml: Vec<f32>,
     mr: Vec<f32>,
     /// Scratch for one route.
@@ -343,6 +356,11 @@ pub struct Mix {
     levels: Vec<Vec<usize>>,
     /// Spread track work over the engine's threads (false: all on the caller).
     pub parallel: bool,
+    /// The graph.s kept edges, run order and master keys, for aligning
+    /// again (an export: plug-ins are late by other amounts there).
+    kept: Vec<(usize, usize)>,
+    order: Vec<usize>,
+    master_keys: Vec<Option<usize>>,
     rate: f64,
 }
 
@@ -734,29 +752,6 @@ fn read_span(
     }
 }
 
-/// Per-speaker gains for a track's left and right sides in a 3D session.
-pub fn space_gains(
-    layout: af27_core::space::SpaceLayout,
-    pos: &af27_core::space::SpacePos,
-    stereo: bool,
-) -> ([f32; MAX_SPEAKERS], [f32; MAX_SPEAKERS], f32) {
-    let [gl, gr] = af27_space::source_gains(layout, pos, stereo);
-    let mut l = [0.0; MAX_SPEAKERS];
-    let mut r = [0.0; MAX_SPEAKERS];
-    for (i, v) in gl.iter().take(MAX_SPEAKERS).enumerate() {
-        l[i] = *v;
-    }
-    for (i, v) in gr.iter().take(MAX_SPEAKERS).enumerate() {
-        r[i] = *v;
-    }
-    let lfe = if pos.lfe_db <= -60.0 {
-        0.0
-    } else {
-        db_to_gain(pos.lfe_db as f32)
-    };
-    (l, r, lfe)
-}
-
 /// Fader and pan gains for a track (fader only in 3D sessions).
 pub fn track_gains(t: &af27_core::Track, space: bool) -> (f32, f32) {
     if space {
@@ -847,17 +842,30 @@ pub fn build(
     let index_of = |id: af27_core::TrackId| session.tracks.iter().position(|t| t.id == id);
     let bus_index =
         |id: af27_core::TrackId| index_of(id).filter(|&i| session.tracks[i].kind == TrackKind::Bus);
+    // 3D: the Place Elements frame, when anything steers.
+    let steer_lead = if space::session_steers(session) {
+        af27_space::steer::STEER_FRAME
+    } else {
+        0
+    };
     let mut tracks: Vec<MixTrack> = session
         .tracks
         .iter()
         .zip(&heard)
-        .map(|(t, &audible)| {
-            let clips: Vec<MixClip> = t
-                .clips
-                .iter()
-                .filter(|c| !c.muted)
-                .filter_map(|c| Some(MixClip::new(c, media(c.media)?)))
-                .collect();
+        .enumerate()
+        .map(|(ti, (t, &audible))| {
+            let mut clips: Vec<MixClip> = Vec::new();
+            // 3D: clips of more than two channels play from their speakers.
+            let mut wide: Vec<MixClip> = Vec::new();
+            for c in t.clips.iter().filter(|c| !c.muted) {
+                let Some(buf) = media(c.media) else { continue };
+                let mc = MixClip::new(c, buf);
+                if space.is_some() && plays_to_speakers(c, mc.buf.num_channels()) {
+                    wide.push(mc);
+                } else {
+                    clips.push(mc);
+                }
+            }
             let (synth, font) = if t.kind == TrackKind::Midi {
                 instruments(t, &session.tempo, rate)
             } else {
@@ -865,10 +873,8 @@ pub fn build(
             };
             let stereo =
                 t.kind != TrackKind::Audio || clips.iter().any(|c| c.buf.num_channels() >= 2);
-            let (space_l, space_r, lfe) = match space {
-                Some(layout) => space_gains(layout, &t.pos, stereo),
-                None => ([0.0; MAX_SPEAKERS], [0.0; MAX_SPEAKERS], 0.0),
-            };
+            let sp =
+                space.map(|layout| space::for_track(layout, t, wide, stereo, rate, ti, steer_lead));
             MixTrack {
                 is_bus: t.kind == TrackKind::Bus,
                 audible,
@@ -901,9 +907,7 @@ pub fn build(
                         })
                     })
                     .collect(),
-                space_l,
-                space_r,
-                lfe,
+                sp,
                 keys: Vec::new(),
                 in_t: 0,
                 out_t: 0,
@@ -976,10 +980,98 @@ pub fn build(
 
     // Delay compensation, in run order.
     let order: Vec<usize> = plan.levels.iter().flatten().copied().collect();
+    let (lead, master_in, master_taps) =
+        align(&mut tracks, &plan.kept, &order, &master_keys, &master_chain);
+
+    let space_mix = space.map(|layout| {
+        let speakers = af27_space::speakers(layout);
+        let channels = speakers.len();
+        let names: Vec<String> = speakers.iter().map(|s| s.name.to_string()).collect();
+        SpaceMix {
+            channels,
+            lfe_channel: af27_space::lfe_channel(layout),
+            monitor: af27_space::Monitoring::new(layout, session.monitor, rate),
+            chain: {
+                let mut c = build_wide_chain(&session.master_chain, rate, &names, BLOCK);
+                c.set_rack(&session.master_rack);
+                c
+            },
+            bed: vec![0.0; BLOCK * channels],
+            lfe_filter: af27_space::lfe::LfeFilter::new(rate),
+            peaks: [0.0; MAX_SPEAKERS],
+            speakers: session.monitor == af27_core::space::Monitor::Speakers,
+            bed_order: None,
+        }
+    });
+    // Start the engine's threads here, on the UI thread, never on the
+    // audio thread.
+    let _ = crate::pool::pool();
+    if space.is_none() {
+        master_chain.set_rack(&session.master_rack);
+    }
+    let master_lane = session
+        .master_lanes
+        .iter()
+        .find(|l| l.target == LaneTarget::Volume && l.plays())
+        .map(|l| l.points.clone())
+        .unwrap_or_default();
+    let master = fader_gain(session.master_db);
+    let mut mix = Mix {
+        levels: plan.levels,
+        kept: plan.kept,
+        order,
+        master_keys,
+        parallel: true,
+        tracks,
+        master_chain,
+        master,
+        master_cur: master,
+        master_lane,
+        master_lane_live: false,
+        master_taps,
+        duration: session.duration(),
+        space: space_mix,
+        metronome: session.tempo.metronome,
+        click: session.tempo.segments().collect(),
+        lead,
+        master_in,
+        steer_lead,
+        primed: false,
+        prime_out: if steer_lead > 0 {
+            vec![0.0; BLOCK * MAX_SPEAKERS]
+        } else {
+            Vec::new()
+        },
+        ml: vec![0.0; BLOCK],
+        mr: vec![0.0; BLOCK],
+        sl: vec![0.0; BLOCK],
+        sr: vec![0.0; BLOCK],
+        av: vec![1.0; BLOCK],
+        apl: vec![1.0; BLOCK],
+        apr: vec![1.0; BLOCK],
+        rate: rate as f64,
+    };
+    mix.settle();
+    mix
+}
+
+/// Delay compensation: when each strip's input and output happen (from
+/// the latency every effect reports), and the delays on every route,
+/// key and late track input that line them up. Returns the lead (how
+/// late the whole mix is), the master's input time and the master
+/// chain's key taps. Allocates; on the UI thread (or before an export).
+fn align(
+    tracks: &mut [MixTrack],
+    kept: &[(usize, usize)],
+    order: &[usize],
+    master_keys: &[Option<usize>],
+    master_chain: &Chain,
+) -> (usize, usize, Vec<Option<KeyTap>>) {
+    let n = tracks.len();
     let mut master_in = 0usize;
-    for &i in &order {
+    for &i in order {
         let mut t_in = 0usize;
-        for &(a, b) in &plan.kept {
+        for &(a, b) in kept {
             if b == i {
                 t_in = t_in.max(tracks[a].out_t);
             }
@@ -999,7 +1091,7 @@ pub fn build(
         let dest_in = |b: Option<usize>| b.map_or(master_in, |b| tracks[b].in_t);
         let out_t = tracks[i].out_t;
         let in_t = tracks[i].in_t;
-        let main = dest_in(tracks[i].output) - out_t;
+        let main = dest_in(tracks[i].output).saturating_sub(out_t);
         let sends: Vec<usize> = tracks[i]
             .sends
             .iter()
@@ -1011,7 +1103,8 @@ pub fn build(
             .enumerate()
             .map(|(slot, k)| {
                 k.map(|src| {
-                    let d = in_t - tracks[src].out_t + tracks[i].chain.latency_before(slot);
+                    let d = in_t.saturating_sub(tracks[src].out_t)
+                        + tracks[i].chain.latency_before(slot);
                     KeyTap::new(src, d)
                 })
             })
@@ -1021,80 +1114,22 @@ pub fn build(
         for (s, d) in t.sends.iter_mut().zip(sends) {
             s.delay = Delay::new(d);
         }
-        if !t.is_bus {
-            t.in_delay = Delay::new(in_t);
-        }
+        t.in_delay = Delay::new(if t.is_bus { 0 } else { in_t });
         t.taps = taps;
     }
-    let master_taps: Vec<Option<KeyTap>> = master_keys
+    let master_taps = master_keys
         .iter()
         .enumerate()
         .map(|(slot, k)| {
             k.map(|src| {
                 KeyTap::new(
                     src,
-                    master_in - tracks[src].out_t + master_chain.latency_before(slot),
+                    master_in.saturating_sub(tracks[src].out_t) + master_chain.latency_before(slot),
                 )
             })
         })
         .collect();
-
-    let space_mix = space.map(|layout| {
-        let speakers = af27_space::speakers(layout);
-        let channels = speakers.len();
-        let names: Vec<String> = speakers.iter().map(|s| s.name.to_string()).collect();
-        SpaceMix {
-            channels,
-            lfe_channel: af27_space::lfe_channel(layout),
-            monitor: af27_space::Monitoring::new(layout, session.monitor, rate),
-            chain: {
-                let mut c = build_wide_chain(&session.master_chain, rate, &names, BLOCK);
-                c.set_rack(&session.master_rack);
-                c
-            },
-            bed: vec![0.0; BLOCK * channels],
-        }
-    });
-    // Start the engine's threads here, on the UI thread, never on the
-    // audio thread.
-    let _ = crate::pool::pool();
-    if space.is_none() {
-        master_chain.set_rack(&session.master_rack);
-    }
-    let master_lane = session
-        .master_lanes
-        .iter()
-        .find(|l| l.target == LaneTarget::Volume && l.plays())
-        .map(|l| l.points.clone())
-        .unwrap_or_default();
-    let master = fader_gain(session.master_db);
-    let mut mix = Mix {
-        levels: plan.levels,
-        parallel: true,
-        tracks,
-        master_chain,
-        master,
-        master_cur: master,
-        master_lane,
-        master_lane_live: false,
-        master_taps,
-        duration: session.duration(),
-        space: space_mix,
-        metronome: session.tempo.metronome,
-        click: session.tempo.segments().collect(),
-        lead,
-        master_in,
-        ml: vec![0.0; BLOCK],
-        mr: vec![0.0; BLOCK],
-        sl: vec![0.0; BLOCK],
-        sr: vec![0.0; BLOCK],
-        av: vec![1.0; BLOCK],
-        apl: vec![1.0; BLOCK],
-        apr: vec![1.0; BLOCK],
-        rate: rate as f64,
-    };
-    mix.settle();
-    mix
+    (lead, master_in, master_taps)
 }
 
 impl Mix {
@@ -1159,7 +1194,28 @@ impl Mix {
         if let Some(sp) = &mut self.space {
             sp.chain.reset();
         }
+        self.space_reset();
         self.settle();
+    }
+
+    /// This mix renders offline (an export): effects that run in another
+    /// process (VST3 plug-ins) start copies of their own and wait for
+    /// every block.
+    pub fn set_offline(&mut self) {
+        for t in &mut self.tracks {
+            t.chain.set_offline(true);
+        }
+        self.master_chain.set_offline(true);
+        let (lead, master_in, taps) = align(
+            &mut self.tracks,
+            &self.kept,
+            &self.order,
+            &self.master_keys,
+            &self.master_chain,
+        );
+        self.lead = lead;
+        self.master_in = master_in;
+        self.master_taps = taps;
     }
 
     /// Starts playing from `t` (seconds): clears everything, then primes
@@ -1170,12 +1226,14 @@ impl Mix {
         self.prime(t);
     }
 
-    /// Renders the `lead` frames before `t` into nothing, so what comes
-    /// out from `t` on is in step. Used at a start and when a new program
-    /// arrives while playing.
+    /// Renders the frames the mix is late by (delay compensation and the
+    /// Place Elements frame) before `t` into nothing, so what comes out
+    /// from `t` on is in step. Used at a start and when a new program
+    /// arrives while playing. No allocation.
     pub fn prime(&mut self, t: f64) {
         let dt = 1.0 / self.rate;
-        let mut left = self.lead;
+        self.primed = true;
+        let mut left = self.lead + self.steer_lead;
         let mut scratch = [0.0f32; BLOCK * 2];
         while left > 0 {
             let n = left.min(BLOCK);
@@ -1346,7 +1404,12 @@ impl Mix {
             let t = &mut self.tracks[ti];
             t.sends[k].cur = target;
             t.sends[k].delay.run(&mut self.sl[..n], &mut self.sr[..n]);
-            if bus != ti {
+            if bus != ti && space && space::is_room(&self.tracks, bus) {
+                // A 3D Bus: placed by the sender's spot.
+                if let Some(sp) = self.space.as_ref() {
+                    space::place_send(&mut self.tracks, sp, ti, bus, &self.sl, &self.sr, n);
+                }
+            } else if bus != ti {
                 let b = &mut self.tracks[bus];
                 add_into(&mut b.l[..n], &mut b.r[..n], &self.sl[..n], &self.sr[..n]);
             }
@@ -1377,33 +1440,22 @@ impl Mix {
             t.main_cur = target;
             t.out_delay.run(&mut self.sl[..n], &mut self.sr[..n]);
         }
+        // 3D: onto the bed by the spot (or a 3D Bus's bed, or its own
+        // multichannel bed); a stereo bus takes it as in a stereo session.
+        if space && self.route_space(ti, n, target[0]) {
+            return;
+        }
         match out {
             Some(bus) if bus != ti => {
                 let b = &mut self.tracks[bus];
                 add_into(&mut b.l[..n], &mut b.r[..n], &self.sl[..n], &self.sr[..n]);
             }
-            _ => match &mut self.space {
-                Some(sp) => {
-                    let t = &self.tracks[ti];
-                    let ch = sp.channels;
-                    for i in 0..n {
-                        let (l, r) = (self.sl[i], self.sr[i]);
-                        let frame = &mut sp.bed[i * ch..(i + 1) * ch];
-                        for c in 0..ch.min(MAX_SPEAKERS) {
-                            frame[c] += l * t.space_l[c] + r * t.space_r[c];
-                        }
-                        if let Some(lc) = sp.lfe_channel {
-                            frame[lc] += (l + r) * 0.5 * t.lfe;
-                        }
-                    }
-                }
-                None => add_into(
-                    &mut self.ml[..n],
-                    &mut self.mr[..n],
-                    &self.sl[..n],
-                    &self.sr[..n],
-                ),
-            },
+            _ => add_into(
+                &mut self.ml[..n],
+                &mut self.mr[..n],
+                &self.sl[..n],
+                &self.sr[..n],
+            ),
         }
     }
 
@@ -1432,13 +1484,16 @@ impl Mix {
         bed_out: bool,
     ) -> (f32, f32) {
         let n = n.min(BLOCK);
-        // The sources are read `lead` ahead of what comes out.
-        let ts = t0 + dt * self.lead as f64;
+        self.space_prime(t0, dt);
+        // The sources are read ahead of what comes out by the delay
+        // compensation and the Place Elements frame.
+        let ts = t0 + dt * (self.lead + self.steer_lead) as f64;
         self.ml[..n].fill(0.0);
         self.mr[..n].fill(0.0);
         if let Some(sp) = &mut self.space {
             sp.bed[..n * sp.channels].fill(0.0);
         }
+        self.space_begin(t0 + dt * n as f64 * 0.5, n);
         for t in &mut self.tracks {
             if t.is_bus {
                 t.l[..n].fill(0.0);
@@ -1458,15 +1513,18 @@ impl Mix {
                     // pool runs each `k` exactly once, so these borrows never
                     // overlap; key sources sit at earlier levels.
                     let t = unsafe { &mut *tracks.get(level[k]) };
+                    // A 3D Bus runs its effects on its own bed instead.
+                    let room = t.sp.as_ref().is_some_and(|s| s.room.is_some());
                     if !t.active() {
                         t.l[..n].fill(0.0);
                         t.r[..n].fill(0.0);
                     } else if !t.is_bus {
                         render_source(t, tracks, ts, dt, n);
-                    } else {
+                    } else if !room {
                         let tin = ts - dt * t.in_t as f64;
                         run_chain(t, tracks, n, tin, dt);
                     }
+                    space::render_track(t, ts, dt, n);
                 };
                 if self.parallel && level.len() >= 2 {
                     crate::pool::pool().run(level.len(), &job);
@@ -1477,26 +1535,16 @@ impl Mix {
             for &ti in level {
                 let tp = ts - dt * self.tracks[ti].out_t as f64;
                 self.route(ti, n, tp, dt);
+                self.space_end_track(ti);
             }
         }
         self.levels = levels;
-        if let Some(sp) = &mut self.space {
-            // The master chain on the speakers, before listening or export.
-            sp.chain.process(&mut sp.bed[..n * sp.channels]);
-        }
-        if let (true, Some(sp)) = (bed_out, self.space.as_ref()) {
-            let ch = sp.channels;
-            let mut peak = (0.0f32, 0.0f32);
-            for i in 0..n {
-                let g = self.master_gain(i, n, t0, dt);
-                let span = i * ch..(i + 1) * ch;
-                for (o, b) in out[span.clone()].iter_mut().zip(&sp.bed[span]) {
-                    *o = b * g;
-                    peak.0 = peak.0.max(o.abs());
-                }
-            }
+        // The LFE band and the master chain on the speakers, before
+        // listening or export.
+        self.space_master(n);
+        if bed_out && self.space.is_some() {
+            let peak = self.write_bed(n, out, t0, dt);
             self.master_cur = self.master;
-            peak.1 = peak.0;
             return peak;
         }
         if let Some(sp) = &mut self.space {

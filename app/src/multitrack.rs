@@ -7,14 +7,18 @@
 //! to trim it. Razor: click a clip to split it there. Time Selection:
 //! drag to select a range. Drop files from the Files panel onto a track.
 //!
-//! Wheel: over the ruler it zooms in time toward the pointer; over the
-//! lanes and the track headers it scrolls the tracks; Shift+wheel scrolls
-//! in time; Ctrl+wheel zooms in time anywhere; Alt+wheel resizes the
+//! Wheel (the full table is [`crate::zoom::wheel_action`]): over the
+//! ruler and the overview strip it zooms in time at the pointer; over the
+//! lanes it scrolls the tracks and Ctrl+wheel zooms in time exactly as the
+//! ruler does; over the track headers it makes every track taller or
+//! shorter evenly; Shift+wheel scrolls in time; Alt+wheel resizes the
 //! track under the pointer; Alt+Shift+wheel zooms the waveforms'
-//! amplitude (display only). The bar on the right of the lanes scrolls
-//! the tracks; dragging its ends or the wheel over it zooms the track
-//! heights (every track the same height); double-click it to fit every
-//! track in view.
+//! amplitude (display only), or over the headers scales every track.
+//! Height changes by wheel become one undo step once the wheel rests.
+//! The bar on the right of the lanes scrolls the tracks; dragging its
+//! ends or the wheel over it zooms the track heights (every track the
+//! same height); double-click it to fit every track in view. The overview
+//! strip above the ruler is in [`crate::overview`].
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense, Stroke};
 
@@ -28,10 +32,10 @@ const HEADER_W: f32 = 210.0;
 /// Width of the vertical zoom bar on the right of the lanes.
 const VBAR_W: f32 = 12.0;
 /// Track height limits for the wheel and the zoom bar.
-const MIN_TRACK_H: f32 = 40.0;
-const MAX_TRACK_H: f32 = 480.0;
+const MIN_TRACK_H: f32 = crate::zoom::TRACK_MIN_H;
+const MAX_TRACK_H: f32 = crate::zoom::TRACK_MAX_H;
 /// Room under the last track (the Add Track row and the Master row).
-const TAIL_H: f32 = 40.0;
+pub(crate) const TAIL_H: f32 = 40.0;
 
 /// What a drag on the vertical zoom bar holds.
 #[derive(Debug, Clone, Copy)]
@@ -132,22 +136,6 @@ pub fn height_for_share(share: f32, view_h: f32, n: usize) -> f32 {
     ((content - TAIL_H) / n.max(1) as f32).clamp(MIN_TRACK_H, MAX_TRACK_H)
 }
 
-/// The scroll that keeps the spot `y` pixels into the view in place when
-/// every track goes from the heights in `old` to `new_h`.
-pub fn scroll_keeping(old: &[f32], scroll: f32, y: f32, new_h: f32) -> f32 {
-    let spot = scroll + y;
-    let mut top = 0.0;
-    for (i, h) in old.iter().enumerate() {
-        if spot < top + h {
-            let frac = ((spot - top) / h.max(1.0)).clamp(0.0, 1.0);
-            return (i as f32 * new_h + frac * new_h - y).max(0.0);
-        }
-        top += h;
-    }
-    // Past the last track: keep the distance past the end.
-    (old.len() as f32 * new_h + (spot - top) - y).max(0.0)
-}
-
 #[cfg(test)]
 mod vzoom_tests {
     use super::*;
@@ -160,17 +148,6 @@ mod vzoom_tests {
         // Limits.
         assert_eq!(height_for_share(1.0, 100.0, 50), MIN_TRACK_H);
         assert_eq!(height_for_share(0.01, 4000.0, 1), MAX_TRACK_H);
-    }
-
-    #[test]
-    fn height_zoom_keeps_the_spot_under_the_pointer() {
-        let old = [100.0, 50.0, 100.0];
-        // 40 px into the view with 80 px scrolled: 120 px into the
-        // session, 20 px (40%) into the second track.
-        let s = scroll_keeping(&old, 80.0, 40.0, 200.0);
-        assert!((s + 40.0 - (200.0 + 0.4 * 200.0)).abs() < 1e-3, "{s}");
-        // Never scrolled above the top.
-        assert_eq!(scroll_keeping(&old, 0.0, 10.0, 40.0), 0.0);
     }
 }
 
@@ -191,8 +168,17 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     let (rect, resp) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, Rounding::ZERO, c(th.wave_background));
-    let ruler = Rect::from_min_size(
+    // The overview strip, then the ruler, over the lanes.
+    let overview = Rect::from_min_size(
         pos2(rect.left() + HEADER_W, rect.top()),
+        vec2(rect.width() - HEADER_W - VBAR_W, crate::overview::STRIP_H),
+    );
+    let full_btn = Rect::from_min_max(
+        pos2(overview.right(), overview.top()),
+        pos2(rect.right(), overview.bottom()),
+    );
+    let ruler = Rect::from_min_size(
+        pos2(rect.left() + HEADER_W, overview.bottom()),
         vec2(rect.width() - HEADER_W - VBAR_W, 22.0),
     );
     // The metronome row, while it is on, sits between the ruler and the
@@ -220,6 +206,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         pos2(rect.right(), lanes.bottom()),
     );
     st.session_px = lanes.width();
+    st.session_lanes_h = lanes.height();
     let headers = Rect::from_min_max(
         pos2(rect.left(), metro.bottom()),
         pos2(ruler.left(), master_band.top()),
@@ -239,21 +226,40 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         .input(|i| i.pointer.hover_pos())
         .filter(|p| rect.contains(*p) && ui.rect_contains_pointer(rect));
     if let Some(hp) = pointer {
-        let input = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers));
-        let areas = Areas {
-            ruler,
-            lanes,
-            headers,
-            vbar,
-        };
-        wheel(st, drag, &areas, hp, input);
+        let input = ui.input(|i| {
+            crate::zoom::WheelInput::read(
+                i.smooth_scroll_delta.into(),
+                i.zoom_delta(),
+                i.modifiers.command || i.modifiers.ctrl,
+                i.modifiers.shift,
+                i.modifiers.alt,
+            )
+        });
+        if let Some(input) = input {
+            let areas = Areas {
+                overview,
+                ruler,
+                lanes,
+                headers,
+                vbar,
+            };
+            wheel(st, drag, &areas, hp, input);
+        }
     }
+    if st.height_commit.is_pending() {
+        // Wake up to keep the resting wheel gesture as an undo step.
+        let quiet = crate::zoom::HEIGHT_COMMIT_QUIET as f32 + 0.02;
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f32(quiet));
+    }
+    crate::overview::input(ui, st, overview, full_btn);
     vzoom_bar(ui, st, drag, &vresp, lanes, vbar);
     let total_h: f32 = st.session.tracks.iter().map(|t| t.height).sum();
     drag.scroll_y = drag
         .scroll_y
         .clamp(0.0, (total_h - lanes.height() + TAIL_H).max(0.0));
-    st.session_view.clamp_to(st.session.duration().max(30.0));
+    let lim = st.session_limits();
+    st.session_view.limit(&lim);
     let v = st.session_view;
 
     // Ruler clicks and drags position the playhead.
@@ -267,9 +273,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if !from_headers {
         if let Some(dv) = crate::ruler::pan_delta(ui, &resp).or(crate::ruler::pan_delta(ui, &rresp))
         {
-            let sv = &mut st.session_view;
-            sv.start -= dv.x as f64 / lanes.width().max(1.0) as f64 * sv.len;
-            sv.clamp_to(st.session.duration().max(30.0));
+            st.session_view
+                .pan_px(-dv.x as f64, lanes.width() as f64, &lim);
             drag.scroll_y =
                 (drag.scroll_y - dv.y).clamp(0.0, (total_h - lanes.height() + TAIL_H).max(0.0));
             st.hand_moved_view();
@@ -742,6 +747,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     // Drawing.
     let tc = st.time_ctx();
     crate::ruler::draw_ruler(&p, ruler, &v, &th, &st.session.markers, &tc);
+    crate::overview::draw(&p, st, overview, full_btn, &th);
     if st.session.tempo.metronome
         || st.session.tempo.has_changes()
         || st
@@ -1443,94 +1449,103 @@ fn drag_scroll(caches: &Caches) -> f32 {
 
 /// The Multitrack's parts, for the wheel.
 struct Areas {
+    overview: Rect,
     ruler: Rect,
     lanes: Rect,
     headers: Rect,
     vbar: Rect,
 }
 
-/// The mouse wheel over the Multitrack (rules in the module notes).
-fn wheel(
-    st: &mut State,
-    drag: &mut Drag,
-    a: &Areas,
-    hp: egui::Pos2,
-    (scroll, zoomd, m): (egui::Vec2, f32, egui::Modifiers),
-) {
-    let prefs = st.zoom;
-    let dur = st.session.duration().max(30.0);
-    let min = st.min_view_len();
-    let pos = st.position();
-    let over_time = a.lanes.contains(hp) || a.ruler.contains(hp);
-    let pointer_t = x_to_time(&st.session_view, a.lanes, hp.x);
-    if zoomd != 1.0 {
-        // Ctrl+wheel: zoom in time anywhere.
-        let pts = crate::zoom::ctrl_points(zoomd);
-        let anchor = if a.ruler.contains(hp) {
-            pointer_t
-        } else if over_time {
-            crate::zoom::anchor_time(prefs.wheel_anchor, pointer_t, &st.session_view, pos)
+/// The mouse wheel over the Multitrack: the table in
+/// [`crate::zoom::wheel_action`] picks what it does.
+fn wheel(st: &mut State, drag: &mut Drag, a: &Areas, hp: egui::Pos2, w: crate::zoom::WheelInput) {
+    use crate::zoom::{Anchor, Region, WheelAction};
+    let region = if a.overview.contains(hp) {
+        Region::Overview
+    } else if a.ruler.contains(hp) {
+        Region::Ruler
+    } else if a.vbar.contains(hp) {
+        Region::TrackBar
+    } else if a.lanes.contains(hp) {
+        Region::Lanes
+    } else if a.headers.contains(hp) {
+        Region::Headers
+    } else {
+        return;
+    };
+    let notches = w.notches();
+    let lim = st.session_limits();
+    // The spot the track height changes keep in place: the pointer's
+    // place in the rows (read through the bar over the track bar).
+    let rows_y = |st: &State, scroll: f32| -> f32 {
+        if region == Region::TrackBar {
+            let (_, _, content) = vbar_thumb(st, scroll, a.lanes, a.vbar);
+            let share = ((hp.y - a.vbar.top()) / a.vbar.height().max(1.0)).clamp(0.0, 1.0);
+            (share * content - scroll).clamp(0.0, a.lanes.height())
         } else {
-            crate::zoom::button_anchor(&st.session_view, pos)
-        };
-        st.session_view
-            .zoom_min(prefs.wheel_factor(pts), anchor, dur, min);
-        st.hand_moved_view();
-        return;
-    }
-    if scroll == egui::Vec2::ZERO {
-        return;
-    }
-    let lanes_y = |y: f32| y - a.lanes.top();
-    if m.alt && m.shift {
-        // Alt+Shift+wheel (egui turns it sideways): waveform amplitude.
-        let pts = scroll.x + scroll.y;
-        let f = 1.0 / prefs.wheel_factor(pts) as f32;
-        st.session_amp = (st.session_amp * f).clamp(1.0, crate::zoom::MAX_AMP);
-        return;
-    }
-    if m.alt {
-        // Alt+wheel: resize the track under the pointer.
-        if let Some(ti) = track_at(st, a.lanes.top(), drag.scroll_y, hp.y) {
-            let f = 1.0 / prefs.wheel_factor(scroll.y) as f32;
-            let h = &mut st.session.tracks[ti].height;
-            *h = (*h * f).clamp(MIN_TRACK_H, MAX_TRACK_H);
-            st.session_dirty = true;
+            (hp.y - a.lanes.top()).clamp(0.0, a.lanes.height())
         }
-        return;
-    }
-    if a.vbar.contains(hp) && scroll.y != 0.0 {
-        // Over the zoom bar: zoom the track heights toward the pointer.
-        let heights: Vec<f32> = st.session.tracks.iter().map(|t| t.height).collect();
-        if heights.is_empty() {
-            return;
-        }
-        let avg = heights.iter().sum::<f32>() / heights.len() as f32;
-        let f = 1.0 / prefs.wheel_factor(scroll.y) as f32;
-        let nh = (avg * f).clamp(MIN_TRACK_H, MAX_TRACK_H);
-        drag.scroll_y = scroll_keeping(&heights, drag.scroll_y, lanes_y(hp.y), nh);
-        for t in &mut st.session.tracks {
-            t.height = nh;
-        }
-        st.session_dirty = true;
-        return;
-    }
-    if scroll.y != 0.0 {
-        if a.ruler.contains(hp) {
-            // The ruler zooms toward the pointer.
+    };
+    match crate::zoom::wheel_action(region, w.mods, w.sideways, true) {
+        WheelAction::ZoomTime(anchor) => {
+            let v = st.session_view;
+            let pointer_t = if region == Region::Overview {
+                crate::overview::time_at(st, a.overview, hp.x).clamp(v.start, v.start + v.len)
+            } else {
+                x_to_time(&v, a.lanes, hp.x)
+            };
+            let t = match anchor {
+                Anchor::Pointer => pointer_t,
+                Anchor::Setting => {
+                    crate::zoom::anchor_time(st.zoom.wheel_anchor, pointer_t, &v, st.position())
+                }
+                Anchor::Center => v.start + v.len / 2.0,
+            };
             st.session_view
-                .zoom_min(prefs.wheel_factor(scroll.y), pointer_t, dur, min);
+                .zoom_at(st.zoom.wheel_factor(w.points), t, &lim);
             st.hand_moved_view();
-        } else if a.lanes.contains(hp) || a.headers.contains(hp) {
-            drag.scroll_y -= scroll.y;
         }
-    }
-    if scroll.x != 0.0 && (over_time || a.headers.contains(hp)) {
-        // Shift+wheel or a sideways swipe: scroll in time.
-        let v = &mut st.session_view;
-        v.start -= scroll.x as f64 / a.lanes.width() as f64 * v.len;
-        v.clamp_to(dur);
-        st.hand_moved_view();
+        WheelAction::ScrollTime => {
+            st.session_view
+                .pan_px(-w.scroll[0] as f64, a.lanes.width() as f64, &lim);
+            st.hand_moved_view();
+        }
+        WheelAction::ScrollTracks => drag.scroll_y -= w.scroll[1],
+        WheelAction::ZoomTracksEven | WheelAction::ScaleAllTracks | WheelAction::ResizeOneTrack => {
+            let old: Vec<f32> = st.session.tracks.iter().map(|t| t.height).collect();
+            let Some(&first) = old.first() else { return };
+            let new: Vec<f32> = match crate::zoom::wheel_action(region, w.mods, w.sideways, true) {
+                WheelAction::ZoomTracksEven => {
+                    // Every track takes the first one's height, stepped.
+                    vec![crate::zoom::wheel_height(first, notches); old.len()]
+                }
+                WheelAction::ScaleAllTracks => old
+                    .iter()
+                    .map(|&h| crate::zoom::wheel_height(h, notches))
+                    .collect(),
+                _ => {
+                    let Some(ti) = track_at(st, a.lanes.top(), drag.scroll_y, hp.y) else {
+                        return;
+                    };
+                    let mut n = old.clone();
+                    n[ti] = crate::zoom::wheel_height(old[ti], notches);
+                    n
+                }
+            };
+            if new == old {
+                return;
+            }
+            let y = rows_y(st, drag.scroll_y);
+            st.touch_track_heights();
+            drag.scroll_y = crate::zoom::scroll_keeping_rows(&old, &new, drag.scroll_y, y);
+            for (t, h) in st.session.tracks.iter_mut().zip(new) {
+                t.height = h;
+            }
+        }
+        WheelAction::ZoomAmp => {
+            st.session_amp = crate::zoom::wheel_amp(st.session_amp, notches);
+        }
+        WheelAction::ZoomFreq | WheelAction::None => {}
     }
 }
 
@@ -1564,7 +1579,7 @@ fn vzoom_bar(
     if resp.double_clicked() {
         // Fit every track in view at one height.
         let before = st.session.clone();
-        let h = ((lanes.height() - TAIL_H) / n as f32).clamp(MIN_TRACK_H, MAX_TRACK_H);
+        let h = crate::zoom::fit_height(lanes.height(), TAIL_H, n);
         for t in &mut st.session.tracks {
             t.height = h;
         }
@@ -1642,7 +1657,24 @@ fn draw_vbar(
     th: &crate::theme::Theme,
 ) {
     p.rect_filled(vbar, Rounding::ZERO, c(th.panel));
-    let (top, bottom, _) = vbar_thumb(st, scroll, lanes, vbar);
+    let (top, bottom, content) = vbar_thumb(st, scroll, lanes, vbar);
+    // A coloured segment per track, sized by its share of the rows.
+    let k = vbar.height() / content.max(1.0);
+    let mut y = vbar.top();
+    for t in &st.session.tracks {
+        let h = t.height * k;
+        if h >= 1.0 {
+            p.rect_filled(
+                Rect::from_min_max(
+                    pos2(vbar.left() + 4.0, y + 0.5),
+                    pos2(vbar.right() - 4.0, y + h - 0.5),
+                ),
+                Rounding::ZERO,
+                ca(t.color, 110),
+            );
+        }
+        y += h;
+    }
     let thumb = Rect::from_min_max(
         pos2(vbar.left() + 2.0, top.max(vbar.top())),
         pos2(vbar.right() - 2.0, bottom.max(top + 8.0)),

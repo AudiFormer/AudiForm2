@@ -11,6 +11,7 @@ pub mod history;
 pub mod midi;
 pub mod midi_live;
 pub mod noteops;
+pub mod plugin;
 pub mod quantize;
 pub mod session;
 pub mod space;

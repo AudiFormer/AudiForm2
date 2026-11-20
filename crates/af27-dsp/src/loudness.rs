@@ -56,6 +56,25 @@ fn k_weighting(fs: f64) -> [Biquad; 2] {
     [shelf, hp]
 }
 
+/// BS.1770 weight of channel `ch` of a file of `n` channels in the usual
+/// (WAV) orders: the front left, right and centre count 1.0; the
+/// low-frequency channel of a 5.1-and-up bed (its fourth channel) is left
+/// out; every other channel (surrounds, heights) counts 1.41 (+1.5 dB).
+pub fn channel_weight(n: usize, ch: usize) -> f64 {
+    let fronts = match n {
+        0..=3 => return 1.0,
+        4 => 2,
+        _ => 3,
+    };
+    if ch == 3 && matches!(n, 6 | 7 | 8 | 10 | 12) {
+        0.0
+    } else if ch < fronts {
+        1.0
+    } else {
+        1.41
+    }
+}
+
 /// Integrated loudness in LUFS, or None when everything is gated out.
 pub fn integrated_loudness(buf: &AudioBuffer) -> Option<f64> {
     let fs = buf.rate as f64;
@@ -79,7 +98,8 @@ pub fn integrated_loudness(buf: &AudioBuffer) -> Option<f64> {
                 .collect()
         })
         .collect();
-    let weight = |ch: usize| if ch >= 3 { 1.41 } else { 1.0 };
+    let n = buf.channels.len();
+    let weight = |ch: usize| channel_weight(n, ch);
     let mut blocks = Vec::new();
     let mut start = 0;
     while start + block <= buf.frames() {
@@ -180,5 +200,41 @@ mod tests {
     fn silence_is_gated() {
         let b = AudioBuffer::new(48_000, 2, 48_000);
         assert!(integrated_loudness(&b).is_none());
+    }
+
+    fn noise(fs: u32, secs: usize) -> Vec<f32> {
+        let mut x = 0x2545_f491u32;
+        (0..fs as usize * secs)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x as f32 / u32::MAX as f32 - 0.5) * 0.3
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_bed_weighs_its_channels_and_leaves_out_the_lfe() {
+        let fs = 48_000;
+        let n = noise(fs, 4);
+        // Noise on L of a 5.1 bed reads as noise on L of a stereo file.
+        let mut st = AudioBuffer::new(fs, 2, n.len());
+        st.channels[0] = n.clone();
+        let mut bed = AudioBuffer::new(fs, 6, n.len());
+        bed.channels[0] = n.clone();
+        let a = integrated_loudness(&st).unwrap();
+        let b = integrated_loudness(&bed).unwrap();
+        assert!((a - b).abs() < 0.01, "{a} {b}");
+        // The LFE changes nothing.
+        bed.channels[3] = n.clone();
+        assert!((integrated_loudness(&bed).unwrap() - b).abs() < 0.01);
+        // A surround counts 1.5 dB more than a front speaker.
+        let mut sur = AudioBuffer::new(fs, 6, n.len());
+        sur.channels[4] = n;
+        let c = integrated_loudness(&sur).unwrap();
+        assert!((c - b - 1.49).abs() < 0.05, "{c} {b}");
+        assert_eq!(channel_weight(12, 8), 1.41);
+        assert_eq!(channel_weight(2, 1), 1.0);
     }
 }

@@ -49,6 +49,9 @@ pub fn catalog() -> Vec<(String, Vec<(String, String)>)> {
 }
 
 pub fn name(id: &str) -> String {
+    if af27_core::plugin::is_plugin(id) {
+        return crate::plugins::name(id);
+    }
     if let Some(e) = af27_dsp::Effect::from_id(id) {
         return e.name().to_string();
     }
@@ -201,6 +204,9 @@ impl Live for FxLive {
 }
 
 fn factory(slot: &EffectSlot, rate: u32) -> Option<Box<dyn Live>> {
+    if af27_core::plugin::is_plugin(&slot.effect) {
+        return af27_vst3::build_live(slot, rate);
+    }
     let info = af27_fx::info(&slot.effect)?;
     let params = params_for(&slot.effect, &slot.values)?;
     let p = af27_fx::build_with(&slot.effect, rate, &params, slot.data.as_deref(), None)?;
@@ -268,6 +274,9 @@ pub fn register() {
 /// For the Inspector's sidechain picker.
 #[allow(dead_code)]
 pub fn takes_key(effect_id: &str) -> bool {
+    if af27_core::plugin::is_plugin(effect_id) {
+        return crate::plugins::takes_key(effect_id);
+    }
     af27_dsp::Effect::from_id(effect_id).is_some_and(|e| e.takes_key())
         || af27_fx::takes_sidechain(effect_id)
 }
@@ -291,6 +300,8 @@ pub fn process_offline(
         return af27_dsp::wide::process_buffer(slot, input, af27_engine::BLOCK);
     }
     let mut p = af27_dsp::live::build_slot(slot, input.rate)?;
+    // Plug-ins start a copy of their own that waits for every block.
+    p.set_offline(true);
     let mut out = input.clone();
     let frames = out.frames();
     let lat = p.latency();
@@ -318,6 +329,7 @@ pub fn process_offline(
         c += 2;
         if c < n {
             p = af27_dsp::live::build_slot(slot, input.rate)?;
+            p.set_offline(true);
         }
     }
     Some(out)

@@ -592,7 +592,9 @@ pub fn open(
     let per_app = super::support().per_app;
     let own = std::process::id();
     let (what, note): (Target, Option<String>) = match source {
-        RecordSource::Input => return Err("Not a system audio source.".into()),
+        RecordSource::Input | RecordSource::Channels(_) => {
+            return Err("Not a system audio source.".into())
+        }
         RecordSource::System(dev) => (Target::Device(dev.as_ref().map(|d| d.id.clone())), None),
         RecordSource::SystemExceptSelf if per_app => (
             Target::Process(own, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE),

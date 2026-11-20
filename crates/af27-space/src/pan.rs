@@ -16,9 +16,9 @@
 //! moves. Size then blends toward all the speakers of its layers, for a
 //! sound that fills the room. Our own method.
 //!
-//! Listening: most people mix on stereo speakers or headphones, so
-//! playback folds each sound to stereo by where it sits left to right.
-//! Exports write every speaker channel.
+//! Everything is placed on the speaker bed; listening (folded to stereo,
+//! binaural, or each speaker on its own output) and exports all start
+//! from that bed, so what is heard is what exports.
 
 pub use af27_core::space::{SpaceLayout, SpacePos};
 
@@ -135,6 +135,30 @@ pub fn channel_mask(layout: SpaceLayout) -> u32 {
     speakers(layout).iter().map(|s| s.mask).sum()
 }
 
+/// The film (cinema) channel order for a layout: sides before rears in a
+/// 7.x bed (L R C LFE Lss Rss Lrs Rrs, then heights). Output channel `k`
+/// takes WAV-order channel `order[k]`. None when it is the WAV order.
+pub fn film_order(layout: SpaceLayout) -> Option<Vec<usize>> {
+    let sp = speakers(layout);
+    let rear = sp.iter().position(|s| s.name == "Lrs")?;
+    let side = sp.iter().position(|s| s.name == "Lss")?;
+    let mut order: Vec<usize> = (0..sp.len()).collect();
+    order[rear] = side;
+    order[rear + 1] = side + 1;
+    order[side] = rear;
+    order[side + 1] = rear + 1;
+    Some(order)
+}
+
+/// Whether FLAC can hold a layout's bed in its own channel order (FLAC
+/// knows the orders of 2.0, 5.1 and 7.1 only).
+pub fn flac_ok(layout: SpaceLayout) -> bool {
+    matches!(
+        layout,
+        SpaceLayout::Stereo20 | SpaceLayout::Surround51 | SpaceLayout::Surround71
+    )
+}
+
 /// What the interface shows about a layout.
 #[derive(Debug, Clone)]
 pub struct LayoutInfo {
@@ -157,14 +181,14 @@ pub fn layout_info(layout: SpaceLayout) -> LayoutInfo {
 }
 
 /// Shares a unit of power between two places, `t` of the way from the first to the second.
-fn share(t: f32) -> (f32, f32) {
+pub(crate) fn share(t: f32) -> (f32, f32) {
     let a = t.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
     (a.cos(), a.sin())
 }
 
 /// Spreads a unit of power between the two entries of `keys` (sorted low
 /// to high) either side of `v`. Returns (index, gain) pairs.
-fn between(keys: &[f32], v: f32) -> [(usize, f32); 2] {
+pub(crate) fn between(keys: &[f32], v: f32) -> [(usize, f32); 2] {
     if v <= keys[0] {
         return [(0, 1.0), (0, 0.0)];
     }
@@ -180,10 +204,35 @@ fn between(keys: &[f32], v: f32) -> [(usize, f32); 2] {
     [(i, a), (i + 1, b)]
 }
 
+/// Speaker channels at most (7.1.4 is 12).
+pub const MAX_SPEAKERS: usize = 16;
+
+/// One gain per speaker, in channel order (unused entries 0).
+pub type Gains = [f32; MAX_SPEAKERS];
+
 /// Gains for one point, one per speaker of `layout` (in channel order).
 pub fn point_gains(layout: SpaceLayout, x: f32, y: f32, z: f32, size: f32) -> Vec<f32> {
+    let mut g = [0.0; MAX_SPEAKERS];
+    point_gains_into(layout, x, y, z, size, &mut g);
+    g[..speakers(layout).len()].to_vec()
+}
+
+/// Sorts a short list in place (no allocation).
+fn sort_small<T: Copy>(v: &mut [T], key: impl Fn(&T) -> f32) {
+    for i in 1..v.len() {
+        let mut j = i;
+        while j > 0 && key(&v[j - 1]) > key(&v[j]) {
+            v.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+}
+
+/// [`point_gains`] into a fixed array, without allocating (for the audio
+/// thread).
+pub fn point_gains_into(layout: SpaceLayout, x: f32, y: f32, z: f32, size: f32, g: &mut Gains) {
+    g.fill(0.0);
     let sp = speakers(layout);
-    let mut g = vec![0f32; sp.len()];
     let has_top = sp.iter().any(|s| s.at.is_some_and(|a| a[2] > 0.5));
     // Below ear level plays from the ear-level speakers: there are none lower.
     let (floor, top) = if has_top {
@@ -195,27 +244,40 @@ pub fn point_gains(layout: SpaceLayout, x: f32, y: f32, z: f32, size: f32) -> Ve
         if lg <= 0.0 {
             continue;
         }
-        // This layer's speakers, grouped into rows by y.
-        let mine: Vec<(usize, [f32; 3])> = sp
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| s.at.filter(|a| (a[2] - layer).abs() < 0.5).map(|a| (i, a)))
-            .collect();
-        let mut rows: Vec<f32> = mine.iter().map(|(_, a)| a[1]).collect();
-        rows.sort_by(f32::total_cmp);
-        rows.dedup();
-        for (ri, rg) in between(&rows, y) {
+        // This layer's rows (distinct y), low to high.
+        let mut rows = [0f32; MAX_SPEAKERS];
+        let mut nrows = 0;
+        for a in sp.iter().filter_map(|s| s.at) {
+            if (a[2] - layer).abs() < 0.5 && !rows[..nrows].iter().any(|r| (r - a[1]).abs() < 1e-6)
+            {
+                rows[nrows] = a[1];
+                nrows += 1;
+            }
+        }
+        if nrows == 0 {
+            continue;
+        }
+        sort_small(&mut rows[..nrows], |v| *v);
+        for (ri, rg) in between(&rows[..nrows], y) {
             if rg <= 0.0 {
                 continue;
             }
-            let mut row: Vec<(usize, f32)> = mine
-                .iter()
-                .filter(|(_, a)| (a[1] - rows[ri]).abs() < 1e-6)
-                .map(|(i, a)| (*i, a[0]))
-                .collect();
-            row.sort_by(|a, b| a.1.total_cmp(&b.1));
-            let xs: Vec<f32> = row.iter().map(|r| r.1).collect();
-            for (k, kg) in between(&xs, x) {
+            let mut row = [(0usize, 0f32); MAX_SPEAKERS];
+            let mut nrow = 0;
+            for (i, s) in sp.iter().enumerate() {
+                if let Some(a) = s.at {
+                    if (a[2] - layer).abs() < 0.5 && (a[1] - rows[ri]).abs() < 1e-6 {
+                        row[nrow] = (i, a[0]);
+                        nrow += 1;
+                    }
+                }
+            }
+            sort_small(&mut row[..nrow], |r| r.1);
+            let mut xs = [0f32; MAX_SPEAKERS];
+            for (k, r) in row[..nrow].iter().enumerate() {
+                xs[k] = r.1;
+            }
+            for (k, kg) in between(&xs[..nrow], x) {
                 g[row[k].0] += lg * rg * kg;
             }
         }
@@ -223,20 +285,16 @@ pub fn point_gains(layout: SpaceLayout, x: f32, y: f32, z: f32, size: f32) -> Ve
     let size = size.clamp(0.0, 1.0);
     if size > 0.0 {
         // Blend toward every placed speaker of the layers in use.
-        let used: Vec<usize> = sp
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                s.at.is_some_and(|a| if a[2] > 0.5 { top > 0.0 } else { floor > 0.0 })
-            })
-            .map(|(i, _)| i)
-            .collect();
-        let u = 1.0 / (used.len().max(1) as f32).sqrt();
-        for v in g.iter_mut() {
-            *v *= 1.0 - size;
-        }
-        for &i in &used {
-            g[i] += size * u;
+        let used = |s: &Speaker| {
+            s.at.is_some_and(|a| if a[2] > 0.5 { top > 0.0 } else { floor > 0.0 })
+        };
+        let count = sp.iter().filter(|s| used(s)).count();
+        let u = 1.0 / (count.max(1) as f32).sqrt();
+        for (i, s) in sp.iter().enumerate() {
+            g[i] *= 1.0 - size;
+            if used(s) {
+                g[i] += size * u;
+            }
         }
         let p: f32 = g.iter().map(|v| v * v).sum::<f32>().sqrt();
         if p > 0.0 {
@@ -245,26 +303,35 @@ pub fn point_gains(layout: SpaceLayout, x: f32, y: f32, z: f32, size: f32) -> Ve
             }
         }
     }
-    g
 }
 
 /// The two points a source plays from: one for mono, a pair for stereo
 /// (left and right spread by `width` about its spot).
 pub fn source_gains(layout: SpaceLayout, pos: &SpacePos, stereo: bool) -> [Vec<f32>; 2] {
+    let [l, r] = source_gains_into(layout, pos, stereo);
+    let n = speakers(layout).len();
+    [l[..n].to_vec(), r[..n].to_vec()]
+}
+
+/// [`source_gains`] into fixed arrays, without allocating. The spot is
+/// tidied first.
+pub fn source_gains_into(layout: SpaceLayout, pos: &SpacePos, stereo: bool) -> [Gains; 2] {
+    let pos = pos.tidy();
     let (x, y, z, size) = (pos.x as f32, pos.y as f32, pos.z as f32, pos.size as f32);
+    let mut l = [0.0; MAX_SPEAKERS];
+    let mut r = [0.0; MAX_SPEAKERS];
     if !stereo {
         // A mono source has the same sound on both sides: half from each.
-        let g: Vec<f32> = point_gains(layout, x, y, z, size)
-            .iter()
-            .map(|v| v * 0.5)
-            .collect();
-        return [g.clone(), g];
+        point_gains_into(layout, x, y, z, size, &mut l);
+        for v in l.iter_mut() {
+            *v *= 0.5;
+        }
+        return [l, l];
     }
-    let [l, r] = sides(pos);
-    [
-        point_gains(layout, l[0], l[1], z, size),
-        point_gains(layout, r[0], r[1], z, size),
-    ]
+    let [a, b] = sides(&pos);
+    point_gains_into(layout, a[0], a[1], z, size, &mut l);
+    point_gains_into(layout, b[0], b[1], z, size, &mut r);
+    [l, r]
 }
 
 /// Where a stereo source's left and right sides sit (x, y): `width` either
@@ -366,5 +433,84 @@ mod tests {
         };
         let f = fold_gains(&pos, false);
         assert!((f[0][0] - 0.5).abs() < 1e-6 && f[0][1].abs() < 1e-6);
+    }
+
+    #[test]
+    fn layouts_have_their_channel_counts_and_lfe() {
+        let want = [
+            (SpaceLayout::Stereo20, 2, None, 0x3),
+            (SpaceLayout::Surround51, 6, Some(3), 0x3F),
+            (SpaceLayout::Surround71, 8, Some(3), 0x63F),
+            (SpaceLayout::Surround512, 8, Some(3), 0x503F),
+            (SpaceLayout::Surround712, 10, Some(3), 0x563F),
+            (SpaceLayout::Surround514, 10, Some(3), 0x2D03F),
+            (SpaceLayout::Surround714, 12, Some(3), 0x2D63F),
+        ];
+        for (l, n, lfe, mask) in want {
+            assert_eq!(speakers(l).len(), n, "{l:?}");
+            assert_eq!(lfe_channel(l), lfe, "{l:?}");
+            assert_eq!(channel_mask(l), mask, "{l:?}");
+        }
+        let names: Vec<_> = speakers(SpaceLayout::Surround714)
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["L", "R", "C", "LFE", "Lrs", "Rrs", "Lss", "Rss", "Ltf", "Rtf", "Ltr", "Rtr"]
+        );
+        let names: Vec<_> = speakers(SpaceLayout::Surround51)
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["L", "R", "C", "LFE", "Ls", "Rs"]);
+    }
+
+    #[test]
+    fn stereo_sources_and_tidy_spots() {
+        // Full width at front centre: the sides land on L and R.
+        let [l, r] = source_gains(SpaceLayout::Surround51, &SpacePos::default(), true);
+        assert!((l[0] - 1.0).abs() < 1e-6 && (r[1] - 1.0).abs() < 1e-6);
+        // Mono: half on each side, unit power overall.
+        let [a, b] = source_gains(SpaceLayout::Surround51, &SpacePos::default(), false);
+        assert!((a[2] - 0.5).abs() < 1e-6 && a == b);
+        // Out of range spots are tidied first; nothing reaches the LFE.
+        let wild = SpacePos {
+            x: f64::NAN,
+            y: 7.0,
+            z: -3.0,
+            ..SpacePos::default()
+        };
+        for layout in SpaceLayout::ALL {
+            let [l, r] = source_gains(layout, &wild, true);
+            if let Some(c) = lfe_channel(layout) {
+                assert_eq!((l[c], r[c]), (0.0, 0.0));
+            }
+            assert!((power(&l) - 1.0).abs() < 1e-4);
+        }
+        // Below ear level plays from the floor.
+        let g = point_gains(SpaceLayout::Surround714, 0.0, 1.0, -0.8, 0.0);
+        assert!((g[2] - 1.0).abs() < 1e-6);
+        // In 2.0, y and z do nothing.
+        assert_eq!(
+            point_gains(SpaceLayout::Stereo20, 0.3, -1.0, 1.0, 0.0),
+            point_gains(SpaceLayout::Stereo20, 0.3, 1.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn film_order_puts_sides_before_rears() {
+        assert_eq!(film_order(SpaceLayout::Surround51), None);
+        assert_eq!(
+            film_order(SpaceLayout::Surround714).unwrap(),
+            [0, 1, 2, 3, 6, 7, 4, 5, 8, 9, 10, 11]
+        );
+        let names: Vec<_> = film_order(SpaceLayout::Surround71)
+            .unwrap()
+            .iter()
+            .map(|&i| speakers(SpaceLayout::Surround71)[i].name)
+            .collect();
+        assert_eq!(names, ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs"]);
+        assert!(flac_ok(SpaceLayout::Surround71) && !flac_ok(SpaceLayout::Surround512));
     }
 }

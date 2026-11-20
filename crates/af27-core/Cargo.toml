@@ -3,7 +3,7 @@ name = "af27-core"
 description = "Audiform27 core: audio buffers, sessions, undo history"
 version.workspace = true
 edition.workspace = true
-license-file = "../../LICENSE"
+license = "GPL-3.0-or-later"
 authors.workspace = true
 
 [dependencies]

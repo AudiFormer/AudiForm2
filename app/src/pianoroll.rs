@@ -483,21 +483,30 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
 
     // Scrolling and zoom.
     if let Some(h) = resp.hover_pos() {
-        let (sc, ctrl, shift, alt) = ui.input(|i| {
+        let (sc, zoomd, shift, alt) = ui.input(|i| {
             (
                 i.smooth_scroll_delta,
-                i.modifiers.command,
+                i.zoom_delta(),
                 i.modifiers.shift,
                 i.modifiers.alt,
             )
         });
-        if ctrl && sc.y != 0.0 {
-            let anchor = ps.scroll_x + ((h.x - grid_r.left()) / ps.zoom) as f64;
-            ps.zoom = (ps.zoom * (sc.y * 0.004).exp()).clamp(20.0, 400.0);
-            ps.scroll_x = (anchor - ((h.x - grid_r.left()) / ps.zoom) as f64).max(0.0);
+        if zoomd != 1.0 {
+            // Ctrl+wheel (egui hands it over as a zoom factor) or a pinch:
+            // time zoom, 1.2 times per notch, at the pointer.
+            let notches = crate::zoom::ctrl_points(zoomd) / crate::zoom::NOTCH;
+            let px = (h.x - grid_r.left()).max(0.0);
+            let anchor = ps.scroll_x + (px / ps.zoom) as f64;
+            ps.zoom = (ps.zoom * 1.2f32.powf(notches)).clamp(20.0, 400.0);
+            ps.scroll_x = (anchor - (px / ps.zoom) as f64).max(0.0);
         } else if alt && (sc.y != 0.0 || sc.x != 0.0) {
+            // Keys taller or shorter, 2 px per notch, keeping the key
+            // under the pointer in place.
             let d = if sc.y != 0.0 { sc.y } else { sc.x };
-            ps.row = (ps.row * (d * 0.004).exp()).clamp(6.0, 32.0);
+            let py = h.y - grid_r.top();
+            let key = ps.top - py / ps.row;
+            ps.row = (ps.row + 2.0 * d / crate::zoom::NOTCH).clamp(6.0, 32.0);
+            ps.top = (key + py / ps.row).clamp(12.0, 127.0);
         } else if shift || sc.x != 0.0 {
             let d = if shift { sc.y } else { sc.x };
             ps.scroll_x = (ps.scroll_x - d as f64 / ps.zoom as f64).clamp(0.0, clip_len.max(1.0));
