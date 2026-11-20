@@ -5,8 +5,8 @@
 //! Audiform (see PORTING.md): Amp Model, Opto Leveler, Tube Preamp, Delay
 //! and Echo, Reverb, Convolution Reverb, Modulation, Center Channel
 //! Extractor, Channel Mixer, Stereo Width, Phase Curve, Vox Strip and
-//! Parametric EQ; and Tube Master, a stereo valve mastering compressor
-//! written for AF2.
+//! Parametric EQ; and Tube Master, a valve mastering compressor for mono,
+//! stereo or a speaker bed, written for AF2.
 //!
 //! [`registry`] lists them, [`build`] makes a running [`Processor`] for
 //! one, and [`params_from`] turns saved values into [`Params`].
@@ -111,7 +111,9 @@ pub fn build_with(
 }
 
 /// The effects with their own form on a speaker bed (more than two
-/// channels): the Reverb, the Convolution Reverb, Modulation and Tube Master.
+/// channels): the Reverb, the Convolution Reverb, Modulation and Tube
+/// Master (the same circuit on every channel, Independent or Linked
+/// detection, the LFE untouched).
 pub const NATIVE_WIDE: [&str; 4] = [verb::ID, reverb::ID, modulation::ID, tube_master::ID];
 
 /// A running processor for effect `id` over a speaker bed with channels
