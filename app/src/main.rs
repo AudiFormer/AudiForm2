@@ -18,6 +18,7 @@ mod inspector;
 mod keymap;
 mod lane_menu;
 mod multitrack;
+mod overview;
 mod panels;
 mod phasewheel;
 mod pianoroll;

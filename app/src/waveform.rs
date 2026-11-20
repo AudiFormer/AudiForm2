@@ -8,14 +8,16 @@
 //! The ruler, the start marker and middle-button panning are in
 //! [`crate::ruler`].
 //!
-//! Wheel (see [`crate::zoom`]): over the waveform and the spectrum it
-//! zooms time (around the pointer, between the pointer and the middle, or
-//! the playhead, per the zoom preferences; or scrolls when wheel zoom is
-//! off); over the ruler and the overview it always zooms toward the
-//! pointer; Shift+wheel scrolls in time; Ctrl+wheel always zooms time;
-//! Alt+wheel zooms the waveform's amplitude (display only, up to 16x).
-//! Over the spectrum's frequency scale the wheel zooms the frequencies;
-//! a right-click on the spectrum offers its zoom, scale and resolution.
+//! Wheel (the full table is [`crate::zoom::wheel_action`]): over the
+//! waveform and the spectrum it zooms time (around the pointer or the
+//! playhead, per the zoom preferences; or scrolls when wheel zoom is off);
+//! over the ruler and the overview it always zooms at the pointer;
+//! Shift+wheel scrolls in time (over the ruler it zooms); Ctrl+wheel
+//! always zooms time; Alt+wheel zooms the waveform's amplitude (display
+//! only, twice per notch, up to 16x). Over the spectrum's frequency scale
+//! the wheel zooms the frequencies at the pointer, and dragging the scale
+//! slides through the frequencies when zoomed in; a right-click on the
+//! spectrum offers its zoom, scale and resolution.
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Rounding, Sense, Shape, Stroke};
 
@@ -269,15 +271,29 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         .or(rresp.hover_pos())
         .or_else(|| spec_resp.as_ref().and_then(|r| r.hover_pos()));
     if let Some(hp) = hover {
-        let input = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers));
-        let areas = Areas {
-            overview,
-            ruler,
-            body,
-            wave: wave_area,
-            spec: spec_area,
-        };
-        wheel(st, &areas, hp, input);
+        let input = ui.input(|i| {
+            crate::zoom::WheelInput::read(
+                i.smooth_scroll_delta.into(),
+                i.zoom_delta(),
+                i.modifiers.command || i.modifiers.ctrl,
+                i.modifiers.shift,
+                i.modifiers.alt,
+            )
+        });
+        if let Some(input) = input {
+            let areas = Areas {
+                overview,
+                ruler,
+                body,
+                wave: wave_area,
+                spec: spec_area,
+            };
+            wheel(st, &areas, hp, input);
+        }
+    }
+    // Dragging the frequency scale slides through the frequencies.
+    if let Some(sa) = spec_area {
+        freq_scale_drag(ui, st, sa);
     }
     let mut moved_by_hand = false;
     let playing = st.transport_playing();
@@ -293,8 +309,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     };
     // Middle-button drag anywhere pans in time.
     if let Some(dv) = crate::ruler::pan_delta(ui, &resp).or(crate::ruler::pan_delta(ui, &rresp)) {
+        let lim = st.doc_limits();
         let d = st.doc_mut().unwrap();
-        d.view.start -= dv.x as f64 / body.width().max(1.0) as f64 * d.view.len;
+        d.view.pan_px(-dv.x as f64, body.width() as f64, &lim);
         moved_by_hand = true;
     }
     let snap_view = st.doc().map(|d| d.view).unwrap_or(View::fit(1.0));
@@ -473,9 +490,10 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             FontId::proportional(10.0),
             c(th.text_dim),
         );
-        // dB scale at the right edge (following the amplitude zoom).
-        for db in [-6.0f32, -12.0, -24.0] {
-            let g = 10f32.powf(db / 20.0) * d.amp * lane.height() * 0.46;
+        // dB scale at the right edge, following the amplitude zoom:
+        // zoomed in, the quieter marks get room and show.
+        let mut last_label = f32::NEG_INFINITY;
+        for (db, g) in level_marks(d.amp, lane.height() * 0.46) {
             if g > lane.height() * 0.5 {
                 continue;
             }
@@ -484,6 +502,22 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     [pos2(lane.right() - 6.0, y), pos2(lane.right(), y)],
                     Stroke::new(1.0_f32, c(th.border)),
                 );
+            }
+            // Labels above the centre line, at least 11 px apart.
+            let y = lane.center().y - g;
+            if (y - last_label).abs() >= 11.0 && y > lane.top() + 5.0 {
+                p.text(
+                    pos2(lane.right() - 8.0, y),
+                    Align2::RIGHT_CENTER,
+                    if db == 0.0 {
+                        "0".to_string()
+                    } else {
+                        format!("{db:.0}")
+                    },
+                    FontId::proportional(8.5),
+                    ca(th.text_dim, 170),
+                );
+                last_label = y;
             }
         }
     }
@@ -608,80 +642,127 @@ struct Areas {
     spec: Option<Rect>,
 }
 
-/// The mouse wheel over the Waveform editor (the rules are in the module
-/// notes at the top).
-fn wheel(
-    st: &mut State,
-    a: &Areas,
-    hp: Pos2,
-    (scroll, zoomd, m): (egui::Vec2, f32, egui::Modifiers),
-) {
-    let prefs = st.zoom;
-    let pos = st.position();
-    let min = st.min_view_len();
-    let ctrl = if zoomd != 1.0 {
-        crate::zoom::ctrl_points(zoomd)
-    } else {
-        0.0
-    };
-    let on_top = a.overview.contains(hp) || a.ruler.contains(hp);
-    let on_scale = a
-        .spec
-        .is_some_and(|sa| sa.contains(hp) && hp.x >= sa.right() - SCALE_W);
-    let Some(d) = st.doc_mut() else { return };
-    let dur = d.duration();
-    // The time under the pointer: on the overview, its place in the file.
-    let pointer_t = if a.overview.contains(hp) {
-        ((hp.x - a.overview.left()) / a.overview.width()) as f64 * dur
-    } else {
-        x_to_time(&d.view, a.body, hp.x)
-    };
-    let anchor = if on_top {
-        pointer_t
-    } else {
-        crate::zoom::anchor_time(prefs.wheel_anchor, pointer_t, &d.view, pos)
-    };
-    let mut moved = false;
-    if ctrl != 0.0 {
-        d.view.zoom_min(prefs.wheel_factor(ctrl), anchor, dur, min);
-        moved = true;
-    } else if scroll.y != 0.0 {
-        if on_scale && !m.alt {
-            // Frequency zoom: the frequency under the pointer stays put.
-            let sa = a.spec.unwrap_or(a.body);
-            let nch = d.buf.num_channels().clamp(1, 8);
-            let lane_h = sa.height() / nch as f32;
-            let k = (((hp.y - sa.top()) / lane_h).floor() as usize).min(nch - 1);
-            let bottom = sa.top() + lane_h * (k + 1) as f32;
-            let frac = ((bottom - hp.y) / lane_h).clamp(0.0, 1.0) as f64;
-            let ny = d.buf.rate as f64 / 2.0;
-            let f = st.spec.freq_at(frac, ny);
-            st.spec.zoom(prefs.wheel_factor(scroll.y), f, ny);
-            return;
-        } else if m.alt {
-            if a.wave.contains(hp) {
-                let f = 1.0 / prefs.wheel_factor(scroll.y) as f32;
-                d.amp = (d.amp * f).clamp(1.0, crate::zoom::MAX_AMP);
-            }
-        } else if on_top || prefs.wheel_zooms_waveform {
-            d.view
-                .zoom_min(prefs.wheel_factor(scroll.y), anchor, dur, min);
-            moved = true;
+/// The level scale's marks for amplitude zoom `amp` in a half-lane
+/// `half` pixels tall: (dB, pixels from the centre line).
+pub fn level_marks(amp: f32, half: f32) -> Vec<(f32, f32)> {
+    [0.0f32, -3.0, -6.0, -9.0, -12.0, -18.0, -24.0]
+        .iter()
+        .map(|&db| {
+            (
+                db,
+                10f32.powf(db / 20.0) * amp.clamp(1.0, crate::zoom::MAX_AMP) * half,
+            )
+        })
+        .collect()
+}
+
+/// The frequency under `y` on the spectrum `sa` (the band it is in).
+fn freq_at_y(st: &State, sa: Rect, y: f32, nch: usize, ny: f64) -> f64 {
+    let nch = nch.clamp(1, 8);
+    let lane_h = sa.height() / nch as f32;
+    let k = (((y - sa.top()) / lane_h).floor().max(0.0) as usize).min(nch - 1);
+    let bottom = sa.top() + lane_h * (k + 1) as f32;
+    let frac = ((bottom - y) / lane_h).clamp(0.0, 1.0) as f64;
+    st.spec.freq_at(frac, ny)
+}
+
+/// Dragging the frequency scale up and down slides through the
+/// frequencies at the same zoom (only when zoomed in).
+fn freq_scale_drag(ui: &egui::Ui, st: &mut State, sa: Rect) {
+    let scale = Rect::from_min_max(pos2(sa.right() - SCALE_W, sa.top()), sa.max);
+    let r = ui.interact(scale, ui.id().with("af2-freq-scale"), Sense::drag());
+    if !st.spec.zoomed() {
+        return;
+    }
+    if r.hovered() || r.dragged() {
+        ui.ctx().set_cursor_icon(if r.dragged() {
+            egui::CursorIcon::Grabbing
         } else {
-            d.view.start -= scroll.y as f64 / a.body.width() as f64 * d.view.len;
-            d.view.clamp_to(dur);
-            moved = true;
+            egui::CursorIcon::Grab
+        });
+    }
+    if r.dragged() {
+        let nch = st.doc().map_or(1, |d| d.buf.num_channels()).clamp(1, 8);
+        let band = sa.height() / nch as f32;
+        let ny = st.doc().map_or(24_000.0, |d| d.buf.rate as f64 / 2.0);
+        let dy = r.drag_delta().y;
+        if dy != 0.0 {
+            st.spec.pan((dy / band.max(1.0)) as f64, ny);
         }
     }
-    if scroll.x != 0.0 && !m.alt {
-        // Shift+wheel (egui turns it sideways) or a sideways swipe.
-        d.view.start -= scroll.x as f64 / a.body.width() as f64 * d.view.len;
-        d.view.clamp_to(dur);
-        moved = true;
+}
+
+/// The mouse wheel over the Waveform editor: the table in
+/// [`crate::zoom::wheel_action`] picks what it does.
+fn wheel(st: &mut State, a: &Areas, hp: Pos2, w: crate::zoom::WheelInput) {
+    use crate::zoom::{Anchor, Region, WheelAction};
+    let region = if a.overview.contains(hp) {
+        Region::Overview
+    } else if a.ruler.contains(hp) {
+        Region::WaveRuler
+    } else if a
+        .spec
+        .is_some_and(|sa| sa.contains(hp) && hp.x >= sa.right() - SCALE_W)
+    {
+        Region::FreqScale
+    } else {
+        Region::Wave
+    };
+    let prefs = st.zoom;
+    let pos = st.position();
+    let lim = st.doc_limits();
+    let notches = w.notches();
+    let action = crate::zoom::wheel_action(region, w.mods, w.sideways, prefs.wheel_zooms_waveform);
+    if action == WheelAction::ZoomFreq {
+        let Some(sa) = a.spec else { return };
+        let Some(d) = st.doc() else { return };
+        let (nch, ny) = (d.buf.num_channels(), d.buf.rate as f64 / 2.0);
+        let f = freq_at_y(st, sa, hp.y, nch, ny);
+        st.spec.zoom(crate::zoom::freq_wheel_factor(notches), f, ny);
+        return;
     }
-    if moved {
-        st.hand_moved_view();
+    let Some(d) = st.doc_mut() else { return };
+    let dur = d.duration();
+    match action {
+        WheelAction::ZoomTime(anchor) => {
+            // The time under the pointer: on the overview, its place in
+            // the file (held inside the view).
+            let pointer_t = if region == Region::Overview {
+                let t = ((hp.x - a.overview.left()) / a.overview.width()) as f64 * dur;
+                t.clamp(d.view.start, d.view.start + d.view.len)
+            } else {
+                x_to_time(&d.view, a.body, hp.x.min(a.body.right()))
+            };
+            let t = match anchor {
+                Anchor::Pointer => pointer_t,
+                Anchor::Setting => {
+                    crate::zoom::anchor_time(prefs.wheel_anchor, pointer_t, &d.view, pos)
+                }
+                Anchor::Center => d.view.start + d.view.len / 2.0,
+            };
+            d.view.zoom_at(prefs.wheel_factor(w.points), t, &lim);
+        }
+        WheelAction::ScrollTime => {
+            // A plain wheel with zoom off scrolls with its up and down.
+            let px = if w.sideways || w.mods.shift {
+                w.scroll[0]
+            } else {
+                w.scroll[1]
+            };
+            d.view.pan_px(-px as f64, a.body.width() as f64, &lim);
+        }
+        WheelAction::ZoomAmp => {
+            if a.wave.contains(hp)
+                || region == Region::WaveRuler
+                || a.spec.is_some_and(|s| s.contains(hp))
+            {
+                d.amp = crate::zoom::wheel_amp(d.amp, notches);
+            }
+            return;
+        }
+        _ => return,
     }
+    st.hand_moved_view();
 }
 
 /// The spectrum's right-click menu: frequency zoom, scale, resolution.
