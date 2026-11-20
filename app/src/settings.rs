@@ -580,6 +580,25 @@ impl SettingsUi {
 fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
     match name {
         "General" => {
+            group(ui, th, "Windows network prompts", |ui| {
+                note(ui, th, "Windows asks \"Allow access to the network?\" when a program listens for connections. In AudiForm 2 that is usually a plug-in checking its licence, since plug-ins run inside AudiForm 2's plug-in host. A firewall rule for AudiForm 2 stops the question for good. Windows asks for your permission to add it.");
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Allow on private networks")
+                        .on_hover_text("Plug-ins that check their licence online keep working (recommended)")
+                        .clicked()
+                    {
+                        firewall_rule(true);
+                    }
+                    if ui
+                        .button("Block network access")
+                        .on_hover_text("No prompts and no network use; plug-ins that need to authorise online may stop working")
+                        .clicked()
+                    {
+                        firewall_rule(false);
+                    }
+                });
+            });
             group(ui, th, "Audiform 1", |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Import from Audiform 1...").clicked() {
@@ -870,6 +889,45 @@ fn ensure_scan(d: &mut Draft, st: &State, force: bool) -> Scan {
         list: Default::default(),
         stale: false,
     })
+}
+
+/// Adds (replacing any earlier one) a Windows Firewall rule for this
+/// program: allow on private and domain networks, or block everywhere.
+/// Windows shows its own permission prompt (UAC) first; nothing changes if
+/// the user says no.
+fn firewall_rule(allow: bool) {
+    #[cfg(windows)]
+    {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let exe = exe.display().to_string().replace('"', "");
+        let (action, profiles) = if allow {
+            ("allow", "private,domain")
+        } else {
+            ("block", "any")
+        };
+        let rule = |dir: &str| {
+            format!(
+                "netsh advfirewall firewall add rule name=\"AudiForm 2\" dir={dir} action={action} program=\"{exe}\" profile={profiles} enable=yes"
+            )
+        };
+        let cmd = format!(
+            "netsh advfirewall firewall delete rule name=\"AudiForm 2\" & {} & {}",
+            rule("in"),
+            rule("out")
+        );
+        // Elevated through PowerShell's Start-Process -Verb RunAs.
+        let ps = format!(
+            "Start-Process cmd -Verb RunAs -WindowStyle Hidden -ArgumentList '/c {}'",
+            cmd.replace('\'', "''")
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = allow;
 }
 
 /// Settings > Audio Devices: the driver, what plays and records, the

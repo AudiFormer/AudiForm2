@@ -661,18 +661,28 @@ fn take_notices(st: &mut State) {
     let mut commit = false;
     for (inst, n) in notices {
         let place = at.get(&inst).copied();
+        // Only changes made in the plug-in's own window are the user's
+        // edits (an undo step, unsaved changes). A plug-in reporting its
+        // settings as it loads just updates the slot quietly.
+        let by_user = manager()
+            .get(&inst)
+            .is_some_and(|i| i.editor_open.load(std::sync::atomic::Ordering::Relaxed));
         match n {
             Notice::Edited { id, value } => {
                 if let Some((t, i)) = place {
-                    begin_pending(st);
+                    if by_user {
+                        begin_pending(st);
+                    }
                     edit_slot(st, t, i, |d| d.set_param(id, value));
                 }
             }
             Notice::State(s) => {
                 if let Some((t, i)) = place {
-                    begin_pending(st);
+                    if by_user {
+                        begin_pending(st);
+                        commit = true;
+                    }
                     edit_slot(st, t, i, |d| d.state = Some(s.clone()));
-                    commit = true;
                 }
             }
             Notice::EndEdit(_) | Notice::EditorClosed => commit = true,
