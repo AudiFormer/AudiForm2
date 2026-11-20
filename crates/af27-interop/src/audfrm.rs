@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use af27_core::automation::{AutomationMode, Curve, Lane, LanePoint as AutoPoint, LaneTarget};
-use af27_core::midi::{ControlEvent, MidiClip, MidiNote, SoundFontRef, TempoChange};
+use af27_core::midi::{
+    ClipTiming, ControlEvent, MidiClip, MidiNote, SoundFontRef, TempoChange, TempoKind,
+};
 use af27_core::plugin::PluginData;
 use af27_core::session::{
     Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session, StretchKind,
@@ -768,6 +770,13 @@ fn midi_clip_from(m: &Value, id: u64) -> MidiClip {
                 pan: n["pan"].as_f64().unwrap_or(0.0) as f32,
             })
             .collect(),
+        // Audiform 1 has none of these; Audiform27 keeps its own fields.
+        timing: match m["af27_keep_bpm"].as_f64() {
+            Some(bpm) => ClipTiming::KeepSpeed { bpm },
+            None => ClipTiming::FollowTempo,
+        },
+        stretch: m["af27_stretch"].as_f64().unwrap_or(1.0),
+        pitch: m["af27_pitch"].as_f64().unwrap_or(0.0) as f32,
         muted: m["muted"].as_bool().unwrap_or(false),
         gain_db: m["gain_db"].as_f64().unwrap_or(0.0) as f32,
         controls: m["controls"]
@@ -805,6 +814,32 @@ fn write_midi_clip(mo: &mut Map<String, Value>, m: &MidiClip) {
     }
     if was.gain_db != m.gain_db {
         put_f32(mo, "gain_db", m.gain_db);
+    }
+    // Audiform27's own timing, stretch and pitch: written only when not
+    // the default, so a plain clip saves as Audiform writes it.
+    if was.timing != m.timing {
+        match m.timing {
+            ClipTiming::KeepSpeed { bpm } => {
+                mo.insert("af27_keep_bpm".into(), json!(bpm));
+            }
+            ClipTiming::FollowTempo => {
+                mo.remove("af27_keep_bpm");
+            }
+        }
+    }
+    if was.stretch != m.stretch {
+        if m.stretch == 1.0 {
+            mo.remove("af27_stretch");
+        } else {
+            mo.insert("af27_stretch".into(), json!(m.stretch));
+        }
+    }
+    if was.pitch != m.pitch {
+        if m.pitch == 0.0 {
+            mo.remove("af27_pitch");
+        } else {
+            put_f32(mo, "af27_pitch", m.pitch);
+        }
     }
     if fresh || was.notes != m.notes {
         let notes = m
@@ -965,6 +1000,11 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
                 bpm: c["bpm"].as_f64().unwrap_or(out.tempo.bpm),
                 beats_per_bar: c["beats_per_bar"].as_u64().unwrap_or(4) as u32,
                 beat_unit: c["beat_unit"].as_u64().unwrap_or(4) as u32,
+                // Audiform 1 has no glides; Audiform27 adds its own field.
+                kind: match c["af27_ramp_from_bar"].as_u64() {
+                    Some(f) => TempoKind::Ramp { from_bar: f as u32 },
+                    None => TempoKind::Immediate,
+                },
                 ext_id: c["id"].as_str().map(str::to_string),
             })
             .collect();
@@ -1396,6 +1436,12 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 set_num(&mut co, "bpm", c.bpm);
                 set_num(&mut co, "beats_per_bar", c.beats_per_bar as f64);
                 set_num(&mut co, "beat_unit", c.beat_unit as f64);
+                match c.kind.ramp_from() {
+                    Some(f) => set_num(&mut co, "af27_ramp_from_bar", f as f64),
+                    None => {
+                        co.remove("af27_ramp_from_bar");
+                    }
+                }
                 Value::Object(co)
             })
             .collect();
@@ -2413,6 +2459,55 @@ mod tests {
     }
 
     #[test]
+    fn midi_clip_timing_stretch_and_pitch_ride_in_own_fields() {
+        let mut s = Session::new("m", 48_000, 0);
+        let t = s.add_track_of(TrackKind::Midi);
+        let id = s.alloc_id();
+        let mut c = MidiClip::new(id, "Riff", 4.0, 8.0);
+        c.notes.push(MidiNote {
+            pitch: 60,
+            start: 0.0,
+            length: 1.0,
+            velocity: 100,
+            channel: 0,
+            pan: 0.0,
+        });
+        s.track_mut(t).unwrap().midi.push(c);
+        let plain = export(&mut s, None);
+        let mo = &plain["tracks"][0]["midi_clips"][0];
+        for k in ["af27_keep_bpm", "af27_stretch", "af27_pitch"] {
+            assert!(mo.get(k).is_none(), "{k}");
+        }
+        {
+            let c = &mut s.track_mut(t).unwrap().midi[0];
+            c.timing = ClipTiming::KeepSpeed { bpm: 96.0 };
+            c.stretch = 1.5;
+            c.pitch = -2.5;
+        }
+        let out = export(&mut s, Some(&plain));
+        let mo = &out["tracks"][0]["midi_clips"][0];
+        assert_eq!(mo["af27_keep_bpm"], json!(96.0));
+        assert_eq!(mo["af27_stretch"], json!(1.5));
+        assert_eq!(mo["af27_pitch"], json!(-2.5));
+        let back = import(&out.to_string(), Path::new(".")).unwrap().session;
+        let bc = &back.tracks[0].midi[0];
+        assert_eq!(bc.timing, ClipTiming::KeepSpeed { bpm: 96.0 });
+        assert_eq!((bc.stretch, bc.pitch), (1.5, -2.5));
+        // Back to the defaults: the fields go again.
+        {
+            let c = &mut s.track_mut(t).unwrap().midi[0];
+            c.timing = ClipTiming::FollowTempo;
+            c.stretch = 1.0;
+            c.pitch = 0.0;
+        }
+        let again = export(&mut s, Some(&out));
+        let mo = &again["tracks"][0]["midi_clips"][0];
+        for k in ["af27_keep_bpm", "af27_stretch", "af27_pitch"] {
+            assert!(mo.get(k).is_none(), "{k}");
+        }
+    }
+
+    #[test]
     fn tempo_map_and_soundfont_round_trip() {
         let imp = import(SAMPLE, Path::new(".")).unwrap();
         let base = imp.base.clone().unwrap();
@@ -2437,6 +2532,20 @@ mod tests {
         let back = import(&out.to_string(), Path::new(".")).unwrap().session;
         assert_eq!(back.tempo.changes.len(), 2);
         assert_eq!(back.tempo.changes[1].bpm, 130.0);
+        assert!(back.tempo.changes[1].kind.is_immediate());
+        assert!(ch[1].get("af27_ramp_from_bar").is_none());
+        // A glide rides in Audiform27's own field, and only while it glides.
+        s.tempo.set_ramp(1, Some(10));
+        let out = export(&mut s, Some(&base));
+        assert_eq!(out["tempo"]["changes"][1]["af27_ramp_from_bar"], json!(10));
+        let back = import(&out.to_string(), Path::new(".")).unwrap().session;
+        assert_eq!(back.tempo.changes[1].kind, TempoKind::Ramp { from_bar: 10 });
+        let base2 = out.clone();
+        s.tempo.set_ramp(1, None);
+        let out = export(&mut s, Some(&base2));
+        assert!(out["tempo"]["changes"][1]
+            .get("af27_ramp_from_bar")
+            .is_none());
 
         // A SoundFont on a MIDI track rides in Audiform27's own field.
         let mut s = Session::new("sf", 48_000, 0);
@@ -2577,6 +2686,10 @@ mod tests {
         assert_eq!(notes[0]["channel"], json!(2));
         assert!(notes[1].get("pan").is_some());
         assert!(out["tracks"][1]["midi_clips"][0].get("controls").is_none());
+        let mc0 = &out["tracks"][1]["midi_clips"][0];
+        for k in ["af27_keep_bpm", "af27_stretch", "af27_pitch"] {
+            assert!(mc0.get(k).is_none(), "{k}");
+        }
         assert!(out["tracks"][1]["input"].is_null());
         assert!(out["tracks"][1].get("af27_synth").is_none());
         let rv = out["buses"]

@@ -614,7 +614,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "audiform27"
+name = "audiform2"
 version = "0.1.0"
 dependencies = [
  "af27-core",

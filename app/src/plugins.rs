@@ -732,13 +732,17 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
     }
     let th = st.theme.clone();
     let mut keep = true;
-    egui::Window::new(RichText::new("Audio Plug-In Manager").strong())
-        .id(egui::Id::new("plugin-manager"))
-        .open(&mut keep)
-        .default_width(560.0)
-        .default_height(520.0)
-        .resizable(true)
-        .show(ctx, |ui| manager_ui(ui, st, &th));
+    crate::ui::popup(
+        ctx,
+        egui::Id::new(("af2-popup", "plugins.rs", 0)),
+        RichText::new("Audio Plug-In Manager").strong(),
+    )
+    .id(egui::Id::new("plugin-manager"))
+    .open(&mut keep)
+    .default_width(560.0)
+    .default_height(520.0)
+    .resizable(true)
+    .show(ctx, |ui| manager_ui(ui, st, &th));
     if !keep {
         UI.with(|u| u.borrow_mut().manager_open = false);
     }

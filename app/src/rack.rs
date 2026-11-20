@@ -975,39 +975,43 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
         };
         let mut keep = true;
         let title = format!("{}: {}", target_name(st, target), slot_name(&slot));
-        egui::Window::new(RichText::new(&title).strong())
-            .id(egui::Id::new(("fx-window", target, i)))
-            .open(&mut keep)
-            .resizable(false)
-            .collapsible(true)
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let (pr, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
-                    power_icon(ui.painter(), pr, !slot.bypass, resp.hovered(), &th);
-                    if resp.on_hover_text("On or bypassed").clicked() {
-                        let before = st.session.clone();
-                        if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
-                            s.bypass = !s.bypass;
-                        }
-                        if target != FILE {
-                            st.live_slot(target, i);
-                            st.commit_live("Bypass", before);
-                        }
-                        crate::plugins::show_bypassed(st, target, i);
+        crate::ui::popup(
+            ctx,
+            egui::Id::new(("fx-window", target, i)),
+            RichText::new(&title).strong(),
+        )
+        .id(egui::Id::new(("fx-window", target, i)))
+        .open(&mut keep)
+        .resizable(false)
+        .collapsible(true)
+        .default_width(320.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let (pr, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                power_icon(ui.painter(), pr, !slot.bypass, resp.hovered(), &th);
+                if resp.on_hover_text("On or bypassed").clicked() {
+                    let before = st.session.clone();
+                    if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
+                        s.bypass = !s.bypass;
                     }
-                    ui.label(RichText::new(format!("Slot {}", i + 1)).color(c(th.text_dim)));
-                });
-                if target != FILE && target != MASTER && crate::fx::takes_key(&slot.effect) {
-                    listen_to(ui, st, target, i, &th);
+                    if target != FILE {
+                        st.live_slot(target, i);
+                        st.commit_live("Bypass", before);
+                    }
+                    crate::plugins::show_bypassed(st, target, i);
                 }
-                ui.separator();
-                if af27_core::plugin::is_plugin(&slot.effect) {
-                    crate::plugins::slot_controls(ui, st, target, i, &th);
-                } else {
-                    slot_controls(ui, st, target, i, &th);
-                }
+                ui.label(RichText::new(format!("Slot {}", i + 1)).color(c(th.text_dim)));
             });
+            if target != FILE && target != MASTER && crate::fx::takes_key(&slot.effect) {
+                listen_to(ui, st, target, i, &th);
+            }
+            ui.separator();
+            if af27_core::plugin::is_plugin(&slot.effect) {
+                crate::plugins::slot_controls(ui, st, target, i, &th);
+            } else {
+                slot_controls(ui, st, target, i, &th);
+            }
+        });
         if !keep {
             st.fx_windows.retain(|w| *w != (target, i));
         }

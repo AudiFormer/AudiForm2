@@ -1,5 +1,5 @@
 [package]
-name = "audiform27"
+name = "audiform2"
 description = "Audiform27: a fast, themeable, all-Rust audio editor"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 authors.workspace = true
 
 [[bin]]
-name = "audiform27"
+name = "audiform2"
 path = "src/main.rs"
 
 [dependencies]

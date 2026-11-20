@@ -498,7 +498,7 @@ pub fn window(ctx: &egui::Context, st: &mut State) {
     let th = st.theme.clone();
     let mut keep = true;
     let mut go = false;
-    egui::Window::new("Import from Audiform 1")
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "af1_import.rs", 0)), "Import from Audiform 1")
         .collapsible(false)
         .resizable(false)
         .pivot(egui::Align2::CENTER_CENTER)

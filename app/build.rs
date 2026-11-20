@@ -2,7 +2,7 @@
 // Copyright (c) The Audiform27 contributors.
 
 //! Builds the icon (`assets/icon/audiform2.ico`) and version text into
-//! audiform27.exe on Windows. `embed-resource` finds the Windows SDK's
+//! audiform2.exe on Windows. `embed-resource` finds the Windows SDK's
 //! rc.exe through the registry, so it need not be on PATH.
 
 fn main() {
@@ -43,8 +43,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "AudiForm 2"
       VALUE "ProductName", "AudiForm 2"
-      VALUE "InternalName", "audiform27"
-      VALUE "OriginalFilename", "audiform27.exe"
+      VALUE "InternalName", "audiform2"
+      VALUE "OriginalFilename", "audiform2.exe"
       VALUE "FileVersion", "{a}.{b}.{c}"
       VALUE "ProductVersion", "{a}.{b}.{c}"
     END

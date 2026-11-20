@@ -4,7 +4,8 @@
 //! The Properties panel: the selected clip's facts and settings. Stretch
 //! and Pitch (mode, type, duration, stretch %, semitones, and the
 //! advanced analysis settings), clip gain, colour, reverse, polarity,
-//! lock and mute.
+//! lock and mute. For a MIDI clip ([`midi_panel`]): its place, timing
+//! (follow the tempo or keep its speed), stretch, pitch and notes.
 
 use egui::{vec2, RichText};
 
@@ -49,6 +50,9 @@ fn section(ui: &mut egui::Ui, th: &Theme, title: &str, right: &str) {
 pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     let Some((ti, ci)) = st.selected_clip.and_then(|id| st.session.find_clip(id)) else {
+        if let Some((ti, ci)) = st.selected_clip.and_then(|id| st.session.find_midi(id)) {
+            return midi_panel(ui, st, ti, ci);
+        }
         ui.add_space(8.0);
         ui.label(RichText::new("Select a clip to see its properties.").color(c(th.text_dim)));
         return;
@@ -315,6 +319,161 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
         if let Some(b) = st.gesture_before.take() {
             if b != st.session {
                 st.commit_session("Clip properties", b);
+            }
+        }
+    }
+}
+
+/// The Properties panel for the MIDI clip at track `ti`, clip `ci`.
+fn midi_panel(ui: &mut egui::Ui, st: &mut State, ti: usize, ci: usize) {
+    use af27_core::midi::{ClipTiming, MIDI_PITCH_MAX, MIDI_STRETCH_MAX, MIDI_STRETCH_MIN};
+    let th = st.theme.clone();
+    let before = st.session.clone();
+    let tempo = st.session.tempo.clone();
+    let track_name = st.session.tracks[ti].name.clone();
+    let clip = st.session.tracks[ti].midi[ci].clone();
+    let mut c2 = clip.clone();
+    let mut keep = !clip.timing.is_follow();
+    let mut live_drag = false;
+    let mut done = false;
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut c2.name)
+                        .desired_width(ui.available_width() - 4.0),
+                );
+                done |= r.lost_focus();
+            });
+            ui.label(
+                RichText::new(format!("MIDI clip on {track_name}"))
+                    .size(10.5)
+                    .color(c(th.text_dim)),
+            );
+
+            section(ui, &th, "Clip", "");
+            let start_s = tempo.secs(clip.start);
+            let end_s = clip.end_secs(&tempo);
+            row(ui, &th, "Start", |ui| {
+                ui.label(format!("{}  ({})", tempo.format(start_s), clock(start_s)));
+            });
+            row(ui, &th, "Length", |ui| {
+                let beats = clip.end_beats(&tempo) - clip.start;
+                ui.label(format!("{beats:.2} beats  ({})", clock(end_s - start_s)))
+                    .on_hover_text(format!(
+                        "Its own length: {:.2} beats before stretch and timing",
+                        clip.length
+                    ));
+            });
+            row(ui, &th, "Notes", |ui| {
+                ui.label(format!("{}", clip.notes.len()));
+            });
+            ui.horizontal_wrapped(|ui| {
+                done |= ui.checkbox(&mut c2.muted, "Mute").changed();
+            });
+
+            section(
+                ui,
+                &th,
+                "Timing",
+                if keep { "Keep speed" } else { "Follow tempo" },
+            );
+            row(ui, &th, "Timing", |ui| {
+                egui::ComboBox::from_id_salt("midi-clip-timing")
+                    .selected_text(if keep { "Keep speed" } else { "Follow tempo" })
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        done |= ui
+                            .selectable_value(&mut keep, false, "Follow tempo")
+                            .on_hover_text(
+                                "Its notes are in the session's beats: it speeds up and slows down with tempo changes under it",
+                            )
+                            .changed();
+                        done |= ui
+                            .selectable_value(&mut keep, true, "Keep speed")
+                            .on_hover_text(
+                                "It plays at its own tempo wherever it sits, the same length in seconds",
+                            )
+                            .changed();
+                    });
+            });
+            if let ClipTiming::KeepSpeed { bpm } = clip.timing {
+                row(ui, &th, "Own tempo", |ui| {
+                    ui.label(format!("{} BPM", (bpm * 100.0).round() / 100.0))
+                        .on_hover_text("The tempo where it was when it was set to keep its speed");
+                });
+            }
+
+            section(ui, &th, "Stretch and Pitch", "");
+            row(ui, &th, "Stretch", |ui| {
+                let mut pct = (c2.ratio() * 100.0) as f32;
+                let r = ui.add(
+                    crate::widgets::Slider::new(
+                        &mut pct,
+                        (MIDI_STRETCH_MIN * 100.0) as f32..=(MIDI_STRETCH_MAX * 100.0) as f32,
+                    )
+                    .suffix(" %"),
+                );
+                if r.changed() {
+                    c2.stretch = (pct as f64 / 100.0).clamp(MIDI_STRETCH_MIN, MIDI_STRETCH_MAX);
+                }
+                live_drag |= r.dragged();
+                done |= r.drag_stopped() || (r.changed() && !r.dragged());
+            });
+            row(ui, &th, "Pitch", |ui| {
+                let r = ui.add(
+                    crate::widgets::Slider::new(&mut c2.pitch, -MIDI_PITCH_MAX..=MIDI_PITCH_MAX)
+                        .step_by(0.1)
+                        .suffix(" st"),
+                )
+                .on_hover_text(
+                    "Whole semitones transpose the notes; a fraction detunes the instrument",
+                );
+                live_drag |= r.dragged();
+                done |= r.drag_stopped() || (r.changed() && !r.dragged());
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(100.0);
+                if ui.small_button("−1 st").clicked() {
+                    c2.pitch = (c2.pitch - 1.0).max(-MIDI_PITCH_MAX);
+                    done = true;
+                }
+                if ui.small_button("+1 st").clicked() {
+                    c2.pitch = (c2.pitch + 1.0).min(MIDI_PITCH_MAX);
+                    done = true;
+                }
+                if ui
+                    .small_button("Reset")
+                    .on_hover_text("Remove the stretch and pitch")
+                    .clicked()
+                {
+                    c2.pitch = 0.0;
+                    c2.stretch = 1.0;
+                    done = true;
+                }
+            });
+        });
+
+    if keep != !c2.timing.is_follow() {
+        c2.set_timing(keep, &tempo);
+    }
+    if c2 != clip {
+        st.session.tracks[ti].midi[ci] = c2;
+        st.session_version += 1;
+        if live_drag && !done {
+            if st.gesture_before.is_none() {
+                st.gesture_before = Some(before);
+            }
+        } else {
+            let b = st.gesture_before.take().unwrap_or(before);
+            st.commit_session("MIDI clip properties", b);
+        }
+    } else if done {
+        if let Some(b) = st.gesture_before.take() {
+            if b != st.session {
+                st.commit_session("MIDI clip properties", b);
             }
         }
     }

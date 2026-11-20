@@ -160,6 +160,17 @@ fn voice(i: &Instrument, freq: f32, local: f64, dt: f32) -> f32 {
     (a + osc(i.wave, f2, local, dt)) * 0.5
 }
 
+impl Note {
+    /// The note `semitones` off its key (a MIDI clip's fractional pitch
+    /// shift).
+    pub fn detuned(mut self, semitones: f32) -> Note {
+        if semitones != 0.0 {
+            self.freq *= 2f32.powf(semitones / 12.0);
+        }
+        self
+    }
+}
+
 /// A note's frequency, gain and pan from MIDI values.
 pub fn note(start: f64, end: f64, pitch: u8, velocity: u8, pan: f32) -> Note {
     let p = (pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
@@ -295,11 +306,20 @@ pub fn click_with(t: f64, segs: &[Segment], s: &MetronomeSettings) -> f32 {
         seg = x;
     }
     let per = per_beat(s.subdivide) as i64;
-    let step = seg.spq() * seg.unit_beats() / per as f64;
-    let into = (t - seg.secs).max(0.0);
-    // A hair of slack so a click computed a little late still sounds.
-    let k = ((into + 1e-9) / step).floor();
-    let local = (into - k * step).max(0.0);
+    let (k, local) = if seg.is_ramp() {
+        // In a glide the clicks are evenly spaced in beats, not seconds:
+        // find the last click in beats, then how long ago it was.
+        let step = seg.unit_beats() / per as f64;
+        let into = (seg.beats_at(t) - seg.beat).max(0.0);
+        let k = ((into + 1e-9) / step).floor();
+        (k, (t - seg.secs_at(seg.beat + k * step)).max(0.0))
+    } else {
+        let step = seg.spq() * seg.unit_beats() / per as f64;
+        let into = (t - seg.secs).max(0.0);
+        // A hair of slack so a click computed a little late still sounds.
+        let k = ((into + 1e-9) / step).floor();
+        (k, (into - k * step).max(0.0))
+    };
     if local >= CLICK_LEN {
         return 0.0;
     }
@@ -353,6 +373,14 @@ mod tests {
     }
 
     #[test]
+    fn a_detuned_note_plays_off_its_key() {
+        let n = note(0.0, 1.0, 69, 100, 0.0);
+        assert_eq!(n.detuned(0.0).freq, n.freq);
+        assert!((n.detuned(0.5).freq - 440.0 * 2f32.powf(0.5 / 12.0)).abs() < 1e-2);
+        assert!((n.detuned(-0.25).freq - 440.0 * 2f32.powf(-0.25 / 12.0)).abs() < 1e-2);
+    }
+
+    #[test]
     fn clicks_land_on_beats() {
         let t = af27_core::midi::Tempo::default();
         let segs: Vec<_> = t.segments().collect();
@@ -366,13 +394,7 @@ mod tests {
         use af27_core::midi::{Tempo, TempoChange};
         // One bar of 4/4 at 120 (2 s), then 6/8 at 60: eighths every 0.5 s.
         let mut t = Tempo::default();
-        t.changes.push(TempoChange {
-            bar: 1,
-            bpm: 60.0,
-            beats_per_bar: 6,
-            beat_unit: 8,
-            ext_id: None,
-        });
+        t.changes.push(TempoChange::new(1, 60.0, 6, 8));
         let segs: Vec<_> = t.segments().collect();
         let at = |x: f64| click(x + 0.0005, &segs);
         // Accent (higher, louder) on each bar's first beat.
@@ -388,5 +410,24 @@ mod tests {
         // Six eighths later (3 s into 6/8) the next bar is accented again.
         assert!(peak(5.0) > peak(4.5) * 1.2);
         assert!(peak(4.5) > 0.1);
+    }
+
+    #[test]
+    fn clicks_follow_a_ritardando_beat_by_beat() {
+        use af27_core::midi::{Tempo, TempoChange, TempoKind};
+        // 120 to 60 BPM across bars 1..5, then steady.
+        let mut t = Tempo::default();
+        t.changes.push(TempoChange {
+            kind: TempoKind::Ramp { from_bar: 1 },
+            ..TempoChange::new(5, 60.0, 4, 4)
+        });
+        let segs: Vec<_> = t.segments().collect();
+        for b in 4..24 {
+            let at = t.secs(b as f64);
+            assert!(click(at + 0.0005, &segs).abs() > 0.0, "beat {b}");
+            // Halfway between two beats (in time) is silent.
+            let mid = (at + t.secs(b as f64 + 1.0)) / 2.0;
+            assert_eq!(click(mid, &segs), 0.0, "between {b} and {}", b + 1);
+        }
     }
 }

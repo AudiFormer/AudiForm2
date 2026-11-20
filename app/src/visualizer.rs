@@ -1819,7 +1819,7 @@ mod tests {
         }
     }
 
-    /// `cargo test --release -p audiform27 visualizer_cost -- --ignored --nocapture`
+    /// `cargo test --release -p audiform2 visualizer_cost -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn visualizer_cost() {

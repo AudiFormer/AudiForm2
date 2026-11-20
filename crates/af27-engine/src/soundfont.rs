@@ -90,6 +90,14 @@ fn pan_cc(p: f32) -> i32 {
     (64.0 + p.clamp(-1.0, 1.0) * 63.0).round() as i32
 }
 
+/// A 14-bit pitch bend (8192 is none) for `semitones` at a bend range
+/// of two semitones.
+fn bend_value(semitones: f32) -> i32 {
+    (8192.0 + semitones.clamp(-2.0, 2.0) / 2.0 * 8192.0)
+        .round()
+        .clamp(0.0, 16383.0) as i32
+}
+
 /// One note in seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct SfNote {
@@ -98,6 +106,9 @@ pub struct SfNote {
     pub key: u8,
     pub velocity: u8,
     pub pan: f32,
+    /// Semitones off its key (-0.5..0.5), played as pitch bend on its
+    /// channel (General MIDI's bend range is two semitones each way).
+    pub detune: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,6 +188,9 @@ impl SfPlayer {
         let ch = Self::channel(i);
         self.synth
             .process_midi_message(ch, 0xB0, 0x0A, pan_cc(n.pan));
+        let bend = bend_value(n.detune);
+        self.synth
+            .process_midi_message(ch, 0xE0, bend & 0x7F, bend >> 7);
         self.synth.note_on(ch, n.key as i32, n.velocity as i32);
     }
 
@@ -409,6 +423,7 @@ mod tests {
             key: 60,
             velocity: 100,
             pan: 0.0,
+            detune: 0.0,
         }];
         let mut pl = SfPlayer::new(&sf, notes, 48_000).unwrap();
         let mut l = vec![0.0; 1024];

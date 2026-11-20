@@ -47,7 +47,7 @@ Needed on the build machine (none of this is needed for a normal build):
 Then:
 
 ```
-cargo build --release -p audiform27 --features asio
+cargo build --release -p audiform2 --features asio
 ```
 
 The `asio` feature of the app turns on `af27-engine/asio`, which turns on
