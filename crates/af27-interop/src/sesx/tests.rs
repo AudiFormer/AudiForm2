@@ -129,13 +129,15 @@ fn tracks_buses_clips_and_media_come_across() {
         (r.tracks, r.buses, r.clips, r.sends, r.stretched),
         (1, 1, 2, 1, 1)
     );
-    for what in [
-        "video track(s)",
-        "Pre-render switch(es)",
-        "Source Channels map(s) (a clip playing one side of its file)",
-    ] {
+    for what in ["video track(s)", "Pre-render switch(es)"] {
         assert_eq!(r.dropped.get(what), Some(&1), "{what}: {:?}", r.dropped);
     }
+    // Source Channels: the right side of the stereo file on both sides.
+    let map = c.props.channel_map.as_ref().expect("a channel map");
+    assert_eq!(map.len(), 2);
+    assert_eq!((map[0].left, map[0].right), (0.0, 0.0));
+    assert_eq!((map[1].left, map[1].right), (1.0, 1.0));
+    assert!(r.dropped.keys().all(|k| !k.contains("Source Channels")));
     assert!(r.approximated.keys().any(|k| k.starts_with("S-curve")));
     let n = r.notices().join("\n");
     assert!(
@@ -328,12 +330,28 @@ fn levels_and_drawn_lines() {
     let pan = &t.lanes[1];
     assert_eq!(pan.target, LaneTarget::Pan);
     assert_eq!(pan.points[0].value, 0.5);
-    // A flat clip line is a level; a moving one is told as left out.
+    // A flat clip line is a level; a moving one is the clip's own lane.
     assert!((t.clips[0].gain_db + 6.02).abs() < 0.01);
+    assert!(t.clips[0].props.lanes.is_empty());
     assert_eq!(t.clips.len(), 2, "a clip without a file is skipped");
-    assert_eq!(r.dropped.get("clip volume line(s)"), Some(&1));
+    let cl = &t.clips[1].props.lanes;
+    assert_eq!(cl.len(), 1);
+    assert_eq!(cl[0].target, LaneTarget::Volume);
+    // Cut to the clip (100 samples): the points, and the end held.
+    let pts: Vec<(f64, f64)> = cl[0]
+        .points
+        .iter()
+        .map(|p| {
+            (
+                (p.time * 44100.0).round(),
+                (p.value * 100.0).round() / 100.0,
+            )
+        })
+        .collect();
+    assert_eq!(pts, vec![(0.0, -6.02), (50.0, 0.0), (100.0, 0.0)]);
+    assert!(!r.dropped.contains_key("clip volume line(s)"));
     assert_eq!(r.dropped.get("other automation line(s)"), Some(&1));
-    assert_eq!(r.lines, 2);
+    assert_eq!(r.lines, 3);
 }
 
 #[test]
@@ -631,4 +649,81 @@ fn a_converted_eq_saves_for_audiform_with_its_keys() {
     assert_eq!(slot["params"]["b1_on"], 1.0);
     assert_eq!(slot["position"], 0);
     assert!(slot.get("data").is_none());
+}
+
+#[test]
+fn clip_lines_racks_and_source_channels_come_across_and_export_back() {
+    // A clip 1 s into its file (sourceInPoint 44100), 1 s long: its lines
+    // count from the file start, so they move to clip time and are cut.
+    let tracks = r#"<audioTrack id="10001" index="1"><trackParameters><name>T</name></trackParameters>
+      <trackAudioParameters audioChannelType="stereo"><trackOutput outputID="10000" type="trackID"/></trackAudioParameters>
+      <audioClip fileID="0" startPoint="0" endPoint="44100" sourceInPoint="44100" sourceOutPoint="88200">
+        <component componentID="Audition.Fader" id="clipGain" powered="true"><parameter index="0" name="volume" parameterValue="1">
+          <parameterKeyframe sampleOffset="0" value="1"/><parameterKeyframe sampleOffset="66150" value="0.5"/></parameter>
+          <parameter index="1" name="static gain" parameterValue="1"/></component>
+        <component componentID="Audition.StereoPanner" id="clipPan" powered="true"><parameter index="0" name="Pan" parameterValue="0">
+          <parameterKeyframe sampleOffset="44100" value="0"/><parameterKeyframe sampleOffset="88200" value="1"/></parameter></component>
+        <effectsRack preFader="true">
+          <component id="rackOutput" powered="true"><parameter index="0" parameterValue="0.5"/></component>
+          <slot powered="true" slotIndex="2"><component componentID="3:56535441 54383141 75746f2d 54756e65" name="Tuner"/></slot>
+        </effectsRack>
+        <channelMap><channel index="0" sourceIndex="0"/></channelMap>
+      </audioClip>
+      <audioClip fileID="0" startPoint="88200" endPoint="132300" sourceInPoint="0" sourceOutPoint="44100">
+        <component componentID="Audition.StereoPanner" id="clipPan" powered="true"><parameter index="0" name="Pan" parameterValue="-40"/></component>
+      </audioClip>
+    </audioTrack><masterTrack id="10000"/>"#;
+    let (s, r) = read_s(&wrap(
+        r#"sampleRate="44100""#,
+        tracks,
+        r#"<file id="0" absolutePath="Z:\nowhere\x.wav" importerPrivateSettings="Channels:0:2;"/>"#,
+    ));
+    assert!(r.dropped.is_empty(), "{:?}", r.dropped);
+    let c = &s.tracks[0].clips[0];
+    let vol = c.playing_lane(&LaneTarget::Volume).unwrap();
+    let at = |l: &Lane, t: f64| l.value_at(t).unwrap();
+    assert!(
+        (at(vol, 0.0) + 6.02 * 2.0 / 3.0).abs() < 0.01,
+        "{:?}",
+        vol.points
+    );
+    assert!((at(vol, 0.5) + 6.02).abs() < 0.01, "{:?}", vol.points);
+    assert!((at(vol, 1.0) + 6.02).abs() < 0.01);
+    let pan = c.playing_lane(&LaneTarget::Pan).unwrap();
+    assert!((at(pan, 0.0) + 1.0).abs() < 1e-6 && (at(pan, 1.0) - 1.0).abs() < 1e-6);
+    assert_eq!(c.props.chain.len(), 1);
+    assert_eq!(c.props.chain[0].position, Some(2));
+    assert!((c.props.rack.output_db + 6.0).abs() < 0.1);
+    // Only the left of the stereo file, on both sides.
+    let map = c.props.channel_map.as_ref().unwrap();
+    assert_eq!(
+        map.iter().map(|m| (m.left, m.right)).collect::<Vec<_>>(),
+        vec![(1.0, 1.0), (0.0, 0.0)]
+    );
+    // A fixed clip pan is a lane of one point.
+    let p2 = s.tracks[0].clips[1].playing_lane(&LaneTarget::Pan).unwrap();
+    assert_eq!(p2.points.len(), 1);
+    assert!((p2.points[0].value + 0.4).abs() < 1e-6);
+
+    // Exported and read back: the same lines, rack and map.
+    let (out, rep) = crate::sesx_out::to_sesx(&s, None);
+    assert_eq!(rep.lanes_left_out, 0);
+    let (b, _) = read_s(&out);
+    let cb = &b.tracks[0].clips[0];
+    let vb = cb.playing_lane(&LaneTarget::Volume).unwrap();
+    for t in [0.0, 0.25, 0.5, 0.9] {
+        assert!((at(vb, t) - at(vol, t)).abs() < 0.02, "{t}");
+    }
+    let pb = cb.playing_lane(&LaneTarget::Pan).unwrap();
+    assert!((at(pb, 0.5) - at(pan, 0.5)).abs() < 1e-3);
+    assert_eq!(cb.props.chain.len(), 1);
+    // The copy does not note the file's channel count: channels the map
+    // leaves out are silent, as before.
+    let mb = cb.props.channel_map.as_ref().unwrap();
+    assert_eq!(mb[0], map[0]);
+    assert!(map[mb.len()..]
+        .iter()
+        .all(|m| m.left == 0.0 && m.right == 0.0));
+    let p2b = b.tracks[0].clips[1].playing_lane(&LaneTarget::Pan).unwrap();
+    assert!((p2b.points[0].value + 0.4).abs() < 1e-6);
 }

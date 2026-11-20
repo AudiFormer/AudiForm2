@@ -457,8 +457,48 @@ fn write_clip(
         esc(&c.name),
         src_in + len
     );
-    fader(x, g, "clipGain", gain(c.gain_db), 1.0, "");
+    // Clip lines count from the start of the file, like `sourceInPoint`.
+    let lanes = c.cropped_lanes();
+    let lane = |target: LaneTarget| lanes.iter().find(|l| l.target == target && l.plays());
+    let line = |pts: &[af27_core::automation::LanePoint], f: &dyn Fn(f64) -> f64| {
+        keyframes(
+            &pts.iter()
+                .map(|p| (src_in as f64 + p.time * rate, f(p.value)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    match lane(LaneTarget::Volume) {
+        Some(l) => {
+            let keys = line(&l.points, &|v| gain(v as f32));
+            let first = gain(l.points[0].value as f32);
+            fader(x, g, "clipGain", first, gain(c.gain_db), &keys);
+        }
+        None => fader(x, g, "clipGain", gain(c.gain_db), 1.0, ""),
+    }
     mute(x, g, "clipMute", c.muted);
+    let (pan_v, pan_keys) = match lane(LaneTarget::Pan) {
+        Some(l) if l.points.len() == 1 => (l.points[0].value, String::new()),
+        Some(l) => (0.0, line(&l.points, &|v| (v.clamp(-1.0, 1.0) + 1.0) / 2.0)),
+        None => (0.0, String::new()),
+    };
+    let _ = write!(
+        x,
+        r#"<component componentGuid="{}" componentID="Audition.StereoPanner" id="clipPan" name="StereoPanner" powered="true"><parameter index="0" name="Pan" parameterValue="{}">{pan_keys}</parameter></component>"#,
+        g.next(),
+        pan_v.clamp(-1.0, 1.0) * 100.0
+    );
+    report.lanes_left_out += lanes
+        .iter()
+        .filter(|l| !matches!(l.target, LaneTarget::Volume | LaneTarget::Pan) && l.plays())
+        .count();
+    rack(x, g, &c.props.chain, &c.props.rack, report);
+    if let Some(map) = &c.props.channel_map {
+        if let Some(text) = channel_map_xml(map) {
+            x.push_str(&text);
+        } else {
+            report.clips_simplified += 1;
+        }
+    }
     if st.is_on() {
         let kind = match st.kind {
             StretchKind::Varispeed => "varispeed",
@@ -493,6 +533,33 @@ fn write_clip(
         c.props.fade_out_skew.round() as i32,
         len - fout
     );
+}
+
+/// A clip's Source Channels as a `channelMap`: the file channel heard on
+/// the left (index 0) and on the right (index 1). None when the map has amounts or flips a `.sesx` cannot hold.
+fn channel_map_xml(map: &[af27_core::session::ChannelSend]) -> Option<String> {
+    let full = |v: f32| (v - 1.0).abs() < 1e-4;
+    let off = |v: f32| v.abs() < 1e-4;
+    if map
+        .iter()
+        .any(|s| !(full(s.left) || off(s.left)) || !(full(s.right) || off(s.right)))
+    {
+        return None;
+    }
+    let left: Vec<usize> = (0..map.len()).filter(|&k| full(map[k].left)).collect();
+    let right: Vec<usize> = (0..map.len()).filter(|&k| full(map[k].right)).collect();
+    // Both sides listed, even when one file channel plays on both: that
+    // reads the same whatever the file's channel count.
+    let pairs: Vec<(usize, usize)> = match (left.as_slice(), right.as_slice()) {
+        ([l], [r]) => vec![(0, *l), (1, *r)],
+        _ => return None,
+    };
+    let mut s = String::from("<channelMap>");
+    for (i, k) in pairs {
+        let _ = write!(s, r#"<channel index="{i}" sourceIndex="{k}"/>"#);
+    }
+    s.push_str("</channelMap>");
+    Some(s)
 }
 
 /// Writes the session to `path` as a `.sesx` (the session itself is not

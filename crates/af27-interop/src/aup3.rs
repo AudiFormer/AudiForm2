@@ -14,6 +14,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
+use af27_core::automation::{self, Lane, LaneTarget};
 use af27_core::session::{Clip, MediaItem, Session, StretchKind, StretchMode};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -395,6 +396,30 @@ fn to_db(g: f64) -> f32 {
     }
 }
 
+/// A clip's gain envelope (seconds, linear gain, moving straight in
+/// gain) as volume points in dB, with points between those far apart in
+/// level so the line in dB follows the straight line in gain.
+fn volume_line(env: &[(f64, f64)]) -> Vec<automation::LanePoint> {
+    let pt = |t: f64, g: f64| automation::LanePoint {
+        time: t,
+        value: to_db(g) as f64,
+        curve: automation::Curve::Linear,
+    };
+    let mut out = Vec::new();
+    for (k, &(t, g)) in env.iter().enumerate() {
+        if let Some(&(t0, g0)) = k.checked_sub(1).and_then(|j| env.get(j)) {
+            if (to_db(g) - to_db(g0)).abs() > 1.0 && t > t0 {
+                for s in 1..8 {
+                    let x = s as f64 / 8.0;
+                    out.push(pt(t0 + (t - t0) * x, g0 + (g - g0) * x));
+                }
+            }
+        }
+        out.push(pt(t, g));
+    }
+    out
+}
+
 /// One clip as read: offset and trims in seconds, its channels.
 struct RawClip {
     name: String,
@@ -621,8 +646,8 @@ pub fn import(path: &Path, audio_dir: &Path) -> Result<Imported, String> {
                 st.ratio = c.ratio;
                 st.pitch = (c.cents / 100.0).clamp(-24.0, 24.0) as f32;
             }
-            // A clip volume line: flat is a level; Audiform27 clips have
-            // no automation of their own yet, so a moving one is told.
+            // A clip volume line: flat is a level; a moving one becomes
+            // the clip's own volume lane, cut to the part heard.
             let inside: Vec<f64> = c
                 .envelope
                 .iter()
@@ -633,6 +658,9 @@ pub fn import(path: &Path, audio_dir: &Path) -> Result<Imported, String> {
                 if inside.iter().all(|v| (v - first).abs() <= 0.001) {
                     clip.gain_db = to_db(first);
                 } else {
+                    let mut lane = Lane::new(LaneTarget::Volume);
+                    lane.points = automation::crop(&volume_line(&c.envelope), left, left + seen);
+                    clip.props.lanes.push(lane);
                     lines += 1;
                 }
             }
@@ -667,14 +695,16 @@ pub fn import(path: &Path, audio_dir: &Path) -> Result<Imported, String> {
     if effects > 0 {
         dropped.push(format!("{effects} effect list(s)"));
     }
-    if lines > 0 {
-        dropped.push(format!("{lines} clip volume line(s)"));
-    }
     notices.push(format!(
         "Imported {} track(s) and {clip_count} clip(s); the audio was written to {}.",
         layout.len(),
         audio_dir.display()
     ));
+    if lines > 0 {
+        notices.push(format!(
+            "{lines} clip volume line(s) came across as clip automation."
+        ));
+    }
     if stretched > 0 {
         notices.push(format!("{stretched} clip(s) keep their stretch and pitch."));
     }

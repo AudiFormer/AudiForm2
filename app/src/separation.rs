@@ -312,6 +312,7 @@ pub fn add_separated_tracks(
                     c.id = s.alloc_id();
                     c.media = *mid;
                     c.ext_id = None;
+                    c.renew_chain_ids();
                     c
                 })
                 .collect();

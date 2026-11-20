@@ -66,8 +66,9 @@ pub const MAX_SPEAKERS: usize = af27_space::MAX_SPEAKERS;
 /// Effect lanes move their effect's settings this often (frames).
 pub const FX_STEP: usize = 256;
 
-#[derive(Clone)]
 pub struct MixClip {
+    /// The session clip's id (for its rack's live settings).
+    pub id: af27_core::ClipId,
     pub buf: Arc<AudioBuffer>,
     pub start: f64,
     pub offset: f64,
@@ -86,6 +87,88 @@ pub struct MixClip {
     /// clip, once the background work has it; until then the clip reads
     /// its source at `speed`.
     pub prepared: Option<Arc<crate::stretch::Prepared>>,
+    /// The clip's volume lane (dB, clip time) and pan lane (-1..1), each
+    /// empty when it has none playing.
+    pub vol: Vec<LanePoint>,
+    pub pan: Vec<LanePoint>,
+    /// Source Channels: per file channel, its (left, right) amounts.
+    /// Empty plays the file as usual; channels past the end are silent.
+    pub map: Vec<[f32; 2]>,
+    /// The clip's own effects, when it has any.
+    pub fx: Option<Box<ClipFx>>,
+}
+
+/// A clip's own effect rack in the mix: its chain runs on the clip's
+/// sound (read ahead by the chain's latency, so it comes out in step),
+/// then the result goes into the track before the track's chain.
+pub struct ClipFx {
+    pub chain: Chain,
+    /// The rack's meters, shared with the UI.
+    pub meter: Arc<RackMeter>,
+    /// Effect lanes, in clip time.
+    lanes: Vec<FxLane>,
+    l: Vec<f32>,
+    r: Vec<f32>,
+    /// The chain's latency in frames: the clip is read this far ahead.
+    lat: usize,
+    /// Ran last block (a fresh start clears the chain first).
+    running: bool,
+}
+
+impl ClipFx {
+    /// The rack of `c` at `rate`, None when the clip has no effects.
+    /// Allocates; on the UI thread.
+    pub fn new(c: &af27_core::Clip, rate: u32) -> Option<Box<ClipFx>> {
+        let slots = &c.props.chain;
+        if slots.is_empty() {
+            return None;
+        }
+        let mut chain = build_chain(slots, rate, BLOCK);
+        chain.set_rack(&c.props.rack);
+        let lanes = c
+            .props
+            .lanes
+            .iter()
+            .filter(|l| l.plays())
+            .filter_map(|lane| {
+                let LaneTarget::Effect { slot, param, .. } = &lane.target else {
+                    return None;
+                };
+                let si = slots
+                    .iter()
+                    .position(|s| s.ext_id.as_deref() == Some(slot.as_str()))?;
+                (*param < slots[si].values.len()).then(|| FxLane {
+                    slot: si,
+                    param: *param,
+                    points: lane.points.clone(),
+                    vals: slots[si].values.clone(),
+                    live: false,
+                })
+            })
+            .collect();
+        Some(Box::new(ClipFx {
+            lat: chain.latency(),
+            chain,
+            meter: Default::default(),
+            lanes,
+            l: vec![0.0; BLOCK],
+            r: vec![0.0; BLOCK],
+            running: false,
+        }))
+    }
+
+    /// New settings for one slot (effect lanes on it keep moving their
+    /// own value). No allocation.
+    pub fn set(&mut self, slot: usize, vals: &[f32]) {
+        self.chain.set(slot, vals);
+        for f in self.lanes.iter_mut().filter(|f| f.slot == slot) {
+            for (k, (d, v)) in f.vals.iter_mut().zip(vals).enumerate() {
+                if k != f.param {
+                    *d = *v;
+                }
+            }
+        }
+    }
 }
 
 impl MixClip {
@@ -95,7 +178,21 @@ impl MixClip {
         let p = &c.props;
         let prepared = crate::stretch::needs(c).then(|| crate::stretch::prepare(&buf, c));
         let g = db_to_gain(c.gain_db);
+        let lane = |target: LaneTarget| {
+            c.playing_lane(&target)
+                .map(|l| l.points.clone())
+                .unwrap_or_default()
+        };
         MixClip {
+            id: c.id,
+            vol: lane(LaneTarget::Volume),
+            pan: lane(LaneTarget::Pan),
+            map: p
+                .channel_map
+                .as_ref()
+                .map(|m| m.iter().map(|s| [s.left, s.right]).collect())
+                .unwrap_or_default(),
+            fx: None,
             buf,
             start: c.start,
             offset: c.offset,
@@ -611,11 +708,17 @@ fn render_source(t: &mut MixTrack, tracks: TrackPtr, ts: f64, dt: f64, n: usize)
     t.l[..n].fill(0.0);
     t.r[..n].fill(0.0);
     let t1 = ts + dt * n as f64;
-    for c in &t.clips {
+    let MixTrack { clips, l, r, .. } = &mut *t;
+    for c in clips.iter_mut() {
+        if let Some(mut fx) = c.fx.take() {
+            clip_through_fx(c, &mut fx, ts, dt, &mut l[..n], &mut r[..n]);
+            c.fx = Some(fx);
+            continue;
+        }
         if c.start >= t1 || c.start + c.length <= ts {
             continue;
         }
-        read_clip(c, ts, dt, &mut t.l[..n], &mut t.r[..n]);
+        read_clip(c, ts, dt, &mut l[..n], &mut r[..n]);
     }
     if let Some(s) = &mut t.synth {
         s.render(ts, dt, &mut t.l[..n], &mut t.r[..n]);
@@ -626,6 +729,74 @@ fn render_source(t: &mut MixTrack, tracks: TrackPtr, ts: f64, dt: f64, n: usize)
     t.in_delay.run(&mut t.l[..n], &mut t.r[..n]);
     let tin = ts - dt * t.in_t as f64;
     run_chain(t, tracks, n, tin, dt);
+}
+
+/// Adds one block of a clip with its own effects into `l` and `r`: the
+/// clip is read `fx.lat` frames ahead into the rack's buffers, run
+/// through its chain (effect lanes moving every [`FX_STEP`] frames) and
+/// what lands inside the clip is added. The chain is cleared when the
+/// clip starts sounding again. No allocation.
+fn clip_through_fx(c: &MixClip, fx: &mut ClipFx, ts: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
+    let n = l.len().min(fx.l.len());
+    let lead = dt * fx.lat as f64;
+    let t1 = ts + dt * n as f64;
+    // Output for ts..t1 comes from the input at ts + lead..t1 + lead.
+    if c.start >= t1 + lead || c.start + c.length <= ts {
+        fx.running = false;
+        return;
+    }
+    let ClipFx {
+        chain,
+        meter,
+        lanes,
+        l: fl,
+        r: fr,
+        running,
+        ..
+    } = fx;
+    if !*running {
+        chain.reset();
+        *running = true;
+    }
+    let (fl, fr) = (&mut fl[..n], &mut fr[..n]);
+    fl.fill(0.0);
+    fr.fill(0.0);
+    read_clip(c, ts + lead, dt, fl, fr);
+    let in_gain = if chain.bypass { 1.0 } else { chain.input };
+    peak_into(&meter.input, fl, fr, in_gain);
+    let step = if lanes.is_empty() { n.max(1) } else { FX_STEP };
+    let mut a = 0;
+    while a < n {
+        let b = (a + step).min(n);
+        let local = ts + lead + dt * a as f64 - c.start;
+        for f in lanes.iter_mut() {
+            if let (Some(v), Some(slot)) = (
+                af27_core::automation::value_at(&f.points, local),
+                f.vals.get_mut(f.param),
+            ) {
+                *slot = v as f32;
+                chain.set(f.slot, &f.vals);
+            }
+        }
+        chain.process(&mut fl[a..b], &mut fr[a..b]);
+        a = b;
+    }
+    peak_into(&meter.output, fl, fr, 1.0);
+    // Only what falls inside the clip (tails stop at its end).
+    let first = if c.start > ts {
+        (((c.start - ts) / dt).ceil() as usize).min(n)
+    } else {
+        0
+    };
+    let last = (((c.start + c.length - ts) / dt).ceil().max(0.0) as usize).min(n);
+    if first < last {
+        add_into(
+            &mut l[first..last],
+            &mut r[first..last],
+            &fl[first..last],
+            &fr[first..last],
+        );
+    }
 }
 
 /// Adds `src * gain` into `dst`, the gain moving in a straight line from
@@ -684,7 +855,26 @@ fn clip_gain(c: &MixClip, local: f64) -> f32 {
     if c.fade_out > 0.0 && c.length - local < c.fade_out {
         g *= fade_curve((c.length - local) / c.fade_out, c.fade_out_skew);
     }
+    if !c.vol.is_empty() {
+        g *= lane_gain(&c.vol, local) as f64;
+    }
     g as f32
+}
+
+/// One frame through a clip's Source Channels: each file channel at its
+/// left and right amounts.
+#[inline]
+fn mapped_frame(buf: &AudioBuffer, map: &[[f32; 2]], x: f64) -> (f32, f32) {
+    let (mut l, mut r) = (0.0f32, 0.0f32);
+    for (src, m) in buf.channels.iter().zip(map) {
+        if m[0] == 0.0 && m[1] == 0.0 {
+            continue;
+        }
+        let v = sample(src, x);
+        l += v * m[0];
+        r += v * m[1];
+    }
+    (l, r)
 }
 
 /// Adds one clip's sound for the block starting at `t0` (frames `dt`
@@ -744,10 +934,12 @@ fn read_span(
     };
     let local_first = t0 + dt * first as f64 - c.start;
     let local_last = t0 + dt * (last - 1) as f64 - c.start;
-    let flat = !in_fade(local_first) && !in_fade(local_last);
+    let flat = !in_fade(local_first) && !in_fade(local_last) && c.vol.is_empty();
     let whole = (step - 1.0).abs() < 1e-9 && (x0 - x0.round()).abs() < 1e-6 && x0 >= -0.5;
+    // Source Channels and a pan lane go frame by frame.
+    let plain = c.map.is_empty() && c.pan.is_empty();
     match ch.len() {
-        2 if whole => {
+        2 if whole && plain => {
             let start = x0.round() as usize;
             let (a, b) = (&ch[0], &ch[1]);
             let avail = a.len().min(b.len());
@@ -781,7 +973,18 @@ fn read_span(
                     continue;
                 }
                 let g = if flat { c.gain } else { clip_gain(c, local) };
-                let (a, b) = stereo_frame(buf, x0 + step * k);
+                let x = x0 + step * k;
+                let (mut a, mut b) = if c.map.is_empty() {
+                    stereo_frame(buf, x)
+                } else {
+                    mapped_frame(buf, &c.map, x)
+                };
+                if !c.pan.is_empty() {
+                    let p = af27_core::automation::value_at(&c.pan, local).unwrap_or(0.0);
+                    let [pl, pr] = balance(p as f32);
+                    a *= pl;
+                    b *= pr;
+                }
                 l[i] += a * g;
                 r[i] += b * g;
             }
@@ -899,10 +1102,11 @@ pub fn build(
             let mut wide: Vec<MixClip> = Vec::new();
             for c in t.clips.iter().filter(|c| !c.muted) {
                 let Some(buf) = media(c.media) else { continue };
-                let mc = MixClip::new(c, buf);
+                let mut mc = MixClip::new(c, buf);
                 if space.is_some() && plays_to_speakers(c, mc.buf.num_channels()) {
                     wide.push(mc);
                 } else {
+                    mc.fx = ClipFx::new(c, rate);
                     clips.push(mc);
                 }
             }
@@ -1212,6 +1416,10 @@ impl Mix {
     /// Clears effect tails and delay lines, after a jump.
     pub fn reset(&mut self) {
         for t in &mut self.tracks {
+            for fx in t.clips.iter_mut().filter_map(|c| c.fx.as_deref_mut()) {
+                fx.chain.reset();
+                fx.running = false;
+            }
             t.chain.reset();
             t.in_delay.clear();
             t.out_delay.clear();
@@ -1244,6 +1452,10 @@ impl Mix {
     /// every block.
     pub fn set_offline(&mut self) {
         for t in &mut self.tracks {
+            for fx in t.clips.iter_mut().filter_map(|c| c.fx.as_deref_mut()) {
+                fx.chain.set_offline(true);
+                fx.lat = fx.chain.latency();
+            }
             t.chain.set_offline(true);
         }
         self.master_chain.set_offline(true);
@@ -1283,6 +1495,24 @@ impl Mix {
             self.render(at, dt, n, &mut scratch[..n * 2], false);
             left -= n;
         }
+    }
+
+    /// The rack of the clip `id`, if it has one in the mix.
+    pub fn clip_fx(&mut self, id: af27_core::ClipId) -> Option<&mut ClipFx> {
+        self.tracks
+            .iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .find(|c| c.id == id)
+            .and_then(|c| c.fx.as_deref_mut())
+    }
+
+    /// Every clip rack's meters, by clip id (for the UI).
+    pub fn clip_meters(&self) -> Vec<(af27_core::ClipId, Arc<RackMeter>)> {
+        self.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter_map(|c| Some((c.id, c.fx.as_ref()?.meter.clone())))
+            .collect()
     }
 
     /// New fader (linear) and pan for a strip, ramped to over the next

@@ -28,6 +28,8 @@ pub mod synth;
 pub mod transport;
 
 #[cfg(test)]
+mod tests_clipfx;
+#[cfg(test)]
 mod tests_keys;
 #[cfg(test)]
 mod tests_mix;
@@ -130,6 +132,22 @@ enum Cmd {
     /// A chain's rack: power, input and output gain, mix.
     Rack {
         track: u16,
+        rack: af27_core::Rack,
+    },
+    /// New settings for a slot of a clip's own rack.
+    ClipParam {
+        clip: af27_core::ClipId,
+        slot: u8,
+        n: u8,
+        vals: [f32; MAX_VALUES],
+    },
+    ClipBypass {
+        clip: af27_core::ClipId,
+        slot: u8,
+        on: bool,
+    },
+    ClipRack {
+        clip: af27_core::ClipId,
         rack: af27_core::Rack,
     },
     /// SoundFont level of a track.
@@ -321,6 +339,26 @@ impl Voice {
                         m.set_rack(track as usize, &rack);
                         m.space_rack(track as usize, &rack);
                     }
+                }
+            }
+            Cmd::ClipParam {
+                clip,
+                slot,
+                n,
+                vals,
+            } => {
+                if let Some(fx) = mix.and_then(|m| m.clip_fx(clip)) {
+                    fx.set(slot as usize, &vals[..n as usize]);
+                }
+            }
+            Cmd::ClipBypass { clip, slot, on } => {
+                if let Some(fx) = mix.and_then(|m| m.clip_fx(clip)) {
+                    fx.chain.set_bypass(slot as usize, on);
+                }
+            }
+            Cmd::ClipRack { clip, rack } => {
+                if let Some(fx) = mix.and_then(|m| m.clip_fx(clip)) {
+                    fx.chain.set_rack(&rack);
                 }
             }
             Cmd::FontGain { track, db } => {
@@ -818,6 +856,32 @@ impl Engine {
             slot: slot as u8,
             on,
         });
+    }
+
+    /// New settings for `slot` of a clip's own rack.
+    pub fn set_clip_param(&mut self, clip: af27_core::ClipId, slot: usize, values: &[f32]) {
+        let mut vals = [0.0; MAX_VALUES];
+        let n = values.len().min(MAX_VALUES);
+        vals[..n].copy_from_slice(&values[..n]);
+        self.send(Cmd::ClipParam {
+            clip,
+            slot: slot as u8,
+            n: n as u8,
+            vals,
+        });
+    }
+
+    pub fn set_clip_bypass(&mut self, clip: af27_core::ClipId, slot: usize, on: bool) {
+        self.send(Cmd::ClipBypass {
+            clip,
+            slot: slot as u8,
+            on,
+        });
+    }
+
+    /// A clip rack's power, levels and mix.
+    pub fn set_clip_rack(&mut self, clip: af27_core::ClipId, rack: af27_core::Rack) {
+        self.send(Cmd::ClipRack { clip, rack });
     }
 
     pub fn set_chain_mix(&mut self, track: u16, mix: f32) {

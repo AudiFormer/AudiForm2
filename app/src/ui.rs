@@ -1269,7 +1269,7 @@ fn effects_menu(
     );
     ui.separator();
     let multi = st.mode == Mode::Multitrack;
-    // Clips have no rack of their own yet: a clip's track's rack opens.
+    // The selected clip's own rack, in the Effects panel's Clip tab.
     let clip_track = st
         .selected_clip
         .and_then(|id| st.session.find_clip(id))
@@ -1279,14 +1279,13 @@ fn effects_menu(
             multi && clip_track.is_some(),
             egui::Button::new("Edit Clip Effects in Effects Rack"),
         )
-        .on_hover_text(
-            "Clips play through their track's rack: this opens the rack of the clip's track",
-        )
+        .on_hover_text("The clip's own effects, which run before its track's")
         .on_disabled_hover_text("Select a clip in the Multitrack editor")
         .clicked()
     {
         st.selected_track = clip_track;
-        *open_tab = Some(Tab::Inspector);
+        st.rack_tab = crate::rack::RackTab::Clip;
+        *open_tab = Some(Tab::Effects);
         ui.close_menu();
     }
     if ui

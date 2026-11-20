@@ -82,7 +82,7 @@ our own feature names.
 - ✅ Audio tracks of any channel count · ✅ buses · ✅ pre/post sends · ✅ track outputs · ✅ MIDI tracks with a built-in synth and piano roll · ✅ 3D Space sessions
 - ✅ Mute, solo, arm, volume, pan · ⬜ safe solo · ⬜ monitor input
 - ⬜ Automation lanes and modes (read, write, latch, touch)
-- 🟡 Clips: gain, fades, mute ✅; loop, colour, lock, group, clip effects ⬜
+- 🟡 Clips: gain, fades, mute, colour, lock ✅; clip effects racks, clip automation (volume, pan, effect values), Source Channels ✅; loop, group ⬜
 - ⬜ Clip time stretch · ⬜ auto-length music fit · ⬜ auto duck · ⬜ silence splitter
 - ⬜ Bounce to track · ⬜ punch-in · ✅ metronome · 🟡 tempo (one tempo; changes kept in files) · ⬜ latency compensation
 

@@ -197,6 +197,43 @@ pub fn value_at(points: &[LanePoint], t: f64) -> Option<f64> {
     Some(a.value + (b.value - a.value) * x)
 }
 
+/// The part of sorted `points` from `a` to `b`, moved to start at 0, with
+/// a point at each end where the line crosses it (none for an empty
+/// lane). A clip's lanes cut to one part of the clip.
+pub fn crop(points: &[LanePoint], a: f64, b: f64) -> Vec<LanePoint> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let eps = 1e-9;
+    let inside: Vec<LanePoint> = points
+        .iter()
+        .filter(|p| p.time >= a - eps && p.time <= b + eps)
+        .map(|p| LanePoint {
+            time: (p.time - a).clamp(0.0, (b - a).max(0.0)),
+            ..*p
+        })
+        .collect();
+    let edge = |t: f64| {
+        // The curve of the point before the edge carries on.
+        let k = points.partition_point(|p| p.time <= t);
+        let curve = k.checked_sub(1).map_or(Curve::Linear, |i| points[i].curve);
+        LanePoint {
+            time: t - a,
+            value: value_at(points, t).unwrap_or(0.0),
+            curve,
+        }
+    };
+    let mut out = Vec::with_capacity(inside.len() + 2);
+    if inside.first().is_none_or(|p| p.time > eps) {
+        out.push(edge(a));
+    }
+    out.extend(inside);
+    if out.last().is_none_or(|p| p.time < b - a - eps) {
+        out.push(edge(b));
+    }
+    out
+}
+
 /// Thins a run of points by furthest-point splitting: keeps the ends and
 /// every point further than `tol` from the line between kept neighbours.
 pub fn thin(points: &[LanePoint], tol: f64) -> Vec<LanePoint> {
@@ -492,6 +529,24 @@ mod tests {
             value,
             curve: Curve::Linear,
         }
+    }
+
+    #[test]
+    fn crop_cuts_with_edge_points() {
+        let pts = vec![pt(1.0, 0.0), pt(3.0, 10.0), pt(5.0, 10.0)];
+        let c = crop(&pts, 2.0, 4.0);
+        assert_eq!(
+            c.iter().map(|p| (p.time, p.value)).collect::<Vec<_>>(),
+            vec![(0.0, 5.0), (1.0, 10.0), (2.0, 10.0)]
+        );
+        // A point on the edge is not doubled; before the first point the
+        // first value holds.
+        let c = crop(&pts, 0.0, 1.0);
+        assert_eq!(
+            c.iter().map(|p| (p.time, p.value)).collect::<Vec<_>>(),
+            vec![(0.0, 0.0), (1.0, 0.0)]
+        );
+        assert!(crop(&[], 0.0, 1.0).is_empty());
     }
 
     #[test]
