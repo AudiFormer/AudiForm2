@@ -100,6 +100,12 @@ enum Cmd {
         on: bool,
     },
     Master(f32),
+    /// The master's balance, mono sum and polarity flip.
+    MasterOpts {
+        pan: f32,
+        mono: bool,
+        invert: bool,
+    },
     Param {
         track: u16,
         slot: u8,
@@ -274,6 +280,13 @@ impl Voice {
             Cmd::Master(g) => {
                 if let Some(m) = mix {
                     m.master = g;
+                }
+            }
+            Cmd::MasterOpts { pan, mono, invert } => {
+                if let Some(m) = mix {
+                    m.master_pan = pan.clamp(-1.0, 1.0);
+                    m.master_mono = mono;
+                    m.master_invert = invert;
                 }
             }
             Cmd::Param {
@@ -835,6 +848,11 @@ impl Engine {
 
     pub fn set_master(&mut self, gain: f32) {
         self.send(Cmd::Master(gain));
+    }
+
+    /// The master's balance (-1..=1), mono sum and polarity flip.
+    pub fn set_master_opts(&mut self, pan: f32, mono: bool, invert: bool) {
+        self.send(Cmd::MasterOpts { pan, mono, invert });
     }
 
     /// New effect settings for `slot` of a track's chain (or [`MASTER`]).

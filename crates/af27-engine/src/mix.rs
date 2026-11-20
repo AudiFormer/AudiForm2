@@ -451,6 +451,10 @@ pub struct Mix {
     /// The master fader (linear), ramped to across each block.
     pub master: f32,
     master_cur: f32,
+    /// The master's balance (-1..=1), mono sum and polarity flip.
+    pub master_pan: f32,
+    pub master_mono: bool,
+    pub master_invert: bool,
     master_lane: Vec<LanePoint>,
     master_lane_live: bool,
     master_taps: Vec<Option<KeyTap>>,
@@ -1271,6 +1275,9 @@ pub fn build(
         master_chain,
         master,
         master_cur: master,
+        master_pan: session.master_pan.clamp(-1.0, 1.0),
+        master_mono: session.master_mono,
+        master_invert: session.master_invert,
         master_lane,
         master_lane_live: false,
         master_taps,
@@ -1841,10 +1848,19 @@ impl Mix {
             });
         }
         let (mut pl, mut pr) = (0.0f32, 0.0f32);
+        // Balance: the far side comes down, the near side stays.
+        let pan = self.master_pan;
+        let (bl, br) = (1.0 - pan.max(0.0), 1.0 + pan.min(0.0));
+        let flip = if self.master_invert { -1.0 } else { 1.0 };
         for i in 0..n {
-            let g = self.master_gain(i, n, t0, dt);
-            let l = self.ml[i] * g;
-            let r = self.mr[i] * g;
+            let g = self.master_gain(i, n, t0, dt) * flip;
+            let (mut l, mut r) = (self.ml[i] * g, self.mr[i] * g);
+            if self.master_mono {
+                let m = (l + r) * 0.5;
+                l = m;
+                r = m;
+            }
+            let (l, r) = (l * bl, r * br);
             pl = pl.max(l.abs());
             pr = pr.max(r.abs());
             out[i * 2] = l;

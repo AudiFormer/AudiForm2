@@ -220,6 +220,10 @@ pub struct State {
     /// went away or would not open.
     pub audio_retry: af27_engine::health::Backoff,
     program_key: (Mode, DocId, u64, u64),
+    /// The session the playing mix was built from, less what does not
+    /// change the sound (see `audio_view`).
+    program_session: Option<Session>,
+    program_docs: u64,
     /// Where playback began, shown on the ruler while playing or paused;
     /// Stop folds it into the playhead.
     pub start_marker: Option<f64>,
@@ -511,6 +515,8 @@ impl State {
             engine_error,
             audio_retry: Default::default(),
             program_key: (Mode::Waveform, 0, 0, 0),
+            program_session: None,
+            program_docs: 0,
             start_marker: None,
             paused: false,
             transport_live: false,
@@ -1108,7 +1114,38 @@ impl State {
         if key == self.program_key {
             return;
         }
+        // A change that leaves the sound alone (track heights from a zoom,
+        // names, colours, markers) keeps the playing mix: a new one starts
+        // every effect afresh and catches up on the audio thread, which
+        // is heard as a stutter.
+        // The open files and which session media they stand for: a file
+        // that finished loading changes what plays without a session edit.
+        let docs = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for d in &self.docs {
+                (d.id, d.version).hash(&mut h);
+            }
+            let mut m: Vec<_> = self.media_docs.iter().collect();
+            m.sort();
+            m.hash(&mut h);
+            h.finish()
+        };
+        let same_docs = key.0 == self.program_key.0
+            && key.1 == self.program_key.1
+            && key.2 == self.program_key.2
+            && self.program_docs == docs;
         self.program_key = key;
+        self.program_docs = docs;
+        if self.mode == Mode::Multitrack {
+            let view = audio_view(&self.session);
+            if same_docs && self.program_session.as_ref() == Some(&view) {
+                return;
+            }
+            self.program_session = Some(view);
+        } else {
+            self.program_session = None;
+        }
         let program = match self.mode {
             Mode::Waveform => match self.doc() {
                 Some(d) => af27_engine::buffer_program(d.buf.clone()),
@@ -1353,6 +1390,7 @@ impl State {
         }
         // Hand the new stream everything again.
         self.program_key = (Mode::Waveform, u64::MAX as DocId, u64::MAX, u64::MAX);
+        self.program_session = None;
         self.sync_program();
         self.live_metronome();
     }
@@ -1961,8 +1999,11 @@ impl State {
 
     pub fn live_master(&mut self) {
         let g = af27_core::time::db_to_gain(self.session.master_db);
+        let s = &self.session;
+        let (pan, mono, invert) = (s.master_pan, s.master_mono, s.master_invert);
         if let Some(e) = &mut self.engine {
             e.set_master(g);
+            e.set_master_opts(pan, mono, invert);
         }
     }
 
@@ -2308,4 +2349,19 @@ mod view_tests {
         v.clamp_to(4.12);
         assert!((v.start + v.len - 4.12).abs() < 1e-9, "{v:?}");
     }
+}
+
+/// The session with everything that does not change the sound cleared, to
+/// tell whether an edit needs a new mix.
+fn audio_view(s: &Session) -> Session {
+    let mut s = s.clone();
+    s.name.clear();
+    s.playhead = 0.0;
+    s.markers.clear();
+    for t in &mut s.tracks {
+        t.height = 0.0;
+        t.color = [0; 3];
+        t.name.clear();
+    }
+    s
 }

@@ -1347,7 +1347,21 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             pos2(head.left() + 12.0, head.top() + 4.0),
             pos2(head.right() - 15.0, head.bottom() - 4.0),
         );
+        // Clipped to the header column, so a track scrolled up under the
+        // header toolbar does not draw (or take clicks) over it.
+        let clip = ui.clip_rect();
+        ui.set_clip_rect(clip.intersect(headers));
         crate::track_views::header(ui, st, ti, inner);
+        ui.set_clip_rect(clip);
+        // A click anywhere on the header (its controls included) selects
+        // the track.
+        let pressed = ui.input(|i| i.pointer.primary_pressed() || i.pointer.secondary_pressed());
+        if pressed {
+            let at = ui.input(|i| i.pointer.press_origin());
+            if at.is_some_and(|p| head.contains(p) && headers.contains(p)) {
+                st.selected_track = Some(st.session.tracks[ti].id);
+            }
+        }
     }
     // A track moved by its colour tab: a line where it would land.
     if let Some(moving) = caches.drag.track_move {

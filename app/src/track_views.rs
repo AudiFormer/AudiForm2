@@ -36,7 +36,7 @@ const ROW_H: f32 = 22.0;
 /// Height of the metronome row.
 pub const METRO_H: f32 = 62.0;
 /// Height of the Master row at the end of the list.
-pub const MASTER_H: f32 = 58.0;
+pub const MASTER_H: f32 = 76.0;
 
 // ------------------------------------------------------------ the dial
 
@@ -1354,6 +1354,49 @@ pub fn master_header(ui: &mut egui::Ui, st: &mut State, rect: Rect) {
                 &th,
             )
             .changed();
+            ui.label(RichText::new("Pan").size(9.5).color(c(th.text_dim)));
+            let mut pan = st.session.master_pan * 100.0;
+            if dial(
+                ui,
+                &mut pan,
+                -100.0..=100.0,
+                0.0,
+                |v| {
+                    if v.abs() < 0.5 {
+                        "C".to_string()
+                    } else if v < 0.0 {
+                        format!("L{:.0}", -v)
+                    } else {
+                        format!("R{v:.0}")
+                    }
+                },
+                &th,
+            )
+            .changed()
+            {
+                st.session.master_pan = pan / 100.0;
+                changed = true;
+            }
+            let mono = st.session.master_mono;
+            if ui
+                .add(egui::Button::new(RichText::new("Mono").size(10.0)).selected(mono))
+                .on_hover_text("Sum the master to mono")
+                .clicked()
+            {
+                st.session.master_mono = !mono;
+                changed = true;
+            }
+            let inv = st.session.master_invert;
+            if ui
+                .add(egui::Button::new(RichText::new("Ø").size(10.5)).selected(inv))
+                .on_hover_text("Invert the master's polarity")
+                .clicked()
+            {
+                st.session.master_invert = !inv;
+                changed = true;
+            }
+        });
+        ui.horizontal(|ui| {
             ui.label(RichText::new("←").color(c(th.text_dim)));
             let out = st
                 .engine
@@ -1368,7 +1411,7 @@ pub fn master_header(ui: &mut egui::Ui, st: &mut State, rect: Rect) {
         st.live_master();
         let down = ui.input(|i| i.pointer.any_down());
         if !st.gesture {
-            st.commit_live("Master level", before);
+            st.commit_live("Master", before);
             st.gesture = down;
         }
     }

@@ -655,6 +655,15 @@ pub struct Session {
     pub rate: u32,
     #[serde(default)]
     pub master_db: f32,
+    /// The master's balance, -1 (left) ..= 1 (right).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub master_pan: f32,
+    /// The master summed to mono.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub master_mono: bool,
+    /// The master's polarity flipped.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub master_invert: bool,
     pub media: Vec<MediaItem>,
     pub tracks: Vec<Track>,
     #[serde(default)]
@@ -709,6 +718,9 @@ impl Session {
             name: name.into(),
             rate,
             master_db: 0.0,
+            master_pan: 0.0,
+            master_mono: false,
+            master_invert: false,
             media: Vec::new(),
             tracks: Vec::new(),
             markers: Vec::new(),
