@@ -4,7 +4,8 @@
 //! Audiform27's effects, ported from the effects their author wrote for
 //! Audiform (see PORTING.md): Amp Model, Opto Leveler, Tube Preamp, Delay
 //! and Echo, Reverb, Convolution Reverb, Modulation, Center Channel
-//! Extractor, Channel Mixer, Stereo Width, Phase Curve and Vox Strip.
+//! Extractor, Channel Mixer, Stereo Width, Phase Curve, Vox Strip and
+//! Parametric EQ.
 //!
 //! [`registry`] lists them, [`build`] makes a running [`Processor`] for
 //! one, and [`params_from`] turns saved values into [`Params`].
@@ -22,7 +23,9 @@ pub mod nam;
 pub use framework::{choice, db_to_gain, num, toggle, EffectInfo, ParamInfo, Params, Processor};
 pub use meters::SlotMeter;
 
-use effects::{amp, center, mixer, modulation, phase_curve, reverb, tube, verb, vocal, width};
+use effects::{
+    amp, center, mixer, modulation, parametric_eq, phase_curve, reverb, tube, verb, vocal, width,
+};
 
 /// Every effect, in menu order.
 pub fn registry() -> Vec<EffectInfo> {
@@ -38,6 +41,7 @@ pub fn registry() -> Vec<EffectInfo> {
         mixer::mixer_info(),
         width::width_info(),
         phase_curve::phase_curve_info(),
+        parametric_eq::info(),
     ]
 }
 
@@ -97,6 +101,7 @@ pub fn build_with(
         mixer::ID => Box::new(mixer::ChannelMixer::new(p)),
         width::WIDTH => Box::new(width::StereoWidth::new(p, rate)),
         phase_curve::ID => Box::new(phase_curve::PhaseCurve::new(p, rate)),
+        parametric_eq::ID => Box::new(parametric_eq::ParametricEq::new(p, rate)),
         _ => return None,
     })
 }
@@ -258,6 +263,7 @@ mod tests {
         channel_mixer_runs_clean => mixer::ID,
         stereo_width_runs_clean => width::WIDTH,
         phase_curve_runs_clean => phase_curve::ID,
+        parametric_eq_runs_clean => parametric_eq::ID,
     }
 
     #[test]
