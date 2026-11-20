@@ -506,6 +506,9 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                 // Rows come and go with the track's height, in order of
                 // use, only when a whole row fits (none is ever cut off).
                 let fits = |ui: &egui::Ui| ui.available_height() >= ROW_H;
+                if kind == TrackKind::Midi && fits(ui) {
+                    instrument_row(ui, st, ti, &th);
+                }
                 if kind != TrackKind::Bus && fits(ui) {
                     input_row(ui, st, id, &th);
                 }
@@ -521,6 +524,9 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                 }
             }
             HeaderView::Routing => {
+                if kind == TrackKind::Midi {
+                    instrument_row(ui, st, ti, &th);
+                }
                 if kind != TrackKind::Bus {
                     input_row(ui, st, id, &th);
                 }
@@ -627,6 +633,99 @@ fn strip_options_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -
         );
     });
     changed
+}
+
+/// A MIDI track's instrument: the built-in synth, a SoundFont (and its
+/// preset), or a VST3 instrument (listed; playing them is next).
+fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
+    let sf = st.session.tracks[ti].soundfont.clone();
+    let shown = match &sf {
+        Some(f) if !f.preset_name.is_empty() => f.preset_name.clone(),
+        Some(f) => f
+            .path
+            .file_stem()
+            .map_or("SoundFont".into(), |s| s.to_string_lossy().to_string()),
+        None => "Built-in Synth".into(),
+    };
+    let mut builtin = false;
+    let mut font = false;
+    let mut preset: Option<af27_engine::soundfont::Preset> = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("♪").color(c(th.text_dim)))
+            .on_hover_text("Instrument");
+        egui::ComboBox::from_id_salt(("track-instrument", ti))
+            .selected_text(RichText::new(shown).size(11.0))
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(sf.is_none(), "Built-in Synth")
+                    .clicked()
+                {
+                    builtin = true;
+                }
+                if ui.selectable_label(false, "SoundFont (.sf2)...").clicked() {
+                    font = true;
+                }
+                if let Some(f) = &sf {
+                    if let Ok(loaded) = af27_engine::soundfont::load(&f.path) {
+                        ui.separator();
+                        ui.label(RichText::new("Presets").small());
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                for p in af27_engine::soundfont::presets(&loaded) {
+                                    let on = p.bank == f.bank && p.program == f.program;
+                                    if ui
+                                        .selectable_label(
+                                            on,
+                                            format!("{:03}:{:03} {}", p.bank, p.program, p.name),
+                                        )
+                                        .clicked()
+                                    {
+                                        preset = Some(p);
+                                    }
+                                }
+                            });
+                    }
+                }
+                let reg = af27_vst3::live::manager().registry();
+                let insts: Vec<String> = reg
+                    .plugins
+                    .iter()
+                    .filter(|p| p.info.instrument)
+                    .map(|p| format!("{} ({})", p.info.name, p.maker()))
+                    .collect();
+                drop(reg);
+                if !insts.is_empty() {
+                    ui.separator();
+                    ui.menu_button("VST3 Instruments", |ui| {
+                        for n in insts {
+                            ui.add_enabled(false, egui::Button::new(n))
+                                .on_disabled_hover_text("Playing VST3 instruments is coming next.");
+                        }
+                    });
+                }
+            });
+    });
+    if builtin && sf.is_some() {
+        let before = st.session.clone();
+        st.session.tracks[ti].soundfont = None;
+        st.commit_session("Instrument", before);
+    }
+    if font {
+        if let Some(p) = crate::inspector::pick_soundfont() {
+            crate::inspector::set_soundfont(st, ti, p);
+        }
+    }
+    if let (Some(p), Some(_)) = (preset, sf) {
+        let before = st.session.clone();
+        if let Some(f) = st.session.tracks[ti].soundfont.as_mut() {
+            f.bank = p.bank;
+            f.program = p.program;
+            f.preset_name = p.name.clone();
+        }
+        st.commit_session("Instrument preset", before);
+    }
 }
 
 fn input_row(ui: &mut egui::Ui, st: &mut State, id: TrackId, th: &Theme) {

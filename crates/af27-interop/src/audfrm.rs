@@ -374,6 +374,12 @@ fn fx_id(audiform_id: &str) -> Option<String> {
 }
 
 fn slot_from(v: &Value) -> EffectSlot {
+    let mut s = slot_from_inner(v);
+    s.position = v["position"].as_u64().map(|p| p.min(15) as u8);
+    s
+}
+
+fn slot_from_inner(v: &Value) -> EffectSlot {
     let effect = v["effect"].as_str().unwrap_or_default().to_string();
     let enabled = v["enabled"].as_bool().unwrap_or(true);
     let ext_id = v["id"].as_str().map(str::to_string);
@@ -390,6 +396,7 @@ fn slot_from(v: &Value) -> EffectSlot {
             .map(|p| v["params"][p.key].as_f64().unwrap_or(p.default) as f32)
             .collect();
         return EffectSlot {
+            position: None,
             sidechain: None,
             effect: id,
             values,
@@ -400,6 +407,7 @@ fn slot_from(v: &Value) -> EffectSlot {
     }
     if af27_core::plugin::is_plugin(&effect) {
         return EffectSlot {
+            position: None,
             sidechain: None,
             data: Some(plugin_data_from(v, ext_id.as_deref()).to_json()),
             effect,
@@ -414,6 +422,7 @@ fn slot_from(v: &Value) -> EffectSlot {
             .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
             .unwrap_or_default();
         return EffectSlot {
+            position: None,
             sidechain: None,
             effect: own.to_string(),
             values,
@@ -424,6 +433,7 @@ fn slot_from(v: &Value) -> EffectSlot {
     }
     // An effect Audiform27 does not have: kept by its own id, silent here.
     EffectSlot {
+        position: None,
         sidechain: None,
         effect,
         values: Vec::new(),
@@ -1278,6 +1288,11 @@ fn write_chain(
             let mut o = obj(orig.cloned().unwrap_or(Value::Null));
             o.insert("id".into(), json!(id));
             o.insert("enabled".into(), json!(!s.bypass));
+            if let Some(p) = s.position {
+                if o.get("position").and_then(Value::as_u64) != Some(p as u64) {
+                    o.insert("position".into(), json!(p));
+                }
+            }
             write_sidechain(&mut o, s.sidechain, uuid_of);
             if let Some(info) = af27_fx::info(&s.effect) {
                 o.insert(
@@ -2292,6 +2307,7 @@ mod tests {
         assert_eq!(again.master_rack.output_db, -3.0);
         // A key on a new slot gets the field; one listening to itself none.
         s.tracks[1].chain.push(EffectSlot {
+            position: None,
             sidechain: Some(host),
             effect: "compressor".into(),
             values: vec![-18.0],
@@ -2571,6 +2587,7 @@ mod tests {
         let bus = s.add_track_of(TrackKind::Bus);
         s.tracks[0].output = Some(bus);
         s.tracks[0].chain.push(EffectSlot {
+            position: None,
             sidechain: None,
             effect: "compressor".into(),
             values: vec![-18.0, 3.0],

@@ -1061,6 +1061,7 @@ mod tests {
         s.tracks[0].volume_db = -3.0;
         s.tracks[0].solo = true;
         s.tracks[0].chain.push(af27_core::EffectSlot {
+            position: None,
             sidechain: None,
             effect: "gain".into(),
             values: vec![1.0],

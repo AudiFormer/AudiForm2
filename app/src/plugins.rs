@@ -110,6 +110,7 @@ pub fn new_slot(effect: &str) -> EffectSlot {
         ..Default::default()
     };
     EffectSlot {
+        position: None,
         effect: effect.to_string(),
         values: Vec::new(),
         bypass: false,

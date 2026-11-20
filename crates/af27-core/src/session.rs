@@ -394,6 +394,10 @@ pub struct EffectSlot {
     pub values: Vec<f32>,
     #[serde(default)]
     pub bypass: bool,
+    /// The rack row it sits in (0..16), so a rack can have gaps. None:
+    /// right after the slot before it. The chain runs in row order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u8>,
     /// The track or bus whose sound keys this effect (a compressor
     /// ducking under a voice). None: it listens to its own input.
     #[serde(default, skip_serializing_if = "Option::is_none")]

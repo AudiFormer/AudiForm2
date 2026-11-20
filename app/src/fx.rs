@@ -341,6 +341,7 @@ mod tests {
 
     fn slot(id: &str) -> EffectSlot {
         EffectSlot {
+            position: None,
             sidechain: None,
             effect: id.into(),
             values: defaults(id),

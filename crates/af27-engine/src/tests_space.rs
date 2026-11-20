@@ -229,6 +229,7 @@ fn the_lfe_send_keeps_only_the_sub_band() {
 
 fn amp(db: f32) -> EffectSlot {
     EffectSlot {
+        position: None,
         sidechain: None,
         effect: "amplify".into(),
         values: vec![db],
