@@ -8,7 +8,7 @@
 //! Effects on more than two channels: a 3D Space master (its speaker
 //! bed) or a surround file in the Waveform editor, from 3.0 up to 7.1.4.
 //!
-//! - The Reverb, the Convolution Reverb and Modulation (`af.*`) run
+//! - The Reverb, the Convolution Reverb, Modulation and Tube Master (`af.*`) run
 //!   natively on the bed through a registered [`WideFactory`].
 //! - Amplify and Invert work on every channel as they are.
 //! - Every other effect runs as a set of stereo copies with the same

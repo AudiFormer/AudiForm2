@@ -1089,6 +1089,8 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                 crate::plugins::slot_controls(ui, st, target, i, &th);
             } else if eq {
                 crate::eq_editor::show(ui, st, target, i, &th);
+            } else if crate::tube_master_ui::ui(ui, st, target, i) {
+                // Tube Master draws its own hardware panel.
             } else if !crate::fx_windows::custom(ui, st, target, i, &th) {
                 slot_controls(ui, st, target, i, &th);
             }
