@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "2.0.0-alpha.1"
 edition = "2021"
 authors = ["The Audiform27 contributors"]
 repository = "https://github.com/nwh212/Audiform27"
@@ -15,6 +15,7 @@ af27-io = { path = "crates/af27-io" }
 af27-dsp = { path = "crates/af27-dsp" }
 af27-engine = { path = "crates/af27-engine" }
 af27-separation = { path = "crates/af27-separation" }
+audiform-separate-client = { path = "crates/af27-separation-client" }
 af27-interop = { path = "crates/af27-interop" }
 af27-dts = { path = "crates/af27-dts" }
 af27-space = { path = "crates/af27-space" }
