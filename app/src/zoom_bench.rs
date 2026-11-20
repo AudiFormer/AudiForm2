@@ -2,7 +2,7 @@
 // Copyright (c) The Audiform27 contributors.
 
 //! A frame-time bench for zooming and scrolling a large session, run by
-//! hand: `cargo test --release -p audiform27 zoom_bench -- --ignored
+//! hand: `cargo test --release -p audiform2 zoom_bench -- --ignored
 //! --nocapture`. It builds a 32-track session of synthetic audio, draws
 //! the Multitrack headless (layout plus tessellation, the CPU side of a
 //! frame) while the view zooms in and out and scrolls, and prints the

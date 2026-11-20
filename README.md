@@ -17,7 +17,7 @@ AI stem separation. The look, names and code are its own.
 ## Build and run
 
 ```bash
-cargo run --release -p audiform27
+cargo run --release -p audiform2
 ```
 
 Windows is the main target. Linux needs the ALSA headers (`libasound2-dev`).
