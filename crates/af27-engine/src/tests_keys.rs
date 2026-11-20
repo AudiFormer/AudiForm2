@@ -95,6 +95,7 @@ impl Fixture {
 /// quick to catch and to let go, with no knee or makeup.
 fn compressor(key: Option<TrackId>) -> EffectSlot {
     EffectSlot {
+        position: None,
         sidechain: key,
         effect: "compressor".into(),
         values: vec![-10.0, 10.0, 1.0, 20.0, 0.0, 0.0],
@@ -106,6 +107,7 @@ fn compressor(key: Option<TrackId>) -> EffectSlot {
 
 fn amp(db: f32) -> EffectSlot {
     EffectSlot {
+        position: None,
         sidechain: None,
         effect: "amplify".into(),
         values: vec![db],

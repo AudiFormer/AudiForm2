@@ -99,6 +99,7 @@ fn setup() -> ScanResult {
 
 fn slot(cid: &str) -> EffectSlot {
     EffectSlot {
+        position: None,
         effect: format!("vst3:{cid}"),
         values: Vec::new(),
         bypass: false,

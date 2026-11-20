@@ -375,6 +375,40 @@ fn pick_sf2() -> Option<std::path::PathBuf> {
 
 /// A MIDI track's instrument: the built-in synth or a SoundFont, with its
 /// file, preset and level.
+/// Plays track `ti`'s notes through the SoundFont at `path` (keeping the
+/// preset when the new file has it).
+pub fn set_soundfont(st: &mut State, ti: usize, path: std::path::PathBuf) {
+    match af27_engine::soundfont::load(&path) {
+        Ok(font) => {
+            let list = af27_engine::soundfont::presets(&font);
+            let keep = st.session.tracks[ti].soundfont.clone();
+            // Keep the preset when it is in the new file; else the first.
+            let pick = keep
+                .as_ref()
+                .and_then(|k| {
+                    list.iter()
+                        .find(|p| p.bank == k.bank && p.program == k.program)
+                })
+                .or_else(|| list.first())
+                .cloned();
+            let before = st.session.clone();
+            st.session.tracks[ti].soundfont = Some(af27_core::midi::SoundFontRef {
+                path,
+                bank: pick.as_ref().map_or(0, |p| p.bank),
+                program: pick.as_ref().map_or(0, |p| p.program),
+                preset_name: pick.map(|p| p.name).unwrap_or_default(),
+                gain_db: keep.map_or(0.0, |k| k.gain_db),
+            });
+            st.commit_session("Instrument", before);
+        }
+        Err(e) => st.error(e),
+    }
+}
+
+pub fn pick_soundfont() -> Option<std::path::PathBuf> {
+    pick_sf2()
+}
+
 fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     let th = st.theme.clone();
     let current = st.session.tracks[ti].soundfont.clone();
@@ -408,35 +442,10 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         st.session.tracks[ti].soundfont = None;
         st.commit_session("Instrument", before);
     }
-    let set_file =
-        |st: &mut State, path: std::path::PathBuf| match af27_engine::soundfont::load(&path) {
-            Ok(font) => {
-                let list = af27_engine::soundfont::presets(&font);
-                let keep = st.session.tracks[ti].soundfont.clone();
-                // Keep the preset when it is in the new file; else the first.
-                let pick = keep
-                    .as_ref()
-                    .and_then(|k| {
-                        list.iter()
-                            .find(|p| p.bank == k.bank && p.program == k.program)
-                    })
-                    .or_else(|| list.first())
-                    .cloned();
-                let before = st.session.clone();
-                st.session.tracks[ti].soundfont = Some(af27_core::midi::SoundFontRef {
-                    path,
-                    bank: pick.as_ref().map_or(0, |p| p.bank),
-                    program: pick.as_ref().map_or(0, |p| p.program),
-                    preset_name: pick.map(|p| p.name).unwrap_or_default(),
-                    gain_db: keep.map_or(0.0, |k| k.gain_db),
-                });
-                st.commit_session("Instrument", before);
-            }
-            Err(e) => st.error(e),
-        };
+    let set_file = set_soundfont;
     if want_font && current.is_none() {
         if let Some(p) = pick_sf2() {
-            set_file(st, p);
+            set_file(st, ti, p);
         }
     }
     let Some(sf) = st.session.tracks[ti].soundfont.clone() else {
@@ -452,7 +461,7 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             .on_hover_text(sf.path.display().to_string());
         if ui.small_button("Change File…").clicked() {
             if let Some(p) = pick_sf2() {
-                set_file(st, p);
+                set_file(st, ti, p);
             }
         }
     });
@@ -653,6 +662,7 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
                         if ui.button(&name).clicked() {
                             if let Some(c) = st.chain_mut(track) {
                                 c.push(EffectSlot {
+                                    position: None,
                                     sidechain: None,
                                     values: crate::fx::defaults(&id),
                                     effect: id.clone(),
