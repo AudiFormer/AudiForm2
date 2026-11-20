@@ -463,7 +463,7 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                         ui.painter().text(
                             r.left_center(),
                             Align2::LEFT_CENTER,
-                            crate::plugins::slot_name(s),
+                            slot_name(s),
                             FontId::proportional(12.5),
                             if s.bypass { c(th.text_dim) } else { c(th.text) },
                         );
@@ -1089,7 +1089,7 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                 crate::plugins::slot_controls(ui, st, target, i, &th);
             } else if eq {
                 crate::eq_editor::show(ui, st, target, i, &th);
-            } else {
+            } else if !crate::fx_windows::custom(ui, st, target, i, &th) {
                 slot_controls(ui, st, target, i, &th);
             }
         });

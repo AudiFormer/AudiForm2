@@ -194,16 +194,6 @@ pub struct Toast {
     pub error: bool,
 }
 
-pub struct GenerateUi {
-    pub open: bool,
-    pub kind: usize,
-    pub wave: usize,
-    pub noise: usize,
-    pub freq: f64,
-    pub secs: f64,
-    pub db: f32,
-}
-
 pub struct State {
     pub mode: Mode,
     pub docs: Vec<Doc>,
@@ -275,7 +265,7 @@ pub struct State {
     pub effect_values: HashMap<Effect, Vec<f32>>,
     pub separation: crate::separation::SeparationUi,
     pub sep_dirs: af27_separation::Dirs,
-    pub generate: GenerateUi,
+    pub generate: crate::generate_ui::GenerateUi,
 
     pub theme: Theme,
     /// The chosen theme as made, before the user's own hues.
@@ -553,15 +543,7 @@ impl State {
             effect_values: HashMap::new(),
             separation: crate::separation::SeparationUi::load(),
             sep_dirs: af27_separation::Dirs::detect(),
-            generate: GenerateUi {
-                open: false,
-                kind: 0,
-                wave: 0,
-                noise: 1,
-                freq: 440.0,
-                secs: 5.0,
-                db: -6.0,
-            },
+            generate: crate::generate_ui::GenerateUi::default(),
             theme,
             theme_base,
             hues,
