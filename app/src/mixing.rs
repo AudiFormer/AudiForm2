@@ -280,9 +280,13 @@ pub fn control_value(t: &af27_core::Track, target: &LaneTarget) -> f64 {
 /// The range a lane is drawn over: its target's, widened for effect
 /// values to the effect's own range when known.
 fn lane_range(t: &af27_core::Track, target: &LaneTarget) -> (f64, f64) {
+    lane_range_in(&t.chain, target)
+}
+
+/// [`lane_range`] for a lane on the owner of `chain` (a track or a clip).
+pub fn lane_range_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> (f64, f64) {
     if let LaneTarget::Effect { slot, param, .. } = target {
-        if let Some(s) = t
-            .chain
+        if let Some(s) = chain
             .iter()
             .find(|s| s.ext_id.as_deref() == Some(slot.as_str()))
         {

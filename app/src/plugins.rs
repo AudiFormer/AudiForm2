@@ -194,6 +194,7 @@ fn slot_at(st: &State, target: u16, i: usize) -> Option<EffectSlot> {
     let chain = match target {
         crate::rack::FILE => &st.file_chain,
         MASTER => &st.session.master_chain,
+        t if crate::rack::is_clip(t) => crate::rack::clip_chain(st, t)?,
         t => &st.session.tracks.get(t as usize)?.chain,
     };
     chain.get(i).cloned()
@@ -526,6 +527,9 @@ fn slots_by_inst(st: &State) -> HashMap<String, (u16, usize)> {
     };
     for (ti, t) in st.session.tracks.iter().enumerate() {
         add(ti as u16, &t.chain);
+        for c in t.clips.iter().filter(|c| !c.props.chain.is_empty()) {
+            add(crate::rack::clip_target(st, c.id), &c.props.chain);
+        }
     }
     add(MASTER, &st.session.master_chain);
     add(crate::rack::FILE, &st.file_chain);
@@ -566,6 +570,9 @@ pub fn tick(st: &mut State) {
         let (tracks, master) = (&mut st.session.tracks, &mut st.session.master_chain);
         for t in tracks.iter_mut() {
             chains.push(&mut t.chain);
+            for c in t.clips.iter_mut() {
+                chains.push(&mut c.props.chain);
+            }
         }
         chains.push(master);
         chains.push(&mut st.file_chain);
@@ -578,7 +585,11 @@ pub fn tick(st: &mut State) {
             .session
             .tracks
             .iter()
-            .flat_map(|t| t.chain.iter())
+            .flat_map(|t| {
+                t.chain
+                    .iter()
+                    .chain(t.clips.iter().flat_map(|c| c.props.chain.iter()))
+            })
             .chain(st.session.master_chain.iter())
             .chain(st.file_chain.iter())
             .collect();
@@ -594,7 +605,11 @@ pub fn tick(st: &mut State) {
                 .session
                 .tracks
                 .iter()
-                .flat_map(|t| t.chain.iter())
+                .flat_map(|t| {
+                    t.chain
+                        .iter()
+                        .chain(t.clips.iter().flat_map(|c| c.props.chain.iter()))
+                })
                 .chain(p.session.master_chain.iter())
             {
                 if is_plugin(&s.effect) {

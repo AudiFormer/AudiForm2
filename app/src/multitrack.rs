@@ -613,6 +613,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                             let d = new_start - c.start;
                             c.start = new_start;
                             c.length -= d;
+                            // The clip's lanes stay where they were in time.
+                            c.shift_lanes(-d);
                             if !rev {
                                 c.offset = (c.offset + d / ratio).max(0.0);
                             }
@@ -672,6 +674,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         if left {
                             c.start = (end - new_len).max(0.0);
                         }
+                        // The clip's lanes stretch with it.
+                        c.scale_lanes(new_len / c.length);
                         c.length = new_len;
                         c.fade_in = c.fade_in.min(c.length);
                         c.fade_out = c.fade_out.min(c.length - c.fade_in);
@@ -954,6 +958,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             }
             if clip.props.inverted {
                 badges.push_str("INV ");
+            }
+            if !clip.props.chain.is_empty() {
+                badges.push_str("FX ");
+            }
+            if clip.props.channel_map.is_some() {
+                badges.push_str("CH ");
             }
             let s = &clip.props.stretch;
             if s.is_on() {
@@ -1256,6 +1266,13 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         Stroke::new(1.0_f32, ca(th.text, 200)),
                     ));
                 }
+            }
+        }
+        // Each clip's own automation over it (the track's lane, when
+        // shown, covers the row instead).
+        if st.shown_lane(ti).is_none() {
+            for clip in &tr.clips {
+                crate::clip_lanes::overlay(ui, st, clip.id, row, &v, lanes);
             }
         }
         // The automation lane shown over the clips.

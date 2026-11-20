@@ -322,11 +322,17 @@ pub struct State {
     /// Each track's rack meters (from the mix the engine plays), and the
     /// levels shown (falling back slowly).
     pub rack_meters: Vec<std::sync::Arc<af27_engine::mix::RackMeter>>,
+    /// Each clip rack's meters in the playing mix.
+    pub clip_meters: HashMap<af27_core::ClipId, std::sync::Arc<af27_engine::mix::RackMeter>>,
+    /// Which clip each clip-rack target names (see `rack::clip_target`).
+    pub clip_targets: std::cell::RefCell<Vec<af27_core::ClipId>>,
     pub rack_shown: HashMap<u16, (f32, f32)>,
     /// The Import from Audiform 1 window.
     pub af1_prompt: Option<crate::af1_import::Prompt>,
     /// The clip whose Properties show, and a floating window for them.
     pub want_properties: bool,
+    /// Which clip lanes show over their clips.
+    pub clip_lanes: crate::clip_lanes::ClipLanesUi,
     /// A live-edit drag is under way (one undo step per drag).
     pub gesture: bool,
     /// Bring the Piano Roll to the front.
@@ -580,8 +586,11 @@ impl State {
             af1_prompt: None,
             rack_row: None,
             rack_meters: Vec::new(),
+            clip_meters: HashMap::new(),
+            clip_targets: Default::default(),
             rack_shown: HashMap::new(),
             want_properties: false,
+            clip_lanes: Default::default(),
             gesture: false,
             want_piano: false,
             session_base: None,
@@ -1124,6 +1133,7 @@ impl State {
                 let p = af27_engine::mix_program(&self.session, &|m| self.media_buffer(m), rate);
                 if let af27_engine::Program::Mix(m) = &p {
                     self.rack_meters = m.tracks.iter().map(|t| t.meter.clone()).collect();
+                    self.clip_meters = m.clip_meters().into_iter().collect();
                 }
                 p
             }
@@ -1948,8 +1958,12 @@ impl State {
         }
     }
 
-    /// The effect chain for a track index, or the master chain for MASTER.
+    /// The effect chain for a track index, or the master chain for MASTER,
+    /// or a clip's (see `rack::clip_target`).
     pub fn chain_mut(&mut self, track: u16) -> Option<&mut Vec<af27_core::EffectSlot>> {
+        if crate::rack::is_clip(track) {
+            return crate::rack::clip_mut(self, track).map(|c| &mut c.props.chain);
+        }
         if track == af27_engine::MASTER {
             Some(&mut self.session.master_chain)
         } else {
@@ -1968,6 +1982,10 @@ impl State {
                 self.meter.0.max(self.meter.1),
                 self.meter.0.max(self.meter.1),
             )
+        } else if crate::rack::is_clip(target) {
+            crate::rack::clip_of(self, target)
+                .and_then(|id| self.clip_meters.get(&id))
+                .map_or((0.0, 0.0), |m| m.take())
         } else {
             self.rack_meters
                 .get(target as usize)
@@ -1981,6 +1999,16 @@ impl State {
 
     /// A rack's power, levels or mix changed.
     pub fn live_rack(&mut self, track: u16) {
+        if crate::rack::is_clip(track) {
+            let Some(c) = crate::rack::clip_mut(self, track) else {
+                return;
+            };
+            let (id, rack) = (c.id, c.props.rack);
+            if let Some(e) = &mut self.engine {
+                e.set_clip_rack(id, rack);
+            }
+            return;
+        }
         let rack = if track == af27_engine::MASTER {
             Some(self.session.master_rack)
         } else {
@@ -1995,6 +2023,13 @@ impl State {
         let Some(s) = self.chain_mut(track).and_then(|c| c.get(slot)).cloned() else {
             return;
         };
+        if let Some(id) = crate::rack::clip_of(self, track) {
+            if let Some(e) = &mut self.engine {
+                e.set_clip_param(id, slot, &s.values);
+                e.set_clip_bypass(id, slot, s.bypass);
+            }
+            return;
+        }
         if let Some(e) = &mut self.engine {
             e.set_param(track, slot, &s.values);
             e.set_bypass(track, slot, s.bypass);

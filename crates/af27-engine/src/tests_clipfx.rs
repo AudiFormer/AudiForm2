@@ -228,8 +228,10 @@ fn a_clip_rack_runs_before_the_track_rack_live_and_offline() {
     m.clip_fx(id).unwrap().chain.set_bypass(0, true);
     m.clip_fx(id).unwrap().set(0, &[-12.0]);
     assert!(near(play(&mut m, 0.3), 0.25));
-    let mut rack = af27_core::Rack::default();
-    rack.output_db = -6.0206;
+    let rack = af27_core::Rack {
+        output_db: -6.0206,
+        ..Default::default()
+    };
     m.clip_fx(id).unwrap().chain.set_rack(&rack);
     let meters = m.clip_meters();
     meters[0].1.take();

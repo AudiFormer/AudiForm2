@@ -349,7 +349,7 @@ fn levels_and_drawn_lines() {
         })
         .collect();
     assert_eq!(pts, vec![(0.0, -6.02), (50.0, 0.0), (100.0, 0.0)]);
-    assert!(r.dropped.get("clip volume line(s)").is_none());
+    assert!(!r.dropped.contains_key("clip volume line(s)"));
     assert_eq!(r.dropped.get("other automation line(s)"), Some(&1));
     assert_eq!(r.lines, 3);
 }
@@ -648,8 +648,7 @@ fn a_converted_eq_saves_for_audiform_with_its_keys() {
 fn clip_lines_racks_and_source_channels_come_across_and_export_back() {
     // A clip 1 s into its file (sourceInPoint 44100), 1 s long: its lines
     // count from the file start, so they move to clip time and are cut.
-    let tracks = format!(
-        r#"<audioTrack id="10001" index="1"><trackParameters><name>T</name></trackParameters>
+    let tracks = r#"<audioTrack id="10001" index="1"><trackParameters><name>T</name></trackParameters>
       <trackAudioParameters audioChannelType="stereo"><trackOutput outputID="10000" type="trackID"/></trackAudioParameters>
       <audioClip fileID="0" startPoint="0" endPoint="44100" sourceInPoint="44100" sourceOutPoint="88200">
         <component componentID="Audition.Fader" id="clipGain" powered="true"><parameter index="0" name="volume" parameterValue="1">
@@ -666,11 +665,10 @@ fn clip_lines_racks_and_source_channels_come_across_and_export_back() {
       <audioClip fileID="0" startPoint="88200" endPoint="132300" sourceInPoint="0" sourceOutPoint="44100">
         <component componentID="Audition.StereoPanner" id="clipPan" powered="true"><parameter index="0" name="Pan" parameterValue="-40"/></component>
       </audioClip>
-    </audioTrack><masterTrack id="10000"/>"#
-    );
+    </audioTrack><masterTrack id="10000"/>"#;
     let (s, r) = read_s(&wrap(
         r#"sampleRate="44100""#,
-        &tracks,
+        tracks,
         r#"<file id="0" absolutePath="Z:\nowhere\x.wav" importerPrivateSettings="Channels:0:2;"/>"#,
     ));
     assert!(r.dropped.is_empty(), "{:?}", r.dropped);

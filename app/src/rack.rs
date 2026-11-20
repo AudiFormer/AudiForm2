@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) The Audiform27 contributors.
 
-//! The Effects Rack: sixteen numbered slots for a track, a bus, the master
-//! or (in the Waveform editor) the open file. Each slot has a power
+//! The Effects Rack: sixteen numbered slots for a track, a bus, the master,
+//! a single clip or (in the Waveform editor) the open file. Each slot has a power
 //! button and opens its effect in a window of its own; slots drag to a new
 //! place in the order. Under the slots: the rack's power, input and output
 //! gain and dry/wet mix. Rack presets save and load whole chains.
@@ -10,7 +10,7 @@
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense, Stroke};
 
 use af27_core::session::CHAIN_SLOTS;
-use af27_core::{EffectSlot, Rack, TrackKind};
+use af27_core::{Clip, ClipId, EffectSlot, Rack, TrackKind};
 use af27_engine::MASTER;
 
 use crate::state::{data_dir, Mode, State};
@@ -18,13 +18,60 @@ use crate::theme::{c, ca, lerp, Theme};
 
 /// The rack of the open file in the Waveform editor (applied, not live).
 pub const FILE: u16 = u16::MAX - 1;
+/// Clip racks: targets from here up to [`FILE`] each name one clip (by
+/// [`clip_target`]); track indexes stay below.
+pub const CLIP_BASE: u16 = 0x8000;
 
 /// Which rack the panel shows in the Multitrack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RackTab {
+    /// The selected clip's own rack.
+    Clip,
     #[default]
     Track,
     Master,
+}
+
+/// Whether a rack target names a clip.
+pub fn is_clip(target: u16) -> bool {
+    (CLIP_BASE..FILE).contains(&target)
+}
+
+/// The rack target of clip `id`: the same one for as long as the app
+/// runs, so its effect windows stay with it through edits and undo.
+pub fn clip_target(st: &State, id: ClipId) -> u16 {
+    let mut list = st.clip_targets.borrow_mut();
+    let k = list.iter().position(|c| *c == id).unwrap_or_else(|| {
+        list.push(id);
+        list.len() - 1
+    });
+    CLIP_BASE + (k as u16).min(FILE - CLIP_BASE - 1)
+}
+
+/// The clip a rack target names.
+pub fn clip_of(st: &State, target: u16) -> Option<ClipId> {
+    if !is_clip(target) {
+        return None;
+    }
+    st.clip_targets
+        .borrow()
+        .get((target - CLIP_BASE) as usize)
+        .copied()
+}
+
+fn clip_ref(st: &State, target: u16) -> Option<&Clip> {
+    let (ti, ci) = st.session.find_clip(clip_of(st, target)?)?;
+    Some(&st.session.tracks[ti].clips[ci])
+}
+
+pub fn clip_mut(st: &mut State, target: u16) -> Option<&mut Clip> {
+    let (ti, ci) = st.session.find_clip(clip_of(st, target)?)?;
+    Some(&mut st.session.tracks[ti].clips[ci])
+}
+
+/// A clip rack's slots.
+pub fn clip_chain(st: &State, target: u16) -> Option<&Vec<EffectSlot>> {
+    clip_ref(st, target).map(|c| &c.props.chain)
 }
 
 /// The slots of a rack.
@@ -40,6 +87,7 @@ fn chain_ref(st: &State, target: u16) -> Option<&Vec<EffectSlot>> {
     match target {
         FILE => Some(&st.file_chain),
         MASTER => Some(&st.session.master_chain),
+        t if is_clip(t) => clip_chain(st, t),
         i => st.session.tracks.get(i as usize).map(|t| &t.chain),
     }
 }
@@ -48,7 +96,22 @@ fn rack_of(st: &mut State, target: u16) -> Option<&mut Rack> {
     match target {
         FILE => Some(&mut st.file_rack),
         MASTER => Some(&mut st.session.master_rack),
+        t if is_clip(t) => clip_mut(st, t).map(|c| &mut c.props.rack),
         i => st.session.tracks.get_mut(i as usize).map(|t| &mut t.rack),
+    }
+}
+
+fn rack_ref(st: &State, target: u16) -> Rack {
+    match target {
+        FILE => st.file_rack,
+        MASTER => st.session.master_rack,
+        t if is_clip(t) => clip_ref(st, t).map(|c| c.props.rack).unwrap_or_default(),
+        i => st
+            .session
+            .tracks
+            .get(i as usize)
+            .map(|t| t.rack)
+            .unwrap_or_default(),
     }
 }
 
@@ -57,6 +120,7 @@ pub fn target_name(st: &State, target: u16) -> String {
     match target {
         FILE => st.doc().map_or("No file".into(), |d| d.name.clone()),
         MASTER => "Master".into(),
+        t if is_clip(t) => clip_ref(st, t).map_or("(clip gone)".into(), |c| c.name.clone()),
         i => st
             .session
             .tracks
@@ -72,6 +136,10 @@ pub fn current_target(st: &State) -> Option<u16> {
     }
     match st.rack_tab {
         RackTab::Master => Some(MASTER),
+        RackTab::Clip => st
+            .selected_clip
+            .filter(|id| st.session.find_clip(*id).is_some())
+            .map(|id| clip_target(st, id)),
         RackTab::Track => st
             .selected_track
             .and_then(|id| st.session.track_index(id))
@@ -141,8 +209,13 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
     if st.mode == Mode::Multitrack {
         ui.horizontal(|ui| {
-            ui.add_enabled(false, egui::SelectableLabel::new(false, "Clip Effects"))
-                .on_disabled_hover_text("Effects on single clips are coming.");
+            if ui
+                .selectable_label(st.rack_tab == RackTab::Clip, "Clip Effects")
+                .on_hover_text("The selected clip's own effects, before its track's")
+                .clicked()
+            {
+                st.rack_tab = RackTab::Clip;
+            }
             if ui
                 .selectable_label(st.rack_tab == RackTab::Track, "Track Effects")
                 .clicked()
@@ -159,11 +232,16 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     }
     let Some(target) = current_target(st) else {
         ui.add_space(8.0);
-        ui.label(RichText::new("Select a track to see its effects rack.").color(c(th.text_dim)));
+        let what = if st.rack_tab == RackTab::Clip {
+            "Select an audio clip to see its own effects rack."
+        } else {
+            "Select a track to see its effects rack."
+        };
+        ui.label(RichText::new(what).color(c(th.text_dim)));
         return;
     };
     // The track's (or the master's) own settings, folded above the rack.
-    if target != FILE {
+    if target != FILE && !is_clip(target) {
         egui::CollapsingHeader::new(
             RichText::new(if target == MASTER {
                 "Master".to_string()
@@ -187,6 +265,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     let kind = match target {
         FILE => "File",
         MASTER => "Mix",
+        t if is_clip(t) => "Clip",
         i => match st.session.tracks.get(i as usize).map(|t| t.kind) {
             Some(TrackKind::Bus) => "Bus",
             _ => "Track",
@@ -933,16 +1012,7 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 if !clean.trim().is_empty() {
                     let p = Preset {
                         chain: chain_ref(st, target).cloned().unwrap_or_default(),
-                        rack: match target {
-                            FILE => st.file_rack,
-                            MASTER => st.session.master_rack,
-                            i => st
-                                .session
-                                .tracks
-                                .get(i as usize)
-                                .map(|t| t.rack)
-                                .unwrap_or_default(),
-                        },
+                        rack: rack_ref(st, target),
                     };
                     let _ = std::fs::create_dir_all(presets_dir());
                     if let Ok(s) = serde_json::to_string_pretty(&p) {
@@ -1002,7 +1072,11 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                 }
                 ui.label(RichText::new(format!("Slot {}", i + 1)).color(c(th.text_dim)));
             });
-            if target != FILE && target != MASTER && crate::fx::takes_key(&slot.effect) {
+            if target != FILE
+                && target != MASTER
+                && !is_clip(target)
+                && crate::fx::takes_key(&slot.effect)
+            {
                 listen_to(ui, st, target, i, &th);
             }
             ui.separator();

@@ -4,11 +4,14 @@
 //! The Properties panel: the selected clip's facts and settings. Stretch
 //! and Pitch (mode, type, duration, stretch %, semitones, and the
 //! advanced analysis settings), clip gain, colour, reverse, polarity,
-//! lock and mute. For a MIDI clip ([`midi_panel`]): its place, timing
+//! lock and mute, and Source Channels ([`source_channels`]: how much of
+//! each of the file's channels goes left and right). For a MIDI clip
+//! ([`midi_panel`]): its place, timing
 //! (follow the tempo or keep its speed), stretch, pitch and notes.
 
 use egui::{vec2, RichText};
 
+use af27_core::session::{usual_channel_map, ChannelSend};
 use af27_core::{StretchKind, StretchMode};
 
 use crate::state::State;
@@ -294,6 +297,9 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
                         .changed();
                 });
             });
+
+            let channels = media.as_ref().map_or(0, |m| m.channels as usize);
+            source_channels(ui, &th, &mut c2, channels, &mut live_drag, &mut done);
         });
 
     if c2 != clip {
@@ -304,6 +310,8 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
             c2.length = clip.length / old_ratio * new_ratio;
             c2.fade_in = c2.fade_in.min(c2.length);
             c2.fade_out = c2.fade_out.min(c2.length);
+            // The clip's lanes stretch with it.
+            c2.scale_lanes(new_ratio / old_ratio);
         }
         st.session.tracks[ti].clips[ci] = c2;
         st.session_version += 1;
@@ -321,6 +329,116 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
                 st.commit_session("Clip properties", b);
             }
         }
+    }
+}
+
+/// Source Channels: per channel of the clip's file (`channels`, 0 when
+/// not known yet), how much goes to the left and to the right (-100 to
+/// 100 %, below zero flips it) and a polarity switch. Off plays the file
+/// as usual (mono on both sides, stereo side to side).
+fn source_channels(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    c2: &mut af27_core::Clip,
+    channels: usize,
+    live_drag: &mut bool,
+    done: &mut bool,
+) {
+    let n = match (&c2.props.channel_map, channels) {
+        (_, k) if k > 0 => k,
+        (Some(m), _) if !m.is_empty() => m.len(),
+        _ => 2,
+    };
+    let on = c2.props.channel_map.is_some();
+    section(ui, th, "Source Channels", if on { "On" } else { "Usual" });
+    let mut use_map = on;
+    if ui
+        .checkbox(&mut use_map, "Mix the file's channels myself")
+        .on_hover_text("Use one side of a stereo file, swap the sides, or flip one")
+        .changed()
+    {
+        c2.props.channel_map = use_map.then(|| usual_channel_map(n));
+        c2.props.fold_channels = use_map;
+        *done = true;
+    }
+    let Some(map) = &mut c2.props.channel_map else {
+        return;
+    };
+    // The table follows the file: one row per channel (channels the map
+    // leaves out are silent), written back only when edited.
+    let mut rows = map.clone();
+    rows.resize(
+        n,
+        ChannelSend {
+            left: 0.0,
+            right: 0.0,
+        },
+    );
+    let mut edited = false;
+    let name = |k: usize| match (n, k) {
+        (1, _) => "Mono".to_string(),
+        (2, 0) => "Left".to_string(),
+        (2, 1) => "Right".to_string(),
+        _ => format!("Channel {}", k + 1),
+    };
+    egui::Grid::new("clip-source-channels")
+        .num_columns(4)
+        .spacing(vec2(10.0, 4.0))
+        .show(ui, |ui| {
+            for h in ["Channel", "To left", "To right", "Polarity"] {
+                ui.label(RichText::new(h).size(10.5).color(c(th.text_dim)));
+            }
+            ui.end_row();
+            for (k, s) in rows.iter_mut().enumerate() {
+                ui.label(name(k));
+                for v in [&mut s.left, &mut s.right] {
+                    let mut pct = *v * 100.0;
+                    let r = ui.add(
+                        egui::DragValue::new(&mut pct)
+                            .range(-100.0..=100.0)
+                            .speed(0.5)
+                            .suffix(" %"),
+                    );
+                    if r.changed() {
+                        *v = (pct / 100.0).clamp(-1.0, 1.0);
+                        edited = true;
+                    }
+                    *live_drag |= r.dragged();
+                    *done |= r.drag_stopped() || (r.changed() && !r.dragged());
+                }
+                let mut flip = s.flipped();
+                if ui
+                    .checkbox(&mut flip, "Ø")
+                    .on_hover_text("Flip this channel's polarity")
+                    .changed()
+                {
+                    s.left = -s.left;
+                    s.right = -s.right;
+                    edited = true;
+                    *done = true;
+                }
+                ui.end_row();
+            }
+        });
+    if edited {
+        *map = rows;
+    }
+    if n == 2 {
+        let one = |l: f32, r: f32| ChannelSend { left: l, right: r };
+        ui.horizontal_wrapped(|ui| {
+            for (label, m) in [
+                ("Usual", [one(1.0, 0.0), one(0.0, 1.0)]),
+                ("Left only", [one(1.0, 1.0), one(0.0, 0.0)]),
+                ("Right only", [one(0.0, 0.0), one(1.0, 1.0)]),
+                ("Swap", [one(0.0, 1.0), one(1.0, 0.0)]),
+                ("Mono", [one(0.5, 0.5), one(0.5, 0.5)]),
+            ] {
+                if ui.small_button(label).clicked() {
+                    *map = m.to_vec();
+                    *done = true;
+                }
+            }
+        });
     }
 }
 

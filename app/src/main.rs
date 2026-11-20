@@ -7,6 +7,7 @@ mod af1_import;
 mod app_icon;
 mod caustics;
 mod classic_themes;
+mod clip_lanes;
 mod clip_props;
 mod corners;
 mod export;

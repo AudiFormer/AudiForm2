@@ -173,6 +173,15 @@ fn clip_items(ui: &mut egui::Ui, st: &mut State, clip: ClipId) {
         st.want_properties = true;
         ui.close_menu();
     }
+    if ui.button("Clip Effects...").clicked() {
+        st.selected_clip = Some(clip);
+        st.rack_tab = crate::rack::RackTab::Clip;
+        st.want_effects = true;
+        ui.close_menu();
+    }
+    ui.menu_button("Clip Automation", |ui| {
+        crate::clip_lanes::menu(ui, st, clip)
+    });
     ui.separator();
     if ui
         .checkbox(&mut c.props.reversed.clone(), "Reverse")
