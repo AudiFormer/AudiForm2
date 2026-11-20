@@ -30,7 +30,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use af27_core::automation::{AutomationMode, Curve, Lane, LanePoint as AutoPoint, LaneTarget};
 use af27_core::midi::{
@@ -38,8 +37,8 @@ use af27_core::midi::{
 };
 use af27_core::plugin::PluginData;
 use af27_core::session::{
-    Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session, StretchKind,
-    StretchMode, TrackId, TrackKind,
+    ChannelSend, Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session,
+    StretchKind, StretchMode, TrackId, TrackKind,
 };
 use af27_core::space::{
     LaneCurve, LanePoint, Monitor, SpaceLane, SpaceLayout, SpaceParam, SpacePos, SpatializeMode,
@@ -53,37 +52,7 @@ const AF27: &str = "af27.";
 
 /// A fresh random (version 4) UUID.
 pub fn new_uuid() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut x = t
-        ^ COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
-        ^ (std::process::id() as u64) << 32;
-    let mut next = || {
-        // splitmix64
-        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = x;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    };
-    let (a, b) = (next(), next());
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&a.to_le_bytes());
-    bytes[8..].copy_from_slice(&b.to_le_bytes());
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &h[0..8],
-        &h[8..12],
-        &h[12..16],
-        &h[16..20],
-        &h[20..32]
-    )
+    af27_core::session::new_uuid()
 }
 
 fn now_iso() -> String {
@@ -294,6 +263,98 @@ fn props_from(c: &Value) -> ClipProps {
         // A Source Channels mix that does not pass through to speakers.
         fold_channels: c["channel_mix"].is_object()
             && !c["channel_mix"]["to_speakers"].as_bool().unwrap_or(false),
+        // Read with the session rate (see `clip_fx_from`).
+        ..Default::default()
+    }
+}
+
+/// A clip's Source Channels as the file has them: None for the file's
+/// usual mix, and for a mix that plays each channel from its own speaker
+/// (3D Space) instead of through its sends.
+fn channel_map_from(c: &Value) -> Option<Vec<ChannelSend>> {
+    let m = c["channel_mix"].as_object()?;
+    if m.get("to_speakers")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let sends = m.get("sends")?.as_array()?;
+    Some(
+        sends
+            .iter()
+            .map(|s| ChannelSend {
+                left: s["left"].as_f64().unwrap_or(0.0) as f32,
+                right: s["right"].as_f64().unwrap_or(0.0) as f32,
+            })
+            .collect(),
+    )
+}
+
+/// A clip's effects, rack, automation and Source Channels into `p`.
+/// Envelope positions count from the clip's left edge.
+fn clip_fx_from(c: &Value, rate: f64, p: &mut ClipProps) {
+    p.chain = chain_from(&c["effects"]);
+    p.rack = rack_from(&c["effects"]);
+    p.lanes = auto_lanes_from(&c["envelopes"], rate, &p.chain);
+    p.channel_map = channel_map_from(c);
+}
+
+/// Writes a clip's effects, rack, automation and Source Channels into
+/// `co` (its original, or a new clip), each only when it changed.
+fn write_clip_fx(
+    co: &mut Map<String, Value>,
+    c: &mut Clip,
+    rate: f64,
+    uuid_of: &HashMap<u64, String>,
+) {
+    let base_fx = co.get("effects").filter(|v| v.is_object()).cloned();
+    let same_fx = base_fx
+        .as_ref()
+        .is_some_and(|b| chain_from(b) == c.props.chain && rack_from(b) == c.props.rack);
+    if !same_fx {
+        let fx = write_chain(&mut c.props.chain, &c.props.rack, base_fx.as_ref(), uuid_of);
+        co.insert("effects".into(), fx);
+    }
+    // The file holds no points outside the clip: those are cut off.
+    let outside = c
+        .props
+        .lanes
+        .iter()
+        .flat_map(|l| &l.points)
+        .any(|p| p.time < 0.0 || p.time > c.length + 1e-9);
+    let mut lanes = if outside {
+        c.cropped_lanes()
+    } else {
+        c.props.lanes.clone()
+    };
+    let base_env = co.get("envelopes").cloned();
+    let envs = auto_lanes_to(&mut lanes, base_env.as_ref(), rate, &c.props.chain);
+    for (a, b) in c.props.lanes.iter_mut().zip(&lanes) {
+        a.ext_id.clone_from(&b.ext_id);
+    }
+    if base_env.as_ref() != Some(&envs) {
+        co.insert("envelopes".into(), envs);
+    }
+    let had = channel_map_from(&Value::Object(co.clone()));
+    if had != c.props.channel_map {
+        match &c.props.channel_map {
+            None => {
+                if co.contains_key("channel_mix") {
+                    co.insert("channel_mix".into(), Value::Null);
+                }
+            }
+            Some(sends) => {
+                let mut m = obj(co.get("channel_mix").cloned().unwrap_or(Value::Null));
+                let list: Vec<Value> = sends
+                    .iter()
+                    .map(|s| json!({"left": short(s.left), "right": short(s.right)}))
+                    .collect();
+                m.insert("sends".into(), Value::Array(list));
+                m.insert("to_speakers".into(), json!(false));
+                co.insert("channel_mix".into(), Value::Object(m));
+            }
+        }
     }
 }
 
@@ -700,9 +761,15 @@ fn auto_lanes_to(
         lanes
             .iter_mut()
             .map(|l| {
-                let mut o = obj(by_id(base_list, l.ext_id.as_deref())
-                    .cloned()
-                    .unwrap_or(Value::Null));
+                let orig = by_id(base_list, l.ext_id.as_deref());
+                // A lane that reads the same keeps its exact text.
+                if let Some(b) = orig {
+                    let one = Value::Array(vec![b.clone()]);
+                    if auto_lanes_from(&one, rate, chain).first() == Some(&*l) {
+                        return b.clone();
+                    }
+                }
+                let mut o = obj(orig.cloned().unwrap_or(Value::Null));
                 o.insert(
                     "id".into(),
                     json!(l.ext_id.get_or_insert_with(new_uuid).clone()),
@@ -740,10 +807,13 @@ fn auto_lanes_to(
                     })
                     .collect();
                 o.insert("points".into(), Value::Array(points));
-                match l.height {
-                    Some(h) => o.insert("height".into(), json!(h)),
-                    None => o.insert("height".into(), Value::Null),
-                };
+                let had = o.get("height").and_then(Value::as_u64).map(|h| h as u32);
+                if had != l.height {
+                    match l.height {
+                        Some(h) => o.insert("height".into(), json!(h)),
+                        None => o.insert("height".into(), Value::Null),
+                    };
+                }
                 Value::Object(o)
             })
             .collect(),
@@ -900,6 +970,15 @@ fn place_buses(s: &mut Session, positions: &HashMap<TrackId, u32>) {
     s.tracks = out;
 }
 
+/// An effect Audiform27 does not have (kept in its chain, silent here).
+fn silent(s: &EffectSlot) -> bool {
+    s.values.is_empty()
+        && !s.effect.is_empty()
+        && !af27_core::plugin::is_plugin(&s.effect)
+        && af27_dsp::Effect::from_id(&s.effect).is_none()
+        && af27_fx::info(&s.effect).is_none()
+}
+
 fn chain_from(v: &Value) -> Vec<EffectSlot> {
     v["slots"]
         .as_array()
@@ -1039,7 +1118,6 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
     let mut by_uuid: HashMap<String, u64> = HashMap::new();
     let mut pending: Vec<(u64, Value)> = Vec::new();
     let mut silent_fx = 0usize;
-    let mut envelopes = 0usize;
     let mut bus_pos: HashMap<TrackId, u32> = HashMap::new();
     let lists = [
         (v["tracks"].as_array(), false),
@@ -1067,7 +1145,8 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
                 };
                 let src_in = c["source_in"].as_f64().unwrap_or(0.0);
                 let src_out = c["source_out"].as_f64().unwrap_or(src_in);
-                let props = props_from(c);
+                let mut props = props_from(c);
+                clip_fx_from(c, rate as f64, &mut props);
                 // A reversed clip's source points count from the file's
                 // end (positions in a reversed copy); `offset` is where its
                 // span starts in the file itself.
@@ -1076,8 +1155,7 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
                 } else {
                     src_in
                 };
-                envelopes += c["envelopes"].as_array().map_or(0, Vec::len);
-                silent_fx += c["effects"]["slots"].as_array().map_or(0, Vec::len);
+                silent_fx += props.chain.iter().filter(|s| silent(s)).count();
                 let id = out.alloc_id();
                 clips.push(Clip {
                     id,
@@ -1102,16 +1180,7 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
                 .map(|m| midi_clip_from(m, out.alloc_id()))
                 .collect();
             let chain = chain_from(&t["effects"]);
-            silent_fx += chain
-                .iter()
-                .filter(|s| {
-                    s.values.is_empty()
-                        && !s.effect.is_empty()
-                        && !af27_core::plugin::is_plugin(&s.effect)
-                        && af27_dsp::Effect::from_id(&s.effect).is_none()
-                        && af27_fx::info(&s.effect).is_none()
-                })
-                .count();
+            silent_fx += chain.iter().filter(|s| silent(s)).count();
             let tr = out.track_mut(tid).unwrap();
             tr.name = t["name"].as_str().unwrap_or("Track").to_string();
             let sf = strip_from(t);
@@ -1200,9 +1269,6 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
             length: secs(&m["duration"]),
             ext_id: m["id"].as_str().map(str::to_string),
         });
-    }
-    if envelopes > 0 {
-        notices.push(format!("{envelopes} clip automation lane(s) are kept in the session and saved back unchanged; Audiform27 does not play clip automation yet."));
     }
     if silent_fx > 0 {
         notices.push(format!("{silent_fx} effect(s) Audiform27 does not have stay in their chains, silent here, and are saved back unchanged."));
@@ -1341,7 +1407,11 @@ fn write_chain(
                 );
                 let mut params = obj(o.get("params").cloned().unwrap_or(Value::Null));
                 for (p, val) in info.params.iter().zip(&s.values) {
-                    params.insert(p.key.into(), json!(*val as f64));
+                    // A value that reads back the same keeps its text.
+                    let had = params.get(p.key).and_then(Value::as_f64);
+                    if had.map(|x| x as f32) != Some(*val) {
+                        params.insert(p.key.into(), json!(*val as f64));
+                    }
                 }
                 o.insert("params".into(), Value::Object(params));
                 if let Some(d) = &s.data {
@@ -1707,6 +1777,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                     co.insert(key.into(), Value::Object(f));
                 }
                 write_props(&mut co, &c.props);
+                write_clip_fx(&mut co, c, rate_f, &uuid_of);
                 co.entry("envelopes").or_insert_with(|| json!([]));
                 co.entry("effects").or_insert_with(empty_chain);
                 Value::Object(co)
@@ -2129,6 +2200,158 @@ mod tests {
         let mut b = base.clone();
         b.as_object_mut().unwrap().remove("modified");
         b
+    }
+
+    /// SAMPLE with a clip that has its own automation, effects and
+    /// Source Channels.
+    fn sample_clip_fx() -> Value {
+        let mut v: Value = serde_json::from_str(SAMPLE).unwrap();
+        let c = &mut v["tracks"][0]["clips"][0];
+        c["envelopes"] = json!([
+            {"id": "ce1", "target": {"type": "volume"}, "enabled": true,
+             "points": [{"position": 0, "value": 0.0, "curve": "linear"}, {"position": 24000, "value": -12.5, "curve": "hold"}]},
+            {"id": "ce2", "target": {"type": "pan"}, "enabled": true,
+             "points": [{"position": 0, "value": -100.0, "curve": "linear"}, {"position": 48000, "value": 30.0, "curve": "linear"}]},
+            {"id": "ce3", "target": {"type": "effect_param", "slot_id": "cfx1", "param": "threshold"}, "enabled": false,
+             "points": [{"position": 1000, "value": -30.0, "curve": "linear"}]}
+        ]);
+        c["effects"] = json!({"enabled": true, "input_gain_db": -2.5, "output_gain_db": 0.0, "mix": 0.7, "slots": [
+            {"id": "cfx1", "effect": "altaudio.dynamics", "enabled": true, "params": {"threshold": -20.3, "ratio": 3.0}, "position": 3, "preset": "Mine"},
+            {"id": "cfx2", "effect": "altaudio.not_here", "enabled": true, "params": {"x": 0.1}}
+        ]});
+        c["channel_mix"] = json!({"sends": [{"left": 0.0, "right": 0.0}, {"left": -1.0, "right": 0.5}], "to_speakers": false});
+        v
+    }
+
+    #[test]
+    fn clip_automation_effects_and_source_channels_read_and_round_trip() {
+        let (mut s, base) = reload(&sample_clip_fx());
+        let c = &s.tracks[0].clips[0];
+        let lanes = &c.props.lanes;
+        assert_eq!(lanes.len(), 3);
+        assert_eq!(lanes[0].target, LaneTarget::Volume);
+        // Positions count from the clip's left edge, in seconds.
+        assert_eq!(lanes[0].points[1].time, 0.5);
+        assert_eq!(lanes[0].points[1].curve, Curve::Hold);
+        assert_eq!(lanes[1].target, LaneTarget::Pan);
+        assert_eq!(lanes[1].points[0].value, -1.0);
+        assert!((lanes[1].points[1].value - 0.3).abs() < 1e-9);
+        assert!(matches!(&lanes[2].target, LaneTarget::Effect { slot, .. } if slot == "cfx1"));
+        assert!(!lanes[2].enabled);
+        assert_eq!(c.props.chain.len(), 2);
+        // An Audiform effect Audiform27 lacks stays in place, silent.
+        assert_eq!(c.props.chain[0].effect, "altaudio.dynamics");
+        assert_eq!(c.props.chain[0].position, Some(3));
+        assert_eq!(c.props.rack.input_db, -2.5);
+        assert_eq!(c.props.rack.mix, 0.7);
+        let map = c.props.channel_map.as_ref().unwrap();
+        assert_eq!((map[1].left, map[1].right), (-1.0, 0.5));
+        assert!(map[1].flipped());
+        // Untouched: saved exactly as it was.
+        assert_eq!(saved(&mut s, &base), unmodified(&base));
+
+        // Edited: only what changed is written.
+        let c = &mut s.tracks[0].clips[0];
+        c.props.lanes[0].points.push(AutoPoint {
+            time: 1.0,
+            value: -3.0,
+            curve: Curve::Linear,
+        });
+        c.props.rack.mix = 1.0;
+        c.props.channel_map = Some(vec![
+            ChannelSend {
+                left: 1.0,
+                right: 0.0,
+            },
+            ChannelSend {
+                left: 0.0,
+                right: 0.0,
+            },
+        ]);
+        let out = saved(&mut s, &base);
+        let co = &out["tracks"][0]["clips"][0];
+        let bo = &base["tracks"][0]["clips"][0];
+        assert_eq!(co["envelopes"][0]["points"][2]["position"], json!(48000));
+        assert_eq!(co["envelopes"][0]["id"], json!("ce1"));
+        assert_eq!(co["envelopes"][1], bo["envelopes"][1]);
+        assert_eq!(co["effects"]["mix"], json!(1.0));
+        assert_eq!(
+            co["effects"]["input_gain_db"],
+            bo["effects"]["input_gain_db"]
+        );
+        // Slots keep their text, the unknown effect and the preset name.
+        assert_eq!(co["effects"]["slots"], bo["effects"]["slots"]);
+        assert_eq!(
+            co["channel_mix"],
+            json!({"sends": [{"left": 1.0, "right": 0.0}, {"left": 0.0, "right": 0.0}], "to_speakers": false})
+        );
+        let (back, _) = reload(&out);
+        assert_eq!(back.tracks[0].clips[0].props.lanes[0].points.len(), 3);
+        assert_eq!(
+            back.tracks[0].clips[0].props.channel_map,
+            s.tracks[0].clips[0].props.channel_map
+        );
+
+        // Taken off again: Audiform's "no mix" (null).
+        s.tracks[0].clips[0].props.channel_map = None;
+        let out = saved(&mut s, &base);
+        assert_eq!(out["tracks"][0]["clips"][0]["channel_mix"], Value::Null);
+    }
+
+    #[test]
+    fn a_new_clip_saves_its_lanes_effects_and_channels_for_audiform() {
+        let (mut s, _) = reload(&serde_json::from_str(SAMPLE).unwrap());
+        let mut c = s.tracks[0].clips[0].clone();
+        c.ext_id = None;
+        c.start += 10.0;
+        let mut vol = Lane::new(LaneTarget::Volume);
+        vol.points = vec![
+            AutoPoint {
+                time: -0.5,
+                value: -6.0,
+                curve: Curve::Linear,
+            },
+            AutoPoint {
+                time: 0.5,
+                value: 0.0,
+                curve: Curve::Linear,
+            },
+        ];
+        c.props.lanes = vec![vol];
+        let mut slot = EffectSlot {
+            effect: "gain".into(),
+            values: vec![3.0],
+            bypass: false,
+            position: Some(1),
+            sidechain: None,
+            data: None,
+            ext_id: None,
+        };
+        c.props.chain = vec![slot.clone()];
+        c.props.rack.output_db = -1.0;
+        c.props.channel_map = Some(vec![ChannelSend {
+            left: 0.0,
+            right: 1.0,
+        }]);
+        s.tracks[0].clips.push(c);
+        let out = export(&mut s, None);
+        let co = &out["tracks"][0]["clips"][1];
+        let env = &co["envelopes"][0];
+        assert!(env["id"].is_string());
+        // Points before the clip are cut off, with one at its edge.
+        assert_eq!(env["points"][0]["position"], json!(0));
+        assert!((env["points"][0]["value"].as_f64().unwrap() + 3.0).abs() < 1e-6);
+        assert_eq!(co["effects"]["output_gain_db"], json!(-1.0));
+        assert_eq!(co["effects"]["slots"][0]["effect"], json!("af27.gain"));
+        assert_eq!(co["channel_mix"]["to_speakers"], json!(false));
+        let (back, _) = reload(&out);
+        let b = &back.tracks[0].clips[1];
+        assert_eq!(b.props.chain.len(), 1);
+        slot.ext_id = b.props.chain[0].ext_id.clone();
+        assert_eq!(b.props.chain[0], slot);
+        assert_eq!(b.props.channel_map, s.tracks[0].clips[1].props.channel_map);
+        // Cut to the clip: an edge point at each end.
+        assert_eq!(b.props.lanes[0].points.len(), 3);
     }
 
     #[test]

@@ -139,8 +139,45 @@ impl ClipStretch {
     }
 }
 
+/// How much of one source channel a clip sends to each side (Source
+/// Channels), -1..1 each: 1 is all of it, a negative amount flips its
+/// polarity.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ChannelSend {
+    pub left: f32,
+    pub right: f32,
+}
+
+impl ChannelSend {
+    /// Flipped polarity: both amounts below zero (or one, with the other
+    /// silent).
+    pub fn flipped(&self) -> bool {
+        self.left < 0.0 || self.right < 0.0
+    }
+}
+
+/// The usual Source Channels of a file with `channels` channels: mono on
+/// both sides, stereo left to left and right to right; wider files fold
+/// (see the engine) and have no table of their own here, so they list
+/// their first two channels left and right and the rest silent.
+pub fn usual_channel_map(channels: usize) -> Vec<ChannelSend> {
+    match channels {
+        0 => Vec::new(),
+        1 => vec![ChannelSend {
+            left: 1.0,
+            right: 1.0,
+        }],
+        n => (0..n)
+            .map(|k| ChannelSend {
+                left: if k == 0 { 1.0 } else { 0.0 },
+                right: if k == 1 { 1.0 } else { 0.0 },
+            })
+            .collect(),
+    }
+}
+
 /// Per-clip settings beyond position and level.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClipProps {
     #[serde(skip_serializing_if = "is_default")]
@@ -165,6 +202,21 @@ pub struct ClipProps {
     /// from its speaker.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub fold_channels: bool,
+    /// Clip automation: volume (dB, on top of the clip gain), pan
+    /// (-1..1) and the clip's own effect values. Point times count from
+    /// the clip's left edge, so the lanes move with the clip.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<crate::automation::Lane>,
+    /// The clip's own effects, run on its sound before the track's.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<EffectSlot>,
+    /// The clip chain's power, input and output gain and mix.
+    #[serde(skip_serializing_if = "is_default")]
+    pub rack: Rack,
+    /// Source Channels: per channel of the clip's file, how much goes to
+    /// the left and the right. None plays the file as usual.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_map: Option<Vec<ChannelSend>>,
 }
 
 fn default_bit_depth() -> u16 {
@@ -229,6 +281,115 @@ impl Clip {
         }
         (g as f32) * crate::time::db_to_gain(self.gain_db)
     }
+
+    /// The clip's playing lane for `target`, if any.
+    pub fn playing_lane(
+        &self,
+        target: &crate::automation::LaneTarget,
+    ) -> Option<&crate::automation::Lane> {
+        self.props
+            .lanes
+            .iter()
+            .find(|l| &l.target == target && l.plays())
+    }
+
+    /// Moves every lane point by `d` seconds (a trim of the left edge by
+    /// `-d` keeps the envelope where it was in the audio). Points that
+    /// fall before the clip are kept, so trimming back brings them back.
+    pub fn shift_lanes(&mut self, d: f64) {
+        for l in &mut self.props.lanes {
+            for p in &mut l.points {
+                p.time += d;
+            }
+        }
+    }
+
+    /// Stretches every lane's times by `k` (the clip was stretched).
+    pub fn scale_lanes(&mut self, k: f64) {
+        if !(k.is_finite() && k > 0.0) {
+            return;
+        }
+        for l in &mut self.props.lanes {
+            for p in &mut l.points {
+                p.time *= k;
+            }
+        }
+    }
+
+    /// Every lane cut to the clip's own span (`0..length`), with a point
+    /// at each edge where the line crosses it, for files that cannot hold
+    /// points outside the clip.
+    pub fn cropped_lanes(&self) -> Vec<crate::automation::Lane> {
+        self.props
+            .lanes
+            .iter()
+            .map(|l| crate::automation::Lane {
+                points: crate::automation::crop(&l.points, 0.0, self.length),
+                ..l.clone()
+            })
+            .collect()
+    }
+
+    /// The clip's effect slots with new ids (and plug-ins with running
+    /// copies of their own), its effect lanes following: for a copy of
+    /// the clip.
+    pub fn renew_chain_ids(&mut self) {
+        for s in &mut self.props.chain {
+            if crate::plugin::is_plugin(&s.effect) {
+                let mut d = s.plugin_data();
+                d.inst = crate::plugin::new_inst();
+                s.set_plugin_data(&d);
+            }
+            let Some(old) = s.ext_id.take() else {
+                continue;
+            };
+            let new = new_uuid();
+            for l in &mut self.props.lanes {
+                if let crate::automation::LaneTarget::Effect { slot, .. } = &mut l.target {
+                    if *slot == old {
+                        *slot = new.clone();
+                    }
+                }
+            }
+            s.ext_id = Some(new);
+        }
+    }
+}
+
+/// A fresh random (version 4) UUID, for ids other programs keep.
+pub fn new_uuid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = t
+        ^ COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
+        ^ (std::process::id() as u64) << 32;
+    let mut next = || {
+        // splitmix64
+        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = x;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let (a, b) = (next(), next());
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&a.to_le_bytes());
+    bytes[8..].copy_from_slice(&b.to_le_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -675,7 +836,7 @@ impl Session {
         } else {
             (c.offset, c.offset + left_len / ratio)
         };
-        let right = Clip {
+        let mut right = Clip {
             id: new_id,
             start: t,
             offset: right_off,
@@ -684,10 +845,20 @@ impl Session {
             ext_id: None,
             ..c.clone()
         };
+        // Each part keeps its share of the clip's lanes (a point where
+        // the cut crosses them) and a copy of its effects.
+        for l in &mut right.props.lanes {
+            l.points = crate::automation::crop(&l.points, left_len, c.length);
+            l.ext_id = None;
+        }
+        right.renew_chain_ids();
         let left = &mut self.tracks[ti].clips[ci];
         left.offset = left_off;
         left.length = left_len;
         left.fade_out = 0.0;
+        for l in &mut left.props.lanes {
+            l.points = crate::automation::crop(&l.points, 0.0, left_len);
+        }
         self.tracks[ti].clips.insert(ci + 1, right);
         Some(new_id)
     }
@@ -872,6 +1043,81 @@ mod tests {
         assert_eq!((rt.offset, rt.length), (2.0, 4.0));
         assert_eq!(l.timeline_to_source(2.0), 5.0);
         assert_eq!(rt.timeline_to_source(8.0), 2.0);
+    }
+
+    #[test]
+    fn split_cuts_clip_lanes_and_copies_the_rack() {
+        use crate::automation::{Curve, Lane, LanePoint, LaneTarget};
+        let (mut s, m) = with_media();
+        let t = s.tracks[0].id;
+        let c = s.add_clip(t, m, 2.0).unwrap();
+        {
+            let cl = &mut s.tracks[0].clips[0];
+            let mut vol = Lane::new(LaneTarget::Volume);
+            let pt = |time, value| LanePoint {
+                time,
+                value,
+                curve: Curve::Linear,
+            };
+            vol.points = vec![pt(0.0, 0.0), pt(4.0, -20.0), pt(8.0, -20.0)];
+            vol.ext_id = Some("lane".into());
+            cl.props.lanes = vec![vol];
+            cl.props.chain = vec![EffectSlot {
+                effect: "gain".into(),
+                values: vec![1.0],
+                bypass: false,
+                position: Some(2),
+                sidechain: None,
+                data: None,
+                ext_id: Some("slot".into()),
+            }];
+            let mut fx = Lane::new(LaneTarget::Effect {
+                slot: "slot".into(),
+                param: 0,
+                key: None,
+            });
+            fx.points = vec![pt(1.0, 0.5)];
+            cl.props.lanes.push(fx);
+            cl.props.rack.mix = 0.5;
+            cl.props.channel_map = Some(usual_channel_map(1));
+        }
+        // At 2 s into the clip: the line is at -10 dB there.
+        let r = s.split_clip(c, 4.0).unwrap();
+        let (l, rt) = (&s.tracks[0].clips[0], &s.tracks[0].clips[1]);
+        assert_eq!(rt.id, r);
+        let lv = &l.props.lanes[0].points;
+        assert_eq!(lv.len(), 2);
+        assert_eq!((lv[1].time, lv[1].value), (2.0, -10.0));
+        let rv = &rt.props.lanes[0].points;
+        assert_eq!((rv[0].time, rv[0].value), (0.0, -10.0));
+        assert_eq!((rv[1].time, rv[1].value), (2.0, -20.0));
+        assert_eq!(rv.last().unwrap().time, 8.0);
+        assert_eq!(
+            rt.playing_lane(&LaneTarget::Volume).unwrap().value_at(1.0),
+            Some(-15.0)
+        );
+        // Both keep the rack; the copy's slot has an id of its own that
+        // its effect lane follows.
+        assert_eq!(l.props.chain.len(), 1);
+        assert_eq!(rt.props.chain.len(), 1);
+        assert_eq!(rt.props.rack.mix, 0.5);
+        assert_eq!(l.props.chain[0].ext_id.as_deref(), Some("slot"));
+        let new_slot = rt.props.chain[0].ext_id.clone().unwrap();
+        assert_ne!(new_slot, "slot");
+        assert!(
+            matches!(&rt.props.lanes[1].target, LaneTarget::Effect { slot, .. } if *slot == new_slot)
+        );
+        assert_eq!(rt.props.channel_map, l.props.channel_map);
+        assert!(rt.props.lanes[0].ext_id.is_none());
+        // Trimming the left edge keeps the line where it was in the audio.
+        assert!(s.trim_start_to(r, 5.0));
+        let rt = &s.tracks[0].clips[1];
+        assert_eq!(
+            rt.playing_lane(&LaneTarget::Volume).unwrap().value_at(0.0),
+            Some(-15.0)
+        );
+        let json = Session::from_json(&s.to_json()).unwrap();
+        assert_eq!(json, s);
     }
 
     #[test]

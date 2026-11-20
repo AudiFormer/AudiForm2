@@ -24,11 +24,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use af27_core::automation::{Curve, Lane, LanePoint, LaneTarget};
+use af27_core::automation::{self, Curve, Lane, LanePoint, LaneTarget};
 use af27_core::plugin::PluginData;
 use af27_core::session::{
-    Clip, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session, StretchKind,
-    StretchMode, TrackId, TrackKind, CHAIN_SLOTS,
+    ChannelSend, Clip, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session,
+    StretchKind, StretchMode, TrackId, TrackKind, CHAIN_SLOTS,
 };
 use af27_core::space::{SpaceLayout, SpacePos};
 use roxmltree::Node;
@@ -293,7 +293,12 @@ fn level(nodes: &[Node], cid_alias: &str, rate: f64) -> (f32, Option<Vec<LanePoi
 
 /// Pan as -1..1 and its drawn line.
 fn pan(nodes: &[Node], rate: f64) -> (f32, Option<Vec<LanePoint>>) {
-    let Some(c) = comp(nodes, "Audition.StereoPanner", "trackPan") else {
+    pan_of(nodes, "trackPan", rate)
+}
+
+/// [`pan`] of the panner whose `id` is `alias` in older files.
+fn pan_of(nodes: &[Node], alias: &str, rate: f64) -> (f32, Option<Vec<LanePoint>>) {
+    let Some(c) = comp(nodes, "Audition.StereoPanner", alias) else {
         return (0.0, None);
     };
     let Some(p) = param(c, "Pan").or_else(|| param_at(c, "0")) else {
@@ -1421,29 +1426,53 @@ fn read_clip(
     let nodes = [c];
     let (gain, line) = level(&nodes, "clipGain", rate);
     let mut gain_db = gain;
+    // Clip lines count from the start of the clip's file (in the units of
+    // `sourceInPoint`): moved to clip time and cut to the clip.
+    let origin = num(c, "sourceInPoint").unwrap_or(0.0).max(0.0) / rate;
+    let clip_len = (end - start) / rate;
+    let cut = |pts: &[LanePoint]| automation::crop(pts, origin, origin + clip_len);
+    let mut lanes = Vec::new();
     if let Some(points) = line {
-        // A line that never moves is a level; Audiform27 clips have no
-        // automation of their own yet.
+        // A line that never moves is a level.
         let first = points[0].value;
         if points.iter().all(|p| (p.value - first).abs() < 0.01) {
             gain_db = (gain as f64 + first) as f32;
         } else {
-            report.drop("clip volume line(s)");
+            let mut l = Lane::new(LaneTarget::Volume);
+            l.points = cut(&points);
+            lanes.push(l);
+            report.lines += 1;
         }
     }
-    other_lines(&nodes, report);
-    if child(c, "effectsRack").is_some_and(|r| {
-        r.children()
-            .any(|s| s.has_tag_name("slot") && child(s, "component").is_some())
-    }) {
-        report.drop("clip effect rack(s)");
+    // Clip pan: its line, or a fixed pan as a lane of one point.
+    let (clip_pan, pan_line) = pan_of(&nodes, "clipPan", rate);
+    let pan_points = match pan_line {
+        Some(pts) => {
+            report.lines += 1;
+            cut(&pts)
+        }
+        None if clip_pan != 0.0 => vec![LanePoint {
+            time: 0.0,
+            value: clip_pan as f64,
+            curve: Curve::Linear,
+        }],
+        None => Vec::new(),
+    };
+    if !pan_points.is_empty() {
+        let mut l = Lane::new(LaneTarget::Pan);
+        l.points = pan_points;
+        lanes.push(l);
     }
+    other_lines(&nodes, report);
+    let (clip_chain, clip_rack) = racks(c, report);
     if c.attribute("looped") == Some("true") {
         report.drop("looped clip(s) (played once)");
     }
-    if channel_map_unusual(c, files.get(fid).and_then(|f| f.channels)) {
-        report.drop("Source Channels map(s) (a clip playing one side of its file)");
-    }
+    let channel_map = clip_channel_map(
+        c,
+        files.get(fid).and_then(|f| f.channels),
+        track_type == Some("mono"),
+    );
 
     let mut fade_skew = |tag: &str| -> (f64, f32) {
         let Some(f) = child(c, tag) else {
@@ -1491,7 +1520,66 @@ fn read_clip(
     clip.props.color = hue_rgb(num(c, "hue"));
     clip.props.fade_in_skew = fade_in_skew;
     clip.props.fade_out_skew = fade_out_skew;
+    clip.props.lanes = lanes;
+    clip.props.chain = clip_chain;
+    clip.props.rack = clip_rack;
+    clip.props.fold_channels = channel_map.is_some();
+    clip.props.channel_map = channel_map;
     Some(clip)
+}
+
+/// A clip's Source Channels from its `channelMap`, when it is not the
+/// file's usual one: each listed channel `index` takes file channel
+/// `sourceIndex`. One listed channel (or a mono track) plays that file
+/// channel on both sides; two set the left (index 0) and right (index
+/// 1). None when the map is usual, empty or names a channel the file
+/// does not have.
+fn clip_channel_map(
+    c: Node,
+    file_channels: Option<u16>,
+    mono_track: bool,
+) -> Option<Vec<ChannelSend>> {
+    if !channel_map_unusual(c, file_channels) {
+        return None;
+    }
+    let pairs: Vec<(i64, i64)> = child(c, "channelMap")?
+        .children()
+        .filter(|n| n.has_tag_name("channel"))
+        .filter_map(|n| Some((num(n, "index")? as i64, num(n, "sourceIndex")? as i64)))
+        .collect();
+    let widest = pairs.iter().map(|p| p.1).max()?;
+    // A file found on disk does not say its channel count here: it has
+    // at least the channels the map names.
+    let n = file_channels
+        .filter(|n| *n > 0)
+        .map_or(widest + 1, |n| n as i64);
+    if pairs.iter().any(|&(i, s)| s < 0 || s >= n || i < 0) || n > 64 {
+        return None;
+    }
+    let mut sends = vec![
+        ChannelSend {
+            left: 0.0,
+            right: 0.0
+        };
+        n as usize
+    ];
+    if pairs.len() == 1 || mono_track {
+        for &(_, s) in &pairs {
+            sends[s as usize] = ChannelSend {
+                left: 1.0,
+                right: 1.0,
+            };
+        }
+    } else {
+        for &(i, s) in &pairs {
+            match i {
+                0 => sends[s as usize].left = 1.0,
+                1 => sends[s as usize].right = 1.0,
+                _ => {}
+            }
+        }
+    }
+    Some(sends)
 }
 
 /// A channel map other than the file's usual one (every channel in

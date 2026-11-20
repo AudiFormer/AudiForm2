@@ -45,6 +45,7 @@ impl Session {
         for c in &mut t.clips {
             c.id = self.alloc_id();
             c.ext_id = None;
+            c.renew_chain_ids();
         }
         for c in &mut t.midi {
             c.id = self.alloc_id();
@@ -346,6 +347,7 @@ impl Session {
         let ratio = c.props.stretch.applied_ratio();
         c.start = t;
         c.length -= d;
+        c.shift_lanes(-d);
         if !c.props.reversed {
             c.offset += d / ratio;
         }
