@@ -131,7 +131,7 @@ impl Effect {
             Effect::Reverse => "Reverse",
             Effect::Silence => "Silence",
             Effect::DcOffset => "Remove DC Offset",
-            Effect::ParametricEq => "Parametric EQ",
+            Effect::ParametricEq => "3-Band EQ",
             Effect::HighPass => "High-Pass Filter",
             Effect::LowPass => "Low-Pass Filter",
             Effect::Notch => "Notch Filter",

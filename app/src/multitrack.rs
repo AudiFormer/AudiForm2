@@ -106,6 +106,8 @@ pub struct Drag {
     pub vgrab: Option<VGrab>,
     /// Where the right-click menu was opened.
     pub menu: crate::lane_menu::MenuAt,
+    /// A track being moved by its colour tab.
+    pub track_move: Option<af27_core::TrackId>,
 }
 
 /// The rectangle a clip fills in its row.
@@ -377,10 +379,23 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     // Right-click: remember where, select what is there; the menu opens
     // from the lanes' response below.
     if resp.secondary_clicked() {
-        if let Some(pp) = resp.interact_pointer_pos().filter(|pp| lanes.contains(*pp)) {
+        if let Some(pp) = resp
+            .interact_pointer_pos()
+            .filter(|pp| lanes.contains(*pp) || headers.contains(*pp))
+        {
             let t = x_to_time(&v, lanes, pp.x).max(0.0);
             let track = track_at(st, lanes.top(), scroll, pp.y);
+            // Which half of the track: new tracks go above or below it.
+            let below = track.is_some_and(|ti| {
+                let top_y = lanes.top() - scroll
+                    + st.session.tracks[..ti]
+                        .iter()
+                        .map(|t| t.height)
+                        .sum::<f32>();
+                pp.y > top_y + st.session.tracks[ti].height / 2.0
+            });
             let mut at = crate::lane_menu::MenuAt {
+                below,
                 t,
                 track,
                 clip: None,
@@ -1287,16 +1302,85 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 c(th.panel)
             },
         );
+        // The colour tab: bright when selected; drag it to move the track.
+        let tab = Rect::from_min_size(head.min, vec2(8.0, head.height()));
         head_p.rect_filled(
-            Rect::from_min_size(head.min, vec2(4.0, head.height())),
+            tab,
             Rounding::ZERO,
-            c(tr.color),
+            if selected {
+                c(tr.color)
+            } else {
+                lerp(th.panel, tr.color, 0.55)
+            },
         );
+        let tab_r = ui.interact(
+            tab,
+            ui.id().with(("track-tab", tr.id)),
+            Sense::click_and_drag(),
+        );
+        if tab_r.hovered() || tab_r.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if tab_r.clicked() {
+            st.selected_track = Some(tr.id);
+        }
+        if tab_r.drag_started() {
+            caches.drag.track_move = Some(tr.id);
+        }
         head_p.line_segment(
             [head.left_bottom(), head.right_bottom()],
             Stroke::new(1.0_f32, c(th.border)),
         );
-        crate::track_views::header(ui, st, ti, head.shrink2(vec2(8.0, 4.0)));
+        // The level meter down the header's right edge.
+        let meter_r = Rect::from_min_max(
+            pos2(head.right() - 11.0, head.top() + 4.0),
+            pos2(head.right() - 4.0, head.bottom() - 4.0),
+        );
+        let lvl = st.track_levels.get(ti).map_or(0.0, |l| l.1)
+            * af27_core::time::db_to_gain(tr.volume_db);
+        crate::track_views::header_meter(&head_p, meter_r, lvl, &th);
+        let inner = Rect::from_min_max(
+            pos2(head.left() + 12.0, head.top() + 4.0),
+            pos2(head.right() - 15.0, head.bottom() - 4.0),
+        );
+        crate::track_views::header(ui, st, ti, inner);
+    }
+    // A track moved by its colour tab: a line where it would land.
+    if let Some(moving) = caches.drag.track_move {
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        let down = ui.input(|i| i.pointer.primary_down());
+        if let Some(pp) = pointer {
+            // The gap nearest the pointer, 0 (above all) ..= n (below all).
+            let mut y = lanes.top() - scroll;
+            let mut gap = 0;
+            let mut gap_y = y;
+            for (k, t) in st.session.tracks.iter().enumerate() {
+                if pp.y > y + t.height / 2.0 {
+                    gap = k + 1;
+                    gap_y = y + t.height;
+                } else if k == gap {
+                    gap_y = y;
+                }
+                y += t.height;
+            }
+            p.line_segment(
+                [pos2(headers.left(), gap_y), pos2(lanes.right(), gap_y)],
+                Stroke::new(2.0_f32, c(th.accent)),
+            );
+            if !down {
+                if let Some(from) = st.session.track_index(moving) {
+                    let to = if gap > from { gap - 1 } else { gap };
+                    if to != from {
+                        let before = st.session.clone();
+                        st.session.move_track(moving, to);
+                        st.commit_session("Move track", before);
+                    }
+                }
+                caches.drag.track_move = None;
+            }
+        } else if !down {
+            caches.drag.track_move = None;
+        }
     }
     // Add-track hint row.
     let add_row = Rect::from_min_size(pos2(headers.left(), top), vec2(HEADER_W, 26.0));

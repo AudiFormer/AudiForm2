@@ -3,17 +3,14 @@
 
 //! AI stem separation.
 //!
-//! The neural network runs in the separation engine
-//! (`audiform-separate`), a separate program shared with Audiform. This
-//! crate speaks its documented interface:
-//!
-//! * `audiform-separate --version` prints a version like `0.2.0`.
-//! * `audiform-separate <job.json>` runs a job. The job names the model
-//!   checkpoint, its architecture spec, an input WAV at the model's rate,
-//!   the output WAVs (each a list of stem indices, optionally `rest`: the
-//!   input minus those stems) and `device` (`gpu` or `cpu`).
-//! * It prints `progress <0..1>`, then `done`, or `error <message>`
-//!   (`error gpu <message>` when the graphics card could not be used).
+//! The neural network runs in the separation engine 1.0
+//! (`audiform-separate`), a separate, privately licensed program. AudiForm
+//! 2 talks to it through `audiform-separate-client` (protocol 2): one
+//! engine is started on the first Separate and kept for the session, the
+//! model is loaded once and reused for every file until another is
+//! loaded, and Cancel stops a run between chunks with the engine still
+//! ready. The engine accepts only programs named `audiform2…` (this one is
+//! `audiform2.exe`) whose handshake says version 2 or later.
 //!
 //! Where things live: Audiform27 keeps its own folder, and also finds the
 //! engine and models an existing Audiform install already downloaded, so
@@ -25,7 +22,7 @@
 //! (`src-tauri/src/separation/`, `src/app/separation.ts`; the project
 //! lead's own files, see docs/clean-room.md).
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,8 +33,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-pub const MIN_ENGINE: (u32, u32, u32) = (0, 2, 0);
-pub const ENGINE_TAG: &str = "engine-v0.2.0";
+pub const MIN_ENGINE: (u32, u32, u32) = (1, 0, 0);
+/// The GitHub release that publishes engine 1.0 and its manifest.
+pub const ENGINE_TAG: &str = "engine-v1.0.0";
+/// What the handshake says AudiForm 2's version is.
+pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+use audiform_separate_client as client;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Stem {
@@ -149,26 +151,21 @@ impl Dirs {
     }
 
     fn engine_file() -> &'static str {
-        if cfg!(windows) {
-            "audiform-separate.exe"
-        } else {
-            "audiform-separate"
-        }
+        client::install::EXE
     }
 
-    /// The engine to run: the env override, ours, then Audiform's.
+    /// The engine to run: the env override, then ours (`engine2`). Audiform
+    /// 1's engine 0.2 does not serve AudiForm 2, so it is not used; its
+    /// downloaded models are.
     pub fn engine(&self) -> Option<PathBuf> {
         if let Some(p) = std::env::var_os("AUDIFORM_SEPARATE") {
             return Some(PathBuf::from(p));
         }
-        self.search_roots()
-            .into_iter()
-            .map(|r| r.join("engine").join(Self::engine_file()))
-            .find(|p| p.is_file())
+        Some(self.own_engine_path()).filter(|p| p.is_file())
     }
 
     pub fn own_engine_path(&self) -> PathBuf {
-        self.own.join("engine").join(Self::engine_file())
+        client::engine::engine_dir(&self.own).join(Self::engine_file())
     }
 
     /// A downloaded checkpoint for `m`, wherever it is.
@@ -216,6 +213,12 @@ pub fn engine_asset() -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The engine release's manifest (version, protocol, each build's file,
+/// size and SHA-256).
+pub fn manifest_url() -> String {
+    engine_url(client::MANIFEST_FILE)
 }
 
 pub fn engine_url(asset: &str) -> String {
@@ -389,13 +392,6 @@ fn run(
     let engine = dirs
         .engine()
         .ok_or("The separation engine is not installed. Use Download Engine first.")?;
-    let ver = engine_version(&engine)?;
-    if !engine_is_new_enough(&ver) {
-        return Err(format!(
-            "The installed engine ({ver}) is too old; version {}.{}.{} or newer is needed.",
-            MIN_ENGINE.0, MIN_ENGINE.1, MIN_ENGINE.2
-        ));
-    }
     let ckpt = dirs
         .model(m)
         .ok_or_else(|| format!("{} is not downloaded yet.", m.name))?;
@@ -414,98 +410,56 @@ fn run(
     let raw: Vec<PathBuf> = (0..names.len())
         .map(|k| work.join(format!("out{k}.wav")))
         .collect();
-    let job_path = work.join("job.json");
-    std::fs::write(
-        &job_path,
-        serde_json::to_vec(&job(m, &ckpt, &input, &raw, gpu, overlap)).unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
-    set(p, |g| g.status = "Separating".into());
-
-    let mut cmd = Command::new(&engine);
-    cmd.arg(&job_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    hide_window(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Could not start the separation engine: {e}"))?;
-    let stdout = child.stdout.take().ok_or("The engine gave no output.")?;
-    let stderr_text = Arc::new(Mutex::new(String::new()));
-    if let Some(mut err) = child.stderr.take() {
-        let t = stderr_text.clone();
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = err.read_to_string(&mut s);
-            if let Ok(mut g) = t.lock() {
-                *g = s;
-            }
+    let outputs: Vec<client::Output> = if m.stems.is_empty() {
+        vec![
+            client::Output::stems(&raw[0], &[0]),
+            client::Output::without(&raw[1], &[0]),
+        ]
+    } else {
+        raw.iter()
+            .enumerate()
+            .map(|(k, f)| client::Output::stems(f, &[k]))
+            .collect()
+    };
+    let result = with_engine(&engine, |eng| {
+        let device = if gpu { "gpu" } else { "cpu" };
+        let ready = eng
+            .loaded()
+            .is_some_and(|l| l.model == m.id && l.device == device);
+        if !ready {
+            set(p, |g| {
+                g.status = "Loading the model".into();
+                g.indeterminate = true;
+            });
+            eng.load(&m.id, &m.spec, &ckpt, gpu)?;
+        }
+        set(p, |g| {
+            g.status = "Separating".into();
+            g.indeterminate = false;
         });
-    }
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
+        eng.run(
+            &input,
+            &outputs,
+            overlap.map(|o| o.clamp(1, 8) as usize),
+            |f| set(p, |g| g.fraction = (f.clamp(0.0, 1.0) as f64 * 0.95) as _),
+            cancel,
+        )
     });
-    let mut finished = false;
-    let mut failure = None;
-    // Once the engine has said it is done (or failed), it gets a few
-    // seconds to exit on its own, then it is stopped: it never lingers.
-    let mut ended_at: Option<std::time::Instant> = None;
-    loop {
-        if ended_at.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
-            let _ = child.kill();
-        }
-        if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
+    match result {
+        Ok(client::RunEnd::Done { .. }) => {}
+        Ok(client::RunEnd::Cancelled) => {
             let _ = std::fs::remove_dir_all(&work);
             return Err("Separation cancelled.".into());
         }
-        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(line) => match parse_line(&line) {
-                Line::Progress(f) => set(p, |g| g.fraction = f.clamp(0.0, 1.0) * 0.95),
-                Line::Done => {
-                    finished = true;
-                    ended_at.get_or_insert_with(std::time::Instant::now);
-                }
-                Line::Error { gpu: true, message } => {
-                    set(p, |g| g.gpu_error = true);
-                    failure = Some(format!("The graphics card could not be used ({message})."));
-                    ended_at.get_or_insert_with(std::time::Instant::now);
-                }
-                Line::Error { message, .. } => {
-                    failure = Some(message);
-                    ended_at.get_or_insert_with(std::time::Instant::now);
-                }
-                Line::Other(_) => {}
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        Err(client::Error::Gpu(message)) => {
+            set(p, |g| g.gpu_error = true);
+            let _ = std::fs::remove_dir_all(&work);
+            return Err(format!("The graphics card could not be used ({message})."));
         }
-    }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    if let Some(f) = failure {
-        let _ = std::fs::remove_dir_all(&work);
-        return Err(f);
-    }
-    // A clean exit after `done`, or one stopped by the grace period above.
-    if !finished || (!status.success() && ended_at.is_none()) {
-        let _ = std::fs::remove_dir_all(&work);
-        let said = stderr_text
-            .lock()
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        let tail: String = said.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
-        return Err(if tail.is_empty() {
-            "The separation engine stopped without finishing.".into()
-        } else {
-            format!("The separation engine stopped: {tail}")
-        });
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&work);
+            return Err(e.to_string());
+        }
     }
     set(p, |g| g.status = "Writing results".into());
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
@@ -522,6 +476,53 @@ fn run(
     }
     let _ = std::fs::remove_dir_all(&work);
     Ok(outs)
+}
+
+/// The engine kept for the session (started on first use).
+static ENGINE: Mutex<Option<client::Engine>> = Mutex::new(None);
+
+/// Runs `f` with the session's engine, starting it first if it is not
+/// running. An engine that went away is started again once.
+fn with_engine<T>(
+    exe: &Path,
+    mut f: impl FnMut(&mut client::Engine) -> Result<T, client::Error>,
+) -> Result<T, client::Error> {
+    let mut guard = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+    for attempt in 0..2 {
+        let alive = guard.as_mut().is_some_and(|e| e.alive());
+        if !alive {
+            *guard = Some(client::Engine::start(exe, HOST_VERSION)?);
+        }
+        match f(guard.as_mut().unwrap()) {
+            Err(client::Error::Stopped(m)) => {
+                *guard = None;
+                if attempt == 1 {
+                    return Err(client::Error::Stopped(m));
+                }
+            }
+            other => return other,
+        }
+    }
+    unreachable!()
+}
+
+/// Frees the loaded model's memory (after a while idle); the engine keeps
+/// running for the next Separate.
+pub fn unload_engine_model() {
+    if let Ok(mut g) = ENGINE.lock() {
+        if let Some(e) = g.as_mut() {
+            if e.loaded().is_some() {
+                let _ = e.unload();
+            }
+        }
+    }
+}
+
+/// Stops the session's engine (when the app closes).
+pub fn stop_engine() {
+    if let Ok(mut g) = ENGINE.lock() {
+        *g = None;
+    }
 }
 
 fn unique(dir: &Path, stem: &str) -> PathBuf {
@@ -787,31 +788,30 @@ pub fn remove_engine(dirs: &Dirs) -> Result<(), String> {
     Ok(())
 }
 
-/// Asks whether a newer engine is published: fetches only the small
-/// checksum file. Sets `flag` on the progress when one is.
+/// Asks whether a newer engine is published: reads the small manifest and
+/// compares its version with the installed engine's. Sets `flag` on the
+/// progress when one is.
 pub fn check_engine_update(dirs: &Dirs, cancel: &AtomicBool, p: &Shared) -> Result<bool, String> {
-    let asset = engine_asset().ok_or("Audio Separation is not available for this computer yet.")?;
     let engine = dirs
         .engine()
         .ok_or("The separation engine is not installed.")?;
-    let tmp = dirs.own.join("engine").join("latest.sha256");
-    download(
-        &format!("{}.sha256", engine_url(asset)),
-        &tmp,
-        "",
-        cancel,
-        p,
-        0,
-    )?;
-    let latest = std::fs::read_to_string(&tmp).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&tmp);
-    if parse_sha256(&latest).is_none() {
-        return Err("The published engine checksum could not be read.".into());
-    }
-    let mine = std::fs::read_to_string(Dirs::engine_record(&engine)).unwrap_or_default();
-    let newer = engine_update_available(&mine, &latest);
+    let manifest = fetch_manifest(dirs, cancel, p)?;
+    let installed = engine_version(&engine)?;
+    let newer = manifest.is_newer_than(&installed);
     set(p, |g| g.flag = newer);
     Ok(newer)
+}
+
+fn fetch_manifest(
+    dirs: &Dirs,
+    cancel: &AtomicBool,
+    p: &Shared,
+) -> Result<client::Manifest, String> {
+    let tmp = dirs.own.join("engine2-manifest.json");
+    download(&manifest_url(), &tmp, "", cancel, p, 0)?;
+    let bytes = std::fs::read(&tmp).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&tmp);
+    client::Manifest::parse(&bytes).map_err(|e| e.to_string())
 }
 
 /// Checks a downloaded model against its pinned checksum. Sets `flag` when
@@ -833,45 +833,31 @@ pub fn check_model(dirs: &Dirs, m: &Model, p: &Shared) -> Result<bool, String> {
     Ok(stale)
 }
 
-/// Downloads and unpacks the engine into Audiform27's own folder, using
-/// the system `tar` (bsdtar ships with Windows 10+ and reads zip). The zip
-/// is checked against the `.sha256` file published beside it, and that
-/// checksum is kept as `engine.sha256` so Check for Update can compare.
+/// Downloads and installs engine 1.0 into `separation/engine2`: the
+/// manifest names this computer's build, its size and SHA-256; the zip is
+/// checked against it and unpacked by the client.
 pub fn install_engine(dirs: &Dirs, cancel: &AtomicBool, p: &Shared) -> Result<(), String> {
-    let asset = engine_asset().ok_or("Audio Separation is not available for this computer yet.")?;
-    let dir = dirs.own.join("engine");
-    let zip = dirs.own.join(asset);
-    let sum_path = dir.join(format!("{asset}.sha256"));
+    let manifest = fetch_manifest(dirs, cancel, p)?;
+    let asset = manifest.asset().map_err(|e| e.to_string())?.clone();
+    let zip = dirs.own.join(&asset.file);
     download(
-        &format!("{}.sha256", engine_url(asset)),
-        &sum_path,
-        "",
+        &engine_url(&asset.file),
+        &zip,
+        &asset.sha256,
         cancel,
         p,
-        0,
+        asset.bytes,
     )?;
-    let sum_text = std::fs::read_to_string(&sum_path).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&sum_path);
-    let expected =
-        parse_sha256(&sum_text).ok_or("The published engine checksum could not be read.")?;
-    download(&engine_url(asset), &zip, &expected, cancel, p, 0)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    set(p, |g| g.status = "Checking the engine".into());
+    client::install::verify(&zip, &asset.sha256).map_err(|e| e.to_string())?;
     set(p, |g| g.status = "Unpacking the engine".into());
-    let mut cmd = Command::new("tar");
-    cmd.arg("-xf")
-        .arg(&zip)
-        .arg("-C")
-        .arg(&dir)
-        .stdin(Stdio::null());
-    hide_window(&mut cmd);
-    let ok = cmd
-        .status()
-        .map_err(|e| format!("Could not unpack the engine: {e}"))?;
+    // A running engine holds its program open: stop it first.
+    stop_engine();
+    let dir = client::engine::engine_dir(&dirs.own);
+    let r = client::install::unpack(&zip, &dir).map_err(|e| e.to_string());
     let _ = std::fs::remove_file(&zip);
-    if !ok.success() || !dirs.own_engine_path().is_file() {
-        return Err("The engine download could not be unpacked.".into());
-    }
-    let _ = std::fs::write(Dirs::engine_record(&dirs.own_engine_path()), &expected);
+    r?;
+    let _ = std::fs::write(Dirs::engine_record(&dirs.own_engine_path()), &asset.sha256);
     Ok(())
 }
 
@@ -930,9 +916,12 @@ mod tests {
                 message: "no CUDA".into()
             }
         );
-        assert!(engine_is_new_enough("0.2.0\n"));
+        assert!(
+            !engine_is_new_enough("0.2.0\n"),
+            "engine 0.2 does not serve AudiForm 2"
+        );
         assert!(engine_is_new_enough("1.0"));
-        assert!(!engine_is_new_enough("0.1.9"));
+        assert!(engine_is_new_enough("1.0.0\n"));
         assert!(!engine_is_new_enough("junk"));
     }
 

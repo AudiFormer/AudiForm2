@@ -327,6 +327,9 @@ pub struct State {
     /// Which clip each clip-rack target names (see `rack::clip_target`).
     pub clip_targets: std::cell::RefCell<Vec<af27_core::ClipId>>,
     pub rack_shown: HashMap<u16, (f32, f32)>,
+    /// Each track's rack input and output peaks this frame, falling back
+    /// slowly (read once a frame from the engine).
+    pub track_levels: Vec<(f32, f32)>,
     /// The Import from Audiform 1 window.
     pub af1_prompt: Option<crate::af1_import::Prompt>,
     /// The clip whose Properties show, and a floating window for them.
@@ -589,6 +592,7 @@ impl State {
             clip_meters: HashMap::new(),
             clip_targets: Default::default(),
             rack_shown: HashMap::new(),
+            track_levels: Vec::new(),
             want_properties: false,
             clip_lanes: Default::default(),
             gesture: false,
@@ -1406,6 +1410,15 @@ impl State {
 
     pub fn tick(&mut self) {
         self.watch_audio(Instant::now());
+        // Track meters: every rack's peaks, once a frame.
+        let n = self.rack_meters.len();
+        self.track_levels.resize(n, (0.0, 0.0));
+        for (i, m) in self.rack_meters.iter().enumerate() {
+            let (a, b) = m.take();
+            let e = &mut self.track_levels[i];
+            e.0 = a.max(e.0 * 0.86);
+            e.1 = b.max(e.1 * 0.86);
+        }
         self.poll_jobs();
         crate::separation::poll(self);
         crate::spectral_select::poll(self);
@@ -1987,9 +2000,10 @@ impl State {
                 .and_then(|id| self.clip_meters.get(&id))
                 .map_or((0.0, 0.0), |m| m.take())
         } else {
-            self.rack_meters
+            self.track_levels
                 .get(target as usize)
-                .map_or((0.0, 0.0), |m| m.take())
+                .copied()
+                .unwrap_or((0.0, 0.0))
         };
         let e = self.rack_shown.entry(target).or_insert((0.0, 0.0));
         e.0 = fresh.0.max(e.0 * 0.88);

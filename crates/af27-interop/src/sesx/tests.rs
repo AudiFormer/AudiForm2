@@ -636,6 +636,13 @@ fn a_converted_eq_saves_for_audiform_with_its_keys() {
     );
     let (mut s, r) = read_s(&wrap(r#"sampleRate="48000""#, &tracks, ""));
     assert_eq!(r.converted.len(), 1);
+    // It plays here as the Parametric EQ, band 1 on.
+    let eq = &s.tracks[0].chain[0];
+    assert_eq!(eq.effect, "af.parametric_eq");
+    let info = af27_fx::info(&eq.effect).unwrap();
+    let at = |k: &str| eq.values[info.params.iter().position(|p| p.key == k).unwrap()];
+    assert_eq!(at("b1_on"), 1.0);
+    assert_eq!(at("gain"), 0.0);
     let doc = crate::audfrm::export(&mut s, None);
     let slot = &doc["tracks"][0]["effects"]["slots"][0];
     assert_eq!(slot["effect"], "altaudio.parametric_eq");

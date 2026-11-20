@@ -18,6 +18,8 @@ pub struct MenuAt {
     pub clip: Option<ClipId>,
     /// On a fade handle: the clip, and true for the fade in.
     pub fade: Option<(ClipId, bool)>,
+    /// Clicked in the lower half of the track (new tracks go below it).
+    pub below: bool,
 }
 
 const SOON: &str = "Coming soon";
@@ -46,7 +48,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State, at: MenuAt) {
         clip_items(ui, st, clip);
         ui.separator();
         if let Some(ti) = at.track {
-            track_items(ui, st, ti);
+            track_items(ui, st, ti, at.below);
         }
         return;
     }
@@ -268,29 +270,40 @@ fn clip_items(ui: &mut egui::Ui, st: &mut State, clip: ClipId) {
     }
 }
 
-fn add_track_items(ui: &mut egui::Ui, st: &mut State) {
-    if ui.button("Add Mono Audio Track").clicked() {
-        st.add_track_kind(TrackKind::Audio);
-        ui.close_menu();
+/// Adds a track of `kind`: above or below the track the menu was opened
+/// on (by which half was clicked), else at the end.
+fn add_at(st: &mut State, kind: TrackKind, at: Option<(usize, bool)>) {
+    let id = st.add_track_kind(kind);
+    if let Some((ti, below)) = at {
+        // One undo step: the add's snapshot is from before the add.
+        st.session.move_track(id, ti + below as usize);
+        st.session_version += 1;
     }
-    if ui.button("Add Stereo Audio Track").clicked() {
-        st.add_track_kind(TrackKind::Audio);
-        ui.close_menu();
-    }
-    if ui.button("Add MIDI Track").clicked() {
-        st.add_track_kind(TrackKind::Midi);
-        ui.close_menu();
-    }
-    if ui.button("Add Bus Track").clicked() {
-        st.add_track_kind(TrackKind::Bus);
-        ui.close_menu();
+}
+
+fn add_track_items(ui: &mut egui::Ui, st: &mut State, at: Option<(usize, bool)>) {
+    let place = match at {
+        Some((_, true)) => " Below",
+        Some((_, false)) => " Above",
+        None => "",
+    };
+    for (label, kind) in [
+        ("Add Mono Audio Track", TrackKind::Audio),
+        ("Add Stereo Audio Track", TrackKind::Audio),
+        ("Add MIDI Track", TrackKind::Midi),
+        ("Add Bus Track", TrackKind::Bus),
+    ] {
+        if ui.button(format!("{label}{place}")).clicked() {
+            add_at(st, kind, at);
+            ui.close_menu();
+        }
     }
 }
 
 /// A track setting a menu item switches.
 type Flag = fn(&mut af27_core::Track) -> &mut bool;
 
-fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize) {
+fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize, below: bool) {
     let Some(t) = st.session.tracks.get(ti).cloned() else {
         return;
     };
@@ -317,7 +330,7 @@ fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         ui.close_menu();
     }
     ui.separator();
-    add_track_items(ui, st);
+    add_track_items(ui, st, Some((ti, below)));
     ui.separator();
     let buses: Vec<(TrackId, String, bool)> = st
         .session
@@ -578,7 +591,7 @@ fn empty_items(ui: &mut egui::Ui, st: &mut State, at: MenuAt) {
         soon(ui, "Ungroup Selected Clips");
     });
     ui.menu_button("Track", |ui| {
-        add_track_items(ui, st);
+        add_track_items(ui, st, at.track.map(|t| (t, at.below)));
         ui.separator();
         if ui.button("Delete Empty Tracks").clicked() {
             edit(st, "Delete empty tracks", |s| s.delete_empty_tracks() > 0);

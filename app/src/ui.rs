@@ -126,6 +126,8 @@ fn full_tab_width(ctx: &egui::Context, title: &str) -> f32 {
 }
 
 pub struct App {
+    /// When the last frame started (the low-latency frame cap).
+    frame_started: Option<std::time::Instant>,
     pub st: State,
     dock: DockState<Tab>,
     pub viewer: Caches,
@@ -191,6 +193,7 @@ impl App {
         st.open_paths(files);
         let dock = load_layout(st.workspace);
         App {
+            frame_started: None,
             st,
             dock,
             viewer: Caches::default(),
@@ -2248,6 +2251,18 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Without vsync, frames are capped at 240 a second so steady
+        // animation does not run the graphics card flat out.
+        if self.st.prefs.low_latency {
+            const MIN: std::time::Duration = std::time::Duration::from_micros(4_166);
+            if let Some(t) = self.frame_started {
+                let e = t.elapsed();
+                if e < MIN {
+                    std::thread::sleep(MIN - e);
+                }
+            }
+            self.frame_started = Some(std::time::Instant::now());
+        }
         crate::selfshot::tick(ctx, ctx.input(|i| i.time));
         crate::plugins::remember_window(frame);
         crate::plugins::tick(&mut self.st);

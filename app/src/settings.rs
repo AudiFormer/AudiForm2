@@ -99,6 +99,9 @@ pub struct Prefs {
     pub new_session: crate::new_dialogs::NewSessionDefaults,
     /// The start-up offer to import from Audiform 1 was made.
     pub af1_import_asked: bool,
+    /// Draw without waiting for the screen's refresh (less lag between the
+    /// pointer and what follows it; frames capped at 240 a second).
+    pub low_latency: bool,
     /// Soloing a track or bus unsolos every other (Ctrl+click always
     /// does, whatever this says).
     pub solo_exclusive: bool,
@@ -229,6 +232,7 @@ impl Default for Prefs {
             new_file: Default::default(),
             new_session: Default::default(),
             af1_import_asked: false,
+            low_latency: true,
             solo_exclusive: false,
             midi_monitor: true,
         }
@@ -635,6 +639,11 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     "OpenGL (for older or virtual graphics drivers)",
                 );
                 note(ui, th, "Takes effect the next time AudiForm 2 starts. If the modern way cannot start, OpenGL is used on its own.");
+                ui.checkbox(
+                    &mut d.prefs.low_latency,
+                    "Low-latency drawing: the playhead, rulers and drags follow the pointer with less lag",
+                );
+                note(ui, th, "Draws without waiting for the screen's refresh, at most 240 frames a second. Turn it off if you see tearing. Takes effect the next time AudiForm 2 starts.");
             });
         }
         "Appearance" => appearance(ui, d, st, th),
