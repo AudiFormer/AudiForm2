@@ -1300,8 +1300,12 @@ fn effects_menu(
         cmd_item(ui, km, c, c.label(), has_doc, cmd).on_disabled_hover_text(no_doc);
     }
     ui.menu_button("Generate", |ui| {
-        if ui.button("Tone or Noise...").clicked() {
-            st.generate.open = true;
+        if ui.button("Noise...").clicked() {
+            st.generate.noise_open = true;
+            ui.close_menu();
+        }
+        if ui.button("Tones...").clicked() {
+            st.generate.tones_open = true;
             ui.close_menu();
         }
         if ui.button("Silence (5 s)").clicked() {
@@ -2149,87 +2153,6 @@ fn status(ui: &mut egui::Ui, st: &State) {
     });
 }
 
-fn generate_window(ctx: &egui::Context, st: &mut State) {
-    let mut open = st.generate.open;
-    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "ui.rs", 1)), "Generate")
-        .open(&mut open)
-        .resizable(false)
-        .show(ctx, |ui| {
-            let g = &mut st.generate;
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut g.kind, 0, "Tone");
-                ui.selectable_value(&mut g.kind, 1, "Noise");
-                ui.selectable_value(&mut g.kind, 2, "Silence");
-            });
-            if g.kind == 0 {
-                ui.horizontal(|ui| {
-                    for (i, n) in ["Sine", "Square", "Triangle", "Saw"].iter().enumerate() {
-                        ui.selectable_value(&mut g.wave, i, *n);
-                    }
-                });
-                ui.add(
-                    crate::widgets::Slider::new(&mut g.freq, 20.0..=20_000.0)
-                        .logarithmic(true)
-                        .suffix(" Hz")
-                        .text("Frequency"),
-                );
-            }
-            if g.kind == 1 {
-                ui.horizontal(|ui| {
-                    for (i, n) in ["White", "Pink", "Brown"].iter().enumerate() {
-                        ui.selectable_value(&mut g.noise, i, *n);
-                    }
-                });
-            }
-            if g.kind != 2 {
-                ui.add(
-                    crate::widgets::Slider::new(&mut g.db, -60.0..=0.0)
-                        .suffix(" dB")
-                        .text("Level"),
-                );
-            }
-            ui.add(
-                crate::widgets::Slider::new(&mut g.secs, 0.1..=600.0)
-                    .logarithmic(true)
-                    .suffix(" s")
-                    .text("Duration"),
-            );
-            if ui.button("Insert at Playhead").clicked() {
-                let (rate, ch) = st
-                    .doc()
-                    .map_or((48_000, 2), |d| (d.buf.rate, d.buf.num_channels()));
-                let g = &st.generate;
-                use af27_dsp::generate as gen;
-                let buf = match g.kind {
-                    0 => gen::tone(
-                        rate,
-                        ch,
-                        g.secs,
-                        g.freq,
-                        g.db,
-                        [
-                            gen::Wave::Sine,
-                            gen::Wave::Square,
-                            gen::Wave::Triangle,
-                            gen::Wave::Saw,
-                        ][g.wave],
-                    ),
-                    1 => gen::noise(
-                        rate,
-                        ch,
-                        g.secs,
-                        g.db,
-                        [gen::Noise::White, gen::Noise::Pink, gen::Noise::Brown][g.noise],
-                    ),
-                    _ => gen::silence(rate, ch, g.secs),
-                };
-                st.mode = Mode::Waveform;
-                st.insert_buffer("Generate", buf);
-            }
-        });
-    st.generate.open = open && st.generate.open;
-}
-
 fn about_window(ctx: &egui::Context, st: &mut State) {
     let mut open = st.show_about;
     crate::ui::popup(ctx, egui::Id::new(("af2-popup", "ui.rs", 2)), "About AudiForm 2").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
@@ -2256,11 +2179,20 @@ impl eframe::App for App {
         // panel once at start.
         if !self.shown_env_tab {
             self.shown_env_tab = true;
-            // AF2_OPEN=new-file | new-session | multitrack, for shots.
+            // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
+            // generate-tones | fx:<effect id>, for shots.
             match std::env::var("AF2_OPEN").as_deref() {
                 Ok("new-file") => crate::new_dialogs::open_new_file(&mut self.st),
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
                 Ok("multitrack") => self.st.mode = Mode::Multitrack,
+                Ok("generate-noise") => self.st.generate.noise_open = true,
+                Ok("generate-tones") => self.st.generate.tones_open = true,
+                // fx:<effect id>: that effect in the file's rack, open.
+                Ok(v) if v.starts_with("fx:") => {
+                    self.st.file_chain.push(crate::rack::new_slot(&v[3..]));
+                    let at = self.st.file_chain.len() - 1;
+                    crate::rack::open_window(&mut self.st, crate::rack::FILE, at);
+                }
                 _ => {}
             }
             if let Ok(name) = std::env::var("AF2_SHOW_TAB") {
@@ -2670,7 +2602,7 @@ impl eframe::App for App {
         crate::af1_import::window(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
-        generate_window(ctx, &mut self.st);
+        crate::generate_ui::windows(ctx, &mut self.st);
         crate::export::poll(&mut self.st, ctx);
         crate::export::show(ctx, &mut self.st);
         crate::tempo::window(ctx, &mut self.st);

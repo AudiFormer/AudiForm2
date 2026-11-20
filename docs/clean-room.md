@@ -51,6 +51,47 @@ file is the record of how every part of Audiform27 was sourced.
 
 | Tempo map sums (`crates/af27-core/src/midi.rs`), piano roll behaviour (`app/src/pianoroll.rs`, `crates/af27-core/src/noteops.rs`) | `src/stores/tempo.ts`, `src/panels/editor/{PianoRollDialog.svelte,midi.ts}` (named by the project lead as the lead's own clean files) | Behaviour and formulas only (segments starting where the previous bars end, bar.beat.tick, the note edit set); rewritten in Rust against AudiForm 2's model, no framework code. `session/ops/midi.rs` was not used: it is written against an AAE-derived model |
 
+## Effect windows ported from Audiform (2026-11-20)
+
+The project lead asked for their own Audiform effect windows in AudiForm 2
+("I did those"). Rule 6 normally keeps visual design our own; here the
+design is the lead's, so layout, graphs, meters and interactions are
+ported, rebuilt in Rust/egui (`app/src/fx_windows/`) and coloured from the
+theme. No Svelte, CSS or TypeScript was copied, and no DSP: every window
+drives AudiForm 2's own effects. Each Audiform file was checked on
+`origin/main` (4b0dce4) with `git log --diff-filter=A --follow` (who created
+it), `git log --follow --author=GeekCast` (must be empty) and
+`git show --stat -C -C --find-copies-harder <creating commit>` (not copied or
+moved), and against Audiform's `ATTRIBUTION.md`. The stray GeekCast header
+line those files carry was not taken.
+
+| AudiForm 2 | From Audiform (`src/panels/voice-chain/`) | Created by | Result |
+| --- | --- | --- | --- |
+| `fx_windows/mod.rs` `columns` (dial columns for every effect without its own face), `widgets::value_box` | `EffectControls.svelte`, `effect-controls.ts`, `ValueField.svelte` | af582cc, Claude | Created clean, no AAE edits, no copy, not in ATTRIBUTION: ported (the dial is AudiForm 2's own; Audiform's `Knob.svelte`/`knob.ts` and `chain.ts` were not used) |
+| `fx_windows/phase.rs` (Phase Curve graph) | `PhaseCurveGraph.svelte`, `phase-curve.ts` | b13f804, Claude | Clean: ported. The curve itself is the already-ported `af27_fx` `curve_at`; the frequency ticks are our own (`graph.ts` was not used) |
+| `fx_windows/space.rs` `verb` (Reverb faceplate, kinds, decay display) | `VerbPanel.svelte`, `reverb-kinds.ts` | e7ed223, Claude | Clean: ported (the kind tips; faceplate colours come from the theme, not Audiform's fixed colours; the Impulse Response tab is not ported) |
+| `fx_windows/space.rs` `convolution` (Convolution Reverb faceplate, IR display, Load/Clear) | `ReverbPanel.svelte` | 81b7779, Claude | Clean: ported |
+| `fx_windows/space.rs` `echo` (Delay faceplate driving AudiForm 2's own Echo: Time and Feedback dials round the repeats display) | `DelayPanel.svelte` | e7ed223, Claude | Clean GUI: ported. Audiform's delay DSP (`echo.rs`) is AAE's and is not used; AudiForm 2's Echo has no kinds, tempo or ping-pong, so those parts of the window are left out |
+| `fx_windows/dynamics.rs` `opto`, `preamp` (big numbered dials, needle meter, lever switches) and `parts::needle` | `TubePanel.svelte`, `BigKnob.svelte`, `NeedleMeter.svelte` | 08c5c47, Claude | Clean: ported (needle scale and ballistics rebuilt; the brass faceplate is replaced by the theme) |
+| `fx_windows/dynamics.rs` `vox` (three modules in signal order with power and style steppers) | `VoxStripPanel.svelte` | 9204329, Claude | Clean: ported (icons and the tone curve not ported) |
+
+Refused or not used:
+
+| Audiform file | Why |
+| --- | --- |
+| `src/panels/editor/Dial.svelte` | Created in 1b8b098, AAE's initial public release |
+| `ResponseGraph.svelte`, `graph.ts`, `VoiceChainPanel.svelte`, `chain.ts` | Created in 850f0bf by GeekCast Radio Network (and edited by it) |
+| `effect-window.ts` | Created in 25b189d by GeekCast Radio Network |
+| `slot-drag.ts` | Edited by GeekCast (c29c24c) |
+| `DynamicsCurveGraph.svelte`, `dynamics-curve.ts`, `curve-presets.ts` | Pass the git checks, but their commit (be4bd61) brought those effects in "from AAE"; left out to be safe (AudiForm 2 has no Dynamics Curve effect) |
+| `LimiterPanel.svelte` | Clean, but its controls (Peak / True peak, Link) are not in AudiForm 2's Limiter; the Limiter got AudiForm 2's own unit instead |
+| `AmpPanel`, `BandEqPanel`, `CenterPanel`, `MixerPanel`, `ModPanel`, `WidthPanel`, `NotchGraph`, `NoiseShapeGraph`, `EqGraph` | Clean, not ported in this pass (the Parametric EQ editor is separate work); those effects use the dial columns |
+
+The Compressor, Limiter, Noise Gate and De-Esser units, the transfer graph
+and the gain-reduction estimate are AudiForm 2's own design. The generator
+windows (`app/src/generate_ui.rs`) and their DSP (`af27-dsp/src/generate.rs`)
+are written fresh from the feature list of professional editors.
+
 ## Deliberately left out
 
 - **Delay and Echo** (`dsp/effects/echo.rs`): Audiform's `ATTRIBUTION.md`

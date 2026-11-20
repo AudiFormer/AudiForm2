@@ -458,4 +458,30 @@ mod tests {
         assert!(out.channels[0].iter().all(|v| v.is_finite()));
         assert_ne!(out.channels[0], mono.channels[0]);
     }
+
+    /// The space effects the new windows drive keep every channel of a
+    /// 5.1 and a 7.1.4 bed: nothing dropped, every speaker still sounding.
+    #[test]
+    fn space_effects_keep_every_channel_of_a_bed() {
+        register();
+        for n in [6usize, 12] {
+            let input = noise(9600, n);
+            for id in [
+                "echo",
+                "reverb",
+                af27_fx::effects::verb::ID,
+                af27_fx::effects::reverb::ID,
+                af27_fx::effects::phase_curve::ID,
+                af27_fx::effects::modulation::ID,
+            ] {
+                let out = process_offline(&slot(id), &input).unwrap();
+                assert_eq!(out.num_channels(), n, "{id} on {n}");
+                assert_eq!(out.frames(), input.frames(), "{id} on {n}");
+                for (c, ch) in out.channels.iter().enumerate() {
+                    let e: f32 = ch[4800..].iter().map(|v| v * v).sum();
+                    assert!(e > 1e-3, "{id} on {n}: channel {c} went quiet");
+                }
+            }
+        }
+    }
 }
