@@ -23,6 +23,8 @@ pub mod transport;
 
 #[cfg(test)]
 mod tests_keys;
+#[cfg(test)]
+mod tests_space;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -31,7 +33,7 @@ use af27_core::AudioBuffer;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 pub use capture::{AudioApp, CaptureSupport, OutputDevice, RecordSource};
-pub use mix::{space_gains, stereo_frame, track_gains, Mix, BLOCK, MAX_SPEAKERS};
+pub use mix::{stereo_frame, track_gains, Mix, BLOCK, MAX_SPEAKERS};
 pub use transport::{Plan, Region};
 
 /// What the audio thread plays.
@@ -89,11 +91,10 @@ enum Cmd {
         track: u16,
         mix: f32,
     },
+    /// A track's new spot in the room.
     Space {
         track: u16,
-        l: [f32; MAX_SPEAKERS],
-        r: [f32; MAX_SPEAKERS],
-        lfe: f32,
+        pos: af27_core::space::SpacePos,
     },
     Instrument {
         track: u16,
@@ -137,6 +138,9 @@ struct Shared {
     pos: AtomicU64,
     peak_l: AtomicU32,
     peak_r: AtomicU32,
+    /// 3D: each speaker's peak, and how many speakers there are.
+    bed_peaks: [AtomicU32; MAX_SPEAKERS],
+    bed_count: AtomicU32,
 }
 
 pub(crate) fn store_max_f32(a: &AtomicU32, v: f32) {
@@ -221,6 +225,7 @@ impl Voice {
                         m.set_master_param(slot as usize, &vals[..n as usize]);
                     } else if let Some(t) = m.tracks.get_mut(track as usize) {
                         t.chain.set(slot as usize, &vals[..n as usize]);
+                        m.space_param(track as usize, slot as usize, &vals[..n as usize]);
                     }
                 }
             }
@@ -230,6 +235,7 @@ impl Voice {
                         m.set_master_bypass(slot as usize, on);
                     } else if let Some(t) = m.tracks.get_mut(track as usize) {
                         t.chain.set_bypass(slot as usize, on);
+                        m.space_bypass(track as usize, slot as usize, on);
                     }
                 }
             }
@@ -239,14 +245,13 @@ impl Voice {
                         m.set_master_mix(amount);
                     } else if let Some(t) = m.tracks.get_mut(track as usize) {
                         t.chain.mix = amount;
+                        m.space_chain_mix(track as usize, amount);
                     }
                 }
             }
-            Cmd::Space { track, l, r, lfe } => {
-                if let Some(t) = mix.and_then(|m| m.tracks.get_mut(track as usize)) {
-                    t.space_l = l;
-                    t.space_r = r;
-                    t.lfe = lfe;
+            Cmd::Space { track, pos } => {
+                if let Some(m) = mix {
+                    m.set_space(track as usize, pos);
                 }
             }
             Cmd::Instrument { track, inst } => {
@@ -270,6 +275,7 @@ impl Voice {
                         m.set_master_rack(&rack);
                     } else {
                         m.set_rack(track as usize, &rack);
+                        m.space_rack(track as usize, &rack);
                     }
                 }
             }
@@ -333,6 +339,12 @@ impl Voice {
         } else {
             2
         };
+        // 3D, listening on speakers: each speaker on its own output (in
+        // layout order) when the device has enough of them.
+        let speakers = match &*program {
+            Program::Mix(m) if !bed_out && m.speakers_out(channels) => Some(m.channels_out()),
+            _ => None,
+        };
         let mut done = 0;
         let mut peaks = (0.0f32, 0.0f32);
         let mut block = [0.0f32; BLOCK * MAX_SPEAKERS];
@@ -381,6 +393,8 @@ impl Voice {
                 let o = &mut out[(done + i) * channels..(done + i + 1) * channels];
                 if bed_out {
                     o[..width].copy_from_slice(&block[i * width..(i + 1) * width]);
+                } else if let (Some(w), Program::Mix(m)) = (speakers, &*program) {
+                    m.bed_frame(i, &mut o[..w]);
                 } else {
                     let (l, r) = (block[i * 2], block[i * 2 + 1]);
                     match channels {
@@ -537,6 +551,8 @@ impl Engine {
             pos: AtomicU64::new(0f64.to_bits()),
             peak_l: AtomicU32::new(0),
             peak_r: AtomicU32::new(0),
+            bed_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
+            bed_count: AtomicU32::new(0),
         });
         let sh = shared.clone();
         let mut voice = Voice {
@@ -567,6 +583,14 @@ impl Engine {
             sh.pos.store(voice.t.to_bits(), Ordering::Relaxed);
             store_max_f32(&sh.peak_l, l);
             store_max_f32(&sh.peak_r, r);
+            if let Some(Program::Mix(m)) = voice.program.as_deref_mut() {
+                let mut pk = [0.0f32; MAX_SPEAKERS];
+                let n = m.take_bed_peaks(&mut pk);
+                for (a, v) in sh.bed_peaks.iter().zip(pk) {
+                    store_max_f32(a, v);
+                }
+                sh.bed_count.store(n as u32, Ordering::Relaxed);
+            }
             // The click last: after the master fader, the meters and the
             // scope, heard but never measured.
             if let Some(c) = &voice.clicks {
@@ -725,18 +749,11 @@ impl Engine {
         self.send(Cmd::ChainMix { track, mix });
     }
 
-    pub fn set_space(
-        &mut self,
-        track: usize,
-        l: [f32; MAX_SPEAKERS],
-        r: [f32; MAX_SPEAKERS],
-        lfe: f32,
-    ) {
+    /// A track's new spot in the room (heard at once, gliding there).
+    pub fn set_space(&mut self, track: usize, pos: af27_core::space::SpacePos) {
         self.send(Cmd::Space {
             track: track as u16,
-            l,
-            r,
-            lfe,
+            pos,
         });
     }
 
@@ -806,6 +823,16 @@ impl Engine {
         let l = f32::from_bits(self.shared.peak_l.swap(0, Ordering::Relaxed));
         let r = f32::from_bits(self.shared.peak_r.swap(0, Ordering::Relaxed));
         (l, r)
+    }
+
+    /// 3D sessions: each speaker's peak since the last call, linear, in
+    /// layout order (after the master chain and fader); empty otherwise.
+    pub fn take_bed_peaks(&self) -> Vec<f32> {
+        let n = (self.shared.bed_count.load(Ordering::Relaxed) as usize).min(MAX_SPEAKERS);
+        self.shared.bed_peaks[..n]
+            .iter()
+            .map(|a| f32::from_bits(a.swap(0, Ordering::Relaxed)))
+            .collect()
     }
 
     /// Frees programs the audio thread has finished with. Call every frame.

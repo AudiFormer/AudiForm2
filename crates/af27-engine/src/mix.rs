@@ -32,9 +32,12 @@ use af27_dsp::wide::{build_wide_chain, WideChain};
 
 use crate::synth::{self, Synth};
 
+mod space;
+pub use space::{bed_names, plays_to_speakers};
+
 pub const BLOCK: usize = 2048;
 /// Speaker channels at most (7.1.4 is 12).
-pub const MAX_SPEAKERS: usize = 16;
+pub const MAX_SPEAKERS: usize = af27_space::MAX_SPEAKERS;
 
 #[derive(Clone)]
 pub struct MixClip {
@@ -104,10 +107,8 @@ pub struct MixTrack {
     pub sends: Vec<MixSend>,
     /// Has a pre-fader send (so the fader waits for the sends).
     pub has_pre: bool,
-    /// 3D: gains per speaker for the left and right side, and the LFE send.
-    pub space_l: [f32; MAX_SPEAKERS],
-    pub space_r: [f32; MAX_SPEAKERS],
-    pub lfe: f32,
+    /// 3D sessions: its place in the room, 3D Bus bed, multichannel clips.
+    pub sp: Option<Box<space::TrackSpaceMix>>,
     /// Per chain slot: the track whose sound keys it (a sidechain), once
     /// the effect takes a key and the source can run first; None hears
     /// its own input.
@@ -134,6 +135,11 @@ pub struct SpaceMix {
     /// The master chain, on the speakers.
     pub chain: WideChain,
     bed: Vec<f32>,
+    lfe_filter: af27_space::lfe::LfeFilter,
+    /// Each speaker's peak since last read (after the master fader).
+    peaks: [f32; MAX_SPEAKERS],
+    /// Listening on speakers: each on its own device output.
+    speakers: bool,
 }
 
 pub struct Mix {
@@ -503,29 +509,6 @@ fn read_span(
     }
 }
 
-/// Per-speaker gains for a track's left and right sides in a 3D session.
-pub fn space_gains(
-    layout: af27_core::space::SpaceLayout,
-    pos: &af27_core::space::SpacePos,
-    stereo: bool,
-) -> ([f32; MAX_SPEAKERS], [f32; MAX_SPEAKERS], f32) {
-    let [gl, gr] = af27_space::source_gains(layout, pos, stereo);
-    let mut l = [0.0; MAX_SPEAKERS];
-    let mut r = [0.0; MAX_SPEAKERS];
-    for (i, v) in gl.iter().take(MAX_SPEAKERS).enumerate() {
-        l[i] = *v;
-    }
-    for (i, v) in gr.iter().take(MAX_SPEAKERS).enumerate() {
-        r[i] = *v;
-    }
-    let lfe = if pos.lfe_db <= -60.0 {
-        0.0
-    } else {
-        db_to_gain(pos.lfe_db as f32)
-    };
-    (l, r, lfe)
-}
-
 /// Fader and pan gains for a track (fader only in 3D sessions).
 pub fn track_gains(t: &af27_core::Track, space: bool) -> (f32, f32) {
     if space {
@@ -548,13 +531,20 @@ pub fn build(
     let tracks: Vec<MixTrack> = session
         .tracks
         .iter()
-        .map(|t| {
-            let clips: Vec<MixClip> = t
-                .clips
-                .iter()
-                .filter(|c| !c.muted)
-                .filter_map(|c| Some(MixClip::new(c, media(c.media)?)))
-                .collect();
+        .enumerate()
+        .map(|(ti, t)| {
+            let mut clips: Vec<MixClip> = Vec::new();
+            // 3D: clips of more than two channels play from their speakers.
+            let mut wide: Vec<MixClip> = Vec::new();
+            for c in t.clips.iter().filter(|c| !c.muted) {
+                let Some(buf) = media(c.media) else { continue };
+                let mc = MixClip::new(c, buf);
+                if space.is_some() && plays_to_speakers(c, mc.buf.num_channels()) {
+                    wide.push(mc);
+                } else {
+                    clips.push(mc);
+                }
+            }
             // Notes in seconds, through the tempo map, cut at their clip's end.
             let notes = || {
                 t.midi.iter().filter(|c| !c.muted).flat_map(|c| {
@@ -594,10 +584,7 @@ pub fn build(
             });
             let stereo =
                 t.kind != TrackKind::Audio || clips.iter().any(|c| c.buf.num_channels() >= 2);
-            let (space_l, space_r, lfe) = match space {
-                Some(layout) => space_gains(layout, &t.pos, stereo),
-                None => ([0.0; MAX_SPEAKERS], [0.0; MAX_SPEAKERS], 0.0),
-            };
+            let sp = space.map(|layout| space::for_track(layout, t, wide, stereo, rate, ti));
             let (gain_l, gain_r) = track_gains(t, space.is_some());
             MixTrack {
                 is_bus: t.kind == TrackKind::Bus,
@@ -630,9 +617,7 @@ pub fn build(
                     })
                     .collect(),
                 has_pre: t.sends.iter().any(|s| s.pre_fader),
-                space_l,
-                space_r,
-                lfe,
+                sp,
                 keys: Vec::new(),
                 l: vec![0.0; BLOCK],
                 r: vec![0.0; BLOCK],
@@ -680,6 +665,9 @@ pub fn build(
                 c
             },
             bed: vec![0.0; BLOCK * channels],
+            lfe_filter: af27_space::lfe::LfeFilter::new(rate),
+            peaks: [0.0; MAX_SPEAKERS],
+            speakers: session.monitor == af27_core::space::Monitor::Speakers,
         }
     });
     let master_slots: &[af27_core::EffectSlot] = if space.is_some() {
@@ -747,6 +735,7 @@ impl Mix {
         if let Some(sp) = &mut self.space {
             sp.chain.reset();
         }
+        self.space_reset();
     }
 
     /// New settings for a master chain slot (on the speakers in 3D).
@@ -808,6 +797,9 @@ impl Mix {
     }
 
     fn route(&mut self, ti: usize, n: usize) {
+        if self.route_space(ti, n) {
+            return;
+        }
         let out = self.tracks[ti].output;
         match out {
             Some(bus) if bus != ti && (bus > ti || !self.tracks[ti].is_bus) => {
@@ -821,33 +813,18 @@ impl Mix {
                     *br += r;
                 }
             }
-            _ => match &mut self.space {
-                Some(sp) => {
-                    let t = &self.tracks[ti];
-                    let ch = sp.channels;
-                    for i in 0..n {
-                        let (l, r) = (t.l[i], t.r[i]);
-                        let frame = &mut sp.bed[i * ch..(i + 1) * ch];
-                        for c in 0..ch.min(MAX_SPEAKERS) {
-                            frame[c] += l * t.space_l[c] + r * t.space_r[c];
-                        }
-                        if let Some(lc) = sp.lfe_channel {
-                            frame[lc] += (l + r) * 0.5 * t.lfe;
-                        }
-                    }
+            // (In a 3D session `route_space` placed it on the bed.)
+            _ => {
+                let t = &self.tracks[ti];
+                for ((ml, mr), (l, r)) in self.ml[..n]
+                    .iter_mut()
+                    .zip(&mut self.mr[..n])
+                    .zip(t.l[..n].iter().zip(&t.r[..n]))
+                {
+                    *ml += l;
+                    *mr += r;
                 }
-                None => {
-                    let t = &self.tracks[ti];
-                    for ((ml, mr), (l, r)) in self.ml[..n]
-                        .iter_mut()
-                        .zip(&mut self.mr[..n])
-                        .zip(t.l[..n].iter().zip(&t.r[..n]))
-                    {
-                        *ml += l;
-                        *mr += r;
-                    }
-                }
-            },
+            }
         }
     }
 
@@ -857,7 +834,7 @@ impl Mix {
                 let x = &self.tracks[ti].sends[s];
                 (x.bus, x.gain, x.pre)
             };
-            if is_pre != pre || bus == ti {
+            if is_pre != pre || bus == ti || self.send_space(ti, bus, g, n) {
                 continue;
             }
             let (t, b) = pair(&mut self.tracks, ti, bus);
@@ -882,6 +859,7 @@ impl Mix {
         }
         self.sends(ti, n, false);
         self.route(ti, n);
+        self.space_end_track(ti);
     }
 
     /// Renders `n` frames (n <= BLOCK) from `t0` into `out`, interleaved
@@ -901,6 +879,7 @@ impl Mix {
         if let Some(sp) = &mut self.space {
             sp.bed[..n * sp.channels].fill(0.0);
         }
+        self.space_begin(t0 + dt * n as f64 * 0.5, n);
         for t in &mut self.tracks {
             if t.is_bus {
                 t.l[..n].fill(0.0);
@@ -920,11 +899,13 @@ impl Mix {
                     // pool runs each `k` exactly once, so these borrows never
                     // overlap; key sources sit at earlier levels.
                     let t = unsafe { &mut *tracks.get(level[k]) };
+                    let room = t.sp.as_ref().is_some_and(|s| s.room.is_some());
                     if !t.is_bus {
                         render_source(t, tracks, t0, dt, n);
-                    } else if t.audible {
+                    } else if t.audible && !room {
                         run_chain(t, tracks, n);
                     }
+                    space::render_track(t, t0, dt, n);
                 };
                 if self.parallel && level.len() >= 2 {
                     crate::pool::pool().run(level.len(), &job);
@@ -942,9 +923,10 @@ impl Mix {
             }
         }
         self.levels = levels;
+        // The LFE band and the master chain on the speakers, before
+        // listening or export.
+        self.space_master(n);
         if let Some(sp) = &mut self.space {
-            // The master chain on the speakers, before listening or export.
-            sp.chain.process(&mut sp.bed[..n * sp.channels]);
             if bed_out {
                 let ch = sp.channels;
                 let mut peak = (0.0f32, 0.0f32);

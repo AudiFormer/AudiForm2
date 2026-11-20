@@ -1809,20 +1809,14 @@ impl State {
     }
 
     pub fn live_space(&mut self, ti: usize) {
-        let Some(layout) = self.session.space else {
+        if self.session.space.is_none() {
+            return;
+        }
+        let Some(pos) = self.session.tracks.get(ti).map(|t| t.pos) else {
             return;
         };
-        let Some(t) = self.session.tracks.get(ti) else {
-            return;
-        };
-        let stereo = t.kind != af27_core::TrackKind::Audio
-            || t.clips.iter().any(|c| {
-                self.media_buffer(c.media)
-                    .is_some_and(|b| b.num_channels() >= 2)
-            });
-        let (l, r, lfe) = af27_engine::space_gains(layout, &t.pos, stereo);
         if let Some(e) = &mut self.engine {
-            e.set_space(ti, l, r, lfe);
+            e.set_space(ti, pos);
         }
     }
 
