@@ -405,7 +405,7 @@ fn mapper(st: &State, area: Rect) -> Option<Mapper> {
     let d = st.doc()?;
     Some(Mapper {
         area,
-        bands: d.buf.num_channels().clamp(1, 8),
+        bands: d.buf.num_channels().clamp(1, crate::waveform::SPEC_MAX_CH),
         view: d.view,
         spec: st.spec,
         ny: d.buf.rate as f64 / 2.0,
@@ -979,7 +979,7 @@ pub fn poll(st: &mut State) {
         st.error("The file changed during the spectral edit, so it was not applied.");
         return;
     }
-    d.set_buffer(&job.label, buf);
+    d.set_buffer_on(&job.label, buf);
     if job.clear_after {
         d.spec_sel.clear();
     }

@@ -910,9 +910,10 @@ pub fn apply_file_rack(st: &mut State) {
             *s = (*s * rack.mix + *d * (1.0 - rack.mix)) * gout;
         }
     }
+    let seg = d.chans.fit_len(seg, r.len());
     let mut b = (*d.buf).clone();
     b.replace(r, &seg);
-    d.set_buffer("Effects Rack", b);
+    d.set_buffer_on("Effects Rack", b);
 }
 
 // ------------------------------------------------------------ presets

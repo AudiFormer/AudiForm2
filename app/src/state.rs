@@ -77,13 +77,18 @@ pub struct Doc {
     pub info: af27_io::meta::FileInfo,
     /// Made with New Audio File at this bit depth (Save As starts there).
     pub new_bits: Option<u16>,
+    /// Which channels are switched on in the Waveform editor (heard and
+    /// edited). A view setting: never saved into the file.
+    pub chans: crate::wave_channels::ChannelSet,
 }
 
 impl Doc {
     pub fn new(id: DocId, name: String, path: Option<PathBuf>, buf: AudioBuffer) -> Doc {
         let peaks = Arc::new(Peaks::build(&buf));
         let dur = buf.duration_secs();
+        let chans = crate::wave_channels::ChannelSet::all(buf.num_channels());
         Doc {
+            chans,
             id,
             name,
             path,
@@ -132,7 +137,17 @@ impl Doc {
         self.after_change();
     }
 
+    /// [`Doc::set_buffer`] for an edit of the channels that are on: the
+    /// channels switched off keep their audio, and the history names the
+    /// channels edited.
+    pub fn set_buffer_on(&mut self, label: &str, buf: AudioBuffer) {
+        let buf = self.chans.merge(&self.buf, buf);
+        let label = format!("{label}{}", self.chans.edit_suffix());
+        self.set_buffer(&label, buf);
+    }
+
     fn after_change(&mut self) {
+        self.chans = self.chans.fit(self.buf.num_channels());
         self.peaks = Arc::new(Peaks::build(&self.buf));
         self.dirty = true;
         self.version += 1;
@@ -219,7 +234,7 @@ pub struct State {
     /// Waits between attempts to open the audio device again after it
     /// went away or would not open.
     pub audio_retry: af27_engine::health::Backoff,
-    program_key: (Mode, DocId, u64, u64),
+    program_key: (Mode, DocId, u64, u64, u64),
     /// The session the playing mix was built from, less what does not
     /// change the sound (see `audio_view`).
     program_session: Option<Session>,
@@ -522,7 +537,7 @@ impl State {
             engine,
             engine_error,
             audio_retry: Default::default(),
-            program_key: (Mode::Waveform, 0, 0, 0),
+            program_key: (Mode::Waveform, 0, 0, 0, 0),
             program_session: None,
             program_docs: 0,
             prerender: Default::default(),
@@ -1122,6 +1137,8 @@ impl State {
             self.session_version
                 + self.docs.iter().map(|d| d.version).sum::<u64>()
                 + (self.prerender.version << 32),
+            // Channels switched off in the Waveform editor are silent.
+            self.doc().map_or(0, |d| d.chans.on_mask()),
         );
         if key == self.program_key {
             return;
@@ -1161,7 +1178,11 @@ impl State {
         }
         let program = match self.mode {
             Mode::Waveform => match self.doc() {
-                Some(d) => af27_engine::buffer_program(d.buf.clone()),
+                Some(d) => af27_engine::buffer_program(
+                    d.chans
+                        .audible(&d.buf)
+                        .map_or_else(|| d.buf.clone(), Arc::new),
+                ),
                 // No file open: nothing plays (not the file just closed).
                 None => {
                     af27_engine::buffer_program(Arc::new(AudioBuffer::new(self.session.rate, 2, 0)))
@@ -1403,7 +1424,13 @@ impl State {
             Err(e) => self.engine_error = Some(e),
         }
         // Hand the new stream everything again.
-        self.program_key = (Mode::Waveform, u64::MAX as DocId, u64::MAX, u64::MAX);
+        self.program_key = (
+            Mode::Waveform,
+            u64::MAX as DocId,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+        );
         self.program_session = None;
         self.sync_program();
         self.live_metronome();
@@ -1733,10 +1760,10 @@ impl State {
         }
         let mut b = (*doc.buf).clone();
         let seg = b.slice(r);
-        let out = e.process(&seg, &vals);
+        let out = doc.chans.fit_len(e.process(&seg, &vals), seg.frames());
         let new_len = out.frames();
         b.replace(r, &out);
-        doc.set_buffer(e.name(), b);
+        doc.set_buffer_on(e.name(), b);
         if doc.sel.is_some() {
             let rate = doc.buf.rate as f64;
             doc.sel = Some((r.start as f64 / rate, (r.start + new_len) as f64 / rate));
@@ -1746,7 +1773,8 @@ impl State {
     pub fn edit_copy(&mut self) {
         if let Some(d) = self.doc() {
             if d.sel.is_some() {
-                let c = d.buf.slice(d.target());
+                // Only the channels switched on.
+                let c = d.chans.pick(&d.buf.slice(d.target()));
                 self.clipboard = Some(c);
             }
         }
@@ -1763,6 +1791,13 @@ impl State {
             }
             let r = d.target();
             let mut b = (*d.buf).clone();
+            if d.chans.some_off() {
+                // Channels switched off keep their audio, so the length
+                // stays: the channels on fall silent there instead.
+                d.chans.silence(&mut b, r);
+                d.set_buffer_on(label, b);
+                return;
+            }
             b.cut(r);
             d.set_buffer(label, b);
             d.cursor = r.start as f64 / d.buf.rate as f64;
@@ -1781,6 +1816,24 @@ impl State {
         };
         let Some(d) = self.doc_mut() else { return };
         let mut c = af27_dsp::resample::resample(&clip, d.buf.rate);
+        if d.chans.some_off() {
+            // Over the channels switched on, from the selection's start
+            // (or the cursor); the others keep their audio.
+            let on = d.chans.on().len();
+            if c.num_channels() != 1 {
+                c = af27_dsp::resample::remix(&c, on);
+            }
+            let at = match d.sel {
+                Some(_) => d.target().start,
+                None => ((d.cursor * d.buf.rate as f64) as usize).min(d.buf.frames()),
+            };
+            let mut b = (*d.buf).clone();
+            d.chans.overwrite(&mut b, at, &c);
+            let rate = b.rate as f64;
+            d.set_buffer_on("Paste", b);
+            d.sel = Some((at as f64 / rate, (at + c.frames()) as f64 / rate));
+            return;
+        }
         c = af27_dsp::resample::remix(&c, d.buf.num_channels());
         let mut b = (*d.buf).clone();
         let at = match d.sel {
@@ -1799,7 +1852,14 @@ impl State {
 
     pub fn edit_crop(&mut self) {
         if let Some(d) = self.doc_mut() {
-            if d.sel.is_some() {
+            if d.sel.is_some() && d.chans.some_off() {
+                // The channels switched off keep their audio, so the
+                // length stays: the channels on fall silent around it.
+                let mut b = (*d.buf).clone();
+                let r = d.target();
+                d.chans.silence_outside(&mut b, r);
+                d.set_buffer_on("Crop", b);
+            } else if d.sel.is_some() {
                 let b = d.buf.slice(d.target());
                 d.set_buffer("Crop", b);
                 d.sel = None;
