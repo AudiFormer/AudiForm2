@@ -206,3 +206,16 @@ Behaviour follows Audiform 1's decisions log (dates are its entries).
 - **`.audfrm` stays byte-exact for unedited sessions:** none of the above
   touches media the file already had. New media inside the session folder
   gets a `relative_path`, as Audiform writes it.
+
+## 2026-11-19: GPLv3
+
+- **Licence changed to GPL-3.0-or-later** (project lead), so release builds
+  can include ASIO under Steinberg's GPLv3 option for the ASIO SDK. The
+  earlier AudiForm 2 License 1.0 is withdrawn; its exclusion clause cannot
+  stand under the GPL, which forbids added restrictions.
+- **The clean-room rule stays.** No code is taken from Audiform 1 or from
+  the editor it was forked from: every Audiform 1 file carries that
+  editor's copyright line, and the project lead does not want AudiForm 2 to
+  owe it credit. Behaviour only, as before.
+- **Contributions** need the relicensing grant in `CONTRIBUTING.md`, so the
+  project lead keeps the freedom to license AudiForm 2 differently later.

@@ -157,9 +157,12 @@ window is in the background or minimised.
 
 ## Licence
 
-Audiform27 is under the **AudiForm 2 License 1.0** (`LICENSE`): MIT-style
-freedoms for everyone except the Excluded Parties it names, who get no
-rights at all. It is source-available rather than OSI open source.
-`crates/af27-dts` is the exception: it is **LGPL-2.1-or-later**, because its
-decoder is a Rust port of FFmpeg's DTS decoder. See `ATTRIBUTION.md` and
+AudiForm 2 is free software under the **GNU General Public License,
+version 3 or later** (`LICENSE`, full text in `COPYING`).
+`crates/af27-dts` is **LGPL-2.1-or-later**, because its decoder is a Rust
+port of FFmpeg's DTS decoder.
+
+AudiForm 2 is written clean-room: it takes no code from Audiform 1 or from
+any project it was forked from, only behaviour. Contributions are accepted
+only under the terms in `CONTRIBUTING.md`. See `ATTRIBUTION.md` and
 `docs/clean-room.md` for where every part comes from.

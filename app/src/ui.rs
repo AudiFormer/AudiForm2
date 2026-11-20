@@ -2021,7 +2021,7 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
         ui.label(RichText::new("AUDIFORM 2").size(28.0).strong().extra_letter_spacing(6.0).color(c(st.theme.accent)));
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.label("A fast, themeable audio editor written entirely in Rust.");
-        ui.label("AudiForm 2 License 1.0 (see LICENSE). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
+        ui.label("Free software under the GNU General Public License, version 3 or later (see LICENSE and COPYING). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
         ui.label("The sequel to Audiform, by the same project lead.");
     });
     st.show_about = open;
