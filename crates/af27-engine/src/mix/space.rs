@@ -19,6 +19,7 @@
 use af27_core::space::{SpaceLane, SpaceLayout, SpacePos, SpatializeMode};
 use af27_dsp::wide::{build_wide_chain, WideChain};
 use af27_space::diffuse::Diffuser;
+use af27_space::steer::Steer;
 use af27_space::{Placement, MAX_SPEAKERS};
 
 use super::{Mix, MixClip, MixTrack, BLOCK};
@@ -35,9 +36,70 @@ pub struct TrackPlace {
     /// rather than gliding in.
     fresh: bool,
     diffuser: Box<Diffuser>,
+    /// Place Elements, for a source set to it in a session built with it.
+    steer: Option<Box<Steer>>,
+    /// The session's Place Elements delay on everything placed (so the
+    /// steered and the plain sound line up): None when nothing steers.
+    hold: Option<Box<Hold>>,
+}
+
+/// A source's sound held back by the Place Elements frame.
+pub struct Hold {
+    ring_l: Vec<f32>,
+    ring_r: Vec<f32>,
+    at: usize,
+    l: Vec<f32>,
+    r: Vec<f32>,
+    /// This block's held sound is ready (the track may be placed twice:
+    /// its output and a send).
+    ready: bool,
+}
+
+impl Hold {
+    fn new(frames: usize) -> Hold {
+        Hold {
+            ring_l: vec![0.0; frames],
+            ring_r: vec![0.0; frames],
+            at: 0,
+            l: vec![0.0; BLOCK],
+            r: vec![0.0; BLOCK],
+            ready: false,
+        }
+    }
+
+    fn fill(&mut self, l: &[f32], r: &[f32], n: usize) {
+        if self.ready {
+            return;
+        }
+        let len = self.ring_l.len();
+        for i in 0..n {
+            self.l[i] = std::mem::replace(&mut self.ring_l[self.at], l[i]);
+            self.r[i] = std::mem::replace(&mut self.ring_r[self.at], r[i]);
+            self.at = (self.at + 1) % len;
+        }
+        self.ready = true;
+    }
+
+    fn clear(&mut self) {
+        self.ring_l.fill(0.0);
+        self.ring_r.fill(0.0);
+        self.ready = false;
+    }
+}
+
+/// Whether a session needs the Place Elements delay: a placed stereo
+/// source is set to it.
+pub fn session_steers(session: &af27_core::Session) -> bool {
+    session.space.is_some()
+        && session.tracks.iter().any(|t| {
+            !(t.kind == af27_core::TrackKind::Bus && t.spatial.room)
+                && t.pos.spatialize_mode == SpatializeMode::Steer
+                && t.spatial.stereo != Some(false)
+        })
 }
 
 impl TrackPlace {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         layout: SpaceLayout,
         pos: SpacePos,
@@ -45,12 +107,15 @@ impl TrackPlace {
         stereo: bool,
         rate: u32,
         k: usize,
+        lead: usize,
     ) -> TrackPlace {
         let lanes: Vec<SpaceLane> = lanes
             .into_iter()
             .filter(|l| l.enabled && !l.points.is_empty())
             .collect();
-        let target = compute(layout, &pos, stereo);
+        let steer = (lead > 0 && stereo && pos.spatialize_mode == SpatializeMode::Steer)
+            .then(|| Box::new(Steer::new(layout, rate, k as u64 + 1)));
+        let target = compute(layout, &pos, stereo, steer.is_some());
         TrackPlace {
             layout,
             stereo,
@@ -60,20 +125,22 @@ impl TrackPlace {
             prev: target,
             fresh: true,
             diffuser: Box::new(Diffuser::new(rate, k)),
+            steer,
+            hold: (lead > 0).then(|| Box::new(Hold::new(lead))),
         }
     }
 
     /// A new spot (dragged live). No allocation.
     pub fn set_pos(&mut self, pos: SpacePos) {
         self.pos = pos;
-        self.target = compute(self.layout, &pos, self.stereo);
+        self.target = compute(self.layout, &pos, self.stereo, self.steer.is_some());
     }
 
     /// Moves automated values to time `t`.
     fn automate(&mut self, t: f64) {
         if !self.lanes.is_empty() {
             let p = self.pos.at_time(&self.lanes, t);
-            self.target = compute(self.layout, &p, self.stereo);
+            self.target = compute(self.layout, &p, self.stereo, self.steer.is_some());
         }
         if std::mem::take(&mut self.fresh) {
             self.prev = self.target;
@@ -83,6 +150,12 @@ impl TrackPlace {
     fn reset(&mut self) {
         self.diffuser.clear();
         self.fresh = true;
+        if let Some(s) = &mut self.steer {
+            s.reset();
+        }
+        if let Some(h) = &mut self.hold {
+            h.clear();
+        }
     }
 
     /// Adds `n` frames of `l`/`r` (times `gain`) to interleaved `bed`
@@ -102,13 +175,34 @@ impl TrackPlace {
     ) {
         let (a, b) = (self.prev, self.target);
         let moving = a != b;
+        let steering = field && self.steer.is_some() && (a.steer > 0.0 || b.steer > 0.0);
         let field = field && (a.has_field() || b.has_field());
         let mut cur = b;
         let width = ch.min(MAX_SPEAKERS);
+        // Place Elements hears the sound as it is (it adds its own frame
+        // of delay); everything else is held back by that frame.
+        let (raw_l, raw_r) = (l, r);
+        let (l, r) = match self.hold.as_deref_mut() {
+            Some(h) => {
+                h.fill(raw_l, raw_r, n);
+                (&h.l[..n], &h.r[..n])
+            }
+            None => (raw_l, raw_r),
+        };
+        let mut steered = [0.0f32; MAX_SPEAKERS];
         for i in 0..n {
             let (x, y) = (l[i] * gain, r[i] * gain);
             if moving {
                 lerp_into(&a, &b, (i + 1) as f32 / n as f32, &mut cur);
+            }
+            if steering {
+                if let Some(st) = self.steer.as_deref_mut() {
+                    st.run(raw_l[i] * gain, raw_r[i] * gain, &mut steered[..width]);
+                    let frame = &mut bed[i * ch..(i + 1) * ch];
+                    for (o, v) in frame[..width].iter_mut().zip(&steered) {
+                        *o += v * cur.steer;
+                    }
+                }
             }
             let frame = &mut bed[i * ch..(i + 1) * ch];
             for ((o, gl), gr) in frame[..width].iter_mut().zip(&cur.bed[0]).zip(&cur.bed[1]) {
@@ -124,11 +218,12 @@ impl TrackPlace {
     }
 }
 
-/// The placement for a spot. Place Elements is not built yet: a source
-/// set to it plays from its spot as if Spatialize were off.
-fn compute(layout: SpaceLayout, pos: &SpacePos, stereo: bool) -> Placement {
+/// The placement for a spot. A source set to Place Elements in a mix
+/// built without it (it was switched on since) plays from its spot as if
+/// Spatialize were off until the mix is rebuilt.
+fn compute(layout: SpaceLayout, pos: &SpacePos, stereo: bool, steer: bool) -> Placement {
     let mut p = *pos;
-    if p.spatialize_mode == SpatializeMode::Steer {
+    if p.spatialize_mode == SpatializeMode::Steer && !steer {
         p.spatialize = 0.0;
     }
     Placement::new(layout, &p, stereo)
@@ -146,6 +241,7 @@ fn lerp_into(a: &Placement, b: &Placement, f: f32, out: &mut Placement) {
         out.side[c] = mix(a.side[c], b.side[c]);
     }
     out.lfe = mix(a.lfe, b.lfe);
+    out.steer = mix(a.steer, b.steer);
     out.center = mix(
         if a.center_channel == b.center_channel {
             a.center
@@ -177,6 +273,9 @@ pub struct TrackFeed {
     bed: Vec<f32>,
     /// Per speaker: stereo fold, for a track that outputs to a stereo bus.
     fold: Vec<[f32; 2]>,
+    /// The Place Elements delay (interleaved ring), when the session has it.
+    hold: Vec<f32>,
+    hold_at: usize,
 }
 
 /// Everything 3D about one track of the mix.
@@ -189,6 +288,7 @@ pub struct TrackSpaceMix {
 
 /// Builds a track's 3D parts. `wide` are its clips of more than two
 /// channels that play from their speakers.
+#[allow(clippy::too_many_arguments)]
 pub fn for_track(
     layout: SpaceLayout,
     t: &af27_core::Track,
@@ -196,6 +296,7 @@ pub fn for_track(
     stereo: bool,
     rate: u32,
     k: usize,
+    lead: usize,
 ) -> Box<TrackSpaceMix> {
     let names = bed_names(layout);
     let ch = names.len();
@@ -209,9 +310,17 @@ pub fn for_track(
     });
     // An Audiform session says whether the track is a pair or a point.
     let stereo = t.spatial.stereo.unwrap_or(stereo);
-    let place = room
-        .is_none()
-        .then(|| TrackPlace::new(layout, t.pos, t.spatial.lanes.clone(), stereo, rate, k));
+    let place = room.is_none().then(|| {
+        TrackPlace::new(
+            layout,
+            t.pos,
+            t.spatial.lanes.clone(),
+            stereo,
+            rate,
+            k,
+            lead,
+        )
+    });
     let feed = (!wide.is_empty()).then(|| TrackFeed {
         clips: wide
             .into_iter()
@@ -234,6 +343,8 @@ pub fn for_track(
         },
         bed: vec![0.0; BLOCK * ch],
         fold: af27_space::fold_bed(layout),
+        hold: vec![0.0; lead * ch],
+        hold_at: 0,
     });
     Box::new(TrackSpaceMix { place, room, feed })
 }
@@ -277,6 +388,17 @@ pub fn render_track(t: &mut MixTrack, t0: f64, dt: f64, n: usize) {
             read_clip_bed(fc, t0, dt, n, &mut feed.bed, ch);
         }
         feed.chain.process(&mut feed.bed[..n * ch]);
+        // Held back with everything placed, when the session steers.
+        if !feed.hold.is_empty() {
+            let frames = feed.hold.len() / ch;
+            for f in feed.bed[..n * ch].chunks_exact_mut(ch) {
+                let slot = &mut feed.hold[feed.hold_at * ch..(feed.hold_at + 1) * ch];
+                for (v, h) in f.iter_mut().zip(slot.iter_mut()) {
+                    std::mem::swap(v, h);
+                }
+                feed.hold_at = (feed.hold_at + 1) % frames;
+            }
+        }
     }
 }
 
@@ -468,6 +590,37 @@ impl Mix {
             .and_then(|s| s.place.as_mut())
         {
             p.prev = p.target;
+            if let Some(h) = &mut p.hold {
+                h.ready = false;
+            }
+        }
+    }
+
+    /// Frames every placed sound is held back by (Place Elements), and
+    /// sources are read ahead by so it all still lines up with the clock.
+    pub fn lead(&self) -> usize {
+        self.lead
+    }
+
+    /// After a jump: the held-back frame is filled with the sound just
+    /// before it (rendered and thrown away), so nothing goes missing.
+    pub(super) fn prime(&mut self, t0: f64, dt: f64) {
+        if self.lead == 0 || self.primed {
+            return;
+        }
+        self.primed = true;
+        let mut buf = std::mem::take(&mut self.prime_out);
+        let mut left = self.lead;
+        let mut t = t0 - self.lead as f64 * dt;
+        while left > 0 {
+            let n = left.min(BLOCK);
+            self.render(t, dt, n, &mut buf, true);
+            t += n as f64 * dt;
+            left -= n;
+        }
+        self.prime_out = buf;
+        if let Some(sp) = &mut self.space {
+            sp.peaks = [0.0; MAX_SPEAKERS];
         }
     }
 
@@ -557,6 +710,12 @@ impl Mix {
         if let Some(sp) = &mut self.space {
             sp.lfe_filter.reset();
         }
+        for t in &mut self.tracks {
+            if let Some(f) = t.sp.as_deref_mut().and_then(|s| s.feed.as_mut()) {
+                f.hold.fill(0.0);
+            }
+        }
+        self.primed = false;
     }
 
     /// Each speaker's peak since the last call (after the master chain,

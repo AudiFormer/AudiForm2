@@ -12,6 +12,7 @@ pub mod diffuse;
 pub mod lfe;
 pub mod pan;
 pub mod place;
+pub mod steer;
 
 pub use af27_core::space::{Monitor, SpaceLayout, SpacePos, SpatializeMode};
 pub use binaural::Binaural;

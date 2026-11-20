@@ -698,6 +698,7 @@ pub fn spot_controls(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     let stereo = is_stereo(st, &st.session.tracks[ti]);
     let automated = !st.session.tracks[ti].spatial.lanes.is_empty();
     let mut ch = false;
+    let mut rebuild = false;
     {
         let p = &mut st.session.tracks[ti].pos;
         let mut height = p.z * 100.0;
@@ -745,17 +746,16 @@ pub fn spot_controls(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                 .selected_text(mode.label())
                 .show_ui(ui, |ui| {
                     for m in SpatializeMode::ALL {
-                        let label = if m == SpatializeMode::Steer {
-                            format!("{} (not yet heard here)", m.label())
-                        } else {
-                            m.label().to_string()
-                        };
                         if ui
-                            .selectable_label(mode == m, label)
+                            .selectable_label(mode == m, m.label())
                             .on_hover_text(m.tip())
                             .clicked()
+                            && m != mode
                         {
                             p.spatialize_mode = m;
+                            // Place Elements delays the whole room by a
+                            // frame: the mix is rebuilt to switch it.
+                            rebuild |= m == SpatializeMode::Steer || mode == SpatializeMode::Steer;
                             ch = true;
                         }
                     }
@@ -808,6 +808,10 @@ pub fn spot_controls(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             RichText::new("Some settings are automated: those follow their lanes in playback.")
                 .size(10.0),
         );
+    }
+    if rebuild {
+        st.commit_session("Spatialize method", before);
+        return;
     }
     if ch {
         st.live_space(ti);

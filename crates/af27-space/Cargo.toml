@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 af27-core.workspace = true
+realfft = "3.4"
 
 [dev-dependencies]
 af27-dsp.workspace = true

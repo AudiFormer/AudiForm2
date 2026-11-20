@@ -361,3 +361,52 @@ fn bed_exports_have_their_layout_channels_and_order() {
     assert!((film.channels[4][100] - 1.0).abs() < 1e-5);
     assert!(film.channels[6][100].abs() < 1e-6);
 }
+
+#[test]
+fn place_elements_lines_up_with_everything_else() {
+    use af27_core::space::SpatializeMode;
+    let rate = RATE as usize;
+    let mut click = vec![0.0f32; rate];
+    click[3000] = 1.0;
+    // A session with one steered and one plain track: both clicks land
+    // on the frame they were placed at, as without Place Elements.
+    let mut f = Fixture::new(Some(SpaceLayout::Surround51));
+    let a = f.track(vec![click.clone(), click.clone()]);
+    f.t(a).pos.spatialize = 1.0;
+    f.t(a).pos.spatialize_mode = SpatializeMode::Steer;
+    let b = f.track(vec![click.clone()]);
+    f.t(b).pos.x = -1.0;
+    let Program::Mix(m) = f.program() else {
+        unreachable!()
+    };
+    assert_eq!(m.lead(), af27_space::steer::STEER_FRAME);
+    let bed = f.bed(1.0);
+    let peak_at = |c: usize| {
+        (0..bed.frames())
+            .max_by(|&i, &j| {
+                bed.channels[c][i]
+                    .abs()
+                    .total_cmp(&bed.channels[c][j].abs())
+            })
+            .unwrap()
+    };
+    // The plain track on L, the steered one (centred) on C.
+    assert_eq!(peak_at(0), 3000);
+    assert_eq!(peak_at(2), 3000);
+    // A render from part way in still has what comes right after its start.
+    let from = 3000.0 / RATE as f64 - 0.01;
+    let part = render_bed(f.program(), RATE, from, from + 0.1);
+    let at = (0.01 * RATE as f64).round() as usize;
+    // (The steered track spills a little onto L around its click.)
+    assert!(
+        (part.channels[0][at] - 1.0).abs() < 0.06,
+        "{}",
+        part.channels[0][at]
+    );
+    // Without a steered track there is no delay.
+    f.t(a).pos.spatialize_mode = SpatializeMode::SideSpread;
+    let Program::Mix(m) = f.program() else {
+        unreachable!()
+    };
+    assert_eq!(m.lead(), 0);
+}

@@ -165,6 +165,11 @@ pub struct Mix {
     levels: Vec<Vec<usize>>,
     /// Spread track work over the engine's threads (false: all on the caller).
     pub parallel: bool,
+    /// 3D: frames placed sound is held back by for Place Elements (sources
+    /// read that far ahead), 0 when nothing steers; see `space::prime`.
+    lead: usize,
+    primed: bool,
+    prime_out: Vec<f32>,
 }
 
 /// Stereo at fractional index `x`, folding wide files (see `stereo_frame`).
@@ -529,6 +534,11 @@ pub fn build(
     rate: u32,
 ) -> Mix {
     let space = session.space;
+    let lead = if space::session_steers(session) {
+        af27_space::steer::STEER_FRAME
+    } else {
+        0
+    };
     let index_of = |id: af27_core::TrackId| session.tracks.iter().position(|t| t.id == id);
     let tracks: Vec<MixTrack> = session
         .tracks
@@ -586,7 +596,7 @@ pub fn build(
             });
             let stereo =
                 t.kind != TrackKind::Audio || clips.iter().any(|c| c.buf.num_channels() >= 2);
-            let sp = space.map(|layout| space::for_track(layout, t, wide, stereo, rate, ti));
+            let sp = space.map(|layout| space::for_track(layout, t, wide, stereo, rate, ti, lead));
             let (gain_l, gain_r) = track_gains(t, space.is_some());
             MixTrack {
                 is_bus: t.kind == TrackKind::Bus,
@@ -697,6 +707,13 @@ pub fn build(
         click: session.tempo.segments().collect(),
         ml: vec![0.0; BLOCK],
         mr: vec![0.0; BLOCK],
+        lead,
+        primed: false,
+        prime_out: if lead > 0 {
+            vec![0.0; BLOCK * MAX_SPEAKERS]
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -877,6 +894,9 @@ impl Mix {
         bed_out: bool,
     ) -> (f32, f32) {
         let n = n.min(BLOCK);
+        self.prime(t0, dt);
+        // Sources are read ahead by the Place Elements delay (0 without it).
+        let ts = t0 + self.lead as f64 * dt;
         self.ml[..n].fill(0.0);
         self.mr[..n].fill(0.0);
         if let Some(sp) = &mut self.space {
@@ -904,11 +924,11 @@ impl Mix {
                     let t = unsafe { &mut *tracks.get(level[k]) };
                     let room = t.sp.as_ref().is_some_and(|s| s.room.is_some());
                     if !t.is_bus {
-                        render_source(t, tracks, t0, dt, n);
+                        render_source(t, tracks, ts, dt, n);
                     } else if t.audible && !room {
                         run_chain(t, tracks, n);
                     }
-                    space::render_track(t, t0, dt, n);
+                    space::render_track(t, ts, dt, n);
                 };
                 if self.parallel && level.len() >= 2 {
                     crate::pool::pool().run(level.len(), &job);
