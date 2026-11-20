@@ -1644,31 +1644,23 @@ fn read_clip(
         track_type == Some("mono"),
     );
 
-    let mut fade_skew = |tag: &str| -> (f64, f32) {
+    let mut fade_skew = |tag: &str| -> (f64, f32, bool) {
         let Some(f) = child(c, tag) else {
-            return (0.0, 0.0);
+            return (0.0, 0.0, false);
         };
         let len =
             (num(f, "endPoint").unwrap_or(0.0) - num(f, "startPoint").unwrap_or(0.0)).abs() / rate;
         if len <= 0.0 {
-            return (0.0, 0.0);
+            return (0.0, 0.0, false);
         }
         let shape = num(f, "shape").unwrap_or(0.0).clamp(-100.0, 100.0) as f32;
-        match f.attribute("type") {
-            Some("cosine") => {
-                report.approx("S-curve fade(s) (as straight curves)");
-                (len, 0.0)
-            }
-            _ => {
-                if shape != 0.0 {
-                    report.approx("fade curve(s) (from the file's curve amount)");
-                }
-                (len, shape)
-            }
+        if shape != 0.0 {
+            report.approx("fade curve(s) (from the file's curve amount)");
         }
+        (len, shape, f.attribute("type") == Some("cosine"))
     };
-    let (fade_in, fade_in_skew) = fade_skew("fadeIn");
-    let (fade_out, fade_out_skew) = fade_skew("fadeOut");
+    let (fade_in, fade_in_skew, fade_in_bell) = fade_skew("fadeIn");
+    let (fade_out, fade_out_skew, fade_out_bell) = fade_skew("fadeOut");
 
     let id = out.alloc_id();
     let mut clip = Clip {
@@ -1690,6 +1682,8 @@ fn read_clip(
     clip.props.color = hue_rgb(num(c, "hue"));
     clip.props.fade_in_skew = fade_in_skew;
     clip.props.fade_out_skew = fade_out_skew;
+    clip.props.fade_in_bell = fade_in_bell;
+    clip.props.fade_out_bell = fade_out_bell;
     clip.props.lanes = lanes;
     clip.props.chain = clip_chain;
     clip.props.rack = clip_rack;

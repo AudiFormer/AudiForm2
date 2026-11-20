@@ -79,6 +79,8 @@ pub struct MixClip {
     pub fade_out: f64,
     pub fade_in_skew: f32,
     pub fade_out_skew: f32,
+    pub fade_in_bell: bool,
+    pub fade_out_bell: bool,
     /// Source seconds per timeline second (1 / the stretch ratio).
     pub speed: f64,
     /// Plays its source span backwards.
@@ -222,6 +224,8 @@ impl MixClip {
             fade_out: c.fade_out,
             fade_in_skew: p.fade_in_skew,
             fade_out_skew: p.fade_out_skew,
+            fade_in_bell: p.fade_in_bell,
+            fade_out_bell: p.fade_out_bell,
             speed: 1.0 / p.stretch.applied_ratio(),
             reversed: p.reversed,
             prepared,
@@ -877,13 +881,17 @@ fn add_into(dl: &mut [f32], dr: &mut [f32], sl: &[f32], sr: &[f32]) {
 /// their skew; see `af27_core::session::fade_curve`).
 #[inline]
 fn clip_gain(c: &MixClip, local: f64) -> f32 {
-    use af27_core::session::fade_curve;
+    use af27_core::session::fade_shape;
     let mut g = c.gain as f64;
     if c.fade_in > 0.0 && local < c.fade_in {
-        g *= fade_curve(local / c.fade_in, c.fade_in_skew);
+        g *= fade_shape(local / c.fade_in, c.fade_in_skew, c.fade_in_bell);
     }
     if c.fade_out > 0.0 && c.length - local < c.fade_out {
-        g *= fade_curve((c.length - local) / c.fade_out, c.fade_out_skew);
+        g *= fade_shape(
+            (c.length - local) / c.fade_out,
+            c.fade_out_skew,
+            c.fade_out_bell,
+        );
     }
     if !c.vol.is_empty() {
         g *= lane_gain(&c.vol, local) as f64;

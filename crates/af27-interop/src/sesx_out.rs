@@ -757,10 +757,20 @@ fn write_clip(
     let fout = at(c.fade_out).min(len);
     let _ = write!(
         x,
-        r#"<fadeIn crossFadeLinkType="linkedAsymmetric" endPoint="{fin}" shape="{}" startPoint="0" type="log"/><fadeOut crossFadeLinkType="linkedAsymmetric" endPoint="{len}" shape="{}" startPoint="{}" type="log"/></audioClip>"#,
+        r#"<fadeIn crossFadeLinkType="linkedAsymmetric" endPoint="{fin}" shape="{}" startPoint="0" type="{}"/><fadeOut crossFadeLinkType="linkedAsymmetric" endPoint="{len}" shape="{}" startPoint="{}" type="{}"/></audioClip>"#,
         c.props.fade_in_skew.round() as i32,
+        if c.props.fade_in_bell {
+            "cosine"
+        } else {
+            "log"
+        },
         c.props.fade_out_skew.round() as i32,
-        len - fout
+        len - fout,
+        if c.props.fade_out_bell {
+            "cosine"
+        } else {
+            "log"
+        }
     );
 }
 

@@ -65,6 +65,25 @@ fn fade_menu(ui: &mut egui::Ui, st: &mut State, clip: ClipId, fade_in: bool) {
     } else {
         c.props.fade_out_skew
     };
+    let bell = if fade_in {
+        c.props.fade_in_bell
+    } else {
+        c.props.fade_out_bell
+    };
+    let set_bell = |st: &mut State, on: bool| {
+        edit(st, "Fade", |s| {
+            let Some((ti, ci)) = s.find_clip(clip) else {
+                return false;
+            };
+            let c = &mut s.tracks[ti].clips[ci];
+            if fade_in {
+                c.props.fade_in_bell = on;
+            } else {
+                c.props.fade_out_bell = on;
+            }
+            true
+        })
+    };
     let set = |st: &mut State, v: Option<f32>, remove: bool| {
         edit(st, "Fade", |s| {
             let Some((ti, ci)) = s.find_clip(clip) else {
@@ -88,12 +107,22 @@ fn fade_menu(ui: &mut egui::Ui, st: &mut State, clip: ClipId, fade_in: bool) {
             true
         })
     };
-    if ui.radio(skew == 0.0, "Straight").clicked() {
+    if ui.radio(skew == 0.0 && !bell, "Straight").clicked() {
+        set_bell(st, false);
         set(st, Some(0.0), false);
         ui.close_menu();
     }
-    if ui.radio(skew != 0.0, "Curve").clicked() {
+    if ui.radio(skew != 0.0 && !bell, "Curve").clicked() {
+        set_bell(st, false);
         set(st, Some(if skew == 0.0 { 50.0 } else { skew }), false);
+        ui.close_menu();
+    }
+    if ui
+        .radio(bell, "Bell (S-curve)")
+        .on_hover_text("Gentle at both ends; drag the handle up or down to lean it")
+        .clicked()
+    {
+        set_bell(st, true);
         ui.close_menu();
     }
     ui.add_enabled(false, egui::Button::new(format!("Skew: {skew:+.0}")))

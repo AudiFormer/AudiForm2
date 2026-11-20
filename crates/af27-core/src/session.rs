@@ -197,6 +197,11 @@ pub struct ClipProps {
     pub fade_in_skew: f32,
     #[serde(skip_serializing_if = "is_default")]
     pub fade_out_skew: f32,
+    /// Bell (S-curve) fades: gentle at both ends, the skew bending it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fade_in_bell: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fade_out_bell: bool,
     /// 3D Space: a clip of more than two channels folds to stereo (its
     /// file had a Source Channels mix) instead of playing each channel
     /// from its speaker.
@@ -231,6 +236,17 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
 /// skew of -100..100: 0 is the straight line (exactly `x`), positive
 /// bows the curve up (louder sooner), negative bows it down.
 #[inline]
+/// A fade's gain at `x` (0..1 through it): the skewed curve, or with
+/// `bell` an S-curve (a raised cosine) over the skewed position.
+pub fn fade_shape(x: f64, skew: f32, bell: bool) -> f64 {
+    let y = fade_curve(x, skew);
+    if bell {
+        0.5 - 0.5 * (std::f64::consts::PI * y).cos()
+    } else {
+        y
+    }
+}
+
 pub fn fade_curve(x: f64, skew: f32) -> f64 {
     let x = x.clamp(0.0, 1.0);
     if skew == 0.0 {
@@ -273,11 +289,19 @@ impl Clip {
         let local = t - self.start;
         let mut g = 1.0f64;
         if self.fade_in > 0.0 && local < self.fade_in {
-            g *= fade_curve(local / self.fade_in, self.props.fade_in_skew);
+            g *= fade_shape(
+                local / self.fade_in,
+                self.props.fade_in_skew,
+                self.props.fade_in_bell,
+            );
         }
         let to_end = self.length - local;
         if self.fade_out > 0.0 && to_end < self.fade_out {
-            g *= fade_curve(to_end / self.fade_out, self.props.fade_out_skew);
+            g *= fade_shape(
+                to_end / self.fade_out,
+                self.props.fade_out_skew,
+                self.props.fade_out_bell,
+            );
         }
         (g as f32) * crate::time::db_to_gain(self.gain_db)
     }
@@ -1200,5 +1224,22 @@ mod tests {
         let (s, _) = with_media();
         let (l, r) = s.tracks[0].gains();
         assert!((l - 1.0).abs() < 1e-5 && (r - 1.0).abs() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod fade_shape_tests {
+    use super::fade_shape;
+
+    #[test]
+    fn a_bell_fade_is_gentle_at_both_ends_and_half_way_in_the_middle() {
+        assert!(fade_shape(0.0, 0.0, true).abs() < 1e-12);
+        assert!((fade_shape(1.0, 0.0, true) - 1.0).abs() < 1e-12);
+        assert!((fade_shape(0.5, 0.0, true) - 0.5).abs() < 1e-12);
+        // Slower than straight near the start, faster near the end.
+        assert!(fade_shape(0.1, 0.0, true) < 0.1);
+        assert!(fade_shape(0.9, 0.0, true) > 0.9);
+        // The skew leans it.
+        assert!(fade_shape(0.5, 50.0, true) > 0.5);
     }
 }

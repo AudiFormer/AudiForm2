@@ -260,6 +260,8 @@ fn props_from(c: &Value) -> ClipProps {
         color: hex_color(&c["color"]),
         fade_in_skew: skew_from(&c["fade_in"]),
         fade_out_skew: skew_from(&c["fade_out"]),
+        fade_in_bell: c["fade_in"]["shape"].as_str() == Some("cosine"),
+        fade_out_bell: c["fade_out"]["shape"].as_str() == Some("cosine"),
         // A Source Channels mix that does not pass through to speakers.
         fold_channels: c["channel_mix"].is_object()
             && !c["channel_mix"]["to_speakers"].as_bool().unwrap_or(false),
@@ -443,13 +445,28 @@ fn write_props(co: &mut Map<String, Value>, p: &ClipProps) {
             },
         );
     }
-    for (key, now, was) in [
-        ("fade_in", p.fade_in_skew, had.fade_in_skew),
-        ("fade_out", p.fade_out_skew, had.fade_out_skew),
+    for (key, now, was, bell, had_bell) in [
+        (
+            "fade_in",
+            p.fade_in_skew,
+            had.fade_in_skew,
+            p.fade_in_bell,
+            had.fade_in_bell,
+        ),
+        (
+            "fade_out",
+            p.fade_out_skew,
+            had.fade_out_skew,
+            p.fade_out_bell,
+            had.fade_out_bell,
+        ),
     ] {
-        if now != was {
+        if now != was || bell != had_bell {
             if let Some(f) = co.get_mut(key).and_then(Value::as_object_mut) {
-                f.insert("shape".into(), json!("linear"));
+                f.insert(
+                    "shape".into(),
+                    json!(if bell { "cosine" } else { "linear" }),
+                );
                 f.insert("curve".into(), short(now / 100.0));
             }
         }
