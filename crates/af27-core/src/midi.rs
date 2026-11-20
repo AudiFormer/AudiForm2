@@ -5,11 +5,20 @@
 //! beats, so they follow tempo changes), and the instruments' settings.
 //!
 //! The tempo map: a starting tempo and time signature, plus changes that
-//! each take over at a bar line (no ramps). Beats are always quarter
-//! notes, so a bar of 6/8 is three of them. Each stretch of the map starts
-//! where the previous one's bars end, so a change never leaves a later one
-//! partway through a bar. This is the model Audiform's sessions carry
+//! each take over at a bar line. Beats are always quarter notes, so a bar
+//! of 6/8 is three of them. Each stretch of the map starts where the
+//! previous one's bars end, so a change never leaves a later one partway
+//! through a bar. This is the model Audiform's sessions carry
 //! (`tempo.changes[{bar, bpm, beats_per_bar, beat_unit}]`).
+//!
+//! A change is either immediate (the new tempo starts at its bar) or
+//! gradual (a ritardando or accelerando): the tempo glides in a straight
+//! line, in beats, from the tempo before it to its own, starting at an
+//! earlier bar and arriving at its bar. A time signature always changes
+//! at the change's bar. Seconds in a glide are exact: the time across
+//! beats `0..x` of a glide from `b0` to `b1` BPM over `L` beats is the
+//! integral of `60 / (b0 + k u)` with `k = (b1 - b0) / L`, which is
+//! `60 / k * ln(1 + k x / b0)`.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +52,31 @@ fn clamp_unit(u: u32) -> u32 {
     }
 }
 
+/// How a tempo change arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TempoKind {
+    /// The new tempo starts at the change's bar.
+    #[default]
+    Immediate,
+    /// A ritardando or accelerando: the tempo glides from the one before
+    /// to the change's, starting at `from_bar` (before the change's bar,
+    /// not before the previous change's) and arriving at the change's bar.
+    Ramp { from_bar: u32 },
+}
+
+impl TempoKind {
+    pub fn is_immediate(&self) -> bool {
+        matches!(self, TempoKind::Immediate)
+    }
+    /// Where the glide starts, for a ramp.
+    pub fn ramp_from(&self) -> Option<u32> {
+        match *self {
+            TempoKind::Ramp { from_bar } => Some(from_bar),
+            TempoKind::Immediate => None,
+        }
+    }
+}
+
 /// A tempo and time signature change at the start of a bar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TempoChange {
@@ -54,9 +88,30 @@ pub struct TempoChange {
     pub beats_per_bar: u32,
     #[serde(default = "quarter")]
     pub beat_unit: u32,
+    /// Immediate, or gliding in from an earlier bar.
+    #[serde(default, skip_serializing_if = "TempoKind::is_immediate")]
+    pub kind: TempoKind,
     /// The change's id in an `.audfrm` file it came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_id: Option<String>,
+}
+
+impl TempoChange {
+    /// An immediate change.
+    pub fn new(bar: u32, bpm: f64, beats_per_bar: u32, beat_unit: u32) -> TempoChange {
+        TempoChange {
+            bar,
+            bpm,
+            beats_per_bar,
+            beat_unit,
+            kind: TempoKind::Immediate,
+            ext_id: None,
+        }
+    }
+    /// The first bar it touches: its glide's start, or its own bar.
+    pub fn first_bar(&self) -> u32 {
+        self.kind.ramp_from().unwrap_or(self.bar).min(self.bar)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,7 +187,8 @@ impl Default for MetronomeSettings {
     }
 }
 
-/// One stretch of the tempo map with a single tempo and time signature.
+/// One stretch of the tempo map with one time signature: a steady tempo,
+/// or a glide from `bpm` to `end_bpm` over its first `ramp_beats`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {
     /// Bars from the session start where it begins.
@@ -141,10 +197,17 @@ pub struct Segment {
     pub beat: f64,
     /// Seconds from the session start where it begins.
     pub secs: f64,
+    /// The tempo at its start.
     pub bpm: f64,
+    /// The tempo at the end of its glide; `bpm` for a steady stretch.
+    pub end_bpm: f64,
+    /// Quarter notes the glide lasts (0 for a steady stretch). A glide
+    /// runs to the next stretch; past its end the tempo stays `end_bpm`.
+    pub ramp_beats: f64,
     pub beats_per_bar: u32,
     pub beat_unit: u32,
-    /// Index into `Tempo::changes`, None for the start.
+    /// Index into `Tempo::changes`, None for the start. A gradual change
+    /// has two stretches: its glide, then its steady tempo.
     pub change: Option<usize>,
 }
 
@@ -157,16 +220,75 @@ impl Segment {
     pub fn unit_beats(&self) -> f64 {
         4.0 / self.beat_unit.max(1) as f64
     }
-    /// Seconds per quarter note.
+    /// Seconds per quarter note at its start.
     pub fn spq(&self) -> f64 {
         60.0 / self.bpm
     }
+    /// A glide (ritardando or accelerando) rather than a steady tempo.
+    pub fn is_ramp(&self) -> bool {
+        self.ramp_beats > 0.0
+    }
+    /// BPM gained per quarter note in the glide.
+    fn slope(&self) -> f64 {
+        (self.end_bpm - self.bpm) / self.ramp_beats
+    }
+    /// Seconds across the glide's first `x` quarter notes (0..=ramp_beats).
+    fn glide_secs(&self, x: f64) -> f64 {
+        let k = self.slope();
+        if k == 0.0 {
+            x * self.spq()
+        } else {
+            60.0 / k * (k * x / self.bpm).ln_1p()
+        }
+    }
+    /// Quarter notes in the glide's first `t` seconds; inverse of
+    /// `glide_secs`.
+    fn glide_beats(&self, t: f64) -> f64 {
+        let k = self.slope();
+        if k == 0.0 {
+            t / self.spq()
+        } else {
+            self.bpm * (k * t / 60.0).exp_m1() / k
+        }
+    }
+    /// The tempo at a time in quarter notes, inside or beyond this stretch.
+    pub fn bpm_at(&self, beats: f64) -> f64 {
+        if !self.is_ramp() {
+            return self.bpm;
+        }
+        let x = beats - self.beat;
+        if x <= 0.0 {
+            self.bpm
+        } else if x >= self.ramp_beats {
+            self.end_bpm
+        } else {
+            self.bpm + self.slope() * x
+        }
+    }
     /// Quarter notes to seconds, inside or beyond this stretch.
     pub fn secs_at(&self, beats: f64) -> f64 {
-        self.secs + (beats - self.beat) * self.spq()
+        let x = beats - self.beat;
+        if !self.is_ramp() || x <= 0.0 {
+            self.secs + x * self.spq()
+        } else if x < self.ramp_beats {
+            self.secs + self.glide_secs(x)
+        } else {
+            self.secs
+                + self.glide_secs(self.ramp_beats)
+                + (x - self.ramp_beats) * 60.0 / self.end_bpm
+        }
     }
     pub fn beats_at(&self, secs: f64) -> f64 {
-        self.beat + (secs - self.secs) / self.spq()
+        let t = secs - self.secs;
+        if !self.is_ramp() || t <= 0.0 {
+            return self.beat + t / self.spq();
+        }
+        let whole = self.glide_secs(self.ramp_beats);
+        if t < whole {
+            self.beat + self.glide_beats(t)
+        } else {
+            self.beat + self.ramp_beats + (t - whole) * self.end_bpm / 60.0
+        }
     }
     /// "4/4", "6/8".
     pub fn meter_text(&self) -> String {
@@ -179,18 +301,27 @@ pub struct Segments<'a> {
     tempo: &'a Tempo,
     next: usize,
     prev: Option<Segment>,
+    /// A gradual change's steady stretch, due after its glide.
+    pending: Option<Segment>,
 }
 
 impl Iterator for Segments<'_> {
     type Item = Segment;
     fn next(&mut self) -> Option<Segment> {
+        if let Some(s) = self.pending.take() {
+            self.prev = Some(s);
+            return Some(s);
+        }
         let Some(p) = self.prev else {
             let t = self.tempo;
+            let bpm = clamp_bpm(t.bpm);
             let s = Segment {
                 bar: 0,
                 beat: 0.0,
                 secs: 0.0,
-                bpm: clamp_bpm(t.bpm),
+                bpm,
+                end_bpm: bpm,
+                ramp_beats: 0.0,
                 beats_per_bar: t.beats_per_bar.max(1),
                 beat_unit: clamp_unit(t.beat_unit),
                 change: None,
@@ -206,14 +337,44 @@ impl Iterator for Segments<'_> {
                 continue;
             }
             let beat = p.beat + (c.bar - p.bar) as f64 * p.bar_beats();
-            let s = Segment {
+            let bpm = clamp_bpm(c.bpm);
+            let steady = Segment {
                 bar: c.bar,
                 beat,
-                secs: p.secs_at(beat),
-                bpm: clamp_bpm(c.bpm),
+                secs: 0.0,
+                bpm,
+                end_bpm: bpm,
+                ramp_beats: 0.0,
                 beats_per_bar: c.beats_per_bar.max(1),
                 beat_unit: clamp_unit(c.beat_unit),
                 change: Some(i),
+            };
+            if let Some(from) = c.kind.ramp_from() {
+                // The glide starts no earlier than the stretch before it
+                // and keeps that stretch's time signature.
+                let from = from.clamp(p.bar, c.bar - 1);
+                let start = p.beat + (from - p.bar) as f64 * p.bar_beats();
+                let glide = Segment {
+                    bar: from,
+                    beat: start,
+                    secs: p.secs_at(start),
+                    bpm: p.bpm_at(start),
+                    end_bpm: bpm,
+                    ramp_beats: beat - start,
+                    beats_per_bar: p.beats_per_bar,
+                    beat_unit: p.beat_unit,
+                    change: Some(i),
+                };
+                self.pending = Some(Segment {
+                    secs: glide.secs_at(beat),
+                    ..steady
+                });
+                self.prev = Some(glide);
+                return Some(glide);
+            }
+            let s = Segment {
+                secs: p.secs_at(beat),
+                ..steady
             };
             self.prev = Some(s);
             return Some(s);
@@ -238,6 +399,7 @@ impl Tempo {
             tempo: self,
             next: 0,
             prev: None,
+            pending: None,
         }
     }
 
@@ -263,6 +425,18 @@ impl Tempo {
         self.last_where(|s| s.bar <= bar)
     }
 
+    /// The steady stretch a change (None: the start) sets, the one after
+    /// its glide for a gradual change.
+    pub fn change_segment(&self, change: Option<usize>) -> Option<Segment> {
+        self.segments().filter(|s| s.change == change).last()
+    }
+
+    /// A gradual change's glide stretch.
+    pub fn ramp_segment(&self, change: usize) -> Option<Segment> {
+        self.segments()
+            .find(|s| s.change == Some(change) && s.is_ramp())
+    }
+
     /// Quarter notes from the session start to seconds. Before 0 the
     /// starting tempo carries on backwards.
     pub fn secs(&self, beats: f64) -> f64 {
@@ -272,6 +446,17 @@ impl Tempo {
     /// Seconds to quarter notes.
     pub fn beats(&self, secs: f64) -> f64 {
         self.seg_at_secs(secs).beats_at(secs)
+    }
+
+    /// The tempo at a time in quarter notes (between the two ends in a
+    /// glide).
+    pub fn bpm_at(&self, beats: f64) -> f64 {
+        self.seg_at_beat(beats).bpm_at(beats)
+    }
+
+    /// The tempo at a time in seconds.
+    pub fn bpm_at_secs(&self, secs: f64) -> f64 {
+        self.bpm_at(self.beats(secs))
     }
 
     /// Where a bar (from 0) starts, in quarter notes.
@@ -324,7 +509,9 @@ impl Tempo {
     }
 
     /// Puts the map in its tidy form: values in range, changes in bar
-    /// order, one per bar (the later one wins), none at bar 0.
+    /// order, one per bar (the later one wins), none at bar 0, and every
+    /// glide starting before its bar and no earlier than the change
+    /// before it.
     pub fn normalize(&mut self) {
         self.bpm = clamp_bpm(self.bpm);
         self.beats_per_bar = self.beats_per_bar.clamp(1, 32);
@@ -344,6 +531,13 @@ impl Tempo {
             }
             out.push(c);
         }
+        let mut prev = 0;
+        for c in &mut out {
+            if let TempoKind::Ramp { from_bar } = &mut c.kind {
+                *from_bar = (*from_bar).clamp(prev, c.bar - 1);
+            }
+            prev = c.bar;
+        }
         self.changes = out;
     }
 
@@ -355,15 +549,68 @@ impl Tempo {
             return i;
         }
         let s = self.seg_at_bar(bar);
-        self.changes.push(TempoChange {
-            bar,
-            bpm: s.bpm,
-            beats_per_bar: s.beats_per_bar,
-            beat_unit: s.beat_unit,
-            ext_id: None,
-        });
+        let bpm = s.bpm_at(self.bar_start(bar));
+        self.changes
+            .push(TempoChange::new(bar, bpm, s.beats_per_bar, s.beat_unit));
         self.normalize();
         self.changes.iter().position(|c| c.bar == bar).unwrap_or(0)
+    }
+
+    /// Makes the change at `to` (from 1; added with the values in effect
+    /// there when there is none) glide in from bar `from`, to `bpm` when
+    /// given. Returns its index.
+    pub fn add_ramp(&mut self, from: u32, to: u32, bpm: Option<f64>) -> usize {
+        let to = to.max(1);
+        let i = self.add_change(to);
+        let c = &mut self.changes[i];
+        c.kind = TempoKind::Ramp {
+            from_bar: from.min(to - 1),
+        };
+        if let Some(b) = bpm {
+            c.bpm = b;
+        }
+        self.normalize();
+        self.changes.iter().position(|c| c.bar == to).unwrap_or(0)
+    }
+
+    /// Moves a change to another bar (from 1); a glide keeps its length in
+    /// bars. A change already at that bar is replaced. Returns its new
+    /// index.
+    pub fn move_change(&mut self, i: usize, bar: u32) -> usize {
+        if i >= self.changes.len() {
+            return i;
+        }
+        let bar = bar.max(1);
+        let mut c = self.changes.remove(i);
+        if let TempoKind::Ramp { from_bar } = &mut c.kind {
+            let len = c.bar.saturating_sub(*from_bar).max(1);
+            *from_bar = bar.saturating_sub(len);
+        }
+        c.bar = bar;
+        // Last, so it wins over one already at the bar.
+        self.changes.push(c);
+        self.normalize();
+        self.changes.iter().position(|c| c.bar == bar).unwrap_or(0)
+    }
+
+    /// Immediate (None) or gliding in from bar `from`.
+    pub fn set_ramp(&mut self, i: usize, from: Option<u32>) {
+        if let Some(c) = self.changes.get_mut(i) {
+            c.kind = match from {
+                Some(f) => TempoKind::Ramp {
+                    from_bar: f.min(c.bar.saturating_sub(1)),
+                },
+                None => TempoKind::Immediate,
+            };
+        }
+        self.normalize();
+    }
+
+    pub fn remove_change(&mut self, i: usize) {
+        if i < self.changes.len() {
+            self.changes.remove(i);
+            self.normalize();
+        }
     }
 
     /// The tempo, top and bottom of a stretch (the start for None).
@@ -386,6 +633,11 @@ impl Tempo {
     /// Whether the map has more than one stretch.
     pub fn has_changes(&self) -> bool {
         self.segments().nth(1).is_some()
+    }
+
+    /// Whether any change glides.
+    pub fn has_ramps(&self) -> bool {
+        self.segments().any(|s| s.is_ramp())
     }
 }
 
@@ -677,13 +929,110 @@ mod tests {
     use super::*;
 
     fn change(bar: u32, bpm: f64, top: u32, unit: u32) -> TempoChange {
+        TempoChange::new(bar, bpm, top, unit)
+    }
+
+    fn ramp(from: u32, bar: u32, bpm: f64) -> TempoChange {
         TempoChange {
-            bar,
-            bpm,
-            beats_per_bar: top,
-            beat_unit: unit,
-            ext_id: None,
+            kind: TempoKind::Ramp { from_bar: from },
+            ..TempoChange::new(bar, bpm, 4, 4)
         }
+    }
+
+    #[test]
+    fn a_ritardando_lasts_its_analytic_length() {
+        // 120 to 60 BPM over bars 1..5 (16 quarter notes) of 4/4: the
+        // time is 60 / k * ln(60 / 120) with k = -60 / 16 per beat.
+        let mut t = Tempo::default();
+        t.changes.push(ramp(1, 5, 60.0));
+        let want = 16.0 * 2f64.ln();
+        assert!(close(t.secs(4.0), 2.0));
+        assert!(close(t.secs(20.0) - t.secs(4.0), want));
+        // Then steady at 60.
+        assert!(close(t.secs(21.0) - t.secs(20.0), 1.0));
+        // Halfway through in beats the tempo is halfway.
+        assert!(close(t.bpm_at(12.0), 90.0));
+        assert!(close(t.bpm_at_secs(t.secs(12.0)), 90.0));
+        assert!(close(t.bpm_at(2.0), 120.0));
+        assert!(close(t.bpm_at(30.0), 60.0));
+        // Bars and their numbers are not moved by the glide.
+        assert!(close(t.bar_start(5), 20.0));
+        assert_eq!(t.format(t.secs(20.0)), "6.1.000");
+        let segs: Vec<_> = t.segments().collect();
+        assert_eq!(segs.len(), 3);
+        assert!(segs[1].is_ramp() && !segs[2].is_ramp());
+        assert_eq!(segs[1].change, segs[2].change);
+        assert_eq!(t.change_segment(Some(0)).unwrap().bar, 5);
+        assert_eq!(t.ramp_segment(0).unwrap().bar, 1);
+    }
+
+    #[test]
+    fn ramps_round_trip_and_time_only_moves_forward() {
+        let mut t = Tempo::default();
+        t.changes.push(ramp(1, 3, 200.0));
+        t.changes.push(change(4, 90.0, 3, 4));
+        t.changes.push(ramp(5, 9, 90.0)); // same tempo: a flat glide
+        t.changes.push(ramp(9, 12, 45.0));
+        t.normalize();
+        let mut last = f64::MIN;
+        for i in 0..400 {
+            let b = i as f64 * 0.173 - 2.0;
+            let s = t.secs(b);
+            assert!(s > last, "at {b}");
+            last = s;
+            assert!((t.beats(s) - b).abs() < 1e-9, "at {b}");
+        }
+        // An accelerando speeds up: each beat shorter than the last.
+        let d1 = t.secs(5.0) - t.secs(4.0);
+        let d2 = t.secs(11.0) - t.secs(10.0);
+        assert!(d2 < d1);
+        // A flat glide is a steady tempo.
+        let a = t.bar_start(5);
+        assert!(close(t.secs(a + 4.0) - t.secs(a), 4.0 * 60.0 / 90.0));
+    }
+
+    #[test]
+    fn immediate_changes_are_unchanged_by_ramps_elsewhere() {
+        let mut t = Tempo::default();
+        t.changes.push(change(2, 60.0, 4, 4));
+        let plain: Vec<f64> = (0..50).map(|i| t.secs(i as f64 * 0.5)).collect();
+        assert_eq!(t.segments().count(), 2);
+        assert!(!t.has_ramps());
+        // A glide after the last point checked moves nothing before it.
+        t.changes.push(ramp(7, 9, 100.0));
+        for (i, s) in plain.iter().enumerate() {
+            assert!(close(t.secs(i as f64 * 0.5), *s));
+        }
+    }
+
+    #[test]
+    fn ramp_edits_keep_the_map_tidy() {
+        let mut t = Tempo::default();
+        t.changes.push(change(2, 100.0, 4, 4));
+        // A glide may not start before the change before it.
+        let i = t.add_ramp(0, 6, Some(80.0));
+        assert_eq!(t.changes[i].kind, TempoKind::Ramp { from_bar: 2 });
+        assert_eq!(t.changes[i].bpm, 80.0);
+        // Moving keeps the glide's length.
+        let i = t.move_change(i, 8);
+        assert_eq!(t.changes[i].kind, TempoKind::Ramp { from_bar: 4 });
+        // A change added inside a glide starts at the glided tempo there,
+        // and shortens the glide.
+        let j = t.add_change(5);
+        assert!(close(t.changes[j].bpm, 100.0 - 20.0 * 0.25));
+        let i = t.changes.iter().position(|c| c.bar == 8).unwrap();
+        assert_eq!(t.changes[i].kind, TempoKind::Ramp { from_bar: 5 });
+        t.set_ramp(i, None);
+        assert!(t.changes[i].kind.is_immediate());
+        t.remove_change(i);
+        assert_eq!(t.changes.len(), 2);
+        // Saved only when it glides.
+        let json = serde_json::to_string(&t.changes[0]).unwrap();
+        assert!(!json.contains("kind"));
+        t.set_ramp(1, Some(3));
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Tempo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
     }
 
     fn close(a: f64, b: f64) -> bool {

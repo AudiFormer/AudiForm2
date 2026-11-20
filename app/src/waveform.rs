@@ -333,7 +333,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         let (v, dur) = st
             .doc()
             .map_or((View::fit(1.0), 0.0), |d| (d.view, d.duration()));
-        crate::ruler::input(ui, st, &rresp, body, &v, dur, &snap_marks)
+        crate::ruler::input(ui, st, &rresp, body, &v, dur, &snap_marks, false)
     };
     // Middle-button drag anywhere pans in time.
     if let Some(dv) = crate::ruler::pan_delta(ui, &resp).or(crate::ruler::pan_delta(ui, &rresp)) {

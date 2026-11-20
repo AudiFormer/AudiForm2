@@ -268,7 +268,10 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
 
     // Ruler clicks and drags position the playhead.
     let marker_times: Vec<f64> = st.session.markers.iter().map(|m| m.time).collect();
-    let ghost = crate::ruler::input(ui, st, &rresp, lanes, &v, f64::MAX, &marker_times);
+    let ghost = crate::ruler::input(ui, st, &rresp, lanes, &v, f64::MAX, &marker_times, true);
+    crate::tempo::markers_input(ui, st, ruler, &|t| time_to_x(&v, ruler, t), &|x| {
+        x_to_time(&v, ruler, x)
+    });
     // Middle-button drag anywhere but the track headers pans: sideways in
     // time, up and down through the tracks.
     let from_headers = ui
@@ -770,6 +773,14 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             &th,
         );
     }
+    crate::tempo::draw_markers(
+        &ui.painter_at(ruler),
+        ruler,
+        &tempo,
+        &|t| time_to_x(&v, ruler, t),
+        &th,
+        st.tempo_ui.hot,
+    );
     let corner = Rect::from_min_max(rect.min, pos2(ruler.left(), ruler.bottom()));
     p.rect_filled(corner, Rounding::ZERO, c(th.panel));
     p.line_segment(

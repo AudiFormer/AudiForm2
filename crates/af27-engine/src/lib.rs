@@ -1535,13 +1535,7 @@ mod tests {
         use af27_core::midi::{MidiClip, MidiNote, TempoChange};
         // One bar of 4/4 at 120 (2 s), then 60 BPM: beat 5 is at 3 s.
         let mut s = Session::new("m", 48_000, 0);
-        s.tempo.changes.push(TempoChange {
-            bar: 1,
-            bpm: 60.0,
-            beats_per_bar: 4,
-            beat_unit: 4,
-            ext_id: None,
-        });
+        s.tempo.changes.push(TempoChange::new(1, 60.0, 4, 4));
         let t = s.add_track_of(TrackKind::Midi);
         let ti = s.track_index(t).unwrap();
         s.tracks[ti].instrument.attack = 0.001;

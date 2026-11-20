@@ -1804,18 +1804,27 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             ),
         );
         // The tempo and time signature of the stretch the playhead is in.
+        // In a glide it shows the tempo there and is edited in the Tempo
+        // window instead.
         let seg = st.session.tempo.seg_at_secs(st.position().max(0.0));
-        let mut bpm = seg.bpm;
+        let (mut bpm, glide) = crate::tempo::playhead_bpm(st);
         let r = ui
-            .add_sized(
-                egui::vec2(78.0, 26.0),
-                egui::DragValue::new(&mut bpm)
-                    .range(af27_core::midi::BPM_MIN..=af27_core::midi::BPM_MAX)
-                    .speed(0.5)
-                    .suffix(" BPM")
-                    .max_decimals(2),
-            )
-            .on_hover_text("Tempo where the playhead is: drag, or double-click to type");
+            .add_enabled_ui(!glide, |ui| {
+                ui.add_sized(
+                    egui::vec2(78.0, 26.0),
+                    egui::DragValue::new(&mut bpm)
+                        .range(af27_core::midi::BPM_MIN..=af27_core::midi::BPM_MAX)
+                        .speed(0.5)
+                        .suffix(" BPM")
+                        .max_decimals(if glide { 1 } else { 2 }),
+                )
+            })
+            .inner;
+        let r = if glide {
+            r.on_disabled_hover_text(crate::tempo::glide_text(st))
+        } else {
+            r.on_hover_text("Tempo where the playhead is: drag, or double-click to type")
+        };
         if r.drag_started() {
             st.gesture_before = Some(st.session.clone());
         }
@@ -2636,6 +2645,7 @@ impl eframe::App for App {
         crate::export::poll(&mut self.st, ctx);
         crate::export::show(ctx, &mut self.st);
         crate::tempo::window(ctx, &mut self.st);
+        crate::tempo::edit_popup(ctx, &mut self.st);
         crate::tempo::replace_prompt(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);

@@ -1173,14 +1173,20 @@ pub fn metronome_header(ui: &mut egui::Ui, st: &mut State, rect: Rect) {
                 });
             // The tempo and time signature under the playhead.
             let seg = st.session.tempo.seg_at_secs(st.position().max(0.0));
-            let mut bpm = seg.bpm;
-            let r = ui.add(
+            let (mut bpm, glide) = crate::tempo::playhead_bpm(st);
+            let r = ui.add_enabled(
+                !glide,
                 egui::DragValue::new(&mut bpm)
                     .range(af27_core::midi::BPM_MIN..=af27_core::midi::BPM_MAX)
                     .speed(0.5)
                     .suffix(" BPM")
                     .max_decimals(1),
             );
+            let r = if glide {
+                r.on_disabled_hover_text(crate::tempo::glide_text(st))
+            } else {
+                r
+            };
             if r.drag_started() {
                 st.gesture_before = Some(st.session.clone());
             }

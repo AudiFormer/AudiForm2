@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use af27_core::automation::{AutomationMode, Curve, Lane, LanePoint as AutoPoint, LaneTarget};
-use af27_core::midi::{ControlEvent, MidiClip, MidiNote, SoundFontRef, TempoChange};
+use af27_core::midi::{ControlEvent, MidiClip, MidiNote, SoundFontRef, TempoChange, TempoKind};
 use af27_core::plugin::PluginData;
 use af27_core::session::{
     Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session, StretchKind,
@@ -887,6 +887,11 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                 bpm: c["bpm"].as_f64().unwrap_or(out.tempo.bpm),
                 beats_per_bar: c["beats_per_bar"].as_u64().unwrap_or(4) as u32,
                 beat_unit: c["beat_unit"].as_u64().unwrap_or(4) as u32,
+                // Audiform 1 has no glides; Audiform27 adds its own field.
+                kind: match c["af27_ramp_from_bar"].as_u64() {
+                    Some(f) => TempoKind::Ramp { from_bar: f as u32 },
+                    None => TempoKind::Immediate,
+                },
                 ext_id: c["id"].as_str().map(str::to_string),
             })
             .collect();
@@ -1301,6 +1306,12 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 set_num(&mut co, "bpm", c.bpm);
                 set_num(&mut co, "beats_per_bar", c.beats_per_bar as f64);
                 set_num(&mut co, "beat_unit", c.beat_unit as f64);
+                match c.kind.ramp_from() {
+                    Some(f) => set_num(&mut co, "af27_ramp_from_bar", f as f64),
+                    None => {
+                        co.remove("af27_ramp_from_bar");
+                    }
+                }
                 Value::Object(co)
             })
             .collect();
@@ -2176,6 +2187,20 @@ mod tests {
         let back = import(&out.to_string(), Path::new(".")).unwrap().session;
         assert_eq!(back.tempo.changes.len(), 2);
         assert_eq!(back.tempo.changes[1].bpm, 130.0);
+        assert!(back.tempo.changes[1].kind.is_immediate());
+        assert!(ch[1].get("af27_ramp_from_bar").is_none());
+        // A glide rides in Audiform27's own field, and only while it glides.
+        s.tempo.set_ramp(1, Some(10));
+        let out = export(&mut s, Some(&base));
+        assert_eq!(out["tempo"]["changes"][1]["af27_ramp_from_bar"], json!(10));
+        let back = import(&out.to_string(), Path::new(".")).unwrap().session;
+        assert_eq!(back.tempo.changes[1].kind, TempoKind::Ramp { from_bar: 10 });
+        let base2 = out.clone();
+        s.tempo.set_ramp(1, None);
+        let out = export(&mut s, Some(&base2));
+        assert!(out["tempo"]["changes"][1]
+            .get("af27_ramp_from_bar")
+            .is_none());
 
         // A SoundFont on a MIDI track rides in Audiform27's own field.
         let mut s = Session::new("sf", 48_000, 0);
