@@ -52,6 +52,9 @@ pub(crate) struct Recorder {
     pub(crate) rate: u32,
     pub(crate) channels: usize,
     pub(crate) peak: Arc<AtomicU32>,
+    /// Sum of squares and sample count of the audio drained since the
+    /// meters last asked (interface thread only).
+    power: (f64, u64),
     errors: Vec<String>,
     /// Input devices: how to open the stream again after a reset.
     reopen: Option<Reopen>,
@@ -199,6 +202,7 @@ impl Recorder {
             rx,
             data: Vec::new(),
             peak,
+            power: (0.0, 0),
             errors: Vec::new(),
             reopen: None,
             reset: Arc::new(AtomicBool::new(false)),
@@ -236,6 +240,7 @@ impl Recorder {
             rate: config.sample_rate().0,
             channels: (config.channels() as usize).max(1),
             peak,
+            power: (0.0, 0),
             errors: Vec::new(),
             reopen: Some(Reopen {
                 device,
@@ -256,6 +261,8 @@ impl Recorder {
         let mut got = false;
         while let Ok(s) = self.rx.pop() {
             self.data.push(s);
+            self.power.0 += (s as f64) * (s as f64);
+            self.power.1 += 1;
             got = true;
         }
         if got {
@@ -265,6 +272,12 @@ impl Recorder {
             self.reset.store(false, Ordering::Relaxed);
             self.restart();
         }
+    }
+
+    /// The mean square of the audio drained since the last call.
+    pub(crate) fn take_mean_square(&mut self) -> Option<f32> {
+        let (sum, n) = std::mem::take(&mut self.power);
+        (n > 0).then(|| (sum / n as f64) as f32)
     }
 
     fn restart(&mut self) {
@@ -441,6 +454,7 @@ mod tests {
             rate: 48_000,
             channels,
             peak: Arc::new(AtomicU32::new(0)),
+            power: (0.0, 0),
             errors: Vec::new(),
             reopen: None,
             reset: Arc::new(AtomicBool::new(false)),

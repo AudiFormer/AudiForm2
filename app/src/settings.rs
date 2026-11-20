@@ -110,6 +110,8 @@ pub struct Prefs {
     /// The MIDI input played on armed MIDI tracks is heard through their
     /// instrument.
     pub midi_monitor: bool,
+    /// The level meters' range, response, hold, type and clip lights.
+    pub meters: crate::meters::MeterPrefs,
 }
 
 /// Settings > Audio Devices and Settings > Channel Routing.
@@ -238,6 +240,7 @@ impl Default for Prefs {
             low_latency: true,
             solo_exclusive: false,
             midi_monitor: true,
+            meters: Default::default(),
         }
     }
 }

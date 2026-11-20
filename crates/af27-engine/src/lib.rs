@@ -16,6 +16,7 @@ mod asio;
 pub mod capture;
 pub mod devices;
 pub mod health;
+mod meter;
 pub mod mix;
 pub mod pool;
 mod record;
@@ -186,16 +187,14 @@ struct Shared {
     pos: AtomicU64,
     peak_l: AtomicU32,
     peak_r: AtomicU32,
+    /// The output's mean square since the interface last read it.
+    mean_square: meter::MeanSquare,
     /// 3D: each speaker's peak, and how many speakers there are.
     bed_peaks: [AtomicU32; MAX_SPEAKERS],
     bed_count: AtomicU32,
 }
 
-pub(crate) fn store_max_f32(a: &AtomicU32, v: f32) {
-    if v > f32::from_bits(a.load(Ordering::Relaxed)) {
-        a.store(v.to_bits(), Ordering::Relaxed);
-    }
-}
+pub(crate) use meter::store_max_f32;
 
 struct Voice {
     program: Option<Box<Program>>,
@@ -982,6 +981,12 @@ impl Engine {
         (l, r)
     }
 
+    /// The output's mean square (left, right, linear power) since the
+    /// last call, for RMS meters; None when no audio came through since.
+    pub fn take_mean_squares(&self) -> Option<(f32, f32)> {
+        self.shared.mean_square.take()
+    }
+
     /// 3D sessions: each speaker's peak since the last call, linear, in
     /// layout order (after the master chain and fader); empty otherwise.
     pub fn take_bed_peaks(&self) -> Vec<f32> {
@@ -1032,6 +1037,15 @@ impl Engine {
             .iter()
             .map(|r| f32::from_bits(r.peak.swap(0, Ordering::Relaxed)))
             .fold(0.0, f32::max)
+    }
+
+    /// The loudest input's mean square (linear power) over the audio taken
+    /// in since the last call, for RMS meters; None when none came in.
+    pub fn recording_mean_square(&mut self) -> Option<f32> {
+        self.recorders
+            .iter_mut()
+            .filter_map(|r| r.take_mean_square())
+            .reduce(f32::max)
     }
 
     /// Problems a running capture hit (a device went away, restarted or

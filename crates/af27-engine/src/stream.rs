@@ -114,6 +114,10 @@ impl Core {
         let width = if bed { self.routes.bed_len } else { 2 };
         let src = &mut self.scratch[..frames * width];
         let (l, r) = self.voice.render(src, width, self.rate as f64, bed);
+        // The RMS meters' power, over the same sound as the peaks (silence
+        // while stopped, so they settle).
+        let (sl, sr, sn) = crate::meter::sum_squares(src, width);
+        self.shared.mean_square.add(sl, sr, sn);
         // Hand-played notes, heard whether or not the transport runs.
         if let Some(a) = &mut self.voice.audition {
             a.render(src, width, 1.0 / self.rate as f64);
@@ -201,6 +205,7 @@ fn build(
         pos: AtomicU64::new(0f64.to_bits()),
         peak_l: AtomicU32::new(0),
         peak_r: AtomicU32::new(0),
+        mean_square: Default::default(),
         bed_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
         bed_count: AtomicU32::new(0),
     });
@@ -420,6 +425,7 @@ mod tests {
             pos: AtomicU64::new(0),
             peak_l: AtomicU32::new(0),
             peak_r: AtomicU32::new(0),
+            mean_square: Default::default(),
             bed_peaks: std::array::from_fn(|_| AtomicU32::new(0)),
             bed_count: AtomicU32::new(0),
         });

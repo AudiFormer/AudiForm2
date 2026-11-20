@@ -245,7 +245,13 @@ pub struct State {
     /// `born` seconds at the last tick.
     last_tick: f64,
     pub return_on_stop: bool,
+    /// The main meter's shown peaks (linear, after its ballistics): what
+    /// the HUD, the master fader and the master rack follow.
     pub meter: (f32, f32),
+    /// The main meter's ballistics (peak, RMS, hold lines, clip latches).
+    pub levels: crate::meters::Stereo,
+    /// When the meters last moved on, for their per-second fall.
+    meter_at: Option<Instant>,
     /// Motion and music state for the HUD chrome.
     pub fx: crate::hud::Fx,
     /// The workspace on screen, and one the toolbar asked to switch to.
@@ -258,7 +264,6 @@ pub struct State {
     pub visuals_mode: u8,
     /// Auto mode decided this device needs the lighter look.
     pub visuals_lite: bool,
-    pub meter_hold: (f32, f32),
 
     pub clipboard: Option<AudioBuffer>,
     /// The export dialog and any export running.
@@ -322,7 +327,8 @@ pub struct State {
     pub clip_meters: HashMap<af27_core::ClipId, std::sync::Arc<af27_engine::mix::RackMeter>>,
     /// Which clip each clip-rack target names (see `rack::clip_target`).
     pub clip_targets: std::cell::RefCell<Vec<af27_core::ClipId>>,
-    pub rack_shown: HashMap<u16, (f32, f32)>,
+    /// Each rack's shown levels and when they were last moved on.
+    pub rack_shown: HashMap<u16, (f32, f32, Instant)>,
     /// Each track's rack input and output peaks this frame, falling back
     /// slowly (read once a frame from the engine).
     pub track_levels: Vec<(f32, f32)>,
@@ -541,7 +547,8 @@ impl State {
                 .filter(|m: &u8| *m <= 2)
                 .unwrap_or(0),
             visuals_lite: false,
-            meter_hold: (0.0, 0.0),
+            levels: Default::default(),
+            meter_at: None,
             clipboard: None,
             export: Default::default(),
             last_effect: None,
@@ -1432,15 +1439,22 @@ impl State {
     }
 
     pub fn tick(&mut self) {
-        self.watch_audio(Instant::now());
+        let now = Instant::now();
+        self.watch_audio(now);
+        // How long since the meters last moved: they fall by the second.
+        let meter_dt = self
+            .meter_at
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+        self.meter_at = Some(now);
+        let fall = self.prefs.meters.response.fall_db_per_s();
         // Track meters: every rack's peaks, once a frame.
         let n = self.rack_meters.len();
         self.track_levels.resize(n, (0.0, 0.0));
         for (i, m) in self.rack_meters.iter().enumerate() {
             let (a, b) = m.take();
             let e = &mut self.track_levels[i];
-            e.0 = a.max(e.0 * 0.86);
-            e.1 = b.max(e.1 * 0.86);
+            e.0 = crate::meters::fall_lin(e.0, a, meter_dt, fall);
+            e.1 = crate::meters::fall_lin(e.1, b, meter_dt, fall);
         }
         let tr = std::env::var_os("AF2_TRACE").is_some();
         let t0 = Instant::now();
@@ -1466,15 +1480,19 @@ impl State {
                     error: true,
                 });
             }
+            // Everything played (or taken in) since the last frame, not
+            // just the latest block.
             let (l, r) = e.take_peaks();
+            let ms = e.take_mean_squares();
             let rec = e.recording_level();
-            let (l, r) = if e.is_recording() { (rec, rec) } else { (l, r) };
-            let fall = 0.9;
-            self.meter = (l.max(self.meter.0 * fall), r.max(self.meter.1 * fall));
-            self.meter_hold = (
-                self.meter.0.max(self.meter_hold.0 * 0.995),
-                self.meter.1.max(self.meter_hold.1 * 0.995),
-            );
+            let rec_ms = e.recording_mean_square();
+            let ((l, r), ms) = if e.is_recording() {
+                ((rec, rec), rec_ms.map(|m| (m, m)))
+            } else {
+                ((l, r), ms)
+            };
+            self.levels.step((l, r), ms, meter_dt, &self.prefs.meters);
+            self.meter = self.levels.peaks();
         }
         if self.transport_live && !self.is_playing() {
             // The audio thread reached the end (or the selection's end).
@@ -2041,10 +2059,14 @@ impl State {
                 .copied()
                 .unwrap_or((0.0, 0.0))
         };
-        let e = self.rack_shown.entry(target).or_insert((0.0, 0.0));
-        e.0 = fresh.0.max(e.0 * 0.88);
-        e.1 = fresh.1.max(e.1 * 0.88);
-        *e
+        let now = Instant::now();
+        let fall = self.prefs.meters.response.fall_db_per_s();
+        let e = self.rack_shown.entry(target).or_insert((0.0, 0.0, now));
+        let dt = now.duration_since(e.2).as_secs_f32();
+        e.0 = crate::meters::fall_lin(e.0, fresh.0, dt, fall);
+        e.1 = crate::meters::fall_lin(e.1, fresh.1, dt, fall);
+        e.2 = now;
+        (e.0, e.1)
     }
 
     /// A rack's power, levels or mix changed.
