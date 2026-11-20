@@ -722,11 +722,9 @@ fn convert(c: Node, report: &mut Report) -> Option<EffectSlot> {
         }
         PARAMETRIC_EQ => {
             let (params, bypass) = parametric_eq(&named_params(c));
-            report.convert(
-                "Parametric Equalizer(s) came across as Audiform's Parametric EQ (kept for Audiform, not played here)",
-            );
-            let mut s = slot("altaudio.parametric_eq", Vec::new());
-            s.data = serde_json::to_string(&params).ok();
+            report.convert("Parametric Equalizer(s) came across as Parametric EQ");
+            let vals: Vec<(&str, f64)> = params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let mut s = fx_slot(af27_fx::effects::parametric_eq::ID, &vals)?;
             s.bypass = bypass;
             return Some(s);
         }

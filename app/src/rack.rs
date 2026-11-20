@@ -974,6 +974,7 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
             continue;
         };
         let mut keep = true;
+        let eq = crate::eq_editor::is_eq(&slot.effect);
         let title = format!("{}: {}", target_name(st, target), slot_name(&slot));
         crate::ui::popup(
             ctx,
@@ -982,9 +983,13 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
         )
         .id(egui::Id::new(("fx-window", target, i)))
         .open(&mut keep)
-        .resizable(false)
+        .resizable(eq)
         .collapsible(true)
-        .default_width(320.0)
+        .default_size(if eq {
+            crate::eq_editor::DEFAULT_SIZE
+        } else {
+            [320.0, 128.0]
+        })
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let (pr, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
@@ -1008,6 +1013,8 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
             ui.separator();
             if af27_core::plugin::is_plugin(&slot.effect) {
                 crate::plugins::slot_controls(ui, st, target, i, &th);
+            } else if eq {
+                crate::eq_editor::show(ui, st, target, i, &th);
             } else if !crate::fx_windows::custom(ui, st, target, i, &th) {
                 slot_controls(ui, st, target, i, &th);
             }

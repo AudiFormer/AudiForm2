@@ -122,3 +122,15 @@ are written fresh from the feature list of professional editors.
   (driver picking, ending streams on silence, stalls, channel maps). No
   code from Audiform or from its patched cpal was used. ASIO goes through
   upstream `cpal` and `asio-sys` (Apache-2.0) unchanged; see `asio.md`.
+- Parametric EQ (`af27-fx/src/effects/parametric_eq.rs`): the filters are
+  written from the public Audio EQ Cookbook formulas and the Butterworth
+  pole angles, on Audiform27's own `biquad.rs`. Audiform's `eq.rs` was not
+  read. Only its saved parameter keys (`altaudio.parametric_eq`, as the
+  `.sesx` importer and the session schema name them) are matched, so
+  sessions carry over.
+- The Parametric EQ's graph editor (`app/src/eq_editor.rs`): the design
+  and maths (node and width handle behaviour, the Q/octave formulas, the
+  frequency ruler, the range switch, the band table) follow Audiform's
+  `eq-graph.ts`, `EqGraph.svelte` and `graph.ts`, files the lead's own
+  sessions created (commits 36d74db and 8a61a53) and AAE never edited.
+  They are rewritten in Rust/egui, with no code or headers copied.

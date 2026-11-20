@@ -1340,8 +1340,16 @@ fn write_chain(
                     json!(s.effect.replacen("af.", "altaudio.", 1)),
                 );
                 let mut params = obj(o.get("params").cloned().unwrap_or(Value::Null));
+                // Values read and not moved keep their saved text, and keys
+                // the file left out stay out while at their defaults.
                 for (p, val) in info.params.iter().zip(&s.values) {
-                    params.insert(p.key.into(), json!(*val as f64));
+                    let unchanged = match params.get(p.key).and_then(Value::as_f64) {
+                        Some(had) => had as f32 == *val,
+                        None => orig.is_some() && *val == p.default as f32,
+                    };
+                    if !unchanged {
+                        put_f32(&mut params, p.key, *val);
+                    }
                 }
                 o.insert("params".into(), Value::Object(params));
                 if let Some(d) = &s.data {
@@ -2319,6 +2327,37 @@ mod tests {
         );
         assert_eq!(out["a_field_from_the_future"]["keep"], json!("me"));
         assert_eq!(out["tempo"]["changes"][0]["bar"], json!(9));
+    }
+
+    #[test]
+    fn a_parametric_eq_plays_and_round_trips_by_its_keys() {
+        let text = SAMPLE.replace(
+            r#""effect": "altaudio.stereo_width", "enabled": false, "params": {"pan": 10.0, "width": 150.0}"#,
+            r#""effect": "altaudio.parametric_eq", "enabled": true, "params": {"b1_q": 0.707, "b1_gain": -3.3, "hp_on": 1, "hp_slope": 2}"#,
+        );
+        assert_ne!(text, SAMPLE);
+        let imp = import(&text, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let eq = &s.tracks[0].chain[1];
+        assert_eq!(eq.effect, "af.parametric_eq");
+        let info = af27_fx::info(&eq.effect).unwrap();
+        let k = |key: &str| info.params.iter().position(|p| p.key == key).unwrap();
+        assert_eq!(eq.values[k("b1_gain")], -3.3);
+        assert_eq!(eq.values[k("hp_slope")], 2.0);
+        // Unchanged: the same document, no keys added.
+        let mut out = export(&mut s, Some(&base));
+        let mut want = base.clone();
+        out.as_object_mut().unwrap().remove("modified");
+        want.as_object_mut().unwrap().remove("modified");
+        assert_eq!(out, want);
+        // An edit writes its own key, as a short decimal.
+        s.tracks[0].chain[1].values[k("b2_gain")] = 1.1;
+        let out = export(&mut s, Some(&base));
+        let p = &out["tracks"][0]["effects"]["slots"][1]["params"];
+        assert_eq!(p["b2_gain"], json!(1.1));
+        assert_eq!(p["b1_q"], json!(0.707));
+        assert_eq!(p.as_object().unwrap().len(), 5);
     }
 
     #[test]
