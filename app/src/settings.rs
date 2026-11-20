@@ -97,6 +97,8 @@ pub struct Prefs {
     /// What New Audio File and New Multitrack Session start with.
     pub new_file: crate::new_dialogs::NewFileDefaults,
     pub new_session: crate::new_dialogs::NewSessionDefaults,
+    /// The start-up offer to import from Audiform 1 was made.
+    pub af1_import_asked: bool,
     /// Soloing a track or bus unsolos every other (Ctrl+click always
     /// does, whatever this says).
     pub solo_exclusive: bool,
@@ -199,6 +201,7 @@ fn merge_scan(prev: Option<&Scan>, key: ScanKey, list: af27_engine::DeviceList) 
 enum PageAct {
     RefreshDevices,
     ReloadThemes,
+    ImportAf1,
 }
 
 impl Default for Prefs {
@@ -225,6 +228,7 @@ impl Default for Prefs {
             metronome: Default::default(),
             new_file: Default::default(),
             new_session: Default::default(),
+            af1_import_asked: false,
             solo_exclusive: false,
             midi_monitor: true,
         }
@@ -410,6 +414,7 @@ impl Draft {
         prefs.metronome = st.prefs.metronome;
         prefs.new_file = st.prefs.new_file.clone();
         prefs.new_session = st.prefs.new_session.clone();
+        prefs.af1_import_asked = st.prefs.af1_import_asked;
         if prefs != st.prefs {
             let reopen = prefs.audio != st.prefs.audio;
             st.prefs = prefs;
@@ -541,6 +546,15 @@ impl SettingsUi {
             Some(PageAct::ReloadThemes) => {
                 st.themes = crate::theme::load_all(&crate::theme::user_dir());
             }
+            Some(PageAct::ImportAf1) => {
+                // The import changes settings under the open dialog: close
+                // it so its copy does not write the old ones back.
+                if crate::af1_import::open(st) {
+                    self.open = false;
+                    self.draft = None;
+                    return;
+                }
+            }
             None => {}
         }
         if apply {
@@ -561,6 +575,14 @@ impl SettingsUi {
 fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
     match name {
         "General" => {
+            group(ui, th, "Audiform 1", |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Import from Audiform 1...").clicked() {
+                        d.act = Some(PageAct::ImportAf1);
+                    }
+                    note(ui, th, "Settings and the VST3 plug-in scan.");
+                });
+            });
             group(ui, th, "Workspace", |ui| {
                 egui::ComboBox::from_id_salt("settings-workspace")
                     .selected_text(d.workspace.name())

@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod af1_import;
 mod app_icon;
 mod caustics;
 mod classic_themes;

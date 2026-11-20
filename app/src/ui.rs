@@ -179,6 +179,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, files: Vec<std::path::PathBuf>) -> App {
         let mut st = State::new();
         st.live_metronome();
+        // Once, after an install: offer to bring Audiform 1's setup over.
+        crate::af1_import::ask_once(&mut st);
         crate::hwcursor::install(cc);
         crate::caustics::install(cc);
         crate::app_icon::install(cc);
@@ -2512,6 +2514,7 @@ impl eframe::App for App {
         }
         crate::rack::windows(ctx, &mut self.st);
         crate::new_dialogs::show(ctx, &mut self.st);
+        crate::af1_import::window(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
         generate_window(ctx, &mut self.st);

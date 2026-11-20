@@ -88,6 +88,10 @@ impl PhasePrefs {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
+    pub fn save_now(&self) {
+        self.save();
+    }
+
     fn save(&self) {
         let _ = std::fs::create_dir_all(data_dir());
         let _ = std::fs::write(

@@ -317,6 +317,8 @@ pub struct State {
     /// File > New Audio File / New Multitrack Session dialogs.
     pub new_file_ui: Option<crate::new_dialogs::NewFileDraft>,
     pub new_session_ui: Option<crate::new_dialogs::NewSessionDraft>,
+    /// The Import from Audiform 1 window.
+    pub af1_prompt: Option<crate::af1_import::Prompt>,
     /// The clip whose Properties show, and a floating window for them.
     pub want_properties: bool,
     /// A live-edit drag is under way (one undo step per drag).
@@ -569,6 +571,7 @@ impl State {
             effect_dialog: false,
             new_file_ui: None,
             new_session_ui: None,
+            af1_prompt: None,
             want_properties: false,
             gesture: false,
             want_piano: false,
