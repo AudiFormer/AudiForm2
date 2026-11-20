@@ -8,8 +8,13 @@
 fn bench_fx() {
     let rate = 48_000u32;
     let n = rate as usize * 30;
-    let src: Vec<f32> = (0..n * 2).map(|i| ((i as f32) * 0.013).sin() * 0.3).collect();
-    for (id, pairs) in [("af.reverb", vec![("mix".to_string(), 0.2)]), ("af.opto_leveler", vec![])] {
+    let src: Vec<f32> = (0..n * 2)
+        .map(|i| ((i as f32) * 0.013).sin() * 0.3)
+        .collect();
+    for (id, pairs) in [
+        ("af.reverb", vec![("mix".to_string(), 0.2)]),
+        ("af.opto_leveler", vec![]),
+    ] {
         let p = af27_fx::params_from(id, &pairs).unwrap();
         let mut fx = af27_fx::build(id, rate, &p).unwrap();
         let mut b = src.clone();

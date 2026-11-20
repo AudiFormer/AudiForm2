@@ -32,6 +32,7 @@ fn slot(id: &str, set: &[(usize, f32)]) -> EffectSlot {
         values[*i] = *v;
     }
     EffectSlot {
+        sidechain: None,
         effect: id.into(),
         values,
         bypass: false,
@@ -113,6 +114,7 @@ fn dense(tracks: usize, secs: f64) -> (Session, Arc<AudioBuffer>, usize) {
         while at < secs {
             let src = ((t as u64 * 7_919) % (48_000 * 40)) as f64 / rate as f64;
             tr.clips.push(Clip {
+                props: Default::default(),
                 id: 10_000 + t as u64 * 1000 + k,
                 media: m,
                 name: "c".into(),
@@ -174,7 +176,11 @@ fn bench_each_effect() {
             p.process(a, b);
         }
         let took = t0.elapsed().as_secs_f64();
-        eprintln!("{id}: {:.0}x real time ({:.1} ms per 30 s)", 30.0 / took, took * 1000.0);
+        eprintln!(
+            "{id}: {:.0}x real time ({:.1} ms per 30 s)",
+            30.0 / took,
+            took * 1000.0
+        );
     }
 }
 

@@ -51,10 +51,119 @@ pub struct Clip {
     pub fade_out: f64,
     #[serde(default)]
     pub muted: bool,
+    /// Stretch, pitch and the other per-clip settings.
+    #[serde(flatten)]
+    pub props: ClipProps,
     /// The object's id in an `.audfrm` file it came from, so saving back
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_id: Option<String>,
+}
+
+/// How a clip is stretched in time and shifted in pitch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StretchMode {
+    #[default]
+    Off,
+    /// Processed while playing.
+    Live,
+    /// Processed once and kept (sounds the same as Live).
+    Rendered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StretchKind {
+    /// One voice or instrument at a time.
+    #[default]
+    Monophonic,
+    /// Chords and full mixes.
+    Polyphonic,
+    /// Tape-style: speed and pitch change together.
+    Varispeed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipStretch {
+    pub mode: StretchMode,
+    pub kind: StretchKind,
+    /// Timeline length over source length (2.0 plays half speed). The
+    /// clip's `length` is on the timeline; it covers `length / ratio`
+    /// seconds of the source from `offset`.
+    pub ratio: f64,
+    /// Pitch shift in semitones (-24..24). Varispeed: follows the ratio.
+    pub pitch: f32,
+    /// Analysis window in milliseconds (5..200).
+    pub window_ms: f32,
+    /// Transient sensitivity 0..100.
+    pub transients: f32,
+    pub preserve_formants: bool,
+    pub high_precision: bool,
+}
+
+impl Default for ClipStretch {
+    fn default() -> Self {
+        ClipStretch {
+            mode: StretchMode::Off,
+            kind: StretchKind::Monophonic,
+            ratio: 1.0,
+            pitch: 0.0,
+            window_ms: 30.0,
+            transients: 40.0,
+            preserve_formants: true,
+            high_precision: true,
+        }
+    }
+}
+
+impl ClipStretch {
+    pub fn is_on(&self) -> bool {
+        self.mode != StretchMode::Off
+            && ((self.ratio - 1.0).abs() > 1e-9 || self.pitch.abs() > 1e-6)
+    }
+    /// The ratio actually applied (1 when off).
+    pub fn applied_ratio(&self) -> f64 {
+        if self.mode == StretchMode::Off {
+            1.0
+        } else {
+            self.ratio.clamp(0.25, 4.0)
+        }
+    }
+    /// The pitch actually applied in semitones (Varispeed: from the ratio).
+    pub fn applied_pitch(&self) -> f32 {
+        match (self.mode, self.kind) {
+            (StretchMode::Off, _) => 0.0,
+            (_, StretchKind::Varispeed) => (-12.0 * self.applied_ratio().log2()) as f32,
+            _ => self.pitch,
+        }
+    }
+}
+
+/// Per-clip settings beyond position and level.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipProps {
+    #[serde(skip_serializing_if = "is_default")]
+    pub stretch: ClipStretch,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reversed: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub inverted: bool,
+    /// Cannot be moved.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+    /// Its own colour instead of the track's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+    /// Fade shapes: -100..100 skew (0 straight).
+    #[serde(skip_serializing_if = "is_default")]
+    pub fade_in_skew: f32,
+    #[serde(skip_serializing_if = "is_default")]
+    pub fade_out_skew: f32,
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 impl Clip {
@@ -111,6 +220,9 @@ pub struct Track {
     /// Effects run in order on the track's sound, before the fader.
     #[serde(default)]
     pub chain: Vec<EffectSlot>,
+    /// The chain's power, input and output gain and dry/wet mix.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub rack: Rack,
     /// Where the track sits in a 3D Space session's room.
     #[serde(default)]
     pub pos: crate::space::SpacePos,
@@ -166,6 +278,10 @@ pub struct EffectSlot {
     pub values: Vec<f32>,
     #[serde(default)]
     pub bypass: bool,
+    /// The track or bus whose sound keys this effect (a compressor
+    /// ducking under a voice). None: it listens to its own input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidechain: Option<TrackId>,
     /// Anything else the effect keeps (an amp capture, an impulse
     /// response file), as the effect's own JSON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +290,29 @@ pub struct EffectSlot {
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_id: Option<String>,
+}
+
+/// An effect chain's own controls.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Rack {
+    /// The whole chain off.
+    pub bypass: bool,
+    pub input_db: f32,
+    pub output_db: f32,
+    /// Dry/wet, 0..1.
+    pub mix: f32,
+}
+
+impl Default for Rack {
+    fn default() -> Self {
+        Rack {
+            bypass: false,
+            input_db: 0.0,
+            output_db: 0.0,
+            mix: 1.0,
+        }
+    }
 }
 
 /// Up to this many effects per chain.
@@ -219,6 +358,8 @@ pub struct Session {
     /// Effects on the whole mix.
     #[serde(default)]
     pub master_chain: Vec<EffectSlot>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub master_rack: Rack,
     /// Some(layout) makes this a 3D Space session.
     #[serde(default)]
     pub space: Option<crate::space::SpaceLayout>,
@@ -260,6 +401,7 @@ impl Session {
             markers: Vec::new(),
             next_id: 1,
             master_chain: Vec::new(),
+            master_rack: Default::default(),
             space: None,
             monitor: Default::default(),
             tempo: Default::default(),
@@ -305,6 +447,7 @@ impl Session {
             output: None,
             sends: Vec::new(),
             chain: Vec::new(),
+            rack: Default::default(),
             pos: Default::default(),
             midi: Vec::new(),
             instrument: Default::default(),
@@ -336,6 +479,7 @@ impl Session {
         let id = self.alloc_id();
         let t = self.track_mut(track)?;
         t.clips.push(Clip {
+            props: Default::default(),
             id,
             media,
             name: m.name.clone(),
@@ -498,6 +642,7 @@ mod tests {
     #[test]
     fn fades_and_pan() {
         let c = Clip {
+            props: Default::default(),
             id: 1,
             media: 1,
             name: String::new(),

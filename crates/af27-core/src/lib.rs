@@ -16,5 +16,6 @@ pub mod time;
 pub use buffer::{AudioBuffer, Range};
 pub use history::History;
 pub use session::{
-    Clip, ClipId, EffectSlot, Marker, MediaId, MediaItem, Send, Session, Track, TrackId, TrackKind,
+    Clip, ClipId, ClipProps, ClipStretch, EffectSlot, Marker, MediaId, MediaItem, Rack, Send,
+    Session, StretchKind, StretchMode, Track, TrackId, TrackKind,
 };

@@ -603,6 +603,7 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
                         if ui.button(&name).clicked() {
                             if let Some(c) = st.chain_mut(track) {
                                 c.push(EffectSlot {
+                                    sidechain: None,
                                     values: crate::fx::defaults(&id),
                                     effect: id.clone(),
                                     bypass: false,

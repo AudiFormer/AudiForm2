@@ -589,6 +589,9 @@ pub struct Sessions {
     pub props: Option<PropsDraft>,
     pub recovery: Vec<Recoverable>,
     pub last_lock: Option<Instant>,
+    /// The session in front was made with New Session (or brought back
+    /// from the list), so it is listed in Files even while empty.
+    pub made: bool,
 }
 
 impl Default for Sessions {
@@ -604,6 +607,7 @@ impl Default for Sessions {
             props: None,
             recovery: Vec::new(),
             last_lock: None,
+            made: false,
         }
     }
 }
@@ -830,6 +834,7 @@ impl State {
     /// The session in front was never saved and nobody has touched it.
     pub fn front_is_blank(&self) -> bool {
         self.session_path.is_none()
+            && !self.sessions.made
             && self.sessions.source.is_none()
             && !self.session_dirty
             && self.session_history.undo_label().is_none()
@@ -859,6 +864,7 @@ impl State {
             base: self.session_base.take(),
             key: std::mem::replace(&mut self.sessions.key, new_key()),
         };
+        self.sessions.made = false;
         self.piano_clip = None;
         self.start_marker = None;
         self.gesture_before = None;
@@ -880,6 +886,7 @@ impl State {
         self.media_docs = p.media_docs;
         self.session_base = p.base;
         self.sessions.key = p.key;
+        self.sessions.made = true;
         self.piano_clip = None;
         self.start_marker = None;
         self.session_version += 1;
@@ -970,9 +977,19 @@ impl State {
             },
         };
         self.park_front();
+        self.sessions.made = true;
+        // Each new session gets its own name in the list.
+        let taken: Vec<String> = self
+            .sessions
+            .parked
+            .iter()
+            .map(|p| p.session.name.clone())
+            .collect();
+        self.session.name = untitled_name(&taken);
         if let Some(i) = made {
+            let name = std::mem::take(&mut self.session.name);
             self.session = i.session;
-            self.session.name = "Untitled Session".into();
+            self.session.name = name;
             // A session of its own: a new id, and where it came from.
             self.session_base = i.base.map(|mut b| {
                 if let Some(o) = b.as_object_mut() {
@@ -2124,5 +2141,30 @@ mod tests {
     fn numbered_names() {
         assert_eq!(numbered("voice.wav", 2), "voice (2).wav");
         assert_eq!(numbered("README", 3), "README (3)");
+    }
+}
+
+/// "Untitled Session", or "Untitled Session 2", 3… when that is taken.
+pub fn untitled_name(taken: &[String]) -> String {
+    let base = "Untitled Session";
+    if !taken.iter().any(|t| t == base) {
+        return base.into();
+    }
+    (2..)
+        .map(|n| format!("{base} {n}"))
+        .find(|n| !taken.contains(n))
+        .unwrap()
+}
+
+#[cfg(test)]
+mod untitled_tests {
+    #[test]
+    fn new_sessions_get_free_names() {
+        assert_eq!(super::untitled_name(&[]), "Untitled Session");
+        let t = vec![
+            "Untitled Session".to_string(),
+            "Untitled Session 2".to_string(),
+        ];
+        assert_eq!(super::untitled_name(&t), "Untitled Session 3");
     }
 }

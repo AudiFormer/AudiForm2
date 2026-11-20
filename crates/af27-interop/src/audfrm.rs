@@ -138,6 +138,7 @@ fn slot_from(v: &Value) -> EffectSlot {
             .map(|p| v["params"][p.key].as_f64().unwrap_or(p.default) as f32)
             .collect();
         return EffectSlot {
+            sidechain: None,
             effect: id,
             values,
             bypass: !enabled,
@@ -151,6 +152,7 @@ fn slot_from(v: &Value) -> EffectSlot {
             .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
             .unwrap_or_default();
         return EffectSlot {
+            sidechain: None,
             effect: own.to_string(),
             values,
             bypass: !enabled,
@@ -160,6 +162,7 @@ fn slot_from(v: &Value) -> EffectSlot {
     }
     // An effect Audiform27 does not have: kept by its own id, silent here.
     EffectSlot {
+        sidechain: None,
         effect,
         values: Vec::new(),
         bypass: !enabled,
@@ -266,6 +269,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                 silent_fx += c["effects"]["slots"].as_array().map_or(0, Vec::len);
                 let id = out.alloc_id();
                 clips.push(Clip {
+                    props: Default::default(),
                     id,
                     media,
                     name: c["name"].as_str().unwrap_or("Clip").to_string(),
@@ -1056,6 +1060,7 @@ mod tests {
         let bus = s.add_track_of(TrackKind::Bus);
         s.tracks[0].output = Some(bus);
         s.tracks[0].chain.push(EffectSlot {
+            sidechain: None,
             effect: "compressor".into(),
             values: vec![-18.0, 3.0],
             bypass: false,

@@ -534,6 +534,7 @@ mod tests {
             values[*i] = *v;
         }
         EffectSlot {
+            sidechain: None,
             effect: id.into(),
             values,
             bypass: false,
@@ -766,6 +767,7 @@ mod tests {
         let mut wide = 0;
         for e in Effect::all().filter(|e| e.realtime()) {
             let s = EffectSlot {
+                sidechain: None,
                 effect: e.id().into(),
                 values: e.defaults(),
                 bypass: false,

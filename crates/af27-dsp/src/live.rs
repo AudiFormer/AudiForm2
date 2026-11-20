@@ -788,6 +788,7 @@ mod tests {
     #[test]
     fn chain_bypass_and_mix() {
         let slots = vec![af27_core::EffectSlot {
+            sidechain: None,
             effect: "amplify".into(),
             values: vec![-6.0206],
             bypass: false,

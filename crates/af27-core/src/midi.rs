@@ -86,6 +86,52 @@ impl Default for Tempo {
     }
 }
 
+/// The metronome's sound. Kept in the app's settings, not the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClickSound {
+    #[default]
+    Tick,
+    Wood,
+    Beep,
+    Shaker,
+}
+
+/// Clicks between the beats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Subdivide {
+    #[default]
+    None,
+    Halves,
+    Triplets,
+    Quarters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetronomeSettings {
+    pub muted: bool,
+    /// Click only while recording.
+    pub recording_only: bool,
+    pub level_db: f32,
+    pub sound: ClickSound,
+    /// A higher click on the first beat of each bar.
+    pub accent: bool,
+    pub subdivide: Subdivide,
+}
+
+impl Default for MetronomeSettings {
+    fn default() -> Self {
+        MetronomeSettings {
+            muted: false,
+            recording_only: false,
+            level_db: -6.0,
+            sound: ClickSound::Tick,
+            accent: true,
+            subdivide: Subdivide::None,
+        }
+    }
+}
+
 /// One stretch of the tempo map with a single tempo and time signature.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {

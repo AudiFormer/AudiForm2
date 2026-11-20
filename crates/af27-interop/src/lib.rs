@@ -238,6 +238,7 @@ pub fn sesx(text: &str, base: &Path, name: &str) -> Result<Imported, String> {
             };
             let id = out.alloc_id();
             clips.push(Clip {
+                props: Default::default(),
                 id,
                 media,
                 name: attr(c, "name").unwrap_or("Clip").to_string(),

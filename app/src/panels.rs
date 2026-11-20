@@ -216,6 +216,7 @@ fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
         .fill(c(th.accent));
     if ui.add_enabled(st.doc().is_some(), apply).clicked() {
         let slot = af27_core::EffectSlot {
+            sidechain: None,
             effect: id.clone(),
             values: vals,
             bypass: false,

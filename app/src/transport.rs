@@ -68,7 +68,7 @@ pub fn fresh_start(cursor: f64, len: f64) -> f64 {
 /// - Normal, starting inside the selection: to the selection's end.
 ///   Otherwise to the end of the file or of the last clip.
 /// - Loop: the selection repeats (no selection: 0 to the end). Starting
-///   after it plays straight on to the end.
+///   (or clicking the playhead) after it rolls over into its start.
 /// - Skip: the selection is jumped over; starting inside it starts at its end.
 pub fn plan_for(
     mode: PlayMode,
@@ -462,7 +462,9 @@ mod tests {
         assert_eq!(p.advance(50.0, 40.0), Some(90.0));
         assert_eq!(p.advance(50.0, 150.0), Some(100.0));
         assert_eq!(p.advance(50.0, 275.0), Some(125.0));
-        assert_eq!(p.advance(300.0, 10.0), Some(310.0));
+        // Started past the loop: rolls over into its start.
+        let (start, _) = plan_for(PlayMode::Loop, Some((100.0, 200.0)), 300.0, LEN, false);
+        assert_eq!(start, 100.0);
         let (_, p) = plan_for(PlayMode::Loop, None, 990.0, LEN, false);
         assert_eq!(
             p.region,

@@ -66,10 +66,12 @@ impl Plan {
     }
 
     /// Where playback asked to start at `t` really starts: inside a
-    /// skipped range it starts at the range's end.
+    /// skipped range it starts at the range's end; past a loop it rolls
+    /// over into the loop's start (before it, it plays into the loop).
     pub fn start_at(&self, t: f64) -> f64 {
         match self.region.real() {
             Region::Skip { start, end } if t >= start && t < end => end,
+            Region::Loop { start, end } if t >= end => start,
             _ => t,
         }
     }
@@ -121,8 +123,12 @@ mod tests {
     }
 
     #[test]
-    fn starting_after_a_loop_plays_straight_on() {
-        assert_eq!(looping(100.0, 200.0).advance(300.0, 10.0), Some(310.0));
+    fn starting_after_a_loop_rolls_into_its_start() {
+        let p = looping(100.0, 200.0);
+        assert_eq!(p.start_at(300.0), 100.0);
+        assert_eq!(p.start_at(200.0), 100.0);
+        assert_eq!(p.start_at(50.0), 50.0);
+        assert_eq!(p.start_at(150.0), 150.0);
     }
 
     #[test]

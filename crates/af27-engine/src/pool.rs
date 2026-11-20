@@ -157,8 +157,7 @@ fn claim(s: &Shared, gen: u64) {
         if i >= n {
             return;
         }
-        if s
-            .ticket
+        if s.ticket
             .compare_exchange_weak(t, t + 1, Ordering::AcqRel, Ordering::Relaxed)
             .is_err()
         {
@@ -255,7 +254,10 @@ mod tests {
             p.run(n, &|i| {
                 hits[i].fetch_add(1, Ordering::Relaxed);
             });
-            assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1), "round {round}");
+            assert!(
+                hits.iter().all(|h| h.load(Ordering::Relaxed) == 1),
+                "round {round}"
+            );
         }
     }
 
@@ -271,7 +273,10 @@ mod tests {
             p.run(n, &|i| {
                 hits[i].fetch_add(1, Ordering::Relaxed);
             });
-            assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1), "round {round}");
+            assert!(
+                hits.iter().all(|h| h.load(Ordering::Relaxed) == 1),
+                "round {round}"
+            );
         }
     }
 

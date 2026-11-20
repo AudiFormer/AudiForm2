@@ -369,8 +369,78 @@ fn cross(t: &mut f64, playing: &mut bool, seam: f64, action: transport::Action) 
     }
 }
 
+/// Which devices to use, by name. None (or a name no longer present)
+/// means the system default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeviceChoice {
+    pub output: Option<String>,
+    pub input: Option<String>,
+    /// Frames per audio callback; None lets the driver choose.
+    pub buffer: Option<u32>,
+}
+
+/// The output devices present now, by name.
+pub fn output_devices() -> Vec<String> {
+    cpal::default_host()
+        .output_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// The recording devices present now, by name.
+pub fn input_devices() -> Vec<String> {
+    cpal::default_host()
+        .input_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// The system's default output and input device names.
+pub fn default_devices() -> (Option<String>, Option<String>) {
+    let h = cpal::default_host();
+    (
+        h.default_output_device().and_then(|d| d.name().ok()),
+        h.default_input_device().and_then(|d| d.name().ok()),
+    )
+}
+
+/// The driver layer in use ("WASAPI" on Windows).
+pub fn driver_name() -> String {
+    format!("{:?}", cpal::default_host().id())
+}
+
+static INPUT_CHOICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The recording device new recordings use (None: the system default).
+pub fn set_input_device(name: Option<String>) {
+    *INPUT_CHOICE.lock().unwrap() = name;
+}
+
+fn find_output(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
+    name.and_then(|n| {
+        host.output_devices()
+            .ok()?
+            .find(|d| d.name().is_ok_and(|x| x == n))
+    })
+    .or_else(|| host.default_output_device())
+}
+
+fn find_input(host: &cpal::Host) -> Option<cpal::Device> {
+    let want = INPUT_CHOICE.lock().unwrap().clone();
+    want.and_then(|n| {
+        host.input_devices()
+            .ok()?
+            .find(|d| d.name().is_ok_and(|x| x == n))
+    })
+    .or_else(|| host.default_input_device())
+}
+
 pub struct Engine {
     _stream: cpal::Stream,
+    /// Set when the output device went away (unplugged) or failed.
+    lost: Arc<AtomicBool>,
+    /// The frames per callback asked for, if any.
+    pub buffer: Option<u32>,
     tx: rtrb::Producer<Cmd>,
     trash: rtrb::Consumer<Garbage>,
     shared: Arc<Shared>,
@@ -382,9 +452,15 @@ pub struct Engine {
 impl Engine {
     /// Opens the default output device.
     pub fn new() -> Result<Engine, String> {
+        Engine::open(&DeviceChoice::default())
+    }
+
+    /// Opens the chosen output device, or the system default when it is
+    /// not there.
+    pub fn open(choice: &DeviceChoice) -> Result<Engine, String> {
+        set_input_device(choice.input.clone());
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
+        let device = find_output(&host, choice.output.as_deref())
             .ok_or("No audio output device was found.")?;
         let name = device.name().unwrap_or_else(|_| "Output".into());
         let config = device
@@ -428,8 +504,20 @@ impl Engine {
             store_max_f32(&sh.peak_l, l);
             store_max_f32(&sh.peak_r, r);
         };
-        let err = |e| eprintln!("audio output error: {e}");
-        let cfg: cpal::StreamConfig = config.clone().into();
+        let lost = Arc::new(AtomicBool::new(false));
+        let lost2 = lost.clone();
+        let err = move |e: cpal::StreamError| {
+            eprintln!("audio output error: {e}");
+            lost2.store(true, Ordering::Relaxed);
+        };
+        let mut cfg: cpal::StreamConfig = config.clone().into();
+        if let Some(n) = choice.buffer {
+            let n = match config.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, max } => n.clamp(*min, *max),
+                cpal::SupportedBufferSize::Unknown => n,
+            };
+            cfg.buffer_size = cpal::BufferSize::Fixed(n);
+        }
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 device.build_output_stream(&cfg, move |d: &mut [f32], _| callback(d), err, None)
@@ -457,6 +545,8 @@ impl Engine {
             .map_err(|e| format!("Could not start audio: {e}"))?;
         Ok(Engine {
             _stream: stream,
+            lost,
+            buffer: choice.buffer,
             tx,
             trash,
             shared,
@@ -464,6 +554,11 @@ impl Engine {
             device: name,
             recorders: Vec::new(),
         })
+    }
+
+    /// The output device went away or failed: reopen (the default).
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Relaxed)
     }
 
     fn send(&mut self, c: Cmd) {
@@ -876,9 +971,7 @@ impl Recorder {
 
     fn input() -> Result<Recorder, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or("No recording device was found.")?;
+        let device = find_input(&host).ok_or("No recording device was found.")?;
         let config = device
             .default_input_config()
             .map_err(|e| format!("The recording device gave no format: {e}"))?;
@@ -990,6 +1083,7 @@ mod tests {
             channels: vec![vec![1.0; 200]],
         });
         s.tracks[0].clips.push(Clip {
+            props: Default::default(),
             id: 99,
             media: m,
             name: "x".into(),
@@ -1032,6 +1126,7 @@ mod tests {
         let bi = s.track_index(bus).unwrap();
         s.tracks[bi].volume_db = -6.0206;
         s.tracks[bi].chain.push(af27_core::EffectSlot {
+            sidechain: None,
             effect: "amplify".into(),
             values: vec![6.0206],
             bypass: false,
@@ -1104,6 +1199,7 @@ mod tests {
 
     fn amp(db: f32) -> af27_core::EffectSlot {
         af27_core::EffectSlot {
+            sidechain: None,
             effect: "amplify".into(),
             values: vec![db],
             bypass: false,
@@ -1283,9 +1379,9 @@ mod tests {
                 "start {from}, {frames} frames: at {at}, want {want}"
             );
         }
-        // Starting after the loop plays straight on.
+        // Starting after the loop rolls over into its start.
         let (at, _) = play_frames(lp, 300.0, 10);
-        assert!(near(at, 310.0), "{at}");
+        assert!(near(at, 110.0), "{at}");
         // The frame before the seam is the loop's last; the next is its first.
         let (_, last) = play_frames(lp, 50.0, 150);
         assert!((last - 199.0).abs() < 1e-3, "{last}");
@@ -1419,6 +1515,7 @@ mod bench {
     fn slot(id: &str) -> EffectSlot {
         let e = af27_dsp::Effect::from_id(id).unwrap();
         EffectSlot {
+            sidechain: None,
             effect: id.into(),
             values: e.defaults(),
             bypass: false,
@@ -1471,6 +1568,7 @@ mod bench {
             let t = s.add_track();
             let i = s.track_index(t).unwrap();
             s.tracks[i].clips.push(Clip {
+                props: Default::default(),
                 id: 1000 + k,
                 media: m,
                 name: "c".into(),

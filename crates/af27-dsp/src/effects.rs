@@ -398,6 +398,7 @@ fn run_live(e: Effect, b: &mut AudioBuffer, vals: &[f32]) {
     if n > 2 {
         // A surround file: every channel by its speaker (see `wide`).
         let slot = af27_core::EffectSlot {
+            sidechain: None,
             effect: e.id().into(),
             values: vals.to_vec(),
             bypass: false,
