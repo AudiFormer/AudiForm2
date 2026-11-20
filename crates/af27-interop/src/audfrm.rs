@@ -175,14 +175,14 @@ fn write_pos(o: &mut Map<String, Value>, p: &SpacePos) {
             continue;
         }
         if !always && now == 0.0 {
-            o.remove(key);
+            o.shift_remove(key);
         } else {
             o.insert(key.into(), json!(now));
         }
     }
     if p.spatialize_mode != had.spatialize_mode {
         if p.spatialize_mode == SpatializeMode::default() {
-            o.remove("spatialize_mode");
+            o.shift_remove("spatialize_mode");
         } else {
             o.insert("spatialize_mode".into(), json!(p.spatialize_mode.key()));
         }
@@ -579,13 +579,13 @@ fn write_strip(o: &mut Map<String, Value>, now: &Strip, is_bus: bool) {
             if n {
                 o.insert(key.into(), json!(true));
             } else {
-                o.remove(key);
+                o.shift_remove(key);
             }
         }
     }
     if now.automation != was.automation {
         if now.automation == AutomationMode::Read {
-            o.remove("automation_mode");
+            o.shift_remove("automation_mode");
         } else {
             o.insert(
                 "automation_mode".into(),
@@ -819,7 +819,7 @@ fn write_midi_clip(mo: &mut Map<String, Value>, m: &MidiClip) {
     }
     if was.controls != m.controls {
         if m.controls.is_empty() {
-            mo.remove("controls");
+            mo.shift_remove("controls");
         } else {
             let list = m
                 .controls
@@ -862,10 +862,78 @@ fn chain_from(v: &Value) -> Vec<EffectSlot> {
         .unwrap_or_default()
 }
 
-/// Reads an Audiform session.
-pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
+/// The newest `schema_version` of Audiform's session documents this app
+/// reads. Audiform has never gone past 1; a later version means a newer
+/// build changed the meaning of a field, so such files are refused whole
+/// rather than half read.
+pub const SCHEMA_VERSION: u64 = 1;
+
+/// A template document wraps a full session document under `session`.
+pub const TEMPLATE_FORMAT: &str = "altaudio.template";
+
+/// Checks a document's `format` and `schema_version` header.
+pub fn check_header(v: &Value, expected: &str) -> Result<(), String> {
+    let format = match v.get("format") {
+        None | Some(Value::Null) => {
+            return Err(
+                "This file has no \"format\" header, so it is not an Audiform session.".into(),
+            )
+        }
+        Some(f) => f.as_str().unwrap_or_default(),
+    };
+    if format != expected {
+        return Err(format!(
+            "This is not an Audiform session (expected an {expected} document, found {format:?})."
+        ));
+    }
+    let Some(version) = v.get("schema_version").filter(|x| !x.is_null()) else {
+        return Err("This session has no \"schema_version\" header.".into());
+    };
+    match version.as_u64() {
+        Some(0) | None => Err(format!(
+            "This {expected} file has a version this app does not know ({version})."
+        )),
+        Some(n) if n > SCHEMA_VERSION => Err(format!(
+            "This {expected} file uses version {n}, which is newer than this app supports (up to {SCHEMA_VERSION}). Update Audiform27 to open it."
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Parses an Audiform session (or the session inside an Audiform
+/// template) and checks its headers. Versions below the newest would be
+/// upgraded here step by step; there are none yet, since every Audiform
+/// session document is still version 1.
+pub fn parse(text: &str) -> Result<Value, String> {
     let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map_err(|e| format!("Not an Audiform session: {e}"))?;
+    if v.get("format").and_then(Value::as_str) == Some(TEMPLATE_FORMAT) {
+        check_header(&v, TEMPLATE_FORMAT)?;
+        let inner = v
+            .get("session")
+            .filter(|s| s.is_object())
+            .cloned()
+            .ok_or("This template has no session in it.")?;
+        check_header(&inner, FORMAT)?;
+        return Ok(inner);
+    }
+    check_header(&v, FORMAT)?;
+    Ok(v)
+}
+
+/// Reads an Audiform session. Relative media paths are found from
+/// `base_dir` (the session file's folder).
+pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
+    let v = parse(text)?;
+    let issues = crate::check::validate(&v);
+    let mut imp = import_value(v, base_dir)?;
+    if !issues.is_empty() {
+        imp.notices.push(crate::check::notice(&issues));
+    }
+    Ok(imp)
+}
+
+fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
     let rate = v["sample_rate"].as_u64().unwrap_or(48_000).max(1) as u32;
     let mut out = Session::new(v["name"].as_str().unwrap_or("Audiform Session"), rate, 0);
     let mut notices = Vec::new();
@@ -1320,7 +1388,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             doc.insert("space".into(), Value::Object(sp));
         }
         None => {
-            doc.remove("space");
+            doc.shift_remove("space");
         }
     }
 
@@ -1336,7 +1404,14 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             let id = m.ext_id.get_or_insert_with(new_uuid).clone();
             o.insert("id".into(), json!(id));
             if let Some(p) = &m.path {
-                o.insert("path".into(), json!(p.to_string_lossy()));
+                // Another spelling of the same file keeps the file's text.
+                let same = o
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|was| crate::paths::same(Path::new(was), p));
+                if !same {
+                    o.insert("path".into(), json!(p.to_string_lossy()));
+                }
             }
             o.entry("path").or_insert_with(|| json!(""));
             o.entry("relative_path").or_insert(Value::Null);
@@ -1503,7 +1578,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             if t.spatial.room {
                 o.insert("room".into(), json!(true));
             } else {
-                o.remove("room");
+                o.shift_remove("room");
             }
         }
         if is_bus {
@@ -1602,7 +1677,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                     );
                 }
                 None => {
-                    o.remove("af27_soundfont");
+                    o.shift_remove("af27_soundfont");
                 }
             }
         }
@@ -1666,35 +1741,47 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
 /// Saves `session` to `path` as an Audiform session, pretty-printed as
 /// Audiform writes it. Returns the document written (the new base).
 pub fn save(session: &mut Session, base: Option<&Value>, path: &Path) -> Result<Value, String> {
+    save_relative_to(session, base, path, path.parent())
+}
+
+/// Like [`save`], with media paths made relative to `home` instead of the
+/// file's own folder: a recovery copy kept elsewhere records paths as
+/// they are from the session's real file. `None` leaves the relative
+/// paths as the session had them (new media gets none).
+pub fn save_relative_to(
+    session: &mut Session,
+    base: Option<&Value>,
+    path: &Path,
+    home: Option<&Path>,
+) -> Result<Value, String> {
     let mut doc = export(session, base);
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = home {
         fill_relative_paths(&mut doc, base, dir);
     }
-    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    let tmp: PathBuf = path.with_extension("audfrm.tmp");
-    std::fs::write(&tmp, text).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
+    let mut text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    // As Audiform writes it: pretty JSON and a final newline.
+    text.push('\n');
+    crate::paths::write_atomic(path, text.as_bytes())?;
     Ok(doc)
 }
 
-/// Media added since the file was read, and kept inside the session's
-/// folder, gets a path relative to the session file as Audiform writes
-/// it, so the folder can move. Media the file already had keeps what it
-/// said, so an unedited session saves the same.
+/// Every media file gets its path relative to the session's folder, as
+/// Audiform writes it (with `/`), so the folder can move; none when it is
+/// on another drive. Media the file already had keeps its relative path
+/// when it still names the same file, or when the file is not where the
+/// session says (a stale absolute path must not overwrite a good relative
+/// one), so an unedited session saves the same.
 fn fill_relative_paths(doc: &mut Value, base: Option<&Value>, dir: &Path) {
-    let known: Vec<&str> = base
+    let known: HashMap<&str, &Value> = base
         .and_then(|b| b["media"].as_array())
         .into_iter()
         .flatten()
-        .filter_map(|m| m["id"].as_str())
+        .filter_map(|m| Some((m["id"].as_str()?, &m["relative_path"])))
         .collect();
     let Some(media) = doc.get_mut("media").and_then(Value::as_array_mut) else {
         return;
     };
     for m in media {
-        if m["id"].as_str().is_some_and(|id| known.contains(&id)) || !m["relative_path"].is_null() {
-            continue;
-        }
         let Some(p) = m["path"]
             .as_str()
             .filter(|p| !p.is_empty())
@@ -1702,8 +1789,23 @@ fn fill_relative_paths(doc: &mut Value, base: Option<&Value>, dir: &Path) {
         else {
             continue;
         };
-        if let Ok(rel) = p.strip_prefix(dir) {
-            m["relative_path"] = json!(rel.to_string_lossy());
+        let rel = crate::paths::relative(&p, dir);
+        let old = m["id"].as_str().and_then(|id| known.get(id)).copied();
+        match old {
+            Some(old) => {
+                if !p.is_file() {
+                    continue;
+                }
+                let still = match (old.as_str(), rel.as_deref()) {
+                    (Some(o), Some(r)) => crate::paths::same(Path::new(o), Path::new(r)),
+                    (None, None) => old.is_null(),
+                    _ => false,
+                };
+                if !still {
+                    m["relative_path"] = json!(rel);
+                }
+            }
+            None => m["relative_path"] = json!(rel),
         }
     }
 }
@@ -1742,12 +1844,143 @@ mod tests {
         });
         let doc = save(&mut s, Some(&base), &file).unwrap();
         let media = doc["media"].as_array().unwrap();
-        // The file's own media: untouched.
+        // The file's own media (not on this computer): untouched.
         assert_eq!(media[0], base["media"][0]);
-        let rel = std::path::Path::new("Audio").join("guest.wav");
-        assert_eq!(media[1]["relative_path"], json!(rel.to_string_lossy()));
-        assert!(media[2]["relative_path"].is_null());
+        assert_eq!(media[1]["relative_path"], json!("Audio/guest.wav"));
+        assert_eq!(
+            media[2]["relative_path"],
+            json!("../elsewhere/music.wav"),
+            "beside the session folder: a climbing relative path"
+        );
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.ends_with("}\n"), "a final newline, as Audiform writes");
+        // Opened again from a moved folder, the media is found there.
+        let moved = std::env::temp_dir().join(format!("af27-moved-{}", new_uuid()));
+        std::fs::create_dir_all(moved.join("Audio")).unwrap();
+        std::fs::write(moved.join("Audio").join("guest.wav"), b"x").unwrap();
+        let again = import(&text, &moved).unwrap().session;
+        assert_eq!(
+            again.media[1].path.as_deref(),
+            Some(moved.join("Audio").join("guest.wav").as_path())
+        );
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+
+    #[test]
+    fn a_file_on_another_drive_gets_no_relative_path_and_a_stale_one_is_kept() {
+        let dir = std::env::temp_dir().join(format!("af27-rel2-{}", new_uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("host.wav");
+        std::fs::write(&wav, b"x").unwrap();
+        let mut v: Value = serde_json::from_str(SAMPLE).unwrap();
+        // A file that is here, recorded with a wrong relative path, and a
+        // file that is not here with a relative path that must survive.
+        v["media"][0]["path"] = json!(wav.to_string_lossy());
+        v["media"][0]["relative_path"] = json!("old/host.wav");
+        let mut gone = v["media"][0].clone();
+        gone["id"] = json!("m2");
+        gone["path"] = json!("Q:\\nowhere\\x.wav");
+        gone["relative_path"] = json!("Audio/x.wav");
+        v["media"].as_array_mut().unwrap().push(gone);
+        let imp = import(&v.to_string(), &dir).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let doc = save(&mut s, Some(&base), &dir.join("Show.audfrm")).unwrap();
+        assert_eq!(doc["media"][0]["relative_path"], json!("host.wav"));
+        assert_eq!(doc["media"][1]["relative_path"], json!("Audio/x.wav"));
+        #[cfg(windows)]
+        {
+            s.media[0].path = Some(PathBuf::from(r"Q:\other drive\host.wav"));
+            let out = export(&mut s, Some(&doc));
+            let mut out2 = out.clone();
+            fill_relative_paths(&mut out2, Some(&out), Path::new(r"C:\Show"));
+            // Not a file here, so the last good relative path stays.
+            assert_eq!(out2["media"][0]["relative_path"], json!("host.wav"));
+            assert_eq!(
+                crate::paths::relative(Path::new(r"Q:\x.wav"), Path::new(r"C:\Show")),
+                None
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn headers_are_checked_and_newer_files_refused() {
+        let with = |f: &dyn Fn(&mut Value)| {
+            let mut v: Value = serde_json::from_str(SAMPLE).unwrap();
+            f(&mut v);
+            import(&v.to_string(), Path::new("."))
+        };
+        assert!(with(&|_| {}).is_ok());
+        let e = with(&|v| v["format"] = json!("altaudio.library")).unwrap_err();
+        assert!(e.contains("not an Audiform session"), "{e}");
+        let e = with(&|v| {
+            v.as_object_mut().unwrap().shift_remove("format");
+        })
+        .unwrap_err();
+        assert!(e.contains("\"format\""), "{e}");
+        let e = with(&|v| {
+            v.as_object_mut().unwrap().shift_remove("schema_version");
+        })
+        .unwrap_err();
+        assert!(e.contains("schema_version"), "{e}");
+        assert!(with(&|v| v["schema_version"] = json!(0)).is_err());
+        let e = with(&|v| v["schema_version"] = json!(99)).unwrap_err();
+        assert!(e.contains("version 99") && e.contains("Update"), "{e}");
+        assert!(import("{ not json", Path::new(".")).is_err());
+        // A template carries a session with its own header.
+        let session: Value = serde_json::from_str(SAMPLE).unwrap();
+        let mut t = json!({"format": "altaudio.template", "schema_version": 1, "id": "x",
+            "name": "Show", "description": "", "created": "2026-01-01T00:00:00Z", "session": session});
+        let imp = import(&t.to_string(), Path::new(".")).unwrap();
+        assert_eq!(imp.session.name, "Round Trip");
+        t["session"]["schema_version"] = json!(2);
+        assert!(import(&t.to_string(), Path::new(".")).is_err());
+        t["session"]["schema_version"] = json!(1);
+        t["schema_version"] = json!(2);
+        assert!(import(&t.to_string(), Path::new(".")).is_err());
+    }
+
+    /// Exactly the fields Audiform requires and nothing more.
+    #[test]
+    fn a_session_with_only_the_required_fields_opens_and_saves() {
+        let text = r##"{"format": "altaudio.session", "schema_version": 1, "id": "s", "name": "Bare",
+            "sample_rate": 44100, "bit_depth": 24, "created": "2026-01-01T00:00:00Z", "modified": "2026-01-01T00:00:00Z",
+            "media": [], "tracks": [],
+            "buses": [{"id": "b", "name": "Bus", "channels": "stereo", "height": 72, "volume_db": 0.0, "pan": 0.0,
+              "muted": false, "solo": false, "output": {"type": "master"}, "sends": [],
+              "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}, "envelopes": []}],
+            "master": {"channels": "stereo", "height": 64, "volume_db": 0.0,
+              "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}, "envelopes": []},
+            "markers": [], "view": {"samples_per_pixel": 512.0, "scroll": 0, "scroll_y": 0, "playhead": 0, "selection": null},
+            "modes": {"podcast": false, "voiceover": false}, "libraries": [], "metadata": {}}"##;
+        let imp = import(text, Path::new(".")).unwrap();
+        assert!(imp.notices.is_empty(), "{:?}", imp.notices);
+        assert_eq!(imp.session.rate, 44_100);
+        assert_eq!(imp.session.bit_depth, 24);
+        assert_eq!(imp.session.tracks[0].kind, TrackKind::Bus);
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let out = export(&mut s, Some(&base));
+        // Fields Audiform27 always writes; nothing else is added or lost.
+        for k in base.as_object().unwrap().keys() {
+            assert!(out.get(k).is_some(), "{k} lost");
+        }
+    }
+
+    #[test]
+    fn broken_references_are_reported_on_open() {
+        let mut v: Value = serde_json::from_str(SAMPLE).unwrap();
+        v["tracks"][0]["sends"][0]["bus_id"] = json!("nope");
+        let imp = import(&v.to_string(), Path::new(".")).unwrap();
+        assert!(
+            imp.notices
+                .iter()
+                .any(|n| n.contains("tracks[0].sends[0]") && n.contains("opened anyway")),
+            "{:?}",
+            imp.notices
+        );
     }
 
     /// A session with fields Audiform27 does not use anywhere: they must
@@ -2519,6 +2752,22 @@ mod real {
                     }
                 }
                 assert_eq!(out, want, "{} changed on a load and save", p.display());
+                // Byte for byte as well: same key order, same numbers, the
+                // final newline (only `modified` is new on a real save).
+                let orig = super::parse(&text).unwrap();
+                let mut again = super::export(&mut s, Some(&orig));
+                again["modified"] = orig["modified"].clone();
+                // The tempo block Audiform27 adds to files without one
+                // (tempo code is not part of this check).
+                if orig.get("tempo").is_none() {
+                    again.as_object_mut().unwrap().shift_remove("tempo");
+                }
+                let written = serde_json::to_string_pretty(&again).unwrap() + "\n";
+                assert!(
+                    written == text.replace("\r\n", "\n"),
+                    "{} is not byte-identical after a load and save",
+                    p.display()
+                );
                 n += 1;
             }
         }

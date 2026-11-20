@@ -8,7 +8,7 @@ authors.workspace = true
 
 [dependencies]
 af27-core.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 roxmltree = "0.20"
 af27-dsp = { path = "../af27-dsp" }
 af27-fx = { path = "../af27-fx" }

@@ -710,7 +710,10 @@ fn write_autosave(
 ) {
     let f = autosave_file(key);
     let _ = std::fs::create_dir_all(autosave_dir());
-    if af27_interop::audfrm::save(session, base, &f).is_ok() {
+    // Relative media paths are kept as they are from the session's own
+    // file, not from the recovery folder.
+    let home = path.and_then(Path::parent);
+    if af27_interop::audfrm::save_relative_to(session, base, &f, home).is_ok() {
         let note = AutosaveNote {
             key,
             name: session.name.clone(),
@@ -1708,7 +1711,14 @@ impl State {
                 return;
             }
         };
-        let dir = r.file.parent().unwrap_or(Path::new("."));
+        // Relative media paths count from the session's own file.
+        let dir = r
+            .note
+            .as_ref()
+            .and_then(|n| n.path.as_deref())
+            .and_then(Path::parent)
+            .or_else(|| r.file.parent())
+            .unwrap_or(Path::new("."));
         match af27_interop::audfrm::import(&text, dir) {
             Ok(i) => {
                 self.park_front();

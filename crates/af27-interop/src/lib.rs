@@ -15,6 +15,8 @@
 
 use std::collections::HashMap;
 pub mod audfrm;
+pub mod check;
+pub mod paths;
 pub mod smf;
 
 use std::path::{Path, PathBuf};
@@ -54,17 +56,23 @@ pub fn import(path: &Path) -> Result<Imported, String> {
     }
 }
 
-/// Picks the first of absolute or relative-to-the-session paths that
-/// exists, else the absolute one (shown as missing media).
+/// Finds a media file: the path relative to the session first (so a show
+/// folder that moved, or was copied, uses its own files), then the
+/// absolute path, then a file of that name beside the session. Else the
+/// absolute path (shown as missing media).
 pub(crate) fn resolve(abs: Option<&str>, rel: Option<&str>, base: &Path) -> Option<PathBuf> {
     let a = abs.filter(|s| !s.is_empty()).map(PathBuf::from);
     let r = rel
         .filter(|s| !s.is_empty())
-        .map(|r| base.join(r.replace('\\', "/")));
-    if let Some(p) = a.as_ref().filter(|p| p.exists()) {
+        .map(|r| paths::normalize(&base.join(r.replace('\\', "/"))));
+    if let Some(p) = r.as_ref().filter(|p| p.is_file()) {
+        // The same file as the absolute path: keep that spelling.
+        if let Some(a) = a.as_ref().filter(|a| paths::same(a, p)) {
+            return Some(a.clone());
+        }
         return Some(p.clone());
     }
-    if let Some(p) = r.as_ref().filter(|p| p.exists()) {
+    if let Some(p) = a.as_ref().filter(|p| p.exists()) {
         return Some(p.clone());
     }
     // A file moved alongside the session: try its name next to the session.
