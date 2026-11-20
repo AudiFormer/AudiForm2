@@ -1397,7 +1397,7 @@ fn effect_dialog(ctx: &egui::Context, st: &mut State) {
         return;
     }
     let mut open = true;
-    egui::Window::new("Effect")
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "ui.rs", 0)), "Effect")
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
@@ -1495,6 +1495,28 @@ fn tool_button(
         }
     }
     resp
+}
+
+/// A popup window that opens dead centre every time it opens (and can be
+/// dragged while open). `key` tells one popup from another: a window not
+/// drawn last frame has just opened, so it is put back in the middle.
+pub fn popup<'a>(
+    ctx: &egui::Context,
+    key: egui::Id,
+    title: impl Into<egui::WidgetText>,
+) -> egui::Window<'a> {
+    let frame = ctx.cumulative_pass_nr();
+    let last: Option<u64> = ctx.data(|d| d.get_temp(key));
+    ctx.data_mut(|d| d.insert_temp(key, frame));
+    let centre = ctx.screen_rect().center();
+    let w = egui::Window::new(title)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(centre);
+    if last.is_none_or(|l| l + 1 < frame) {
+        w.current_pos(centre)
+    } else {
+        w
+    }
 }
 
 /// Every node of the main dock surface, to adjust tab bar scrolls.
@@ -2113,7 +2135,7 @@ fn status(ui: &mut egui::Ui, st: &State) {
 
 fn generate_window(ctx: &egui::Context, st: &mut State) {
     let mut open = st.generate.open;
-    egui::Window::new("Generate")
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "ui.rs", 1)), "Generate")
         .open(&mut open)
         .resizable(false)
         .show(ctx, |ui| {
@@ -2194,7 +2216,7 @@ fn generate_window(ctx: &egui::Context, st: &mut State) {
 
 fn about_window(ctx: &egui::Context, st: &mut State) {
     let mut open = st.show_about;
-    egui::Window::new("About AudiForm 2").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "ui.rs", 2)), "About AudiForm 2").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(120.0, 120.0), egui::Sense::hover());
         crate::hud::logo_mark(ui.painter(), r, &st.theme, &st.fx, 1.0);
         ui.label(RichText::new("AUDIFORM 2").size(28.0).strong().extra_letter_spacing(6.0).color(c(st.theme.accent)));

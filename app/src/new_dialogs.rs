@@ -217,55 +217,59 @@ fn new_file_window(ctx: &egui::Context, st: &mut State) {
     let th = st.theme.clone();
     let mut open = true;
     let mut result = None;
-    egui::Window::new("New Audio File")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .pivot(Align2::CENTER_CENTER)
-        .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            let mut enter = false;
-            egui::Grid::new("new-file-grid")
-                .num_columns(2)
-                .spacing(vec2(10.0, 8.0))
-                .show(ui, |ui| {
-                    label(ui, "File Name:");
-                    let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(200.0));
-                    if !d.focused {
-                        r.request_focus();
-                        d.focused = true;
-                    }
-                    enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    ui.end_row();
-                    label(ui, "Sample Rate:");
-                    ui.horizontal(|ui| rate_box(ui, "nf-rate", &mut d.rate));
-                    ui.end_row();
-                    label(ui, "Channels:");
-                    egui::ComboBox::from_id_salt("nf-ch")
-                        .selected_text(channels_name(d.channels))
-                        .width(160.0)
-                        .show_ui(ui, |ui| {
-                            for n in [1usize, 2, 6, 8] {
-                                ui.selectable_value(&mut d.channels, n, channels_name(n));
-                            }
-                        });
-                    ui.end_row();
-                    label(ui, "Bit Depth:");
-                    ui.horizontal(|ui| bits_box(ui, "nf-bits", &mut d.bits));
-                    ui.end_row();
-                });
-            ui.label(
-                RichText::new("Saved as FLAC by default (lossless and compressed).")
-                    .size(10.5)
-                    .color(c(th.text_dim)),
-            );
-            let (ok, cancel) = buttons(ui, &th, enter);
-            if ok {
-                result = Some(true);
-            } else if cancel {
-                result = Some(false);
-            }
-        });
+    crate::ui::popup(
+        ctx,
+        egui::Id::new(("af2-popup", "new_dialogs.rs", 0)),
+        "New Audio File",
+    )
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(false)
+    .pivot(Align2::CENTER_CENTER)
+    .default_pos(ctx.screen_rect().center())
+    .show(ctx, |ui| {
+        let mut enter = false;
+        egui::Grid::new("new-file-grid")
+            .num_columns(2)
+            .spacing(vec2(10.0, 8.0))
+            .show(ui, |ui| {
+                label(ui, "File Name:");
+                let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(200.0));
+                if !d.focused {
+                    r.request_focus();
+                    d.focused = true;
+                }
+                enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.end_row();
+                label(ui, "Sample Rate:");
+                ui.horizontal(|ui| rate_box(ui, "nf-rate", &mut d.rate));
+                ui.end_row();
+                label(ui, "Channels:");
+                egui::ComboBox::from_id_salt("nf-ch")
+                    .selected_text(channels_name(d.channels))
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for n in [1usize, 2, 6, 8] {
+                            ui.selectable_value(&mut d.channels, n, channels_name(n));
+                        }
+                    });
+                ui.end_row();
+                label(ui, "Bit Depth:");
+                ui.horizontal(|ui| bits_box(ui, "nf-bits", &mut d.bits));
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("Saved as FLAC by default (lossless and compressed).")
+                .size(10.5)
+                .color(c(th.text_dim)),
+        );
+        let (ok, cancel) = buttons(ui, &th, enter);
+        if ok {
+            result = Some(true);
+        } else if cancel {
+            result = Some(false);
+        }
+    });
     match (result, open) {
         (Some(true), _) => {
             let name = if d.name.trim().is_empty() {
@@ -298,7 +302,7 @@ fn new_session_window(ctx: &egui::Context, st: &mut State) {
     let mut open = true;
     let mut result = None;
     let templates = crate::sessions::list_templates();
-    egui::Window::new("New Multitrack Session")
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "new_dialogs.rs", 1)), "New Multitrack Session")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

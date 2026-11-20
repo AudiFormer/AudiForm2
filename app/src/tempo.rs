@@ -48,7 +48,7 @@ pub fn playhead_bar(st: &State) -> u32 {
 
 pub fn window(ctx: &egui::Context, st: &mut State) {
     let mut open = st.tempo_ui.open;
-    egui::Window::new("Tempo and Time Signature")
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "tempo.rs", 0)), "Tempo and Time Signature")
         .open(&mut open)
         .resizable(false)
         .default_width(360.0)
@@ -193,27 +193,31 @@ pub fn replace_prompt(ctx: &egui::Context, st: &mut State) {
         return;
     }
     let mut answer = None;
-    egui::Window::new("Import MIDI File")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label("The session already has tempo or time signature changes.");
-            ui.label("Replace its tempo map with the one in the MIDI file?");
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Replace Tempo Map").clicked() {
-                    answer = Some(true);
-                }
-                if ui.button("Keep Session Tempo").clicked() {
-                    answer = Some(false);
-                }
-                if ui.button("Cancel").clicked() {
-                    answer = Some(false);
-                    st.tempo_ui.pending = None;
-                }
-            });
+    crate::ui::popup(
+        ctx,
+        egui::Id::new(("af2-popup", "tempo.rs", 1)),
+        "Import MIDI File",
+    )
+    .collapsible(false)
+    .resizable(false)
+    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+    .show(ctx, |ui| {
+        ui.label("The session already has tempo or time signature changes.");
+        ui.label("Replace its tempo map with the one in the MIDI file?");
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("Replace Tempo Map").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Keep Session Tempo").clicked() {
+                answer = Some(false);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+                st.tempo_ui.pending = None;
+            }
         });
+    });
     if let Some(replace) = answer {
         if let Some((path, imp)) = st.tempo_ui.pending.take() {
             finish_import(st, &path, &imp, replace);

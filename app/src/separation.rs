@@ -976,7 +976,7 @@ fn dialogs(ctx: &egui::Context, st: &mut State) {
         }
     };
     let mut answer = None;
-    egui::Window::new(title)
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "separation.rs", 0)), title)
         .id(egui::Id::new("separation_ask"))
         .collapsible(false)
         .resizable(false)
