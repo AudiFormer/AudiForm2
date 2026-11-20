@@ -25,7 +25,84 @@ impl Theme {
             Theme::mall_pastel_95_night(),
             Theme::phosphor(),
             Theme::undercurrent(),
+            Theme::studio_lite(),
         ]
+    }
+
+    /// Flat charcoal panels, a green waveform and blue highlights, like
+    /// the plain dark look of a classic studio editor. Nothing moves and
+    /// nothing is layered: no pictures, glass, glow, grid, vignette or
+    /// intro, so it draws the least of any theme (for weaker computers).
+    pub fn studio_lite() -> Theme {
+        Theme {
+            name: "Studio Lite".into(),
+            author: "Audiform".into(),
+            background: [29, 29, 31],
+            panel: [38, 38, 40],
+            panel_raised: [52, 52, 55],
+            border: [22, 22, 24],
+            text: [214, 214, 214],
+            text_dim: [150, 150, 152],
+            accent: [56, 142, 232],
+            accent_alt: [232, 196, 64],
+            wave_peak: [36, 150, 82],
+            wave_centre: [92, 226, 132],
+            wave_background: [24, 24, 26],
+            grid: [48, 48, 51],
+            selection: [214, 226, 240],
+            selection_alpha: 46,
+            playhead: [235, 70, 70],
+            marker: [232, 196, 64],
+            meter_low: [60, 200, 100],
+            meter_mid: [230, 210, 70],
+            meter_high: [235, 70, 60],
+            backdrop_top: [29, 29, 31],
+            backdrop_bottom: [29, 29, 31],
+            grid_glow: [56, 142, 232],
+            spectrum: vec![
+                [6, 6, 20],
+                [30, 16, 80],
+                [110, 30, 120],
+                [200, 60, 80],
+                [245, 150, 50],
+                [255, 240, 190],
+            ],
+            track_colors: vec![
+                [92, 196, 120],
+                [86, 150, 220],
+                [214, 120, 72],
+                [190, 110, 200],
+                [210, 190, 80],
+                [80, 190, 190],
+                [220, 90, 110],
+                [150, 160, 170],
+            ],
+            phase_low: Some([56, 142, 232]),
+            phase_high: Some([200, 230, 255]),
+            rounding: 2.0,
+            glow: 0.0,
+            font_scale: 1.0,
+            grid_strength: 0.0,
+            // Opaque panels: nothing behind them to blend.
+            glass: 1.0,
+            chamfer: 0.0,
+            scanlines: 0.0,
+            motion: 0.0,
+            reactive: 0.0,
+            picture_tile: 900.0,
+            picture_veil: 0.0,
+            vignette: 0.0,
+            caustics: 0.0,
+            dark: true,
+            pixel: false,
+            brackets: false,
+            intro: false,
+            hidden: false,
+            realistic: false,
+            grid_style: "none".into(),
+            picture: "".into(),
+            ..Theme::analog()
+        }
     }
 
     /// A walnut and brushed metal studio desk.
