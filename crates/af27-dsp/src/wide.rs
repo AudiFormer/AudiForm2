@@ -405,6 +405,11 @@ pub struct WideChain {
     channels: usize,
     dry: Vec<f32>,
     pub mix: f32,
+    /// The rack's input and output gains (linear) and power, as in
+    /// [`crate::live::Chain`].
+    pub input: f32,
+    pub output: f32,
+    pub bypass: bool,
 }
 
 impl WideChain {
@@ -416,27 +421,43 @@ impl WideChain {
         self.slots.iter().all(|(_, bypass)| *bypass)
     }
 
+    /// Takes a rack's settings (no allocation).
+    pub fn set_rack(&mut self, rack: &af27_core::Rack) {
+        self.bypass = rack.bypass;
+        self.input = db_to_gain(rack.input_db);
+        self.output = db_to_gain(rack.output_db);
+        self.mix = rack.mix.clamp(0.0, 1.0);
+    }
+
     /// Processes interleaved frames (at most the block it was built for).
     pub fn process(&mut self, buf: &mut [f32]) {
-        if self.is_empty() {
+        if self.bypass {
             return;
         }
         let n = buf.len().min(self.dry.len());
         let n = n - n % self.channels;
-        let wet_only = self.mix >= 0.999;
-        if !wet_only {
-            self.dry[..n].copy_from_slice(&buf[..n]);
+        if self.input != 1.0 {
+            buf[..n].iter_mut().for_each(|s| *s *= self.input);
         }
-        for (p, bypass) in &mut self.slots {
-            if !*bypass {
-                p.process(&mut buf[..n]);
+        if !self.is_empty() {
+            let wet_only = self.mix >= 0.999;
+            if !wet_only {
+                self.dry[..n].copy_from_slice(&buf[..n]);
+            }
+            for (p, bypass) in &mut self.slots {
+                if !*bypass {
+                    p.process(&mut buf[..n]);
+                }
+            }
+            if !wet_only {
+                let m = self.mix.max(0.0);
+                for (o, d) in buf[..n].iter_mut().zip(&self.dry[..n]) {
+                    *o = *o * m + d * (1.0 - m);
+                }
             }
         }
-        if !wet_only {
-            let m = self.mix;
-            for (o, d) in buf[..n].iter_mut().zip(&self.dry[..n]) {
-                *o = *o * m + d * (1.0 - m);
-            }
+        if self.output != 1.0 {
+            buf[..n].iter_mut().for_each(|s| *s *= self.output);
         }
     }
 
@@ -481,6 +502,9 @@ pub fn build_wide_chain(
         channels,
         dry: vec![0.0; block.max(1) * channels],
         mix: 1.0,
+        input: 1.0,
+        output: 1.0,
+        bypass: false,
     }
 }
 

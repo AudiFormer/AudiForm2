@@ -146,6 +146,9 @@ pub struct EffectInfo {
     pub category: &'static str,
     pub description: &'static str,
     pub params: Vec<ParamInfo>,
+    /// It has a level detector another track can key (a sidechain): the
+    /// host passes that track's sound to [`Processor::process_keyed`].
+    pub sidechain: bool,
 }
 
 impl EffectInfo {
@@ -240,7 +243,9 @@ pub trait Processor: Send {
     }
 
     /// Processes with a side-chain key (interleaved stereo, the same
-    /// length as `buf`). Effects without a key input ignore it.
+    /// length as `buf`): another track's sound, which drives the level
+    /// detector in place of the effect's own input. Effects without a key
+    /// input (see [`EffectInfo::sidechain`]) ignore it. Must not allocate.
     fn process_keyed(&mut self, buf: &mut [f32], _key: &[f32]) {
         self.process(buf);
     }
@@ -259,6 +264,7 @@ mod tests {
     fn params_take_defaults_and_clamp() {
         let info = EffectInfo {
             id: "t",
+            sidechain: false,
             name: "T",
             category: "",
             description: "",

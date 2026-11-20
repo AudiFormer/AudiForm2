@@ -20,6 +20,9 @@ pub mod soundfont;
 pub mod synth;
 pub mod transport;
 
+#[cfg(test)]
+mod tests_keys;
+
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -96,6 +99,15 @@ enum Cmd {
         inst: af27_core::midi::Instrument,
     },
     Metronome(bool),
+    /// The click's sound, level, accent and subdivisions.
+    MetronomeSettings(af27_core::midi::MetronomeSettings),
+    /// Recording started or stopped (for a click only while recording).
+    Recording(bool),
+    /// A chain's rack: power, input and output gain, mix.
+    Rack {
+        track: u16,
+        rack: af27_core::Rack,
+    },
     /// SoundFont level of a track.
     FontGain {
         track: u16,
@@ -138,7 +150,18 @@ struct Voice {
     playing: bool,
     t: f64,
     plan: Plan,
+    /// The click's settings (the app's, kept across programs).
+    metro: af27_core::midi::MetronomeSettings,
+    recording: bool,
+    /// Live playback only: the click for the frames last rendered, one
+    /// value per frame, added after the meters and the scope. Offline
+    /// renders have none, so the click never reaches an export.
+    clicks: Option<Vec<f32>>,
 }
+
+/// Frames of click the live voice holds (longer callbacks go without
+/// the click past this).
+const CLICK_FRAMES: usize = 1 << 16;
 
 impl Voice {
     fn apply(&mut self, cmd: Cmd, trash: &mut rtrb::Producer<Garbage>) {
@@ -238,6 +261,17 @@ impl Voice {
                     m.metronome = on;
                 }
             }
+            Cmd::MetronomeSettings(s) => self.metro = s,
+            Cmd::Recording(on) => self.recording = on,
+            Cmd::Rack { track, rack } => {
+                if let Some(m) = mix {
+                    if track == MASTER {
+                        m.set_master_rack(&rack);
+                    } else {
+                        m.set_rack(track as usize, &rack);
+                    }
+                }
+            }
             Cmd::FontGain { track, db } => {
                 if let Some(f) = mix
                     .and_then(|m| m.tracks.get_mut(track as usize))
@@ -278,6 +312,10 @@ impl Voice {
     /// Fills interleaved `out` (`channels` wide) and returns the peaks.
     fn render(&mut self, out: &mut [f32], channels: usize, rate: f64, bed_out: bool) -> (f32, f32) {
         out.fill(0.0);
+        if let Some(c) = &mut self.clicks {
+            let frames = (out.len() / channels.max(1)).min(c.len());
+            c[..frames].fill(0.0);
+        }
         let Some(program) = self.program.as_deref_mut() else {
             return (0.0, 0.0);
         };
@@ -326,7 +364,16 @@ impl Voice {
                     }
                     pk
                 }
-                Program::Mix(m) => m.render(self.t, dt, n, &mut block[..n * width], bed_out),
+                Program::Mix(m) => {
+                    let click_on = !self.metro.recording_only || self.recording;
+                    if let (Some(c), true) = (&mut self.clicks, click_on) {
+                        let end = (done + n).min(c.len());
+                        if done < end {
+                            m.click_into(self.t, dt, &mut c[done..end], &self.metro);
+                        }
+                    }
+                    m.render(self.t, dt, n, &mut block[..n * width], bed_out)
+                }
             };
             peaks = (peaks.0.max(p.0), peaks.1.max(p.1));
             for i in 0..n {
@@ -351,6 +398,19 @@ impl Voice {
             }
         }
         peaks
+    }
+}
+
+/// Adds the click (one value per frame) to the first two channels of
+/// interleaved `out`.
+fn add_clicks(out: &mut [f32], channels: usize, clicks: &[f32]) {
+    let ch = channels.max(1);
+    for (f, c) in out.chunks_exact_mut(ch).zip(clicks) {
+        if *c != 0.0 {
+            for s in f.iter_mut().take(2) {
+                *s += c;
+            }
+        }
     }
 }
 
@@ -484,6 +544,9 @@ impl Engine {
             playing: false,
             t: 0.0,
             plan: Plan::default(),
+            metro: Default::default(),
+            recording: false,
+            clicks: Some(vec![0.0; CLICK_FRAMES]),
         };
         let mut callback = move |out: &mut [f32]| {
             while let Ok(cmd) = rx.pop() {
@@ -503,6 +566,11 @@ impl Engine {
             sh.pos.store(voice.t.to_bits(), Ordering::Relaxed);
             store_max_f32(&sh.peak_l, l);
             store_max_f32(&sh.peak_r, r);
+            // The click last: after the master fader, the meters and the
+            // scope, heard but never measured.
+            if let Some(c) = &voice.clicks {
+                add_clicks(out, channels, c);
+            }
         };
         let lost = Arc::new(AtomicBool::new(false));
         let lost2 = lost.clone();
@@ -678,8 +746,22 @@ impl Engine {
         });
     }
 
+    /// The click on or off (the session's `tempo.metronome`).
     pub fn set_metronome(&mut self, on: bool) {
         self.send(Cmd::Metronome(on));
+    }
+
+    /// The click's sound, level, accent, subdivisions, mute and whether it
+    /// plays only while recording. Kept across programs.
+    pub fn set_metronome_settings(&mut self, settings: af27_core::midi::MetronomeSettings) {
+        self.send(Cmd::MetronomeSettings(settings));
+    }
+
+    /// New rack settings (power, input and output gain, dry/wet mix) for a
+    /// track's chain, by track index, or [`MASTER`] for the master chain.
+    /// Live, without rebuilding the mix.
+    pub fn set_rack(&mut self, track: u16, rack: af27_core::Rack) {
+        self.send(Cmd::Rack { track, rack });
     }
 
     pub fn set_font_gain(&mut self, track: usize, db: f32) {
@@ -750,6 +832,7 @@ impl Engine {
             recs.push(r);
         }
         self.recorders = recs;
+        self.send(Cmd::Recording(true));
         Ok(())
     }
 
@@ -787,6 +870,7 @@ impl Engine {
     /// Stops recording and returns one take per source, in the order
     /// they were given.
     pub fn stop_recording_all(&mut self) -> Vec<Take> {
+        self.send(Cmd::Recording(false));
         std::mem::take(&mut self.recorders)
             .into_iter()
             .map(Recorder::finish)
@@ -830,6 +914,9 @@ fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -
         playing: true,
         t: from,
         plan: Plan::new(to, Region::None),
+        metro: Default::default(),
+        recording: false,
+        clicks: None,
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.reset();
@@ -863,6 +950,9 @@ pub fn render_each(
         t: from,
         plan: Plan::new(to, Region::None),
         audition: None,
+        metro: Default::default(),
+        recording: false,
+        clicks: None,
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.reset();
@@ -1280,6 +1370,9 @@ mod tests {
             playing: false,
             t: 0.0,
             plan: Plan::default(),
+            metro: Default::default(),
+            recording: false,
+            clicks: None,
         };
         let mut centre = |v: &mut Voice| {
             v.apply(
@@ -1339,6 +1432,9 @@ mod tests {
             t: 0.0,
             plan: Plan::default(),
             audition: None,
+            metro: Default::default(),
+            recording: false,
+            clicks: None,
         }
     }
 

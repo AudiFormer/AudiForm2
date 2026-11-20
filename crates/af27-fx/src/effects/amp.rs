@@ -34,6 +34,7 @@ const PART: usize = 128;
 pub fn amp_info() -> EffectInfo {
     EffectInfo {
         id: AMP,
+        sidechain: false,
         name: "Amp Model",
         category: "Amplitude",
         description: "Plays a neural amp capture (a .nam file) of a real amp, pedal or full rig, with a noise gate before it, Bass, Middle and Treble after it, and an optional cabinet impulse response. Load them in its window.",

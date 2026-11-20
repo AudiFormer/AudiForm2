@@ -33,6 +33,7 @@ pub const PREAMP: &str = "af.tube_preamp";
 pub fn opto_info() -> EffectInfo {
     EffectInfo {
         id: OPTO,
+        sidechain: true,
         name: "Opto Leveler",
         category: "Dynamics",
         description: "A smooth leveling amplifier with an optical-style gain cell: quick to catch, slow and gentle to let go. Turn up Peak Reduction until the meter shows a few dB of leveling, then set Gain for the level you want.",
@@ -51,6 +52,7 @@ pub fn opto_info() -> EffectInfo {
 pub fn preamp_info() -> EffectInfo {
     EffectInfo {
         id: PREAMP,
+        sidechain: false,
         name: "Tube Preamp",
         category: "Amplitude",
         description: "A warm vintage tube preamp: drive it for rich, mostly even harmonics, with a transformer's weight and soft top and broad Low and High tone controls.",
@@ -220,12 +222,21 @@ impl Opto {
     }
 }
 
-impl Processor for Opto {
-    fn process(&mut self, buf: &mut [f32]) {
+impl Opto {
+    /// `key`: a sidechain (interleaved stereo, as long as `buf`) whose
+    /// level drives the gain cell, or None to listen to `buf` itself.
+    fn run(&mut self, buf: &mut [f32], key: Option<&[f32]>) {
         let mem_up = 1.0 - (-1.0 / (2.0 * self.rate)).exp();
         let mem_down = 1.0 - (-1.0 / (6.0 * self.rate)).exp();
-        for f in buf.as_chunks_mut::<2>().0 {
-            let side = self.emph[0].run((f[0] + f[1]) * 0.5);
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let heard = match key {
+                Some(k) => match (k.get(i * 2), k.get(i * 2 + 1)) {
+                    (Some(a), Some(b)) => (a + b) * 0.5,
+                    _ => 0.0,
+                },
+                None => (f[0] + f[1]) * 0.5,
+            };
+            let side = self.emph[0].run(heard);
             self.det = side * side + (self.det - side * side) * self.det_coef;
             let level = 10.0 * self.det.max(1e-12).log10() + 3.0;
             let want = self.target(level);
@@ -257,6 +268,15 @@ impl Processor for Opto {
             self.tick = 0;
             self.meter.store(self.gr, self.follow.db());
         }
+    }
+}
+
+impl Processor for Opto {
+    fn process(&mut self, buf: &mut [f32]) {
+        self.run(buf, None);
+    }
+    fn process_keyed(&mut self, buf: &mut [f32], key: &[f32]) {
+        self.run(buf, Some(key));
     }
     fn reset(&mut self) {
         self.det = 0.0;

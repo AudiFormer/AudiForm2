@@ -4,15 +4,21 @@
 //! The mix graph, run in blocks of up to [`BLOCK`] frames.
 //!
 //! Per block: buses are cleared; every audio and MIDI track renders its
-//! clips (or notes), runs its effect chain, feeds pre-fader sends, takes
+//! clips (or notes), runs its effect chain (inside its rack: input gain,
+//! the effects, dry/wet mix, output gain), feeds pre-fader sends, takes
 //! its fader and pan, feeds post-fader sends, then goes to its output (a
-//! bus or the master). Buses then run in session order. A 3D Space
+//! bus or the master). Buses then run in session order. An effect keyed
+//! by another track or bus (a sidechain) hears that source's sound after
+//! its chain and before its fader, so the source runs first; see `plan`.
+//! A 3D Space
 //! session spreads each track over the speaker bed instead of panning;
 //! its master chain then runs on the bed's speakers (every channel, see
 //! `af27_dsp::wide`), before the bed is heard binaurally or folded to
 //! stereo, or exported as it is. Bus tracks stay stereo. In a stereo
 //! session the master chain runs on the stereo mix. The master fader
-//! comes last, plus the metronome.
+//! comes last. The metronome is not part of the mix: the live engine adds
+//! it after the meters and the scope (see `Mix::click_into`), so it never
+//! reaches an export.
 //!
 //! Everything a block needs is allocated when the program is built, on
 //! the UI thread. The audio thread only reads and writes those buffers.
@@ -67,8 +73,23 @@ pub struct MixTrack {
     pub space_l: [f32; MAX_SPEAKERS],
     pub space_r: [f32; MAX_SPEAKERS],
     pub lfe: f32,
+    /// Per chain slot: the track whose sound keys it (a sidechain), once
+    /// the effect takes a key and the source can run first; None hears
+    /// its own input.
+    pub keys: Vec<Option<usize>>,
     l: Vec<f32>,
     r: Vec<f32>,
+    /// This track's sound after its chain and before its fader, kept for
+    /// the effects it keys (empty when it keys nothing).
+    kl: Vec<f32>,
+    kr: Vec<f32>,
+}
+
+impl MixTrack {
+    /// Whether another track's effect listens to this one.
+    pub fn is_key(&self) -> bool {
+        !self.kl.is_empty()
+    }
 }
 
 pub struct SpaceMix {
@@ -94,11 +115,11 @@ pub struct Mix {
     pub click: Vec<af27_core::midi::Segment>,
     ml: Vec<f32>,
     mr: Vec<f32>,
-    /// The audio and MIDI tracks (not buses), whose own work runs in parallel.
-    work: Vec<usize>,
-    /// Buses grouped so none in a group feeds another in it: each group's
-    /// chains run in parallel, groups in order.
-    bus_levels: Vec<Vec<usize>>,
+    /// Every track grouped so none in a group feeds or keys another in
+    /// it: each group's own work (clips, notes, chains) runs in parallel,
+    /// groups in order. Without sidechains the audio and MIDI tracks form
+    /// the first group and the buses follow.
+    levels: Vec<Vec<usize>>,
     /// Spread track work over the engine's threads (false: all on the caller).
     pub parallel: bool,
 }
@@ -155,32 +176,90 @@ pub fn stereo_frame(buf: &AudioBuffer, x: f64) -> (f32, f32) {
     }
 }
 
-/// Groups the buses into levels: a bus is one level above every earlier
-/// bus that feeds it (by output or send), so the buses within a level are
-/// independent. Feeds to an earlier bus arrive after it has run, as they
-/// always have, and are ignored here.
-fn bus_levels(tracks: &[MixTrack]) -> Vec<Vec<usize>> {
-    let mut level = vec![0usize; tracks.len()];
-    for (b, t) in tracks.iter().enumerate() {
-        if !t.is_bus {
+/// Whether `from` needs `to`'s sound first, directly or through others
+/// (`deps[x]`: what `x` needs first; the graph has no loops).
+fn needs(deps: &[Vec<usize>], from: usize, to: usize) -> bool {
+    let mut seen = vec![false; deps.len()];
+    let mut stack = vec![from];
+    while let Some(x) = stack.pop() {
+        if x == to {
+            return true;
+        }
+        if std::mem::replace(&mut seen[x], true) {
             continue;
         }
-        for (a, s) in tracks.iter().enumerate().take(b) {
-            let feeds = s.is_bus && (s.output == Some(b) || s.sends.iter().any(|x| x.bus == b));
-            if feeds {
-                level[b] = level[b].max(level[a] + 1);
+        stack.extend(deps[x].iter().copied().filter(|&d| !seen[d]));
+    }
+    false
+}
+
+/// Works out the order tracks run in, on the UI thread.
+///
+/// A bus runs after everything that feeds it (by output or send); feeds
+/// to an earlier bus arrive after it has run, as they always have, and are
+/// ignored here. A track whose effect is keyed by another track or bus
+/// (`wanted[i][slot]`, already limited to effects that take a key) runs
+/// after that source. A key to itself, to a track that is not there, or
+/// one that would close a loop (the source needs this track's sound
+/// first) is dropped, and that effect hears its own input.
+///
+/// Returns the keys kept, per track and slot, and the levels: each track
+/// sits one above everything it needs, so the tracks within a level are
+/// independent of one another.
+fn plan(
+    tracks: &[MixTrack],
+    wanted: &[Vec<Option<usize>>],
+) -> (Vec<Vec<Option<usize>>>, Vec<Vec<usize>>) {
+    let n = tracks.len();
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (a, t) in tracks.iter().enumerate() {
+        for b in t.output.into_iter().chain(t.sends.iter().map(|s| s.bus)) {
+            let counts = b != a && b < n && tracks[b].is_bus && (!t.is_bus || a < b);
+            if counts && !deps[b].contains(&a) {
+                deps[b].push(a);
+            }
+        }
+    }
+    let mut keys = Vec::with_capacity(n);
+    for (i, slots) in wanted.iter().enumerate() {
+        let mut kept = Vec::with_capacity(slots.len());
+        for k in slots {
+            let src = k.filter(|&s| s != i && s < n && !needs(&deps, s, i));
+            if let Some(s) = src {
+                if !deps[i].contains(&s) {
+                    deps[i].push(s);
+                }
+            }
+            kept.push(src);
+        }
+        keys.push(kept);
+    }
+    // Longest path from the tracks that need nothing (Kahn's order).
+    let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut waiting: Vec<usize> = deps.iter().map(Vec::len).collect();
+    for (i, d) in deps.iter().enumerate() {
+        for &x in d {
+            users[x].push(i);
+        }
+    }
+    let mut level = vec![0usize; n];
+    let mut ready: Vec<usize> = (0..n).filter(|&i| waiting[i] == 0).collect();
+    while let Some(x) = ready.pop() {
+        for &u in &users[x] {
+            level[u] = level[u].max(level[x] + 1);
+            waiting[u] -= 1;
+            if waiting[u] == 0 {
+                ready.push(u);
             }
         }
     }
     let top = level.iter().copied().max().unwrap_or(0);
     let mut out = vec![Vec::new(); top + 1];
-    for (i, t) in tracks.iter().enumerate() {
-        if t.is_bus {
-            out[level[i]].push(i);
-        }
+    for (i, l) in level.iter().enumerate() {
+        out[*l].push(i);
     }
     out.retain(|l| !l.is_empty());
-    out
+    (keys, out)
 }
 
 /// A track list shared with the engine's threads for one block.
@@ -198,9 +277,34 @@ impl TrackPtr {
     }
 }
 
+/// Runs a track's chain over its block, each keyed slot hearing its
+/// source's kept sound, then keeps this track's own sound if it keys
+/// others. Reads only the key sources, which have finished this block
+/// (they sit at an earlier level) and are not written meanwhile.
+fn run_chain(t: &mut MixTrack, tracks: TrackPtr, n: usize) {
+    {
+        let MixTrack {
+            chain, keys, l, r, ..
+        } = &mut *t;
+        chain.process_keyed(&mut l[..n], &mut r[..n], |slot| {
+            let src = keys.get(slot).copied().flatten()?;
+            // A different track from `t` (keys to itself are dropped),
+            // only read here.
+            let s = unsafe { &*tracks.get(src) };
+            // A source that is not heard has no sound to key with: the
+            // effect hears its own input rather than silence.
+            (s.audible && s.is_key()).then(|| (&s.kl[..n], &s.kr[..n]))
+        });
+    }
+    if t.is_key() {
+        t.kl[..n].copy_from_slice(&t.l[..n]);
+        t.kr[..n].copy_from_slice(&t.r[..n]);
+    }
+}
+
 /// A track's own sound for one block: silence, then its clips or notes,
-/// then its effect chain. Touches nothing but the track itself.
-fn render_source(t: &mut MixTrack, t0: f64, dt: f64, n: usize) {
+/// then its effect chain. Writes nothing but the track itself.
+fn render_source(t: &mut MixTrack, tracks: TrackPtr, t0: f64, dt: f64, n: usize) {
     t.l[..n].fill(0.0);
     t.r[..n].fill(0.0);
     if !t.audible {
@@ -219,7 +323,7 @@ fn render_source(t: &mut MixTrack, t0: f64, dt: f64, n: usize) {
     if let Some(f) = &mut t.font {
         f.render(t0, dt, &mut t.l[..n], &mut t.r[..n]);
     }
-    t.chain.process(&mut t.l[..n], &mut t.r[..n]);
+    run_chain(t, tracks, n);
     // With no pre-fader send, the fader can go on here, in parallel too.
     if !t.has_pre {
         apply_fader(t, n);
@@ -445,7 +549,11 @@ pub fn build(
                 clips,
                 synth,
                 font,
-                chain: build_chain(&t.chain, rate, BLOCK),
+                chain: {
+                    let mut c = build_chain(&t.chain, rate, BLOCK);
+                    c.set_rack(&t.rack);
+                    c
+                },
                 output: t
                     .output
                     .and_then(index_of)
@@ -467,11 +575,39 @@ pub fn build(
                 space_l,
                 space_r,
                 lfe,
+                keys: Vec::new(),
                 l: vec![0.0; BLOCK],
                 r: vec![0.0; BLOCK],
+                kl: Vec::new(),
+                kr: Vec::new(),
             }
         })
         .collect();
+    let mut tracks = tracks;
+    // Sidechains: which track keys each slot, for effects that take a key.
+    let wanted: Vec<Vec<Option<usize>>> = session
+        .tracks
+        .iter()
+        .zip(&tracks)
+        .map(|(st, mt)| {
+            st.chain
+                .iter()
+                .zip(&mt.chain.slots)
+                .map(|(slot, (p, _))| slot.sidechain.and_then(index_of).filter(|_| p.takes_key()))
+                .collect()
+        })
+        .collect();
+    let (keys, levels) = plan(&tracks, &wanted);
+    for (t, k) in tracks.iter_mut().zip(keys) {
+        t.keys = k;
+    }
+    for i in 0..tracks.len() {
+        let used = tracks.iter().any(|t| t.keys.contains(&Some(i)));
+        if used {
+            tracks[i].kl = vec![0.0; BLOCK];
+            tracks[i].kr = vec![0.0; BLOCK];
+        }
+    }
     let space = space.map(|layout| {
         let speakers = af27_space::speakers(layout);
         let channels = speakers.len();
@@ -480,7 +616,11 @@ pub fn build(
             channels,
             lfe_channel: af27_space::lfe_channel(layout),
             monitor: af27_space::Monitoring::new(layout, session.monitor, rate),
-            chain: build_wide_chain(&session.master_chain, rate, &names, BLOCK),
+            chain: {
+                let mut c = build_wide_chain(&session.master_chain, rate, &names, BLOCK);
+                c.set_rack(&session.master_rack);
+                c
+            },
             bed: vec![0.0; BLOCK * channels],
         }
     });
@@ -492,19 +632,15 @@ pub fn build(
     // Start the engine's threads here, on the UI thread, never on the
     // audio thread.
     let _ = crate::pool::pool();
-    let work = tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| !t.is_bus)
-        .map(|(i, _)| i)
-        .collect();
-    let bus_levels = bus_levels(&tracks);
+    let mut master_chain = build_chain(master_slots, rate, BLOCK);
+    if space.is_none() {
+        master_chain.set_rack(&session.master_rack);
+    }
     Mix {
-        bus_levels,
-        work,
+        levels,
         parallel: true,
         tracks,
-        master_chain: build_chain(master_slots, rate, BLOCK),
+        master_chain,
         master: db_to_gain(session.master_db),
         duration: session.duration(),
         space,
@@ -516,6 +652,12 @@ pub fn build(
 }
 
 impl Mix {
+    /// The order tracks run in: groups of track indices, each group's
+    /// tracks independent of one another (see `plan`).
+    pub fn levels(&self) -> &[Vec<usize>] {
+        &self.levels
+    }
+
     pub fn channels_out(&self) -> usize {
         self.space.as_ref().map_or(2, |s| s.channels)
     }
@@ -549,6 +691,42 @@ impl Mix {
         match &mut self.space {
             Some(sp) => sp.chain.set_bypass(slot, on),
             None => self.master_chain.set_bypass(slot, on),
+        }
+    }
+
+    /// New rack settings (bypass, input and output gain, mix) for a track's
+    /// chain. No allocation.
+    pub fn set_rack(&mut self, track: usize, rack: &af27_core::Rack) {
+        if let Some(t) = self.tracks.get_mut(track) {
+            t.chain.set_rack(rack);
+        }
+    }
+
+    /// New rack settings for the master chain (on the speakers in 3D).
+    pub fn set_master_rack(&mut self, rack: &af27_core::Rack) {
+        match &mut self.space {
+            Some(sp) => sp.chain.set_rack(rack),
+            None => self.master_chain.set_rack(rack),
+        }
+    }
+
+    /// The metronome click for `n` frames from `t0` into `out` (one value
+    /// per frame), or silence when the click is off. Kept apart from
+    /// [`Mix::render`] so it never reaches the meters, the scope or an
+    /// export: the live engine adds it to what it hears last.
+    pub fn click_into(
+        &self,
+        t0: f64,
+        dt: f64,
+        out: &mut [f32],
+        settings: &af27_core::midi::MetronomeSettings,
+    ) {
+        if !self.metronome || settings.muted {
+            out.fill(0.0);
+            return;
+        }
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = synth::click_with(t0 + dt * i as f64, &self.click, settings);
         }
     }
 
@@ -660,40 +838,22 @@ impl Mix {
             }
         }
         // Every track's own work (its clips or notes and its effect chain)
-        // is independent of the others, so it is spread over the engine's
-        // threads. Sends and outputs, which add into shared buses, follow
-        // in order on this thread.
-        let work = std::mem::take(&mut self.work);
-        {
-            let tracks = TrackPtr(self.tracks.as_mut_ptr());
-            let job = |k: usize| {
-                // Each index in `work` is a different track, and the pool
-                // runs each `k` exactly once, so these borrows never overlap.
-                let t = unsafe { &mut *tracks.get(work[k]) };
-                render_source(t, t0, dt, n);
-            };
-            if self.parallel && work.len() >= 2 {
-                crate::pool::pool().run(work.len(), &job);
-            } else {
-                (0..work.len()).for_each(job);
-            }
-        }
-        for &ti in &work {
-            if self.tracks[ti].audible {
-                let faded = !self.tracks[ti].has_pre;
-                self.mix_out(ti, n, faded);
-            }
-        }
-        self.work = work;
-        let levels = std::mem::take(&mut self.bus_levels);
+        // is independent of the others in its level, so it is spread over
+        // the engine's threads. Sends and outputs, which add into shared
+        // buses, follow in order on this thread.
+        let levels = std::mem::take(&mut self.levels);
         for level in &levels {
             {
                 let tracks = TrackPtr(self.tracks.as_mut_ptr());
                 let job = |k: usize| {
-                    // Distinct buses, each run once (see above).
+                    // Each index in a level is a different track, and the
+                    // pool runs each `k` exactly once, so these borrows never
+                    // overlap; key sources sit at earlier levels.
                     let t = unsafe { &mut *tracks.get(level[k]) };
-                    if t.audible {
-                        t.chain.process(&mut t.l[..n], &mut t.r[..n]);
+                    if !t.is_bus {
+                        render_source(t, tracks, t0, dt, n);
+                    } else if t.audible {
+                        run_chain(t, tracks, n);
                     }
                 };
                 if self.parallel && level.len() >= 2 {
@@ -703,12 +863,15 @@ impl Mix {
                 }
             }
             for &ti in level {
-                if self.tracks[ti].audible {
-                    self.mix_out(ti, n, false);
+                let t = &self.tracks[ti];
+                if t.audible {
+                    // A track with no pre-fader send took its fader above.
+                    let faded = !t.is_bus && !t.has_pre;
+                    self.mix_out(ti, n, faded);
                 }
             }
         }
-        self.bus_levels = levels;
+        self.levels = levels;
         if let Some(sp) = &mut self.space {
             // The master chain on the speakers, before listening or export.
             sp.chain.process(&mut sp.bed[..n * sp.channels]);
@@ -736,13 +899,8 @@ impl Mix {
         }
         let (mut pl, mut pr) = (0.0f32, 0.0f32);
         for i in 0..n {
-            let mut l = self.ml[i] * self.master;
-            let mut r = self.mr[i] * self.master;
-            if self.metronome {
-                let c = synth::click(t0 + dt * i as f64, &self.click);
-                l += c;
-                r += c;
-            }
+            let l = self.ml[i] * self.master;
+            let r = self.mr[i] * self.master;
             pl = pl.max(l.abs());
             pr = pr.max(r.abs());
             out[i * 2] = l;

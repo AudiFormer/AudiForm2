@@ -18,6 +18,7 @@ pub const WIDTH: &str = "af.stereo_width";
 pub fn width_info() -> EffectInfo {
     EffectInfo {
         id: WIDTH,
+        sidechain: false,
         name: "Stereo Width",
         category: "Stereo",
         description: "Moves the center of the stereo picture left or right, and makes it narrower (down to mono) or wider.",

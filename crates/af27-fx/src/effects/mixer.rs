@@ -15,6 +15,7 @@ pub const ID: &str = "af.channel_mixer";
 pub fn mixer_info() -> EffectInfo {
     EffectInfo {
         id: ID,
+        sidechain: false,
         name: "Channel Mixer",
         category: "Stereo",
         description: "Makes each output side from a share of the left and right inputs, each with its own polarity switch: swap sides, fold to mono, copy one side to both.",

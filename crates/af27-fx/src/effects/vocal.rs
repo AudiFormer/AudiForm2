@@ -50,6 +50,7 @@ pub const FX_STYLES: &[&str] = &["Chorus", "Doubler", "Saturate", "Radio", "Wide
 pub fn vocal_info() -> EffectInfo {
     EffectInfo {
         id: VOCAL,
+        sidechain: false,
         name: "Vox Strip",
         category: "Vocal",
         description: "A full vocal chain in one: Dynamics (compressor and de-esser), Tone (with Air) and Effects, each with its own style and one-knob controls.",

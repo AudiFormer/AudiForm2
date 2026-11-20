@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use af27_core::midi::{MidiClip, MidiNote, SoundFontRef, TempoChange};
-use af27_core::session::{Clip, EffectSlot, Marker, MediaItem, Send, Session, TrackKind};
+use af27_core::session::{
+    Clip, EffectSlot, Marker, MediaItem, Rack, Send, Session, TrackId, TrackKind,
+};
 use af27_core::space::{Monitor, SpaceLayout};
 use serde_json::{json, Map, Value};
 
@@ -168,6 +170,31 @@ fn slot_from(v: &Value) -> EffectSlot {
         bypass: !enabled,
         data,
         ext_id,
+    }
+}
+
+/// A chain's power, input and output gain and mix.
+fn rack_from(v: &Value) -> Rack {
+    Rack {
+        bypass: !v["enabled"].as_bool().unwrap_or(true),
+        input_db: v["input_gain_db"].as_f64().unwrap_or(0.0) as f32,
+        output_db: v["output_gain_db"].as_f64().unwrap_or(0.0) as f32,
+        mix: v["mix"].as_f64().unwrap_or(1.0) as f32,
+    }
+}
+
+/// Points each slot's sidechain at its track or bus, by the file's ids
+/// (`chain` was read from `v` slot for slot). An id that names nothing
+/// leaves the slot listening to itself.
+fn resolve_sidechains(chain: &mut [EffectSlot], v: &Value, by_uuid: &HashMap<String, TrackId>) {
+    let Some(slots) = v["slots"].as_array() else {
+        return;
+    };
+    for (slot, sv) in chain.iter_mut().zip(slots) {
+        slot.sidechain = sv["sidechain"]
+            .as_str()
+            .and_then(|u| by_uuid.get(u))
+            .copied();
     }
 }
 
@@ -355,6 +382,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
             tr.clips = clips;
             tr.midi = midi;
             tr.chain = chain;
+            tr.rack = rack_from(&t["effects"]);
             tr.ext_id = Some(uuid);
         }
     }
@@ -386,9 +414,12 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
         let tr = out.track_mut(tid).unwrap();
         tr.output = output;
         tr.sends = sends;
+        resolve_sidechains(&mut tr.chain, &t["effects"], &by_uuid);
     }
     out.master_db = v["master"]["volume_db"].as_f64().unwrap_or(0.0) as f32;
     out.master_chain = chain_from(&v["master"]["effects"]);
+    out.master_rack = rack_from(&v["master"]["effects"]);
+    resolve_sidechains(&mut out.master_chain, &v["master"]["effects"], &by_uuid);
     for m in v["markers"].as_array().into_iter().flatten() {
         out.markers.push(Marker {
             name: m["name"].as_str().unwrap_or("Marker").to_string(),
@@ -442,8 +473,66 @@ fn empty_chain() -> Value {
     json!({"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []})
 }
 
-fn write_chain(slots: &mut [EffectSlot], base_chain: Option<&Value>) -> Value {
+/// Writes a gain or mix unless the object already holds that value as
+/// it reads back (`default` when it is missing), so an unchanged file
+/// keeps its exact text.
+fn set_level(o: &mut Map<String, Value>, key: &str, v: f32, default: f32) {
+    let had = o
+        .get(key)
+        .and_then(Value::as_f64)
+        .map_or(default, |x| x as f32);
+    if had == v {
+        return;
+    }
+    // Shortest decimal for the f32, not its f64 expansion.
+    let x: f64 = format!("{v}").parse().unwrap_or(v as f64);
+    o.insert(key.into(), json!(x));
+}
+
+/// Writes a slot's sidechain as the key's file id. A slot listening to
+/// itself keeps what the file had, unless that named a track still here
+/// (the key was cleared).
+fn write_sidechain(
+    o: &mut Map<String, Value>,
+    key: Option<TrackId>,
+    uuid_of: &HashMap<u64, String>,
+) {
+    match key.and_then(|k| uuid_of.get(&k)) {
+        Some(u) => {
+            if o.get("sidechain").and_then(Value::as_str) != Some(u.as_str()) {
+                o.insert("sidechain".into(), json!(u));
+            }
+        }
+        None => {
+            let named = o
+                .get("sidechain")
+                .and_then(Value::as_str)
+                .is_some_and(|old| uuid_of.values().any(|u| u == old));
+            if named {
+                o.insert("sidechain".into(), Value::Null);
+            }
+        }
+    }
+}
+
+fn write_chain(
+    slots: &mut [EffectSlot],
+    rack: &Rack,
+    base_chain: Option<&Value>,
+    uuid_of: &HashMap<u64, String>,
+) -> Value {
     let mut chain = obj(base_chain.cloned().unwrap_or_else(empty_chain));
+    if chain
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        == rack.bypass
+    {
+        chain.insert("enabled".into(), json!(!rack.bypass));
+    }
+    set_level(&mut chain, "input_gain_db", rack.input_db, 0.0);
+    set_level(&mut chain, "output_gain_db", rack.output_db, 0.0);
+    set_level(&mut chain, "mix", rack.mix, 1.0);
     let base_slots = base_chain.and_then(|c| c["slots"].as_array());
     let out: Vec<Value> = slots
         .iter_mut()
@@ -453,6 +542,7 @@ fn write_chain(slots: &mut [EffectSlot], base_chain: Option<&Value>) -> Value {
             let mut o = obj(orig.cloned().unwrap_or(Value::Null));
             o.insert("id".into(), json!(id));
             o.insert("enabled".into(), json!(!s.bypass));
+            write_sidechain(&mut o, s.sidechain, uuid_of);
             if let Some(info) = af27_fx::info(&s.effect) {
                 o.insert(
                     "effect".into(),
@@ -661,7 +751,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
         o.insert("sends".into(), Value::Array(sends));
         o.insert(
             "effects".into(),
-            write_chain(&mut t.chain, orig.map(|x| &x["effects"])),
+            write_chain(&mut t.chain, &t.rack, orig.map(|x| &x["effects"]), &uuid_of),
         );
         o.entry("envelopes").or_insert_with(|| json!([]));
         if session.space.is_some() {
@@ -786,7 +876,12 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
         .filter(|v| !v.is_null());
     master.insert(
         "effects".into(),
-        write_chain(&mut session.master_chain, base_master_fx),
+        write_chain(
+            &mut session.master_chain,
+            &session.master_rack,
+            base_master_fx,
+            &uuid_of,
+        ),
     );
     master.entry("envelopes").or_insert_with(|| json!([]));
     doc.insert("master".into(), Value::Object(master));
@@ -1004,6 +1099,72 @@ mod tests {
         );
         assert_eq!(out["a_field_from_the_future"]["keep"], json!("me"));
         assert_eq!(out["tempo"]["changes"][0]["bar"], json!(9));
+    }
+
+    #[test]
+    fn sidechains_and_rack_levels_map_and_round_trip() {
+        let text = SAMPLE
+            .replace(
+                r#""enabled": true, "params": {"threshold""#,
+                r#""enabled": true, "sidechain": "b1", "params": {"threshold""#,
+            )
+            .replace(
+                r#""enabled": false, "params": {"pan""#,
+                r#""enabled": false, "sidechain": null, "params": {"pan""#,
+            );
+        let imp = import(&text, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let bus = s.tracks[1].id;
+        assert_eq!(s.tracks[0].chain[0].sidechain, Some(bus));
+        assert_eq!(s.tracks[0].chain[1].sidechain, None);
+        let r = s.tracks[0].rack;
+        assert!(!r.bypass);
+        assert_eq!((r.input_db, r.output_db, r.mix), (1.5, -0.5, 0.8));
+        assert_eq!(s.master_rack, Rack::default());
+        // Unchanged: the same document.
+        let mut out = export(&mut s, Some(&base));
+        let mut want = base.clone();
+        out.as_object_mut().unwrap().remove("modified");
+        want.as_object_mut().unwrap().remove("modified");
+        assert_eq!(out, want);
+        // Edits land in Audiform's fields.
+        let host = s.tracks[0].id;
+        s.tracks[0].chain[0].sidechain = None;
+        s.tracks[0].chain[1].sidechain = Some(bus);
+        s.tracks[1].rack.bypass = true;
+        s.tracks[0].rack.mix = 0.25;
+        s.master_rack.output_db = -3.0;
+        let out = export(&mut s, Some(&base));
+        let slots = &out["tracks"][0]["effects"]["slots"];
+        assert_eq!(slots[0]["sidechain"], Value::Null);
+        assert_eq!(slots[1]["sidechain"], json!("b1"));
+        assert_eq!(out["tracks"][0]["effects"]["mix"], json!(0.25));
+        assert_eq!(out["tracks"][0]["effects"]["input_gain_db"], json!(1.5));
+        assert_eq!(out["buses"][0]["effects"]["enabled"], json!(false));
+        assert_eq!(out["master"]["effects"]["output_gain_db"], json!(-3.0));
+        // And read back the same.
+        let again = import(&out.to_string(), Path::new(".")).unwrap().session;
+        assert_eq!(again.tracks[0].chain[1].sidechain, Some(again.tracks[1].id));
+        assert!(again.tracks[1].rack.bypass);
+        assert_eq!(again.tracks[0].rack.mix, 0.25);
+        assert_eq!(again.master_rack.output_db, -3.0);
+        // A key on a new slot gets the field; one listening to itself none.
+        s.tracks[1].chain.push(EffectSlot {
+            sidechain: Some(host),
+            effect: "compressor".into(),
+            values: vec![-18.0],
+            bypass: false,
+            data: None,
+            ext_id: None,
+        });
+        let out = export(&mut s, Some(&base));
+        assert_eq!(
+            out["buses"][0]["effects"]["slots"][0]["sidechain"],
+            json!("t1")
+        );
+        let fresh = &out["tracks"][0]["effects"]["slots"];
+        assert!(fresh[0].get("sidechain").is_some());
     }
 
     #[test]
