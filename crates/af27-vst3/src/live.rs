@@ -44,6 +44,8 @@ const DRY_MASK: usize = DRY_FRAMES - 1;
 /// A pause this long between blocks (stopped, bypassed) starts the
 /// buffer afresh.
 const GAP: Duration = Duration::from_millis(250);
+/// A control moved in the plug-in's window this recently is not sent back.
+const TURNING: Duration = Duration::from_millis(1500);
 /// Late for this long: the plug-in is hung, and its process is ended.
 const STALL_LIMIT: Duration = Duration::from_secs(20);
 
@@ -333,6 +335,8 @@ pub struct Instance {
     known: Mutex<HashMap<u32, f64>>,
     /// The settings last fetched from or given to it.
     last_state: Mutex<Option<String>>,
+    /// When each control last moved in the plug-in's own window.
+    turned: Mutex<HashMap<u32, Instant>>,
     notices: Mutex<Vec<Notice>>,
     pump: OnceLock<Thread>,
     quit: AtomicBool,
@@ -407,6 +411,7 @@ impl Instance {
             let n = match e {
                 Event::ParamEdited { id, value } => {
                     self.known.lock().unwrap().insert(id, value);
+                    self.turned.lock().unwrap().insert(id, Instant::now());
                     Notice::Edited { id, value }
                 }
                 Event::BeginEdit(id) => Notice::BeginEdit(id),
@@ -492,7 +497,13 @@ impl Instance {
             self.push_state(s);
         }
         let known = self.known.lock().unwrap().clone();
+        let turned = self.turned.lock().unwrap().clone();
         for (id, v) in d.pairs() {
+            // A control being turned in the plug-in's window is ahead of
+            // the session: sending the session's copy would make it jump.
+            if turned.get(&id).is_some_and(|t| t.elapsed() < TURNING) {
+                continue;
+            }
             if known.get(&id).is_none_or(|k| (k - v).abs() > 1e-9) {
                 self.set_param(id, v);
             }
@@ -787,6 +798,7 @@ impl Manager {
             pending: Mutex::new(Vec::new()),
             known: Mutex::new(d.pairs().into_iter().collect()),
             last_state: Mutex::new(d.state.clone()),
+            turned: Mutex::new(HashMap::new()),
             notices: Mutex::new(Vec::new()),
             pump: OnceLock::new(),
             quit: AtomicBool::new(false),

@@ -554,6 +554,10 @@ fn unique_insts(chains: &mut [&mut Vec<EffectSlot>]) -> bool {
 /// edit or undo, running plug-ins catch up with the session.
 pub fn tick(st: &mut State) {
     manager().set_device_buffer(st.engine.as_ref().and_then(|e| e.buffer));
+    // What plug-ins reported goes in first, so the catch-up below never
+    // sends a plug-in a value older than one it just reported (a knob
+    // turned in its window would jump back).
+    take_notices(st);
     let version = st.session_version;
     if UI.with(|u| u.borrow().synced_version) != version {
         UI.with(|u| u.borrow_mut().synced_version = version);
@@ -599,6 +603,9 @@ pub fn tick(st: &mut State) {
         }
         manager().retain(&keep);
     }
+}
+
+fn take_notices(st: &mut State) {
     let notices = manager().take_notices();
     let idle_commit = UI.with(|u| {
         u.borrow()
