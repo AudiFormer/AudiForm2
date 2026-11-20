@@ -285,6 +285,7 @@ pub fn control_value(t: &af27_core::Track, target: &LaneTarget) -> f64 {
             .iter()
             .find(|s| s.ext_id.as_deref() == Some(id.as_str()))
             .map_or(0.0, |s| s.pan as f64),
+        LaneTarget::Rack(p) => p.value_in(&t.rack),
     }
 }
 
@@ -315,6 +316,166 @@ pub fn lane_range_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> (f
         }
     }
     target.range()
+}
+
+/// An effect lane's value as its effect has it: (name, unit, default),
+/// when the effect is known.
+fn effect_param(
+    chain: &[af27_core::EffectSlot],
+    target: &LaneTarget,
+) -> Option<(String, &'static str, f64)> {
+    let LaneTarget::Effect { slot, param, .. } = target else {
+        return None;
+    };
+    let s = chain
+        .iter()
+        .find(|s| s.ext_id.as_deref() == Some(slot.as_str()))
+        .or_else(|| {
+            // A slot not yet given an id (see `pending-` targets).
+            slot.strip_prefix("pending-")
+                .and_then(|n| n.parse::<usize>().ok())
+                .and_then(|i| chain.get(i))
+        })?;
+    if let Some(p) =
+        af27_dsp::Effect::from_id(&s.effect).and_then(|e| e.params().get(*param).cloned())
+    {
+        return Some((p.name.to_string(), p.unit, p.default as f64));
+    }
+    af27_fx::info(&s.effect).and_then(|i| {
+        i.params
+            .get(*param)
+            .map(|p| (p.name.to_string(), p.unit, p.default))
+    })
+}
+
+/// What a lane's value rests at by default (where a dragged point snaps
+/// to): 0 dB, centre, the rack's 0 dB, full mix and on, or the effect
+/// value's default.
+pub fn lane_default_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> f64 {
+    match target {
+        LaneTarget::Rack(p) => p.default_value(),
+        LaneTarget::Effect { .. } => effect_param(chain, target).map_or(0.0, |p| p.2),
+        _ => 0.0,
+    }
+}
+
+/// A lane's name for its label: the effect value's own name when known.
+pub fn lane_label_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> String {
+    effect_param(chain, target).map_or_else(|| target.label(), |p| p.0)
+}
+
+/// A lane value as the readout shows it: "-3.4 dB", "L 20", "Centre",
+/// "80 % wet", "On", or the effect value in its unit.
+pub fn lane_value_text_in(chain: &[af27_core::EffectSlot], target: &LaneTarget, v: f64) -> String {
+    use af27_core::automation::RackParam;
+    let db = |v: f64| {
+        let r = (v * 10.0).round() / 10.0;
+        if r == 0.0 {
+            "0.0 dB".to_string()
+        } else {
+            format!("{r:+.1} dB")
+        }
+    };
+    match target {
+        LaneTarget::Volume | LaneTarget::SendLevel(_) => {
+            if v <= af27_core::automation::SILENT_DB {
+                "-inf dB".into()
+            } else {
+                db(v)
+            }
+        }
+        LaneTarget::Rack(RackParam::Input | RackParam::Output) => db(v),
+        LaneTarget::Pan | LaneTarget::SendPan(_) => {
+            let p = (v * 100.0).round();
+            if p == 0.0 {
+                "Centre".into()
+            } else if p < 0.0 {
+                format!("L {:.0}", -p)
+            } else {
+                format!("R {p:.0}")
+            }
+        }
+        LaneTarget::Rack(RackParam::Mix) => format!("{:.0} % wet", v.clamp(0.0, 1.0) * 100.0),
+        LaneTarget::Rack(RackParam::Power) => if v >= 0.5 { "On" } else { "Off" }.into(),
+        LaneTarget::Mute => if v >= 0.5 { "Muted" } else { "Heard" }.into(),
+        _ => match effect_param(chain, target) {
+            Some((_, unit, _)) => {
+                let digits = if v.abs() >= 100.0 {
+                    0
+                } else if v.abs() >= 10.0 {
+                    1
+                } else {
+                    2
+                };
+                if unit.is_empty() {
+                    format!("{v:.digits$}")
+                } else {
+                    format!("{v:.digits$} {unit}")
+                }
+            }
+            None => format!("{v:.2}"),
+        },
+    }
+}
+
+/// A dragged point's value: snapped onto the lane's default when within
+/// [`af27_core::automation::SNAP_PX`] of it (not while Alt is held), and
+/// on or off for a power lane. `px_per_unit` is the lane's drawn scale.
+pub fn drag_value(
+    ui: &egui::Ui,
+    chain: &[af27_core::EffectSlot],
+    target: &LaneTarget,
+    raw: f64,
+    px_per_unit: f64,
+) -> f64 {
+    if matches!(
+        target,
+        LaneTarget::Rack(af27_core::automation::RackParam::Power) | LaneTarget::Mute
+    ) {
+        return if raw >= 0.5 { 1.0 } else { 0.0 };
+    }
+    if ui.input(|i| i.modifiers.alt) {
+        return raw;
+    }
+    af27_core::automation::snap_to(
+        raw,
+        lane_default_in(chain, target),
+        px_per_unit,
+        af27_core::automation::SNAP_PX,
+    )
+}
+
+/// The value label drawn beside a point being dragged, kept inside
+/// `inside`.
+pub fn draw_readout(
+    painter: &egui::Painter,
+    th: &crate::theme::Theme,
+    at: egui::Pos2,
+    text: String,
+    inside: Rect,
+) {
+    let galley = painter.layout_no_wrap(
+        text,
+        egui::FontId::monospace(10.0),
+        Color32::from_rgb(th.text[0], th.text[1], th.text[2]),
+    );
+    let size = galley.size() + vec2(6.0, 2.0);
+    // Up and to the right of the point, or to its left near the edge.
+    let mut min = at + vec2(8.0, -size.y - 4.0);
+    if min.x + size.x > inside.right() {
+        min.x = at.x - 8.0 - size.x;
+    }
+    if min.y < inside.top() {
+        min.y = at.y + 6.0;
+    }
+    let back = Rect::from_min_size(min, size);
+    painter.rect_filled(back, 3.0, crate::theme::ca(th.background, 225));
+    painter.rect_stroke(
+        back,
+        3.0,
+        Stroke::new(1.0_f32, crate::theme::ca(th.accent, 200)),
+    );
+    painter.galley(back.min + vec2(3.0, 1.0), galley, Color32::WHITE);
 }
 
 /// Draws track `ti`'s shown lane over its row, and edits it: click adds a
@@ -388,7 +549,11 @@ pub fn lane_overlay(
     painter.text(
         area.left_top() + vec2(4.0, 2.0),
         egui::Align2::LEFT_TOP,
-        format!("{} ({})", lane.target.label(), t.automation.label()),
+        format!(
+            "{} ({})",
+            lane_label_in(&t.chain, &lane.target),
+            t.automation.label()
+        ),
         egui::FontId::proportional(10.0),
         col,
     );
@@ -422,10 +587,17 @@ pub fn lane_overlay(
         resp.dragged(),
         resp.interact_pointer_pos(),
     ) {
+        let value = drag_value(
+            ui,
+            &t.chain,
+            &lane.target,
+            val_of(pos.y),
+            area.height() as f64 / (hi - lo).max(1e-9),
+        );
         let lane = &mut st.session.tracks[ti].lanes[k];
         if let Some(p) = lane.points.get_mut(*i) {
             p.time = x_to_time(v, lanes, pos.x).max(0.0);
-            p.value = val_of(pos.y);
+            p.value = value;
         }
         // Keep it between its neighbours.
         let (prev, next) = (
@@ -441,6 +613,19 @@ pub fn lane_overlay(
             if let Some(b) = next {
                 p.time = p.time.min(b);
             }
+        }
+    }
+    // The value of the point being dragged, beside it.
+    if let (Some((i, _)), true) = (dragging.as_ref(), resp.dragged()) {
+        if let Some(p) = st.session.tracks[ti].lanes[k].points.get(*i) {
+            let at = pos2(time_to_x(v, lanes, p.time), y_of(p.value));
+            draw_readout(
+                &painter,
+                &th,
+                at,
+                lane_value_text_in(&t.chain, &lane.target, p.value),
+                lanes.intersect(row),
+            );
         }
     }
     if resp.drag_stopped() {
@@ -483,7 +668,7 @@ pub fn lane_overlay(
         st.commit_session("Edit Automation", before);
     }
     resp.on_hover_text(
-        "Click: add a point. Drag: move one. Right-click: remove. Double-click: hold or ramp.",
+        "Click: add a point. Drag: move one (it snaps to the default; hold Alt to move freely). Right-click: remove. Double-click: hold or ramp.",
     );
 }
 
@@ -500,6 +685,14 @@ pub fn lanes_menu(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         targets.push(LaneTarget::Pan);
     }
     for tg in targets {
+        let label = format!("{}{}", tg.label(), if has(&tg) { " (shown)" } else { "" });
+        if ui.button(label).clicked() {
+            pick = Some(tg);
+            ui.close_menu();
+        }
+    }
+    for p in af27_core::automation::RackParam::ALL {
+        let tg = LaneTarget::Rack(p);
         let label = format!("{}{}", tg.label(), if has(&tg) { " (shown)" } else { "" });
         if ui.button(label).clicked() {
             pick = Some(tg);

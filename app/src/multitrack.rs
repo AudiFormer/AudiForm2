@@ -1356,6 +1356,23 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     });
                 crate::clip_lanes::overlay(ui, st, clip.id, row, &v, lanes, free);
             }
+            // The lines menu at the right of each clip's title bar (on
+            // rows tall enough to show lines).
+            if row.height() >= 40.0 {
+                for clip in &tr.clips {
+                    let x0 = time_to_x(&v, lanes, clip.start);
+                    let x1 = time_to_x(&v, lanes, clip.end());
+                    let cr = clip_rect(row.top(), row.height(), x0, x1);
+                    let title = Rect::from_min_size(cr.min, vec2(cr.width(), 15.0));
+                    // Clear of the stretch handle in the corner.
+                    let pad = if stretch_on && cr.width() >= 24.0 && cr.height() >= 34.0 {
+                        13.0
+                    } else {
+                        3.0
+                    };
+                    crate::clip_lanes::title_button(ui, st, clip.id, title, pad, lanes);
+                }
+            }
         }
         // The automation lane shown over the clips.
         crate::mixing::lane_overlay(ui, st, ti, row, &v, lanes);
