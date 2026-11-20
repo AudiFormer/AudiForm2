@@ -19,17 +19,21 @@
 //! their saved settings. Others stay in the chain, in place, silent here
 //! and saved back as they were. Audiform27-only effects are saved as
 //! `af27.<id>` slots, which Audiform skips when playing but keeps when it
-//! saves.
+//! saves. VST3 plug-in slots (`vst3:<class id>`) keep the same id; their
+//! controls (`params`, `p<id>` keys) and settings (`plugin_state`) live in
+//! the slot's data as `af27_core::plugin::PluginData`, and go back only
+//! when they changed.
 //!
 //! Units: positions are samples at the session rate (clip start, fades,
 //! markers), source points are samples at the file's own rate, MIDI is in
 //! beats.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use af27_core::midi::{MidiClip, MidiNote, SoundFontRef, TempoChange};
+use af27_core::plugin::PluginData;
 use af27_core::session::{
     Clip, ClipProps, ClipStretch, EffectSlot, Marker, MediaItem, Rack, Send, Session, StretchKind,
     StretchMode, TrackId, TrackKind,
@@ -393,6 +397,16 @@ fn slot_from(v: &Value) -> EffectSlot {
             ext_id,
         };
     }
+    if af27_core::plugin::is_plugin(&effect) {
+        return EffectSlot {
+            sidechain: None,
+            data: Some(plugin_data_from(v, ext_id.as_deref()).to_json()),
+            effect,
+            values: Vec::new(),
+            bypass: !enabled,
+            ext_id,
+        };
+    }
     if let Some(own) = effect.strip_prefix(AF27) {
         let values = v["params"]["values"]
             .as_array()
@@ -415,6 +429,60 @@ fn slot_from(v: &Value) -> EffectSlot {
         bypass: !enabled,
         data,
         ext_id,
+    }
+}
+
+/// A plug-in slot's controls and settings as the file has them. Its
+/// running copy is named after the slot's id in the file.
+fn plugin_data_from(v: &Value, ext_id: Option<&str>) -> PluginData {
+    PluginData {
+        inst: ext_id.map_or_else(af27_core::plugin::new_inst, str::to_string),
+        params: plugin_params(v),
+        state: v["plugin_state"].as_str().map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn plugin_params(v: &Value) -> BTreeMap<String, f64> {
+    v["params"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, x)| Some((k.clone(), x.as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Writes a plug-in slot's controls and settings, each only when it
+/// differs from what the slot already holds (so an unchanged file keeps
+/// its exact text).
+fn write_plugin(o: &mut Map<String, Value>, s: &EffectSlot) {
+    if o.get("effect").and_then(Value::as_str) != Some(s.effect.as_str()) {
+        o.insert("effect".into(), json!(s.effect));
+    }
+    let d = s.plugin_data();
+    let had = Value::Object(o.clone());
+    if plugin_params(&had) != d.params || !had["params"].is_object() {
+        let m: Map<String, Value> = d
+            .params
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect();
+        o.insert("params".into(), Value::Object(m));
+    }
+    let had_state = had["plugin_state"].as_str();
+    if had_state != d.state.as_deref() {
+        match &d.state {
+            Some(st) => {
+                o.insert("plugin_state".into(), json!(st));
+            }
+            None => {
+                if o.contains_key("plugin_state") {
+                    o.insert("plugin_state".into(), Value::Null);
+                }
+            }
+        }
     }
 }
 
@@ -595,6 +663,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                 .filter(|s| {
                     s.values.is_empty()
                         && !s.effect.is_empty()
+                        && !af27_core::plugin::is_plugin(&s.effect)
                         && af27_dsp::Effect::from_id(&s.effect).is_none()
                         && af27_fx::info(&s.effect).is_none()
                 })
@@ -811,6 +880,8 @@ fn write_chain(
                         serde_json::from_str(d).unwrap_or_else(|_| json!(d)),
                     );
                 }
+            } else if af27_core::plugin::is_plugin(&s.effect) {
+                write_plugin(&mut o, s);
             } else if orig.is_none() || af27_dsp::Effect::from_id(&s.effect).is_some() {
                 // Audiform27's own effect: a slot Audiform skips but keeps.
                 o.insert("effect".into(), json!(format!("{AF27}{}", s.effect)));
@@ -1257,7 +1328,7 @@ mod tests {
 
     /// A session with fields Audiform27 does not use anywhere: they must
     /// all survive a load and save.
-    const SAMPLE: &str = r##"{
+    pub(super) const SAMPLE: &str = r##"{
       "format": "altaudio.session", "schema_version": 1, "id": "11111111-1111-4111-8111-111111111111",
       "name": "Round Trip", "sample_rate": 48000, "bit_depth": 32,
       "created": "2026-11-08T05:29:43Z", "modified": "2026-11-08T05:29:43Z",
@@ -1761,6 +1832,81 @@ mod tests {
         assert_eq!(again.tracks[0].chain[0].effect, "compressor");
         assert_eq!(again.tracks[0].chain[0].values, vec![-18.0, 3.0]);
         assert_eq!(again.tracks[0].output, Some(again.tracks[1].id));
+    }
+}
+
+#[cfg(test)]
+mod plugin_slots {
+    use super::*;
+
+    const ID: &str = "vst3:5454535630357432723520636C617373";
+
+    fn doc() -> String {
+        let slot = format!(
+            r#"{{"id": "fx9", "effect": "{ID}", "enabled": true, "params": {{"p458681842": 0.25, "p7": 1}}, "plugin_state": "AAECAw==", "preset": null}}"#
+        );
+        let master = r#""volume_db": -1.0, "effects": {"enabled": true, "input_gain_db": 0.0, "output_gain_db": 0.0, "mix": 1.0, "slots": []}"#;
+        super::tests::SAMPLE.replacen(
+            master,
+            &master.replace(r#""slots": []"#, &format!(r#""slots": [{slot}]"#)),
+            1,
+        )
+    }
+
+    #[test]
+    fn plug_in_slots_load_with_their_settings_and_round_trip() {
+        let text = doc();
+        assert!(text.contains("vst3:"), "the sample has a slot to replace");
+        let imp = import(&text, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let slot = s.master_chain[0].clone();
+        assert_eq!(slot.effect, ID);
+        let d = slot.plugin_data();
+        assert_eq!(d.inst, "fx9", "the running copy is named after the slot");
+        assert_eq!(d.state.as_deref(), Some("AAECAw=="));
+        assert_eq!(d.param(458_681_842), Some(0.25));
+        assert_eq!(d.param(7), Some(1.0));
+        assert!(!slot.bypass);
+        assert!(
+            imp.notices.iter().any(|n| n.starts_with("1 effect(s)")),
+            "only the sample's own Dynamics counts as missing, not the plug-in: {:?}",
+            imp.notices
+        );
+        // Unchanged: the file comes back exactly (`1` stays `1`).
+        let mut got = export(&mut s.clone(), Some(&base));
+        let mut want = base.clone();
+        want.as_object_mut().unwrap().remove("modified");
+        got.as_object_mut().unwrap().remove("modified");
+        assert_eq!(got, want);
+        // A changed control and new settings go back; the rest stays.
+        let mut d = s.master_chain[0].plugin_data();
+        d.set_param(458_681_842, 0.5);
+        d.state = Some("BBBB".into());
+        s.master_chain[0].set_plugin_data(&d);
+        let out = export(&mut s, Some(&base));
+        let o = &out["master"]["effects"]["slots"][0];
+        assert_eq!(o["params"]["p458681842"], json!(0.5));
+        assert_eq!(o["plugin_state"], json!("BBBB"));
+        assert_eq!(o["preset"], Value::Null);
+        assert_eq!(o["effect"], json!(ID));
+        assert!(o.get("data").is_none(), "no data field on plug-in slots");
+        // A new plug-in slot gets every field Audiform needs.
+        let mut fresh = s.master_chain[0].clone();
+        fresh.ext_id = None;
+        let mut d = fresh.plugin_data();
+        d.params.clear();
+        d.set_param(3, 0.75);
+        d.state = None;
+        fresh.set_plugin_data(&d);
+        s.master_chain.push(fresh);
+        let out = export(&mut s, Some(&base));
+        let n = &out["master"]["effects"]["slots"][1];
+        assert_eq!(n["effect"], json!(ID));
+        assert_eq!(n["enabled"], json!(true));
+        assert_eq!(n["params"], json!({"p3": 0.75}));
+        assert!(n["id"].is_string());
+        assert!(n.get("plugin_state").is_none());
     }
 }
 

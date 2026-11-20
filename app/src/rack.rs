@@ -87,9 +87,21 @@ fn structural(st: &mut State, target: u16, label: &str, before: af27_core::Sessi
 }
 
 /// Opens (or brings back) a slot's window.
+/// A plug-in slot also opens the plug-in's own window. Every way of
+/// opening a slot comes here.
 pub fn open_window(st: &mut State, target: u16, slot: usize) {
     if !st.fx_windows.contains(&(target, slot)) {
         st.fx_windows.push((target, slot));
+    }
+    crate::plugins::open_editor(st, target, slot);
+}
+
+/// A slot's name as the rack shows it.
+fn slot_name(s: &EffectSlot) -> String {
+    if af27_core::plugin::is_plugin(&s.effect) {
+        crate::plugins::slot_name(s)
+    } else {
+        crate::fx::name(&s.effect)
     }
 }
 
@@ -229,8 +241,11 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 let nr = ui
                     .allocate_new_ui(egui::UiBuilder::new().max_rect(name_r), |ui| {
                         ui.dnd_drag_source(id, i, |ui| {
-                            let text = RichText::new(crate::fx::name(&s.effect))
-                                .color(if s.bypass { c(th.text_dim) } else { c(th.text) });
+                            let text = RichText::new(slot_name(s)).color(if s.bypass {
+                                c(th.text_dim)
+                            } else {
+                                c(th.text)
+                            });
                             let (r, resp) = ui.allocate_exact_size(name_r.size(), Sense::click());
                             if open || resp.hovered() {
                                 ui.painter().rect_filled(
@@ -337,6 +352,7 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
             st.live_slot(target, i);
             st.commit_live("Bypass", before.clone());
         }
+        crate::plugins::show_bypassed(st, target, i);
     }
     let mut changed = false;
     if let Some((from, to)) = moved {
@@ -374,6 +390,9 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
 }
 
 pub fn new_slot(id: &str) -> EffectSlot {
+    if af27_core::plugin::is_plugin(id) {
+        return crate::plugins::new_slot(id);
+    }
     EffectSlot {
         values: crate::fx::defaults(id),
         effect: id.to_string(),
@@ -398,8 +417,9 @@ pub fn effect_picker(ui: &mut egui::Ui) -> Option<String> {
         });
     }
     ui.separator();
-    ui.add_enabled(false, egui::Button::new("VST3 plug-ins"))
-        .on_disabled_hover_text("Plug-in hosting is on its way.");
+    if let Some(id) = crate::plugins::picker(ui) {
+        picked = Some(id);
+    }
     picked
 }
 
@@ -695,11 +715,7 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
             continue;
         };
         let mut keep = true;
-        let title = format!(
-            "{}: {}",
-            target_name(st, target),
-            crate::fx::name(&slot.effect)
-        );
+        let title = format!("{}: {}", target_name(st, target), slot_name(&slot));
         egui::Window::new(RichText::new(&title).strong())
             .id(egui::Id::new(("fx-window", target, i)))
             .open(&mut keep)
@@ -719,6 +735,7 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                             st.live_slot(target, i);
                             st.commit_live("Bypass", before);
                         }
+                        crate::plugins::show_bypassed(st, target, i);
                     }
                     ui.label(RichText::new(format!("Slot {}", i + 1)).color(c(th.text_dim)));
                 });
@@ -726,7 +743,11 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                     listen_to(ui, st, target, i, &th);
                 }
                 ui.separator();
-                slot_controls(ui, st, target, i, &th);
+                if af27_core::plugin::is_plugin(&slot.effect) {
+                    crate::plugins::slot_controls(ui, st, target, i, &th);
+                } else {
+                    slot_controls(ui, st, target, i, &th);
+                }
             });
         if !keep {
             st.fx_windows.retain(|w| *w != (target, i));

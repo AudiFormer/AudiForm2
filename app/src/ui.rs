@@ -674,7 +674,8 @@ fn disabled_submenu(ui: &mut egui::Ui, label: &str, why: &str) {
     });
 }
 
-const PLUGIN_NOTE: &str = "Plug-in hosting is coming";
+const PLUGIN_NOTE: &str =
+    "VST 2 plug-ins are not supported (Steinberg no longer licenses its SDK). Use VST 3.";
 
 fn menus(app: &mut App, ui: &mut egui::Ui) {
     let st = &mut app.st;
@@ -1347,9 +1348,21 @@ fn effects_menu(
     }
     ui.separator();
     disabled_submenu(ui, "VST", PLUGIN_NOTE);
-    disabled_submenu(ui, "VST 3", PLUGIN_NOTE);
-    ui.add_enabled(false, egui::Button::new("Audio Plug-In Manager..."))
-        .on_disabled_hover_text(PLUGIN_NOTE);
+    ui.menu_button("VST 3", |ui| {
+        if let Some(id) = crate::plugins::picker_items(ui) {
+            if !add_to_track_rack(st, Some(id.clone())) && st.file_chain.len() < 16 {
+                // The Waveform editor: into the file's rack.
+                st.file_chain.push(crate::rack::new_slot(&id));
+                let at = st.file_chain.len() - 1;
+                crate::rack::open_window(st, crate::rack::FILE, at);
+                st.want_effects = true;
+            }
+        }
+    });
+    if ui.button("Audio Plug-In Manager...").clicked() {
+        crate::plugins::open_manager();
+        ui.close_menu();
+    }
 }
 
 /// In the Multitrack, an effect picked from the Effects menu goes into the
@@ -2099,8 +2112,10 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::selfshot::tick(ctx, ctx.input(|i| i.time));
+        crate::plugins::remember_window(frame);
+        crate::plugins::tick(&mut self.st);
         // For documentation shots: AF2_SHOW_TAB=Inspector (etc.) opens that
         // panel once at start.
         if !self.shown_env_tab {
@@ -2488,6 +2503,7 @@ impl eframe::App for App {
             self.show_tab(Tab::Effects);
         }
         crate::rack::windows(ctx, &mut self.st);
+        crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
         generate_window(ctx, &mut self.st);
         crate::export::poll(&mut self.st, ctx);

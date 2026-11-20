@@ -972,6 +972,7 @@ impl State {
     /// left out, and the file as it was goes into Backups.
     pub fn save_session_to(&mut self, path: PathBuf) {
         self.keep_playhead();
+        crate::plugins::capture_all(self);
         let is_af27 = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("af27"));

@@ -23,6 +23,7 @@ mod panels;
 mod phasewheel;
 mod pianoroll;
 mod pictures;
+mod plugins;
 mod pointers;
 mod rack;
 mod record_input;
@@ -51,7 +52,15 @@ mod zoom;
 mod zoom_bench;
 
 fn main() -> eframe::Result<()> {
+    // Started again as a VST3 plug-in host or scanner (see af27-vst3).
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if let Some(code) = af27_vst3::main_with_args(&args) {
+        std::process::exit(code);
+    }
     fx::register();
+    plugins::init();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
     // AF2_RENDERER, when set, wins over the choice in Preferences.
     let glow_first = match std::env::var("AF2_RENDERER") {
