@@ -1447,7 +1447,13 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             .collect();
         tempo.insert("changes".into(), Value::Array(changes));
     }
-    doc.insert("tempo".into(), Value::Object(tempo));
+    // A file that never had a tempo block keeps having none while the
+    // session's tempo is untouched.
+    let untouched = base.is_some_and(|b| b.get("tempo").is_none())
+        && session.tempo == af27_core::midi::Tempo::default();
+    if !untouched {
+        doc.insert("tempo".into(), Value::Object(tempo));
+    }
     match session.space {
         Some(l) => {
             let mut sp = obj(base.map(|b| b["space"].clone()).unwrap_or(Value::Null));
@@ -2899,11 +2905,6 @@ mod real {
                 let orig = super::parse(&text).unwrap();
                 let mut again = super::export(&mut s, Some(&orig));
                 again["modified"] = orig["modified"].clone();
-                // The tempo block Audiform27 adds to files without one
-                // (tempo code is not part of this check).
-                if orig.get("tempo").is_none() {
-                    again.as_object_mut().unwrap().shift_remove("tempo");
-                }
                 let written = serde_json::to_string_pretty(&again).unwrap() + "\n";
                 assert!(
                     written == text.replace("\r\n", "\n"),
