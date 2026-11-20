@@ -449,13 +449,7 @@ fn the_click_follows_tempo_and_time_signature_changes() {
     use af27_core::midi::{Tempo, TempoChange};
     // One bar of 4/4 at 120 (2 s), then 3/4 at 60: a beat a second.
     let mut t = Tempo::default();
-    t.changes.push(TempoChange {
-        bar: 1,
-        bpm: 60.0,
-        beats_per_bar: 3,
-        beat_unit: 4,
-        ext_id: None,
-    });
+    t.changes.push(TempoChange::new(1, 60.0, 3, 4));
     let s: Vec<_> = t.segments().collect();
     let m = MetronomeSettings::default();
     assert!(peak(2.0, &s, &m) > peak(3.0, &s, &m) * 1.2, "a new bar");

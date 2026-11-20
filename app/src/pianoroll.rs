@@ -606,7 +606,14 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                     ),
                 );
                 if is_bar && x >= grid_r.left() - 1.0 {
-                    let label = if seg.bar == bar && seg.change.is_some() {
+                    let label = if seg.bar == bar && seg.is_ramp() {
+                        let word = if seg.end_bpm < seg.bpm {
+                            "rit."
+                        } else {
+                            "accel."
+                        };
+                        format!("{}  {word} {}→{}", bar + 1, seg.bpm, seg.end_bpm)
+                    } else if seg.bar == bar && seg.change.is_some() {
                         format!("{}  {} {}", bar + 1, seg.meter_text(), seg.bpm)
                     } else {
                         format!("{}", bar + 1)
@@ -1366,7 +1373,7 @@ fn tools_row(
             )
             .clicked()
         {
-            let bpm = st.session.tempo.seg_at_beat(clip_start).bpm;
+            let bpm = st.session.tempo.bpm_at(clip_start);
             let beats = ps.stray_ms / 1000.0 * bpm / 60.0;
             let rng = &mut ps.rng;
             apply(st, ti, ci, &sel, "Humanize", |ns, idx| {
@@ -1457,6 +1464,9 @@ pub fn new_clip(st: &mut State, track: af27_core::TrackId, beats: f64) {
             start,
             length,
             notes: Vec::new(),
+            timing: Default::default(),
+            stretch: 1.0,
+            pitch: 0.0,
             muted: false,
             gain_db: 0.0,
             controls: Vec::new(),

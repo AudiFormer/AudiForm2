@@ -15,7 +15,8 @@
 //! Writing: format 1 at 960 ticks per quarter note. Track 0 holds the
 //! tempo map (a tempo and a time signature at each stretch), then one
 //! track per MIDI track with the notes of its unmuted clips as they play
-//! (cut at the clip's end), pan as controller 10 when it changes.
+//! (cut at the clip's end; through each clip's timing, stretch and whole
+//! semitones of pitch), pan as controller 10 when it changes.
 
 use std::collections::HashMap;
 
@@ -56,6 +57,86 @@ type Held = (u64, u8, f32);
 enum MapEvent {
     Tempo(f64),
     Meter(u32, u32),
+    /// A glide arriving at this tempo, from the event's tick given.
+    Ramp(u64, f64),
+}
+
+/// Quarter notes between the tempo events a glide is written as.
+const RAMP_STEP: f64 = 0.25;
+
+/// Runs of at least this many evenly spaced tempo events (a beat or less
+/// apart) moving one way are read as one glide.
+const RAMP_MIN_EVENTS: usize = 4;
+
+/// Folds dense runs of tempo events into glides: each run becomes one
+/// `Ramp` at its last event, from its first. Events in tick order.
+fn fold_ramps(events: Vec<(u64, usize, MapEvent)>, ppq: f64) -> Vec<(u64, usize, MapEvent)> {
+    let bpm_of = |e: &MapEvent| match e {
+        MapEvent::Tempo(b) => Some(*b),
+        _ => None,
+    };
+    // (first, last) index of each run.
+    let mut ramps: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < events.len() {
+        let Some(b0) = bpm_of(&events[i].2) else {
+            i += 1;
+            continue;
+        };
+        // Extend over tempo events, evenly spaced, one direction.
+        let mut end = i;
+        let mut step = 0u64;
+        let mut dir = 0.0f64;
+        let mut prev = (events[i].0, b0);
+        let mut j = i + 1;
+        while j < events.len() {
+            // A time signature inside (at the glide's last bar) is kept.
+            let Some(b) = bpm_of(&events[j].2) else {
+                j += 1;
+                continue;
+            };
+            let gap = events[j].0 - prev.0;
+            if gap == 0 || gap as f64 > ppq || (step != 0 && gap != step) {
+                break;
+            }
+            let d = b - prev.1;
+            if d * dir < 0.0 {
+                break;
+            }
+            if d != 0.0 {
+                dir = d.signum();
+            }
+            step = gap;
+            prev = (events[j].0, b);
+            end = j;
+            j += 1;
+        }
+        if end + 1 - i >= RAMP_MIN_EVENTS && prev.1 != b0 {
+            ramps.push((i, end));
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(events.len());
+    let mut runs = ramps.into_iter().peekable();
+    let mut from = 0u64;
+    for (k, ev) in events.into_iter().enumerate() {
+        match runs.peek() {
+            Some(&(a, _)) if k == a => from = ev.0,
+            _ => {}
+        }
+        match runs.peek() {
+            Some(&(_, e)) if k == e => {
+                let bpm = bpm_of(&ev.2).unwrap_or(120.0);
+                out.push((ev.0, ev.1, MapEvent::Ramp(from, bpm)));
+                runs.next();
+            }
+            Some(&(a, _)) if k >= a && bpm_of(&ev.2).is_some() => {}
+            _ => out.push(ev),
+        }
+    }
+    out
 }
 
 /// Reads a `.mid` file.
@@ -175,6 +256,7 @@ pub fn read(bytes: &[u8]) -> Result<SmfImport, String> {
         }
     }
     map.sort_by_key(|(t, s, _)| (*t, *s));
+    let map = fold_ramps(map, ppq);
     let (tempo, moved) = tempo_from(&map, ppq);
     Ok(SmfImport {
         tracks,
@@ -196,6 +278,18 @@ fn tempo_from(events: &[(u64, usize, MapEvent)], ppq: f64) -> (Tempo, usize) {
             moved += 1;
         }
         let bar = if on_line { bar } else { t.nearest_bar(beats) };
+        if let (MapEvent::Ramp(from, bpm), true) = (e, bar > 0) {
+            let fb = *from as f64 / ppq;
+            let (from_bar, into, _) = t.bar_at(fb);
+            let from_bar = if into < 1e-6 {
+                from_bar
+            } else {
+                moved += 1;
+                t.nearest_bar(fb)
+            };
+            t.add_ramp(from_bar, bar, Some(*bpm));
+            continue;
+        }
         let at = (bar > 0).then(|| t.add_change(bar));
         let seg = match at {
             Some(i) => {
@@ -205,7 +299,7 @@ fn tempo_from(events: &[(u64, usize, MapEvent)], ppq: f64) -> (Tempo, usize) {
             None => (t.bpm, t.beats_per_bar, t.beat_unit),
         };
         let (bpm, top, unit) = match e {
-            MapEvent::Tempo(b) => (*b, seg.1, seg.2),
+            MapEvent::Tempo(b) | MapEvent::Ramp(_, b) => (*b, seg.1, seg.2),
             MapEvent::Meter(top, unit) => (seg.0, *top, *unit),
         };
         t.set_values(at, bpm, top, unit);
@@ -214,7 +308,7 @@ fn tempo_from(events: &[(u64, usize, MapEvent)], ppq: f64) -> (Tempo, usize) {
     let mut prev = (t.bpm, t.beats_per_bar, t.beat_unit);
     t.changes.retain(|c| {
         let v = (c.bpm, c.beats_per_bar, c.beat_unit);
-        let keep = v != prev;
+        let keep = v != prev || !c.kind.is_immediate();
         prev = v;
         keep
     });
@@ -264,6 +358,9 @@ pub fn add_to_session(session: &mut Session, imp: &SmfImport, replace_tempo: boo
                     ..*n
                 })
                 .collect(),
+            timing: Default::default(),
+            stretch: 1.0,
+            pitch: 0.0,
             muted: false,
             gain_db: 0.0,
             controls: Vec::new(),
@@ -318,8 +415,26 @@ pub fn write(session: &Session) -> Result<Vec<u8>, String> {
         0,
         TrackEventKind::Meta(MetaMessage::TrackName(&names[0])),
     )];
+    let us = |bpm: f64| (60_000_000.0 / bpm).round().clamp(1.0, 16_777_215.0) as u32;
     for s in session.tempo.segments() {
         let t = tick(s.beat);
+        if s.is_ramp() {
+            // A glide as a run of tempo events, one every sixteenth, each
+            // the steady tempo that lasts that step's exact time.
+            let steps = (s.ramp_beats / RAMP_STEP).round().max(1.0) as u32;
+            let h = s.ramp_beats / steps as f64;
+            for k in 0..steps {
+                let b = s.beat + k as f64 * h;
+                let secs = s.secs_at(b + h) - s.secs_at(b);
+                let bpm = 60.0 * h / secs;
+                evs.push((
+                    tick(b),
+                    2,
+                    TrackEventKind::Meta(MetaMessage::Tempo(u24::new(us(bpm)))),
+                ));
+            }
+            continue;
+        }
         let pow = s.beat_unit.max(1).trailing_zeros() as u8;
         evs.push((
             t,
@@ -331,8 +446,11 @@ pub fn write(session: &Session) -> Result<Vec<u8>, String> {
                 8,
             )),
         ));
-        let us = (60_000_000.0 / s.bpm).round().clamp(1.0, 16_777_215.0) as u32;
-        evs.push((t, 2, TrackEventKind::Meta(MetaMessage::Tempo(u24::new(us)))));
+        evs.push((
+            t,
+            2,
+            TrackEventKind::Meta(MetaMessage::Tempo(u24::new(us(s.bpm)))),
+        ));
     }
     smf.tracks.push(finish(evs));
 
@@ -341,12 +459,18 @@ pub fn write(session: &Session) -> Result<Vec<u8>, String> {
         .iter()
         .filter(|t| t.kind == TrackKind::Midi || !t.midi.is_empty());
     for (k, tr) in midi_tracks.enumerate() {
-        let mut notes: Vec<(u64, u64, &MidiNote)> = Vec::new();
+        // The notes as they play: through each clip's timing and stretch,
+        // transposed by its whole semitones of pitch shift (a fraction of
+        // a semitone has no place in a note number and is left out).
+        let tempo = &session.tempo;
+        let mut notes: Vec<(u64, u64, MidiNote)> = Vec::new();
         for c in tr.midi.iter().filter(|c| !c.muted) {
             for n in c.notes.iter().filter(|n| n.start < c.length) {
-                let s = tick(c.start + n.start);
-                let e = tick(c.start + (n.start + n.length).min(c.length)).max(s + 1);
-                notes.push((s, e, n));
+                let s = tick(c.beats_at(n.start, tempo));
+                let end = (n.start + n.length).min(c.length);
+                let e = tick(c.beats_at(end, tempo)).max(s + 1);
+                let pitch = c.shifted(n.pitch);
+                notes.push((s, e, MidiNote { pitch, ..*n }));
             }
         }
         notes.sort_by_key(|(s, _, n)| (*s, n.channel, n.pitch));
@@ -422,20 +546,8 @@ mod tests {
     fn session() -> Session {
         let mut s = Session::new("Song", 48_000, 0);
         s.tempo = Tempo::constant(96.0, 3, 4);
-        s.tempo.changes.push(TempoChange {
-            bar: 2,
-            bpm: 140.0,
-            beats_per_bar: 6,
-            beat_unit: 8,
-            ext_id: None,
-        });
-        s.tempo.changes.push(TempoChange {
-            bar: 4,
-            bpm: 90.0,
-            beats_per_bar: 4,
-            beat_unit: 4,
-            ext_id: None,
-        });
+        s.tempo.changes.push(TempoChange::new(2, 140.0, 6, 8));
+        s.tempo.changes.push(TempoChange::new(4, 90.0, 4, 4));
         let a = s.add_track_of(TrackKind::Midi);
         let b = s.add_track_of(TrackKind::Midi);
         let clip = |id, start, notes| MidiClip {
@@ -444,6 +556,9 @@ mod tests {
             start,
             length: 32.0,
             notes,
+            timing: Default::default(),
+            stretch: 1.0,
+            pitch: 0.0,
             muted: false,
             gain_db: 0.0,
             controls: Vec::new(),
@@ -532,6 +647,73 @@ mod tests {
         assert!(lead.end() >= 3.0 + 5.0);
         // And it writes the same bytes again.
         assert_eq!(write(&back).unwrap()[..], bytes[..]);
+    }
+
+    #[test]
+    fn glides_are_written_as_tempo_runs_and_read_back_as_glides() {
+        use af27_core::midi::TempoKind;
+        let mut s = session();
+        s.tempo = Tempo::default();
+        s.tempo.add_ramp(2, 6, Some(80.0));
+        s.tempo.changes.push(TempoChange::new(8, 100.0, 3, 4));
+        let i = s.tempo.add_ramp(9, 11, Some(150.0));
+        s.tempo.changes[i].beats_per_bar = 5;
+        s.tempo.normalize();
+        let bytes = write(&s).unwrap();
+        let imp = read(&bytes).unwrap();
+        assert_eq!(imp.moved, 0);
+        let (a, b) = (&imp.tempo, &s.tempo);
+        assert_eq!(a.changes.len(), b.changes.len(), "{a:?}");
+        for (x, y) in a.changes.iter().zip(&b.changes) {
+            assert_eq!(
+                (x.bar, x.kind, x.beats_per_bar),
+                (y.bar, y.kind, y.beats_per_bar)
+            );
+            assert!((x.bpm - y.bpm).abs() < 1e-3);
+        }
+        assert_eq!(a.changes[0].kind, TempoKind::Ramp { from_bar: 2 });
+        // The run keeps each step's time, so seconds agree closely.
+        for k in 0..60 {
+            let q = k as f64;
+            assert!((a.secs(q) - b.secs(q)).abs() < 1e-3, "at {q}");
+        }
+        // A tempo every sixteenth across the glides.
+        let smf = Smf::parse(&bytes).unwrap();
+        let tempos = smf.tracks[0]
+            .iter()
+            .filter(|e| matches!(e.kind, TrackEventKind::Meta(MetaMessage::Tempo(_))))
+            .count();
+        assert_eq!(tempos, 1 + 64 + 1 + 1 + 24 + 1);
+    }
+
+    #[test]
+    fn export_writes_the_notes_as_they_play() {
+        use af27_core::midi::ClipTiming;
+        let mut s = Session::new("Song", 48_000, 0);
+        s.tempo.changes.push(TempoChange::new(1, 60.0, 4, 4));
+        let a = s.add_track_of(TrackKind::Midi);
+        let mut c = MidiClip::new(5, "c", 0.0, 8.0);
+        c.notes.push(note(60, 1.0, 1.0, 100, 0, 0.0));
+        c.notes.push(note(64, 6.0, 1.0, 100, 0, 0.0));
+        c.stretch = 0.5;
+        c.pitch = 3.4;
+        s.track_mut(a).unwrap().midi.push(c.clone());
+        // A kept-speed copy at 120 BPM on its own track.
+        let b = s.add_track_of(TrackKind::Midi);
+        let mut k = MidiClip::new(6, "k", 0.0, 8.0);
+        k.notes.push(note(60, 6.0, 1.0, 100, 0, 0.0));
+        k.timing = ClipTiming::KeepSpeed { bpm: 120.0 };
+        s.track_mut(b).unwrap().midi.push(k);
+        let imp = read(&write(&s).unwrap()).unwrap();
+        let n = &imp.tracks[0].notes;
+        // At 50% beat 1 is half a beat in, transposed up three.
+        assert_eq!((n[0].pitch, n[0].start, n[0].length), (63, 0.5, 0.5));
+        assert_eq!((n[1].pitch, n[1].start), (67, 3.0));
+        // Kept at 120: 6 of its beats are 3 s, which is bar 1 (2 s at
+        // 120) plus one beat at 60: session beat 5.
+        let kn = &imp.tracks[1].notes;
+        assert!((kn[0].start - 5.0).abs() < 1e-3, "{kn:?}");
+        assert!((kn[0].length - 0.5).abs() < 1e-3, "{kn:?}");
     }
 
     #[test]

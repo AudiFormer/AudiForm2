@@ -114,6 +114,7 @@ pub fn pan_delta(ui: &egui::Ui, r: &Response) -> Option<egui::Vec2> {
 /// Clicks, drags and the right-click menu on the ruler `r`, whose times
 /// run across `x_rect` with view `v`, up to `max_t`. Returns where playback
 /// will move on release while a drag is under way during playback.
+#[allow(clippy::too_many_arguments)]
 pub fn input(
     ui: &egui::Ui,
     st: &mut State,
@@ -122,6 +123,7 @@ pub fn input(
     v: &View,
     max_t: f64,
     markers: &[f64],
+    tempo_items: bool,
 ) -> Option<f64> {
     let id = r.id.with("scrub");
     let pressed = r.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
@@ -169,6 +171,30 @@ pub fn input(
                 .unwrap_or_else(|| st.position());
             st.add_marker_at(t);
             ui.close_menu();
+        }
+        if tempo_items {
+            let t = ui
+                .data(|d| d.get_temp::<f64>(at_id))
+                .unwrap_or_else(|| st.position());
+            ui.separator();
+            if ui
+                .button("Add Tempo Change Here")
+                .on_hover_text("An immediate tempo or time signature change at the nearest bar line")
+                .clicked()
+            {
+                let beats = st.session.tempo.beats(t);
+                crate::tempo::add_here(st, beats, false);
+                ui.close_menu();
+            }
+            if ui
+                .button("Add Gradual Tempo Change Here")
+                .on_hover_text("A ritardando or accelerando starting at the nearest bar line and arriving four bars later")
+                .clicked()
+            {
+                let beats = st.session.tempo.beats(t);
+                crate::tempo::add_here(st, beats, true);
+                ui.close_menu();
+            }
         }
     });
     ghost

@@ -822,6 +822,7 @@ fn instruments(
                 key: n.pitch,
                 velocity: velocity_u8(n.velocity),
                 pan: n.pan,
+                detune: n.detune,
             })
             .collect();
         let font = crate::soundfont::SfPlayer::new(sf, list, rate)
@@ -831,7 +832,9 @@ fn instruments(
     }
     let list = notes
         .iter()
-        .map(|n| synth::note(n.start, n.end, n.pitch, velocity_u8(n.velocity), n.pan))
+        .map(|n| {
+            synth::note(n.start, n.end, n.pitch, velocity_u8(n.velocity), n.pan).detuned(n.detune)
+        })
         .collect();
     (Some(Synth::new(t.instrument, list, rate)), None)
 }

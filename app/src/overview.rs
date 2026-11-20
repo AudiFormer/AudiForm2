@@ -179,7 +179,7 @@ pub fn draw(p: &egui::Painter, st: &State, r: Rect, button: Rect, th: &crate::th
         }
         for clip in &tr.midi {
             let a = x_of(r, total, st.session.tempo.secs(clip.start));
-            let b = x_of(r, total, st.session.tempo.secs(clip.start + clip.length)).max(a + 1.0);
+            let b = x_of(r, total, clip.end_secs(&st.session.tempo)).max(a + 1.0);
             p.rect_filled(
                 Rect::from_min_max(pos2(a, y), pos2(b, (y + row_h).min(inner.bottom()))),
                 Rounding::ZERO,
