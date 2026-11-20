@@ -4,24 +4,24 @@
 //! Opening other editors' projects as Audiform27 sessions.
 //!
 //! * `.sesx`: the XML multitrack session format used by a widely used
-//!   commercial editor. Read from the files themselves: tracks, clip
-//!   positions, source in/out points, clip gain and mute, fades, track
-//!   volume, pan, mute and solo, and the file table (absolute and
-//!   relative paths). Effects and automation are reported as skipped.
-//! * `.audfrm` / `.altaudio`: Audiform's JSON sessions (same layout).
+//!   commercial editor ([`sesx`]); also written by [`sesx_out`].
+//! * `.audfrm` / `.altaudio`: Audiform's JSON sessions ([`audfrm`]), and
+//!   the session inside an Audiform template (`.altemplate`).
 //!
 //! Media durations and formats that a file does not state are filled in
 //! when the audio is loaded.
 
-use std::collections::HashMap;
 pub mod audfrm;
+mod b64;
 pub mod check;
 pub mod paths;
+pub mod sesx;
+pub mod sesx_out;
 pub mod smf;
 
 use std::path::{Path, PathBuf};
 
-use af27_core::session::{Clip, Marker, MediaItem, Session};
+use af27_core::session::Session;
 
 /// The result of an import, with anything that could not be carried over.
 #[derive(Debug)]
@@ -32,23 +32,35 @@ pub struct Imported {
     pub base: Option<serde_json::Value>,
 }
 
+/// The kinds of session file this crate opens, by extension (lower case).
+pub const SESSION_EXTENSIONS: [&str; 4] = ["audfrm", "altaudio", "altemplate", "sesx"];
+
+/// Whether files with this extension (any case) open as sessions here.
+pub fn is_session_ext(ext: &str) -> bool {
+    let e = ext.to_ascii_lowercase();
+    SESSION_EXTENSIONS.contains(&e.as_str())
+}
+
+/// Opens a session file of any kind this crate reads. A 5.1 `.sesx` is
+/// read as mixed with the surround speakers behind; use
+/// [`import_with`] to say otherwise.
 pub fn import(path: &Path) -> Result<Imported, String> {
+    import_with(path, sesx::Surrounds::Behind)
+}
+
+pub fn import_with(path: &Path, surrounds: sesx::Surrounds) -> Result<Imported, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
-    let base = path.parent().unwrap_or(Path::new("."));
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Imported Session")
-        .to_string();
     match ext.as_str() {
-        "sesx" => sesx(&text, base, &name),
-        "audfrm" | "altaudio" => audfrm::import(&text, base),
+        "sesx" => sesx::import_file(path, surrounds),
+        "audfrm" | "altaudio" | "altemplate" => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
+            audfrm::import(&text, path.parent().unwrap_or(Path::new(".")))
+        }
         _ => Err(format!(
             "{} is not a session type this app can open.",
             path.display()
@@ -94,226 +106,6 @@ pub(crate) fn file_name(p: &Path) -> String {
     last.rsplit_once('.').map_or(last, |(a, _)| a).to_string()
 }
 
-fn gain_db(linear: f64) -> f32 {
-    if linear <= 1e-9 {
-        -96.0
-    } else {
-        (20.0 * linear.log10()) as f32
-    }
-}
-
-// ---------------------------------------------------------------- .sesx
-
-fn attr<'a>(n: roxmltree::Node<'a, 'a>, k: &str) -> Option<&'a str> {
-    n.attribute(k)
-}
-
-fn num(n: roxmltree::Node, k: &str) -> f64 {
-    n.attribute(k).and_then(|v| v.parse().ok()).unwrap_or(0.0)
-}
-
-/// The value of parameter `pname` (or index `pidx`) of the child
-/// component with id `cid`.
-fn component_param(
-    node: roxmltree::Node,
-    cid: &str,
-    pname: Option<&str>,
-    pidx: &str,
-) -> Option<f64> {
-    let comp = node
-        .descendants()
-        .find(|c| c.has_tag_name("component") && c.attribute("id") == Some(cid))?;
-    comp.children()
-        .filter(|p| p.has_tag_name("parameter"))
-        .find(|p| match pname {
-            Some(n) => p.attribute("name") == Some(n),
-            None => p.attribute("index") == Some(pidx),
-        })
-        .or_else(|| {
-            comp.children()
-                .find(|p| p.has_tag_name("parameter") && p.attribute("index") == Some(pidx))
-        })
-        .and_then(|p| p.attribute("parameterValue"))
-        .and_then(|v| v.parse().ok())
-}
-
-pub fn sesx(text: &str, base: &Path, name: &str) -> Result<Imported, String> {
-    let text = text.trim_start_matches('\u{feff}');
-    let doc = roxmltree::Document::parse_with_options(
-        text,
-        roxmltree::ParsingOptions {
-            allow_dtd: true,
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("The .sesx file could not be read: {e}"))?;
-    let root = doc.root_element();
-    let sess = root
-        .descendants()
-        .find(|n| n.has_tag_name("session"))
-        .ok_or("The .sesx file has no session.")?;
-    let rate = num(sess, "sampleRate").max(1.0) as u32;
-    let mut out = Session::new(name, rate, 0);
-    let mut notices = Vec::new();
-
-    // File table.
-    let mut files: HashMap<String, u64> = HashMap::new();
-    for f in root.descendants().filter(|n| n.has_tag_name("file")) {
-        let Some(fid) = attr(f, "id") else { continue };
-        let path = resolve(attr(f, "absolutePath"), attr(f, "relativePath"), base);
-        let id = out.alloc_id();
-        let rate_hint = attr(f, "importerPrivateSettings")
-            .and_then(|s| s.split(';').find_map(|kv| kv.strip_prefix("SampleRate:0:")))
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(rate);
-        out.media.push(MediaItem {
-            id,
-            name: path
-                .as_deref()
-                .map(file_name)
-                .unwrap_or_else(|| format!("File {fid}")),
-            path,
-            duration: 0.0,
-            rate: rate_hint,
-            channels: 0,
-            ext_id: None,
-        });
-        files.insert(fid.to_string(), id);
-    }
-
-    let s = |v: f64| v / rate as f64;
-    let mut skipped_fx = 0usize;
-    let tracks: Vec<_> = sess
-        .descendants()
-        .filter(|n| n.has_tag_name("audioTrack"))
-        .collect();
-    let mut ordered: Vec<_> = tracks.iter().collect();
-    ordered.sort_by_key(|t| {
-        attr(**t, "index")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0)
-    });
-    for t in ordered {
-        let tid = out.add_track();
-        let tname = t
-            .descendants()
-            .find(|n| n.has_tag_name("name"))
-            .and_then(|n| n.text())
-            .unwrap_or("Track")
-            .to_string();
-        let params = t
-            .children()
-            .find(|n| n.has_tag_name("trackAudioParameters"));
-        let volume = params
-            .and_then(|p| component_param(p, "trackFader", Some("volume"), "0"))
-            .unwrap_or(1.0);
-        let mute = params
-            .and_then(|p| component_param(p, "trackMute", Some("mute"), "1"))
-            .unwrap_or(0.0);
-        let pan = params
-            .and_then(|p| component_param(p, "trackPan", Some("Pan"), "0"))
-            .unwrap_or(0.0);
-        let solo = params.and_then(|p| attr(p, "solo")) == Some("true");
-        // Track inserts other than the fixed fader, mute, pan and EQ.
-        if let Some(p) = params {
-            skipped_fx += p
-                .children()
-                .filter(|c| c.has_tag_name("component"))
-                .filter(|c| {
-                    !matches!(
-                        c.attribute("id"),
-                        Some("trackFader" | "trackMute" | "trackPan" | "trackEQ")
-                    )
-                })
-                .filter(|c| c.attribute("powered") != Some("false"))
-                .count();
-        }
-        let mut clips = Vec::new();
-        for c in t.children().filter(|n| n.has_tag_name("audioClip")) {
-            let Some(&media) = attr(c, "fileID").and_then(|f| files.get(f)) else {
-                continue;
-            };
-            let start = num(c, "startPoint");
-            let end = num(c, "endPoint");
-            let src_in = num(c, "sourceInPoint");
-            let cgain = component_param(c, "clipGain", Some("volume"), "0").unwrap_or(1.0);
-            let cmute = component_param(c, "clipMute", Some("mute"), "1").unwrap_or(0.0);
-            let fade = |tag: &str| {
-                c.children()
-                    .find(|n| n.has_tag_name(tag))
-                    .map(|f| (num(f, "endPoint") - num(f, "startPoint")).abs())
-                    .unwrap_or(0.0)
-            };
-            let id = out.alloc_id();
-            clips.push(Clip {
-                props: Default::default(),
-                id,
-                media,
-                name: attr(c, "name").unwrap_or("Clip").to_string(),
-                start: s(start),
-                offset: s(src_in),
-                length: s((end - start).max(0.0)),
-                gain_db: gain_db(cgain),
-                fade_in: s(fade("fadeIn")),
-                fade_out: s(fade("fadeOut")),
-                muted: cmute >= 0.5,
-                ext_id: None,
-            });
-        }
-        let tr = out.track_mut(tid).unwrap();
-        tr.name = tname;
-        tr.volume_db = gain_db(volume);
-        // Stored as -100..100 in some versions, -1..1 in others.
-        tr.pan = if pan.abs() > 1.0 {
-            (pan / 100.0) as f32
-        } else {
-            pan as f32
-        };
-        tr.mute = mute >= 0.5;
-        tr.solo = solo;
-        tr.clips = clips;
-    }
-    for m in root.descendants().filter(|n| n.has_tag_name("marker")) {
-        let time = m
-            .attribute("startPoint")
-            .or_else(|| m.attribute("start"))
-            .and_then(|v| v.parse::<f64>().ok());
-        if let Some(t) = time {
-            out.markers.push(Marker {
-                name: m.attribute("name").unwrap_or("Marker").to_string(),
-                time: s(t),
-                length: m
-                    .attribute("duration")
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .map(s)
-                    .unwrap_or(0.0),
-                ext_id: None,
-            });
-        }
-    }
-    if root.descendants().any(|n| n.has_tag_name("busTrack")) {
-        notices.push(
-            "Bus tracks were not carried over yet; their clips play through the master.".into(),
-        );
-    }
-    if skipped_fx > 0 {
-        notices.push(format!(
-            "{skipped_fx} track effect(s) were skipped; Audiform27 uses its own effects."
-        ));
-    }
-    if root
-        .descendants()
-        .any(|n| n.has_tag_name("automationLane") || n.has_tag_name("parameterEnvelope"))
-    {
-        notices.push("Automation was not carried over yet.".into());
-    }
-    Ok(Imported {
-        session: out,
-        notices,
-        base: None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,7 +140,7 @@ mod tests {
 
     #[test]
     fn reads_a_sesx() {
-        let imp = sesx(SESX, Path::new("."), "Test").unwrap();
+        let imp = sesx::read(SESX, Path::new("."), "Test", sesx::Surrounds::Behind).unwrap();
         let s = &imp.session;
         assert_eq!(s.rate, 44_100);
         assert_eq!(s.tracks.len(), 2);

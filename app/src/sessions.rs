@@ -276,7 +276,45 @@ pub fn expand_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
 }
 
 pub fn is_session_ext(ext: &str) -> bool {
-    matches!(ext, "af27" | "sesx" | "audfrm" | "altaudio")
+    ext.eq_ignore_ascii_case("af27") || af27_interop::is_session_ext(ext)
+}
+
+/// Opens another app's or Audiform's session file. A 5.1 `.sesx` first
+/// asks where its surround speakers were, so directions come across
+/// right in 3D Space.
+pub fn import_session(path: &Path) -> Result<af27_interop::Imported, String> {
+    use af27_interop::sesx::Surrounds;
+    let is_sesx = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("sesx"));
+    let surround = is_sesx
+        && std::fs::read(path)
+            .map(|b| {
+                af27_interop::sesx::is_surround(&af27_interop::sesx::decode(
+                    &b[..b.len().min(16_384)],
+                ))
+            })
+            .unwrap_or(false);
+    let surrounds = if surround {
+        let behind = rfd::MessageDialog::new()
+            .set_title("5.1 session")
+            .set_description(
+                "Where were the surround speakers when this session was mixed?
+
+Yes: behind me (the usual placement)
+No: beside me",
+            )
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if behind == rfd::MessageDialogResult::No {
+            Surrounds::Sides
+        } else {
+            Surrounds::Behind
+        }
+    } else {
+        Surrounds::Behind
+    };
+    af27_interop::import_with(path, surrounds)
 }
 
 fn file_name(p: &Path) -> String {

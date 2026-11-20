@@ -1312,6 +1312,18 @@ fn write_chain(
                 }
             } else if af27_core::plugin::is_plugin(&s.effect) {
                 write_plugin(&mut o, s);
+            } else if orig.is_none() && s.effect.starts_with("altaudio.") {
+                // An Audiform effect made on import (a converted
+                // Parametric EQ): its settings, by Audiform's keys, are
+                // the slot's data.
+                o.insert("effect".into(), json!(s.effect));
+                let params = s
+                    .data
+                    .as_deref()
+                    .and_then(|d| serde_json::from_str::<Value>(d).ok())
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({}));
+                o.insert("params".into(), params);
             } else if orig.is_none() || af27_dsp::Effect::from_id(&s.effect).is_some() {
                 // Audiform27's own effect: a slot Audiform skips but keeps.
                 o.insert("effect".into(), json!(format!("{AF27}{}", s.effect)));

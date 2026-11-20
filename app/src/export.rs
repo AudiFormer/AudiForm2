@@ -230,6 +230,58 @@ fn open_with(st: &mut State, purpose: Purpose, name: String, folder: Option<Path
     ui.open = true;
 }
 
+/// File > Export > Multitrack Session (.sesx): a copy of the session for
+/// the other editor. The session itself is not changed and stays tied to
+/// its own file.
+pub fn export_sesx(st: &mut State) {
+    let folder = st
+        .session_path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            st.sessions
+                .source
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(home);
+    let name = format!("{}.sesx", ex::safe_file_name(&st.session.name));
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Export Multitrack Session")
+        .set_directory(&folder)
+        .set_file_name(name)
+        .add_filter("Multitrack session (.sesx)", &["sesx"])
+        .save_file()
+    else {
+        return;
+    };
+    let path = if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("sesx"))
+    {
+        path
+    } else {
+        let mut p = path.into_os_string();
+        p.push(".sesx");
+        PathBuf::from(p)
+    };
+    crate::plugins::capture_all(st);
+    match af27_interop::sesx_out::export(&st.session, &path) {
+        Ok(report) => {
+            st.toast(format!(
+                "Exported {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if let Some(n) = report.notice() {
+                st.toast(n);
+            }
+        }
+        Err(e) => st.error(e),
+    }
+}
+
 /// File > Save Audio As.
 pub fn open_save_as(st: &mut State) {
     let Some(d) = st.doc() else {

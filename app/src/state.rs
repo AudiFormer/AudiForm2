@@ -667,7 +667,7 @@ impl State {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if matches!(ext.as_str(), "af27" | "sesx" | "audfrm" | "altaudio") {
+            if crate::sessions::is_session_ext(&ext) {
                 self.open_session(&p);
             } else {
                 self.load_file(p, None);
@@ -941,7 +941,7 @@ impl State {
                 .and_then(|t| Session::from_json(&t))
                 .map(|s| (s, Vec::new(), None))
         } else {
-            af27_interop::import(path).map(|i| (i.session, i.notices, i.base))
+            crate::sessions::import_session(path).map(|i| (i.session, i.notices, i.base))
         };
         match result {
             Ok((session, notices, base)) => {

@@ -607,11 +607,14 @@ const AUDIO_FILTER: &[&str] = af27_io::EXTENSIONS;
 
 pub fn open_dialog(st: &mut State) {
     let mut all: Vec<&str> = AUDIO_FILTER.to_vec();
-    all.extend(["af27", "sesx", "audfrm", "altaudio"]);
+    all.extend(["af27", "sesx", "audfrm", "altaudio", "altemplate"]);
     if let Some(paths) = rfd::FileDialog::new()
         .add_filter("Audio and sessions", &all)
         .add_filter("Audio", AUDIO_FILTER)
-        .add_filter("Sessions", &["af27", "sesx", "audfrm", "altaudio"])
+        .add_filter(
+            "Sessions",
+            &["af27", "sesx", "audfrm", "altaudio", "altemplate"],
+        )
         .pick_files()
     {
         st.open_paths(paths);
@@ -864,6 +867,10 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     &mut cmd,
                 );
                 cmd_item(ui, km, Cmd::ExportStems, "Track Stems...", true, &mut cmd);
+                if ui.button("Multitrack Session (.sesx)...").clicked() {
+                    crate::export::export_sesx(st);
+                    ui.close_menu();
+                }
                 if st.session.space.is_some()
                     && ui.button("3D Speaker Bed (multichannel)...").clicked()
                 {
