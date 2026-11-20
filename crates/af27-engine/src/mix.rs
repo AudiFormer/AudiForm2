@@ -42,9 +42,44 @@ pub struct MixClip {
     pub start: f64,
     pub offset: f64,
     pub length: f64,
+    /// Clip gain, negative when the clip's polarity is inverted.
     pub gain: f32,
     pub fade_in: f64,
     pub fade_out: f64,
+    pub fade_in_skew: f32,
+    pub fade_out_skew: f32,
+    /// Source seconds per timeline second (1 / the stretch ratio).
+    pub speed: f64,
+    /// Plays its source span backwards.
+    pub reversed: bool,
+    /// Stretched (and pitch-shifted, and turned round) audio of the whole
+    /// clip, once the background work has it; until then the clip reads
+    /// its source at `speed`.
+    pub prepared: Option<Arc<crate::stretch::Prepared>>,
+}
+
+impl MixClip {
+    /// The mix clip for `c` playing `buf`. Stretched clips get their
+    /// prepared buffer from the cache (queued if new).
+    pub fn new(c: &af27_core::Clip, buf: Arc<AudioBuffer>) -> MixClip {
+        let p = &c.props;
+        let prepared = crate::stretch::needs(c).then(|| crate::stretch::prepare(&buf, c));
+        let g = db_to_gain(c.gain_db);
+        MixClip {
+            buf,
+            start: c.start,
+            offset: c.offset,
+            length: c.length,
+            gain: if p.inverted { -g } else { g },
+            fade_in: c.fade_in,
+            fade_out: c.fade_out,
+            fade_in_skew: p.fade_in_skew,
+            fade_out_skew: p.fade_out_skew,
+            speed: 1.0 / p.stretch.applied_ratio(),
+            reversed: p.reversed,
+            prepared,
+        }
+    }
 }
 
 pub struct MixSend {
@@ -351,24 +386,48 @@ fn pair(tracks: &mut [MixTrack], a: usize, b: usize) -> (&MixTrack, &mut MixTrac
     }
 }
 
-/// The clip's gain at `local` seconds into it: clip gain and linear fades.
+/// The clip's gain at `local` seconds into it: clip gain and fades (with
+/// their skew; see `af27_core::session::fade_curve`).
 #[inline]
 fn clip_gain(c: &MixClip, local: f64) -> f32 {
+    use af27_core::session::fade_curve;
     let mut g = c.gain as f64;
     if c.fade_in > 0.0 && local < c.fade_in {
-        g *= local / c.fade_in;
+        g *= fade_curve(local / c.fade_in, c.fade_in_skew);
     }
     if c.fade_out > 0.0 && c.length - local < c.fade_out {
-        g *= (c.length - local) / c.fade_out;
+        g *= fade_curve((c.length - local) / c.fade_out, c.fade_out_skew);
     }
     g as f32
 }
 
 /// Adds one clip's sound for the block starting at `t0` (frames `dt`
-/// apart) into `l` and `r`. Only the frames inside the clip are visited;
-/// mono and stereo files read their channels directly, and a file at the
-/// output rate is read without interpolation.
+/// apart) into `l` and `r`: from its prepared (stretched) audio when that
+/// is ready, otherwise from its source at its speed and direction.
 fn read_clip(c: &MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
+    match c.prepared.as_deref().and_then(|p| p.ready()) {
+        Some(buf) => read_span(c, buf, 0.0, 1.0, false, t0, dt, l, r),
+        None => read_span(c, &c.buf, c.offset, c.speed, c.reversed, t0, dt, l, r),
+    }
+}
+
+/// [`read_clip`] from `buf`, whose audio for the clip starts at `offset`
+/// seconds and runs `speed` source seconds per timeline second (backwards
+/// from the span's end when `reversed`). Only the frames inside the clip
+/// are visited; mono and stereo files read their channels directly, and a
+/// file at the output rate is read without interpolation.
+#[allow(clippy::too_many_arguments)]
+fn read_span(
+    c: &MixClip,
+    buf: &AudioBuffer,
+    offset: f64,
+    speed: f64,
+    reversed: bool,
+    t0: f64,
+    dt: f64,
+    l: &mut [f32],
+    r: &mut [f32],
+) {
     let n = l.len();
     let first = if c.start > t0 {
         (((c.start - t0) / dt).ceil() as usize).min(n)
@@ -379,10 +438,19 @@ fn read_clip(c: &MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
     if first >= last {
         return;
     }
-    let rate = c.buf.rate as f64;
-    let step = dt * rate;
-    let x0 = (c.offset + (t0 + dt * first as f64 - c.start)) * rate;
-    let ch = &c.buf.channels;
+    let rate = buf.rate as f64;
+    let local0 = t0 + dt * first as f64 - c.start;
+    let (x0, step) = if reversed {
+        // The last frame of the span first (matching a reversed copy).
+        let end = (c.length * rate).round() - 1.0;
+        (
+            offset * rate + (end - local0 * rate) * speed,
+            -dt * rate * speed,
+        )
+    } else {
+        ((offset + local0 * speed) * rate, dt * rate * speed)
+    };
+    let ch = &buf.channels;
     // The fades change the gain; in the plain middle of a clip it is fixed.
     let in_fade = |local: f64| {
         (c.fade_in > 0.0 && local < c.fade_in)
@@ -427,7 +495,7 @@ fn read_clip(c: &MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
                     continue;
                 }
                 let g = if flat { c.gain } else { clip_gain(c, local) };
-                let (a, b) = stereo_frame(&c.buf, x0 + step * k);
+                let (a, b) = stereo_frame(buf, x0 + step * k);
                 l[i] += a * g;
                 r[i] += b * g;
             }
@@ -485,17 +553,7 @@ pub fn build(
                 .clips
                 .iter()
                 .filter(|c| !c.muted)
-                .filter_map(|c| {
-                    Some(MixClip {
-                        buf: media(c.media)?,
-                        start: c.start,
-                        offset: c.offset,
-                        length: c.length,
-                        gain: db_to_gain(c.gain_db),
-                        fade_in: c.fade_in,
-                        fade_out: c.fade_out,
-                    })
-                })
+                .filter_map(|c| Some(MixClip::new(c, media(c.media)?)))
                 .collect();
             // Notes in seconds, through the tempo map, cut at their clip's end.
             let notes = || {
@@ -656,6 +714,18 @@ impl Mix {
     /// tracks independent of one another (see `plan`).
     pub fn levels(&self) -> &[Vec<usize>] {
         &self.levels
+    }
+
+    /// Works out every stretched clip's audio now (waiting for any the
+    /// background is on), so an offline render hears them all.
+    pub fn prepare_now(&self) {
+        for t in &self.tracks {
+            for c in &t.clips {
+                if let Some(p) = &c.prepared {
+                    p.ensure();
+                }
+            }
+        }
     }
 
     pub fn channels_out(&self) -> usize {

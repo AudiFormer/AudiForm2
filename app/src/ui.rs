@@ -2405,6 +2405,11 @@ impl eframe::App for App {
             self.st.want_piano = false;
             self.show_tab(Tab::PianoRoll);
         }
+        // Stretched clips render in the background: keep drawing until
+        // they are in.
+        if af27_engine::stretch::pending() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
         if std::mem::take(&mut self.st.want_properties) {
             self.show_tab(Tab::Properties);
         }

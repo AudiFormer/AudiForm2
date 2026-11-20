@@ -8,3 +8,4 @@ authors.workspace = true
 
 [dependencies]
 af27-core.workspace = true
+rustfft = "6.4"

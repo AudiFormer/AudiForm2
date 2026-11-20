@@ -17,6 +17,7 @@ pub mod mix;
 pub mod pool;
 pub mod scope;
 pub mod soundfont;
+pub mod stretch;
 pub mod synth;
 pub mod transport;
 
@@ -920,6 +921,8 @@ fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.reset();
+        // Offline: every stretched clip as it will finally sound.
+        m.prepare_now();
     }
     let frames = ((to - from).max(0.0) * rate as f64).round() as usize;
     let mut inter = vec![0.0f32; frames * channels];
@@ -956,6 +959,8 @@ pub fn render_each(
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
         m.reset();
+        // Offline: every stretched clip as it will finally sound.
+        m.prepare_now();
     }
     let mut left = ((to - from).max(0.0) * rate as f64).round() as usize;
     let mut block = vec![0.0f32; BLOCK * channels];

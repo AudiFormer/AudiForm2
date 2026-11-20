@@ -131,6 +131,7 @@ name = "af27-dsp"
 version = "0.1.0"
 dependencies = [
  "af27-core",
+ "rustfft",
 ]
 
 [[package]]
