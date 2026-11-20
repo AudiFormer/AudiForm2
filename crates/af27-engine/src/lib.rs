@@ -920,6 +920,7 @@ fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -
         clicks: None,
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
+        m.set_offline();
         m.reset();
         // Offline: every stretched clip as it will finally sound.
         m.prepare_now();
@@ -958,6 +959,7 @@ pub fn render_each(
         clicks: None,
     };
     if let Some(Program::Mix(m)) = v.program.as_deref_mut() {
+        m.set_offline();
         m.reset();
         // Offline: every stretched clip as it will finally sound.
         m.prepare_now();

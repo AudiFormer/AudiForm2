@@ -853,13 +853,19 @@ impl Manager {
             d.inst.clone()
         };
         let mut map = self.instances.lock().unwrap();
+        let mut pooled = true;
         if let Some(i) = map.get(&key) {
             if i.rate == rate && i.cid.eq_ignore_ascii_case(&found.info.cid) {
                 return Some(i.clone());
             }
+            // Playing at another rate (an export at its own rate): a copy
+            // of its own, so playback's copy never restarts for it.
+            pooled = Arc::strong_count(i) == 1;
         }
         let inst = self.new_instance(&key, &found, &d, rate, false);
-        map.insert(key, inst.clone());
+        if pooled {
+            map.insert(key, inst.clone());
+        }
         drop(map);
         let me = inst.clone();
         std::thread::spawn(move || manager().start(&me, &d));

@@ -605,6 +605,7 @@ dependencies = [
  "af27-io",
  "af27-separation",
  "af27-space",
+ "af27-vst3",
  "eframe",
  "egui",
  "egui_dock",

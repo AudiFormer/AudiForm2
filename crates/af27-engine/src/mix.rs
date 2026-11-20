@@ -732,6 +732,16 @@ impl Mix {
         self.space.as_ref().map_or(2, |s| s.channels)
     }
 
+    /// This mix renders offline (an export): effects that run in another
+    /// process (VST3 plug-ins) start copies of their own and wait for
+    /// every block.
+    pub fn set_offline(&mut self) {
+        for t in &mut self.tracks {
+            t.chain.set_offline(true);
+        }
+        self.master_chain.set_offline(true);
+    }
+
     /// Clears effect tails, after a jump.
     pub fn reset(&mut self) {
         for t in &mut self.tracks {
