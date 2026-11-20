@@ -138,7 +138,9 @@ fn tracks_buses_clips_and_media_come_across() {
     assert_eq!((map[1].left, map[1].right), (1.0, 1.0));
     assert!(r.dropped.keys().all(|k| !k.contains("Source Channels")));
     // An S-curve fade comes across as a bell fade, not an approximation.
-    assert!(c.props.fade_out_bell || t.clips[1].props.fade_in_bell || t.clips[1].props.fade_out_bell);
+    assert!(
+        c.props.fade_out_bell || t.clips[1].props.fade_in_bell || t.clips[1].props.fade_out_bell
+    );
     assert!(!r.approximated.keys().any(|k| k.starts_with("S-curve")));
     let n = r.notices().join("\n");
     assert!(

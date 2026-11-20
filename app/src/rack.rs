@@ -277,29 +277,6 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
                     .color(c(th.text)),
             );
             ui.add_space(2.0);
-            // The track's (or the master's) own settings, folded away by
-            // default so the rack keeps the room.
-            if target != FILE && !is_clip(target) {
-                egui::CollapsingHeader::new(
-                    RichText::new(if target == MASTER {
-                        "Master settings"
-                    } else {
-                        "Track settings"
-                    })
-                    .size(11.0)
-                    .color(c(th.text_dim)),
-                )
-                .id_salt("rack-track-settings")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.set_max_width(w0);
-                    if target == MASTER {
-                        crate::inspector::master_settings(ui, st);
-                    } else {
-                        crate::inspector::track_settings(ui, st, target as usize);
-                    }
-                });
-            }
             egui::ScrollArea::vertical()
                 .id_salt("rack-slots")
                 .auto_shrink([false, false])

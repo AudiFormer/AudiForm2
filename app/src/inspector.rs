@@ -327,22 +327,6 @@ pub fn track_settings(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     }
 }
 
-/// The master level, for the Effects tab's Master rack.
-pub fn master_settings(ui: &mut egui::Ui, st: &mut State) {
-    let before = st.session.clone();
-    let changed = ui
-        .add(
-            crate::widgets::Slider::new(&mut st.session.master_db, -60.0..=12.0)
-                .suffix(" dB")
-                .text("Master level"),
-        )
-        .changed();
-    if changed {
-        st.live_master();
-    }
-    live_commit(st, ui, "Master level", &before, changed);
-}
-
 /// The rack lives in the Effects panel; here, how many and a way there.
 fn rack_link(ui: &mut egui::Ui, st: &mut State, track: u16) {
     let th = st.theme.clone();
