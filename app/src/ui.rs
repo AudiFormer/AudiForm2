@@ -300,7 +300,11 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
+        let tt = std::time::Instant::now();
         self.ui_inner(ui, tab);
+        if std::env::var_os("AF2_TRACE").is_some() && tt.elapsed().as_millis() > 20 {
+            eprintln!("tab {:?} {:.1} ms", tab, tt.elapsed().as_secs_f64() * 1e3);
+        }
     }
 
     fn closeable(&mut self, tab: &mut Tab) -> bool {
@@ -2266,7 +2270,11 @@ impl eframe::App for App {
         }
         crate::selfshot::tick(ctx, ctx.input(|i| i.time));
         crate::plugins::remember_window(frame);
+        let pt = std::time::Instant::now();
         crate::plugins::tick(&mut self.st);
+        if std::env::var_os("AF2_TRACE").is_some() {
+            eprintln!("plugins tick {:.1} ms", pt.elapsed().as_secs_f64() * 1e3);
+        }
         // For documentation shots: AF2_SHOW_TAB=Inspector (etc.) opens that
         // panel once at start.
         if !self.shown_env_tab {
@@ -2334,7 +2342,11 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) && !self.st.may_quit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        let tick_t = std::time::Instant::now();
         self.st.tick();
+        if std::env::var_os("AF2_TRACE").is_some() {
+            eprintln!("tick total {:.1} ms", tick_t.elapsed().as_secs_f64() * 1e3);
+        }
         self.keys(ctx);
         // The Piano Roll says again this frame whether the pointer is on it.
         self.st.piano_hover = false;
@@ -2552,9 +2564,13 @@ impl eframe::App for App {
                         }
                     }
                 }
+                let dt = std::time::Instant::now();
                 DockArea::new(&mut self.dock)
                     .style(style)
                     .show_inside(ui, &mut viewer);
+                if std::env::var_os("AF2_TRACE").is_some() {
+                    eprintln!("dock {:.1} ms", dt.elapsed().as_secs_f64() * 1e3);
+                }
                 let dock_to = crate::retro::next_shape(ui.ctx(), ui.layer_id());
                 // Where dividers meet, drag both at once.
                 crate::corners::corners(ui, &mut self.dock);

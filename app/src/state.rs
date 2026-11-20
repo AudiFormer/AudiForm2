@@ -299,6 +299,8 @@ pub struct State {
     pub viz: crate::visualizer::Visualizer,
     /// The last analysis window taken while stopped, and what it was taken at.
     pub scope_cache: Option<((u64, u64, i64), Vec<[f32; 2]>)>,
+    /// A stopped-playback scope mix being made in the background.
+    pub scope_job: Option<((u64, u64, i64), std::sync::mpsc::Receiver<Vec<[f32; 2]>>)>,
     /// Effect slot open for editing in the Inspector: (track or MASTER, slot).
     pub open_slot: Option<(u16, usize)>,
     /// Effect windows open: (rack, slot).
@@ -570,6 +572,7 @@ impl State {
             phase: crate::phasewheel::PhasePrefs::load(),
             viz: crate::visualizer::Visualizer::load(),
             scope_cache: None,
+            scope_job: None,
             open_slot: None,
             fx_windows: Vec::new(),
             file_chain: Vec::new(),
@@ -1409,10 +1412,20 @@ impl State {
             e.0 = a.max(e.0 * 0.86);
             e.1 = b.max(e.1 * 0.86);
         }
+        let tr = std::env::var_os("AF2_TRACE").is_some();
+        let t0 = Instant::now();
         self.poll_jobs();
+        let t1 = Instant::now();
         crate::separation::poll(self);
         crate::spectral_select::poll(self);
         self.sync_program();
+        if tr {
+            eprintln!(
+                "tick: jobs {:.1} ms, program {:.1} ms",
+                (t1 - t0).as_secs_f64() * 1e3,
+                t1.elapsed().as_secs_f64() * 1e3
+            );
+        }
         if let Some(e) = &mut self.engine {
             e.collect();
             for text in e.take_recording_errors() {
@@ -2165,15 +2178,72 @@ impl State {
                 None => vec![[0.0; 2]; n],
             },
             Mode::Multitrack => {
-                let span = n as f64 / rate as f64;
-                let b = self.render_mix((t - span).max(0.0), (t - span).max(0.0) + span, false);
-                (0..b.frames())
-                    .map(|i| [b.channels[0][i], b.channels[1][i]])
-                    .collect()
+                // Mixed in the background (never on the drawing thread),
+                // without VST3 plug-ins: starting dozens of plug-ins for a
+                // scope preview froze large sessions. Until it is ready the
+                // last result shows.
+                if let Some((k, rx)) = &self.scope_job {
+                    match rx.try_recv() {
+                        Ok(frames) => {
+                            let k = *k;
+                            self.scope_job = None;
+                            self.scope_cache = Some((k, frames.clone()));
+                            if k == key {
+                                return (frames, rate);
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => self.scope_job = None,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+                if self.scope_job.is_none() {
+                    self.start_scope_job(key, t, n, rate);
+                }
+                return match &self.scope_cache {
+                    Some((_, f)) if f.len() == n => (f.clone(), rate),
+                    _ => (vec![[0.0; 2]; n], rate),
+                };
             }
         };
         self.scope_cache = Some((key, frames.clone()));
         (frames, rate)
+    }
+
+    /// Mixes the `n` frames before `t` on a background thread for the
+    /// stopped-playback scopes, VST3 plug-ins left out.
+    fn start_scope_job(&mut self, key: (u64, u64, i64), t: f64, n: usize, rate: u32) {
+        let mut session = self.session.clone();
+        let keep = |c: &mut Vec<af27_core::EffectSlot>| {
+            c.retain(|s| !af27_core::plugin::is_plugin(&s.effect))
+        };
+        for tr in &mut session.tracks {
+            keep(&mut tr.chain);
+        }
+        keep(&mut session.master_chain);
+        let media: HashMap<MediaId, Arc<AudioBuffer>> = session
+            .media
+            .iter()
+            .filter_map(|m| self.media_buffer(m.id).map(|b| (m.id, b)))
+            .collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.scope_job = Some((key, rx));
+        std::thread::spawn(move || {
+            let span = n as f64 / rate as f64;
+            let from = (t - span).max(0.0);
+            let program = af27_engine::mix_program(&session, &|m| media.get(&m).cloned(), rate);
+            let b = af27_engine::render(program, rate, from, from + span);
+            let frames: Vec<[f32; 2]> = (0..n.min(b.frames()))
+                .map(|i| {
+                    [
+                        b.channels[0][i],
+                        b.channels.get(1).map_or(b.channels[0][i], |c| c[i]),
+                    ]
+                })
+                .collect();
+            let mut frames = frames;
+            frames.resize(n, [0.0; 2]);
+            let _ = tx.send(frames);
+        });
     }
 
     /// Levels in dBFS of `out.len()` bands, 20 Hz to 20 kHz evenly in
