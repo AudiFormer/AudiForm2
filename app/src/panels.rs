@@ -302,15 +302,14 @@ pub fn levels(ui: &mut egui::Ui, st: &mut State) {
     let (rect, resp) = ui.allocate_exact_size(rect.size(), Sense::click());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, Rounding::ZERO, c(th.panel));
-    let scale_h = 13.0;
+    // L on top, the scale between, R below (clear of the panel's corners).
     let latch_w = if prefs.clip { 12.0 } else { 0.0 };
     let bars = Rect::from_min_max(
-        rect.min + vec2(18.0, 3.0),
-        pos2(rect.right() - 8.0 - latch_w, rect.bottom() - scale_h),
+        rect.min + vec2(18.0, 4.0),
+        pos2(rect.right() - 8.0 - latch_w, rect.bottom() - 6.0),
     );
-    let gap = 3.0;
+    let gap = if bars.height() > 30.0 { 13.0 } else { 3.0 };
     let bar_h = ((bars.height() - gap) / 2.0).max(2.0);
-    let mut latches = [Rect::NOTHING; 2];
     for (i, ch) in st.levels.ch.iter().enumerate() {
         let r = Rect::from_min_size(
             pos2(bars.left(), bars.top() + i as f32 * (bar_h + gap)),
@@ -325,11 +324,16 @@ pub fn levels(ui: &mut egui::Ui, st: &mut State) {
             c(th.text_dim),
         );
         if prefs.clip {
-            latches[i] = meters::clip_latch(r);
-            meters::draw_clip_latch(&p, latches[i], ch.clipped, &th);
+            meters::draw_clip_latch(&p, meters::clip_latch(r), ch.clipped, &th);
         }
     }
-    meters::draw_scale(&p, rect, bars, prefs.floor(), &th);
+    if gap > 10.0 {
+        let strip = Rect::from_min_size(
+            pos2(bars.left(), bars.top() + bar_h),
+            vec2(bars.width(), gap),
+        );
+        meters::draw_scale(&p, strip, prefs.floor(), &th);
+    }
     // A click clears the clip lights and the peak-hold lines.
     if resp.clicked() {
         st.levels.clear_clips();

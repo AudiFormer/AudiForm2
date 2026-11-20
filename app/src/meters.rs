@@ -439,40 +439,39 @@ pub fn draw_channel(p: &Painter, r: Rect, ch: &Channel, prefs: &MeterPrefs, th: 
 /// The spacing between labelled ticks for a range drawn `width` wide.
 pub fn tick_step(range: f32, width: f32) -> f32 {
     for step in [1.0f32, 2.0, 3.0, 6.0, 12.0, 24.0, 48.0] {
-        if width / (range / step) >= 30.0 {
+        if width / (range / step) >= 36.0 {
             return step;
         }
     }
     96.0
 }
 
-/// Tick marks and labels for a meter whose bars span `bars` horizontally,
-/// labels along the bottom of `rect`.
-pub fn draw_scale(p: &Painter, rect: Rect, bars: Rect, floor: f32, th: &Theme) {
-    let step = tick_step(-floor, bars.width());
-    let x_of = |d: f32| bars.left() + ((d - floor) / -floor).clamp(0.0, 1.0) * bars.width();
+/// The scale in the strip between the two bars: tick marks running in
+/// from both bars' edges and the dB labels centred between them. `strip`
+/// spans the bars' width and the gap between them.
+pub fn draw_scale(p: &Painter, strip: Rect, floor: f32, th: &Theme) {
+    let step = tick_step(-floor, strip.width());
+    let x_of = |d: f32| strip.left() + ((d - floor) / -floor).clamp(0.0, 1.0) * strip.width();
+    let tick = Stroke::new(1.0_f32, ca(th.text_dim, 150));
     let mut d = 0.0f32;
     while d >= floor - 0.01 {
         let x = x_of(d).round() + 0.5;
+        p.line_segment([pos2(x, strip.top()), pos2(x, strip.top() + 2.0)], tick);
         p.line_segment(
-            [pos2(x, bars.bottom() + 1.0), pos2(x, bars.bottom() + 3.0)],
-            Stroke::new(1.0_f32, ca(th.text_dim, 170)),
+            [pos2(x, strip.bottom() - 2.0), pos2(x, strip.bottom())],
+            tick,
         );
-        let label = if d == 0.0 {
-            "0".to_string()
+        let label = format!("{}", d as i32);
+        // Keep the end labels inside the bars' span.
+        let align = if x - strip.left() < 6.0 {
+            Align2::LEFT_CENTER
+        } else if strip.right() - x < 6.0 {
+            Align2::RIGHT_CENTER
         } else {
-            format!("{}", d as i32)
-        };
-        // Keep the end labels inside the panel.
-        let align = if x - bars.left() < 6.0 {
-            Align2::LEFT_BOTTOM
-        } else if bars.right() - x < 6.0 {
-            Align2::RIGHT_BOTTOM
-        } else {
-            Align2::CENTER_BOTTOM
+            Align2::CENTER_CENTER
         };
         p.text(
-            pos2(x, rect.bottom() - 1.0),
+            pos2(x, strip.center().y),
             align,
             label,
             FontId::proportional(9.0),
@@ -666,9 +665,9 @@ mod tests {
 
     #[test]
     fn ticks_stay_readable() {
-        assert_eq!(tick_step(60.0, 2000.0), 1.0);
+        assert_eq!(tick_step(60.0, 2400.0), 1.0);
         assert_eq!(tick_step(60.0, 1600.0), 2.0);
-        assert_eq!(tick_step(60.0, 600.0), 3.0);
+        assert_eq!(tick_step(60.0, 800.0), 3.0);
         assert_eq!(tick_step(96.0, 600.0), 6.0);
     }
 
