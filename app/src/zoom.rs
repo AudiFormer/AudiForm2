@@ -359,7 +359,9 @@ pub fn wheel_action(r: Region, m: WheelMods, sideways: bool, wheel_zooms: bool) 
             } else if m.shift || sideways {
                 A::ScrollTime
             } else {
-                zoom_ptr
+                // The plain wheel over the tracks does nothing: zoom is over
+                // the headers (heights) and the ruler (time).
+                A::None
             }
         }
         Region::Headers => {
@@ -1331,7 +1333,7 @@ mod tests {
         // Lanes.
         // Over the tracks the wheel zooms time at the pointer, as over the
         // ruler; Ctrl scrolls up and down.
-        assert_eq!(t(Lanes, plain, false), A::ZoomTime(Pointer));
+        assert_eq!(t(Lanes, plain, false), A::None);
         assert_eq!(t(Lanes, ctrl, false), A::ScrollTracks);
         assert_eq!(t(Lanes, shift, false), A::ScrollTime);
         assert_eq!(t(Lanes, alt, false), A::ResizeOneTrack);

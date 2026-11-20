@@ -136,16 +136,170 @@ pub fn dial(
     resp
 }
 
-/// A little square toggle with a letter (M, S, R).
+/// A little square key with a letter (M, S, R): outlined, filled with
+/// its colour when on, as in the leading editor's track headers.
 fn letter(ui: &mut egui::Ui, on: bool, label: &str, col: [u8; 3], tip: &str, th: &Theme) -> bool {
-    let b = egui::Button::new(RichText::new(label).strong().size(10.5).color(if on {
-        c(th.background)
+    let w = if label.chars().count() > 1 {
+        22.0
     } else {
-        c(th.text_dim)
-    }))
-    .fill(if on { c(col) } else { c(th.panel_raised) })
-    .min_size(vec2(18.0, 17.0));
-    ui.add(b).on_hover_text(tip).clicked()
+        17.0
+    };
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 16.0), Sense::click());
+    let p = ui.painter();
+    let hot = resp.hovered();
+    if th.bevel.is_some() {
+        p.rect_filled(r, 0.0, if on { c(col) } else { c(th.panel_raised) });
+        crate::skin::bevel(p, r, th, on);
+    } else {
+        p.rect_filled(
+            r,
+            Rounding::same(2.0),
+            if on { c(col) } else { ca(th.background, 140) },
+        );
+        p.rect_stroke(
+            r,
+            Rounding::same(2.0),
+            Stroke::new(
+                1.0_f32,
+                if hot {
+                    c(th.text)
+                } else {
+                    ca(th.text_dim, 150)
+                },
+            ),
+        );
+    }
+    p.text(
+        r.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(10.0),
+        if on {
+            c(th.background)
+        } else if hot {
+            c(th.text)
+        } else {
+            c(th.text_dim)
+        },
+    );
+    resp.on_hover_text(tip).clicked()
+}
+
+/// Small drawn icons for the header rows.
+#[derive(Clone, Copy)]
+enum HeadIcon {
+    Wave,
+    Bus,
+    Midi,
+    Volume,
+    Pan,
+    In,
+    Out,
+}
+
+fn head_icon(ui: &mut egui::Ui, icon: HeadIcon, th: &Theme) {
+    let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+    let p = ui.painter();
+    let col = c(th.text_dim);
+    let s = Stroke::new(1.2_f32, col);
+    let m = r.center();
+    match icon {
+        HeadIcon::Wave => {
+            for (k, h) in [2.0f32, 5.0, 3.0, 6.5, 4.0, 2.0].iter().enumerate() {
+                let x = r.left() + 3.0 + k as f32 * 2.2;
+                p.line_segment([pos2(x, m.y - h), pos2(x, m.y + h)], s);
+            }
+        }
+        HeadIcon::Bus => {
+            p.line_segment([pos2(r.left() + 2.0, m.y - 4.0), pos2(m.x, m.y)], s);
+            p.line_segment([pos2(r.left() + 2.0, m.y + 4.0), pos2(m.x, m.y)], s);
+            p.line_segment([pos2(m.x, m.y), pos2(r.right() - 2.0, m.y)], s);
+        }
+        HeadIcon::Midi => {
+            for k in 0..4 {
+                let x = r.left() + 3.0 + k as f32 * 3.0;
+                p.rect_stroke(
+                    Rect::from_min_size(pos2(x, m.y - 5.0), vec2(2.6, 10.0)),
+                    Rounding::ZERO,
+                    s,
+                );
+            }
+        }
+        HeadIcon::Volume => {
+            for k in 0..5 {
+                let x = r.left() + 2.0 + k as f32 * 2.6;
+                let h = 2.0 + k as f32 * 1.6;
+                p.line_segment([pos2(x, m.y + 5.0 - h * 2.0 + 2.0), pos2(x, m.y + 5.0)], s);
+            }
+        }
+        HeadIcon::Pan => {
+            for (k, h) in [5.0f32, 3.0, 1.5, 3.0, 5.0].iter().enumerate() {
+                let x = r.left() + 2.0 + k as f32 * 2.8;
+                p.line_segment([pos2(x, m.y - h), pos2(x, m.y + h)], s);
+            }
+        }
+        HeadIcon::In | HeadIcon::Out => {
+            let (a, b) = match icon {
+                HeadIcon::In => (r.left() + 2.0, r.right() - 3.0),
+                _ => (r.right() - 2.0, r.left() + 3.0),
+            };
+            p.line_segment(
+                [pos2(a, m.y), pos2(b, m.y)],
+                Stroke::new(1.6_f32, c(th.text)),
+            );
+            let d = if b > a { -3.5 } else { 3.5 };
+            p.line_segment(
+                [pos2(b, m.y), pos2(b + d, m.y - 3.5)],
+                Stroke::new(1.6_f32, c(th.text)),
+            );
+            p.line_segment(
+                [pos2(b, m.y), pos2(b + d, m.y + 3.5)],
+                Stroke::new(1.6_f32, c(th.text)),
+            );
+        }
+    }
+}
+
+/// "+0", "-3.5": a level as the leading editor shows it.
+fn level_text(v: f32) -> String {
+    if (v - v.round()).abs() < 0.05 {
+        format!("{:+.0}", v)
+    } else {
+        format!("{v:+.1}")
+    }
+}
+
+/// The header's level meter: a slim vertical bar down the right edge.
+pub fn header_meter(p: &egui::Painter, r: Rect, level: f32, th: &Theme) {
+    p.rect_filled(r, Rounding::ZERO, c(th.wave_background));
+    p.rect_stroke(r, Rounding::ZERO, Stroke::new(1.0_f32, ca(th.border, 200)));
+    let db = 20.0 * level.max(1e-9).log10();
+    let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+    if f > 0.0 {
+        let lit = Rect::from_min_max(
+            pos2(r.left() + 1.0, r.bottom() - r.height() * f),
+            pos2(r.right() - 1.0, r.bottom() - 1.0),
+        );
+        p.rect_filled(
+            lit,
+            Rounding::ZERO,
+            if db > -0.1 {
+                c(th.meter_high)
+            } else if db > -12.0 {
+                c(th.meter_mid)
+            } else {
+                c(th.meter_low)
+            },
+        );
+    }
+    // A short mark at the bottom, like the leading editor's idle meters.
+    p.line_segment(
+        [
+            pos2(r.left() + 1.0, r.bottom() - 2.0),
+            pos2(r.right() - 1.0, r.bottom() - 2.0),
+        ],
+        Stroke::new(1.0_f32, c(th.meter_mid)),
+    );
 }
 
 // ------------------------------------------------------------ the strip
@@ -406,13 +560,19 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
         ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
         // Name and the letters, in every view.
         ui.horizontal(|ui| {
+            head_icon(
+                ui,
+                match kind {
+                    TrackKind::Bus => HeadIcon::Bus,
+                    TrackKind::Midi => HeadIcon::Midi,
+                    _ => HeadIcon::Wave,
+                },
+                &th,
+            );
             let tr = &mut st.session.tracks[ti];
-            if kind == TrackKind::Bus {
-                ui.label(RichText::new("BUS").size(9.0).strong().color(c(tr.color)));
-            }
             let r = ui.add(
                 egui::TextEdit::singleline(&mut tr.name)
-                    .desired_width(if kind == TrackKind::Bus { 70.0 } else { 92.0 })
+                    .desired_width(86.0)
                     .frame(false)
                     .font(egui::TextStyle::Body),
             );
@@ -460,38 +620,24 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
             HeaderView::Mix => {
                 ui.horizontal(|ui| {
                     let tr = &mut st.session.tracks[ti];
-                    ui.label(RichText::new("Vol").size(9.5).color(c(th.text_dim)));
-                    if dial(
-                        ui,
-                        &mut tr.volume_db,
-                        -60.0..=12.0,
-                        0.0,
-                        |v| format!("{v:+.1}"),
-                        &th,
-                    )
-                    .on_hover_text("Volume (dB). Double-click for 0 dB.")
-                    .changed()
+                    head_icon(ui, HeadIcon::Volume, &th);
+                    if dial(ui, &mut tr.volume_db, -60.0..=12.0, 0.0, level_text, &th)
+                        .on_hover_text("Volume (dB). Double-click for 0 dB.")
+                        .changed()
                     {
                         live = true;
                         moved.push((LaneTarget::Volume, tr.volume_db as f64));
                     }
                     if st.session.space.is_none() {
-                        ui.label(RichText::new("Pan").size(9.5).color(c(th.text_dim)));
+                        ui.add_space(6.0);
+                        head_icon(ui, HeadIcon::Pan, &th);
                         let mut pan = tr.pan * 100.0;
                         if dial(
                             ui,
                             &mut pan,
                             -100.0..=100.0,
                             0.0,
-                            |v| {
-                                if v.abs() < 0.5 {
-                                    "C".into()
-                                } else if v < 0.0 {
-                                    format!("L{:.0}", -v)
-                                } else {
-                                    format!("R{v:.0}")
-                                }
-                            },
+                            |v| format!("{:.0}", if v.abs() < 0.5 { 0.0 } else { v }),
                             &th,
                         )
                         .on_hover_text("Pan. Double-click for centre.")
@@ -581,10 +727,7 @@ fn strip_options_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -
             tr.mono = !tr.mono;
             changed = true;
         }
-        if !is_bus && letter(ui, tr.polarity, "Ø", th.accent, "Invert polarity", th) {
-            tr.polarity = !tr.polarity;
-            changed = true;
-        }
+        let _ = is_bus;
         let mode = tr.automation;
         let id = tr.id;
         egui::ComboBox::from_id_salt(("auto-mode", id))
@@ -730,8 +873,7 @@ fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
 
 fn input_row(ui: &mut egui::Ui, st: &mut State, id: TrackId, th: &Theme) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("→").color(c(th.text_dim)))
-            .on_hover_text("Input");
+        head_icon(ui, HeadIcon::In, th);
         let midi = st
             .session
             .tracks
@@ -741,6 +883,17 @@ fn input_row(ui: &mut egui::Ui, st: &mut State, id: TrackId, th: &Theme) {
             midi_input_pick(ui, st, id);
         } else {
             crate::record_input::track_input(ui, &mut st.rec_inputs, id);
+            // Polarity at the input's right, as in the leading editor.
+            if let Some(ti) = st.session.track_index(id) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let on = st.session.tracks[ti].polarity;
+                    if letter(ui, on, "Ø", th.accent, "Invert polarity", th) {
+                        let before = st.session.clone();
+                        st.session.tracks[ti].polarity = !on;
+                        st.commit_session("Polarity", before);
+                    }
+                });
+            }
         }
     });
 }
@@ -806,8 +959,7 @@ fn output_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -> bool 
         .map_or("Master".to_string(), |b| b.1.clone());
     let mut pick = None;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("←").color(c(th.text_dim)))
-            .on_hover_text("Output");
+        head_icon(ui, HeadIcon::Out, th);
         egui::ComboBox::from_id_salt(("track-out", me))
             .selected_text(RichText::new(shown).size(11.0))
             .width(150.0)
