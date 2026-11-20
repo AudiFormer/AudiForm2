@@ -53,7 +53,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
             }
             live_commit(st, ui, "Master level", &before, changed);
             ui.separator();
-            chain(ui, st, MASTER);
+            rack_link(ui, st, MASTER);
             ui.label(
                 RichText::new("Select a track to see its settings.")
                     .size(10.0)
@@ -314,7 +314,30 @@ fn track(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         });
     }
     ui.separator();
-    chain(ui, st, ti as u16);
+    rack_link(ui, st, ti as u16);
+}
+
+/// The rack lives in the Effects panel; here, how many and a way there.
+fn rack_link(ui: &mut egui::Ui, st: &mut State, track: u16) {
+    let th = st.theme.clone();
+    let n = st.chain_mut(track).map_or(0, |c| c.len());
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "Effects rack: {n} effect{}",
+                if n == 1 { "" } else { "s" }
+            ))
+            .color(c(th.text_dim)),
+        );
+        if ui.button("Open Rack").clicked() {
+            st.rack_tab = if track == MASTER {
+                crate::rack::RackTab::Master
+            } else {
+                crate::rack::RackTab::Track
+            };
+            st.want_effects = true;
+        }
+    });
 }
 
 /// Picks a SoundFont file.
@@ -465,6 +488,7 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
 }
 
 /// An effect chain: up to 16 slots, each with bypass, order and settings.
+#[allow(dead_code)]
 fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
     let th = st.theme.clone();
     let title = if track == MASTER {

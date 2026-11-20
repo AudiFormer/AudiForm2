@@ -650,6 +650,11 @@ impl Theme {
 }
 
 /// Built-ins first, then any `.af27theme` files in the user's folder.
+/// Where the user's own `.af27theme` files live.
+pub fn user_dir() -> std::path::PathBuf {
+    crate::state::data_dir().join("themes")
+}
+
 pub fn load_all(dir: &std::path::Path) -> Vec<Theme> {
     let mut list = Theme::builtins();
     if let Ok(rd) = std::fs::read_dir(dir) {

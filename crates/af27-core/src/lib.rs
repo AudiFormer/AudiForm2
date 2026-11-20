@@ -5,6 +5,7 @@
 //! the multitrack session model, and a generic undo history.
 
 pub mod buffer;
+mod edit_ops;
 pub mod history;
 pub mod midi;
 pub mod noteops;

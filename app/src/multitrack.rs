@@ -30,8 +30,8 @@ const VBAR_W: f32 = 12.0;
 /// Track height limits for the wheel and the zoom bar.
 const MIN_TRACK_H: f32 = 40.0;
 const MAX_TRACK_H: f32 = 480.0;
-/// Room under the last track (the Add Track row).
-const TAIL_H: f32 = 40.0;
+/// Room under the last track (the Add Track row and the Master row).
+const TAIL_H: f32 = 40.0 + crate::track_views::MASTER_H;
 
 /// What a drag on the vertical zoom bar holds.
 #[derive(Debug, Clone, Copy)]
@@ -44,11 +44,49 @@ pub enum VGrab {
 
 #[derive(Debug, Clone, Copy)]
 pub enum DragKind {
-    Move { clip: ClipId, grab: f64 },
-    TrimLeft { clip: ClipId },
-    TrimRight { clip: ClipId },
-    Select { anchor: f64 },
-    MoveMidi { clip: ClipId, grab: f64 },
+    Move {
+        clip: ClipId,
+        grab: f64,
+    },
+    TrimLeft {
+        clip: ClipId,
+    },
+    TrimRight {
+        clip: ClipId,
+    },
+    Select {
+        anchor: f64,
+    },
+    MoveMidi {
+        clip: ClipId,
+        grab: f64,
+    },
+    /// A fade handle: sideways sets the length, up and down the curve.
+    Fade {
+        clip: ClipId,
+        fade_in: bool,
+        y0: f32,
+        skew0: f32,
+    },
+    /// The clip-gain handle: up or right is louder.
+    Gain {
+        clip: ClipId,
+        p0: egui::Pos2,
+        db0: f32,
+    },
+    /// A stretch handle on a clip corner.
+    Stretch {
+        clip: ClipId,
+        left: bool,
+    },
+}
+
+/// A handle on a clip, under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Handle {
+    Fade(bool),
+    Gain,
+    Stretch(bool),
 }
 
 #[derive(Default)]
@@ -57,6 +95,34 @@ pub struct Drag {
     pub before: Option<Session>,
     pub scroll_y: f32,
     pub vgrab: Option<VGrab>,
+    /// Where the right-click menu was opened.
+    pub menu: crate::lane_menu::MenuAt,
+}
+
+/// The rectangle a clip fills in its row.
+fn clip_rect(row_top: f32, row_h: f32, x0: f32, x1: f32) -> Rect {
+    Rect::from_min_max(
+        pos2(x0, row_top + 2.0),
+        pos2(x1.max(x0 + 2.0), row_top + row_h - 2.0),
+    )
+}
+
+/// The fade handle's square, the gain box and the stretch triangles.
+fn fade_handle(cr: Rect, x: f32) -> Rect {
+    Rect::from_center_size(
+        pos2(x.clamp(cr.left() + 5.0, cr.right() - 5.0), cr.top() + 20.0),
+        vec2(9.0, 9.0),
+    )
+}
+fn gain_handle(cr: Rect) -> Rect {
+    Rect::from_min_size(pos2(cr.left() + 3.0, cr.bottom() - 15.0), vec2(16.0, 12.0))
+}
+fn stretch_handle(cr: Rect, left: bool) -> Rect {
+    if left {
+        Rect::from_min_size(cr.min, vec2(11.0, 11.0))
+    } else {
+        Rect::from_min_size(pos2(cr.right() - 11.0, cr.top()), vec2(11.0, 11.0))
+    }
 }
 
 /// The uniform track height at which `share` (0..1] of the session's
@@ -129,14 +195,25 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         pos2(rect.left() + HEADER_W, rect.top()),
         vec2(rect.width() - HEADER_W - VBAR_W, 22.0),
     );
+    // The metronome row, while it is on, sits between the ruler and the
+    // tracks (it is not a track).
+    let metro_h = if st.session.tempo.metronome {
+        crate::track_views::METRO_H
+    } else {
+        0.0
+    };
+    let metro = Rect::from_min_max(
+        pos2(rect.left(), ruler.bottom()),
+        pos2(ruler.right(), ruler.bottom() + metro_h),
+    );
     let lanes = Rect::from_min_max(
-        pos2(ruler.left(), ruler.bottom()),
+        pos2(ruler.left(), metro.bottom()),
         pos2(ruler.right(), rect.bottom()),
     );
     let vbar = Rect::from_min_max(pos2(lanes.right(), lanes.top()), rect.max);
     st.session_px = lanes.width();
     let headers = Rect::from_min_max(
-        pos2(rect.left(), ruler.bottom()),
+        pos2(rect.left(), metro.bottom()),
         pos2(ruler.left(), rect.bottom()),
     );
     let vresp = ui.interact(vbar, ui.id().with("af27-vzoom"), Sense::click_and_drag());
@@ -229,6 +306,74 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             })
     };
 
+    // A handle on the clip under a point (only on clips wide and tall
+    // enough to show them).
+    let stretch_on = st.prefs.stretch_handles;
+    let handle_at = |st: &State, pp: egui::Pos2| -> Option<(usize, ClipId, Handle)> {
+        let ti = track_at(st, lanes.top(), scroll, pp.y)?;
+        let row_top = lanes.top() - scroll
+            + st.session.tracks[..ti]
+                .iter()
+                .map(|t| t.height)
+                .sum::<f32>();
+        let tr = &st.session.tracks[ti];
+        for c in tr.clips.iter().rev() {
+            let x0 = time_to_x(&v, lanes, c.start);
+            let x1 = time_to_x(&v, lanes, c.end());
+            let cr = clip_rect(row_top, tr.height, x0, x1);
+            if !cr.expand(4.0).contains(pp) || cr.width() < 24.0 || cr.height() < 34.0 {
+                continue;
+            }
+            if stretch_on {
+                for left in [true, false] {
+                    if stretch_handle(cr, left).expand(2.0).contains(pp) {
+                        return Some((ti, c.id, Handle::Stretch(left)));
+                    }
+                }
+            }
+            let fi = fade_handle(cr, time_to_x(&v, lanes, c.start + c.fade_in));
+            if fi.expand(3.0).contains(pp) {
+                return Some((ti, c.id, Handle::Fade(true)));
+            }
+            let fo = fade_handle(cr, time_to_x(&v, lanes, c.end() - c.fade_out));
+            if fo.expand(3.0).contains(pp) {
+                return Some((ti, c.id, Handle::Fade(false)));
+            }
+            if gain_handle(cr).expand(2.0).contains(pp) {
+                return Some((ti, c.id, Handle::Gain));
+            }
+            if cr.contains(pp) {
+                return None;
+            }
+        }
+        None
+    };
+
+    // Right-click: remember where, select what is there; the menu opens
+    // from the lanes' response below.
+    if resp.secondary_clicked() {
+        if let Some(pp) = resp.interact_pointer_pos().filter(|pp| lanes.contains(*pp)) {
+            let t = x_to_time(&v, lanes, pp.x).max(0.0);
+            let track = track_at(st, lanes.top(), scroll, pp.y);
+            let mut at = crate::lane_menu::MenuAt {
+                t,
+                track,
+                clip: None,
+                fade: None,
+            };
+            if let Some((_, id, Handle::Fade(fin))) = handle_at(st, pp) {
+                at.fade = Some((id, fin));
+            } else if let Some((_, id, _, _)) = hit(st, pp) {
+                at.clip = Some(id);
+                st.selected_clip = Some(id);
+            }
+            if let Some(ti) = track {
+                st.selected_track = Some(st.session.tracks[ti].id);
+            }
+            drag.menu = at;
+        }
+    }
+
     // MIDI clips: (track index, clip id) under a point.
     let tempo = st.session.tempo.clone();
     let hit_midi = |st: &State, pp: egui::Pos2| -> Option<(usize, ClipId)> {
@@ -278,10 +423,48 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             && drag.kind.is_none()
         {
             let t = x_to_time(&v, lanes, pp.x).max(0.0);
+            let handle = (st.tool == Tool::Move).then(|| handle_at(st, pp)).flatten();
+            let locked = |st: &State, id: ClipId| {
+                st.session
+                    .find_clip(id)
+                    .is_some_and(|(ti, ci)| st.session.tracks[ti].clips[ci].props.locked)
+            };
             let kind = match (st.tool, hit(st, pp)) {
+                _ if handle.is_some() => {
+                    let (ti, id, h) = handle.unwrap();
+                    st.selected_clip = Some(id);
+                    st.selected_track = Some(st.session.tracks[ti].id);
+                    let (cti, ci) = st.session.find_clip(id).unwrap();
+                    let c = &st.session.tracks[cti].clips[ci];
+                    match h {
+                        Handle::Fade(fade_in) => Some(DragKind::Fade {
+                            clip: id,
+                            fade_in,
+                            y0: pp.y,
+                            skew0: if fade_in {
+                                c.props.fade_in_skew
+                            } else {
+                                c.props.fade_out_skew
+                            },
+                        }),
+                        Handle::Gain => Some(DragKind::Gain {
+                            clip: id,
+                            p0: pp,
+                            db0: c.gain_db,
+                        }),
+                        Handle::Stretch(_) if c.props.locked => None,
+                        Handle::Stretch(left) => Some(DragKind::Stretch { clip: id, left }),
+                    }
+                }
                 // On a selection edge: drag that edge, the other stays.
                 (Tool::Move | Tool::TimeSelect, _) if on_edge.is_some() => {
                     on_edge.map(|(_, other)| DragKind::Select { anchor: other })
+                }
+                (Tool::Move, Some((ti, id, _, _))) if locked(st, id) => {
+                    st.selected_clip = Some(id);
+                    st.selected_track = Some(st.session.tracks[ti].id);
+                    st.toast("This clip's position is locked (right-click > Unlock Position).");
+                    None
                 }
                 (Tool::Move, Some((ti, id, l, r))) => {
                     st.selected_clip = Some(id);
@@ -342,19 +525,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         st.session_version += 1;
                     }
                 }
-                Some(DragKind::TrimLeft { clip }) => {
-                    if let Some((ti, ci)) = st.session.find_clip(clip) {
-                        let c = &mut st.session.tracks[ti].clips[ci];
-                        let end = c.end();
-                        let new_start = t.clamp(c.start - c.offset, end - 0.01);
-                        let d = new_start - c.start;
-                        c.start = new_start;
-                        c.offset += d;
-                        c.length -= d;
-                        st.session_version += 1;
-                    }
-                }
-                Some(DragKind::TrimRight { clip }) => {
+                Some(DragKind::TrimLeft { clip }) | Some(DragKind::TrimRight { clip }) => {
+                    let left = matches!(drag.kind, Some(DragKind::TrimLeft { .. }));
                     if let Some((ti, ci)) = st.session.find_clip(clip) {
                         let media_len = {
                             let m = st.session.tracks[ti].clips[ci].media;
@@ -367,7 +539,85 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                             })
                         };
                         let c = &mut st.session.tracks[ti].clips[ci];
-                        c.length = (t - c.start).clamp(0.01, media_len - c.offset);
+                        let ratio = c.props.stretch.applied_ratio();
+                        let rev = c.props.reversed;
+                        // Source room before the clip's audio and after it,
+                        // in timeline seconds.
+                        let before_room = c.offset * ratio;
+                        let after_room = (media_len - c.offset - c.length / ratio).max(0.0) * ratio;
+                        let (room_l, room_r) = if rev {
+                            (after_room, before_room)
+                        } else {
+                            (before_room, after_room)
+                        };
+                        if left {
+                            let end = c.end();
+                            let new_start = t.clamp(c.start - room_l, end - 0.01).max(0.0);
+                            let d = new_start - c.start;
+                            c.start = new_start;
+                            c.length -= d;
+                            if !rev {
+                                c.offset = (c.offset + d / ratio).max(0.0);
+                            }
+                        } else {
+                            let new_len = (t - c.start).clamp(0.01, c.length + room_r);
+                            let d = c.length - new_len;
+                            c.length = new_len;
+                            if rev {
+                                c.offset = (c.offset + d / ratio).max(0.0);
+                            }
+                        }
+                        c.fade_in = c.fade_in.min(c.length);
+                        c.fade_out = c.fade_out.min(c.length - c.fade_in);
+                        st.session_version += 1;
+                    }
+                }
+                Some(DragKind::Fade {
+                    clip,
+                    fade_in,
+                    y0,
+                    skew0,
+                }) => {
+                    if let Some((ti, ci)) = st.session.find_clip(clip) {
+                        let c = &mut st.session.tracks[ti].clips[ci];
+                        let skew = (skew0 + (y0 - pp.y) * 1.0).clamp(-100.0, 100.0);
+                        let skew = if skew.abs() < 4.0 { 0.0 } else { skew };
+                        if fade_in {
+                            c.fade_in = (t - c.start).clamp(0.0, c.length - c.fade_out);
+                            c.props.fade_in_skew = skew;
+                        } else {
+                            c.fade_out = (c.end() - t).clamp(0.0, c.length - c.fade_in);
+                            c.props.fade_out_skew = skew;
+                        }
+                        st.session_version += 1;
+                    }
+                }
+                Some(DragKind::Gain { clip, p0, db0 }) => {
+                    if let Some((ti, ci)) = st.session.find_clip(clip) {
+                        let fine = ui.input(|i| i.modifiers.shift);
+                        let px = (pp.x - p0.x) + (p0.y - pp.y);
+                        let db = (db0 + px * if fine { 0.02 } else { 0.1 }).clamp(-96.0, 24.0);
+                        st.session.tracks[ti].clips[ci].gain_db = (db * 10.0).round() / 10.0;
+                        st.session_version += 1;
+                    }
+                }
+                Some(DragKind::Stretch { clip, left }) => {
+                    if let Some((ti, ci)) = st.session.find_clip(clip) {
+                        let c = &mut st.session.tracks[ti].clips[ci];
+                        let src = c.length / c.props.stretch.applied_ratio();
+                        let end = c.end();
+                        let new_len = if left { end - t } else { t - c.start };
+                        let new_len = new_len.clamp(src * 0.25, src * 4.0);
+                        if c.props.stretch.mode == af27_core::StretchMode::Off {
+                            c.props.stretch.mode = af27_core::StretchMode::Live;
+                        }
+                        c.props.stretch.ratio = new_len / src;
+                        if left {
+                            c.start = (end - new_len).max(0.0);
+                        }
+                        c.length = new_len;
+                        c.fade_in = c.fade_in.min(c.length);
+                        c.fade_out = c.fade_out.min(c.length - c.fade_in);
                         st.session_version += 1;
                     }
                 }
@@ -396,6 +646,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     DragKind::TrimLeft { .. } | DragKind::TrimRight { .. } => "Trim clip",
                     DragKind::Select { .. } => "Select",
                     DragKind::MoveMidi { .. } => "Move MIDI clip",
+                    DragKind::Fade { .. } => "Fade",
+                    DragKind::Gain { .. } => "Clip gain",
+                    DragKind::Stretch { .. } => "Stretch clip",
                 };
                 st.commit_session(label, before);
             }
@@ -435,8 +688,17 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             }
         }
     }
+    let hover_handle = resp
+        .hover_pos()
+        .filter(|_| st.tool == Tool::Move)
+        .and_then(|hp| handle_at(st, hp));
     if let Some(hp) = resp.hover_pos() {
         let icon = match (st.tool, hit(st, hp)) {
+            _ if hover_handle.is_some() => match hover_handle.unwrap().2 {
+                Handle::Fade(_) => egui::CursorIcon::Move,
+                Handle::Gain => egui::CursorIcon::ResizeVertical,
+                Handle::Stretch(_) => egui::CursorIcon::ResizeHorizontal,
+            },
             (Tool::Razor, _) => egui::CursorIcon::Crosshair,
             _ if on_edge.is_some() => egui::CursorIcon::ResizeHorizontal,
             (Tool::Move, Some((_, _, true, _))) | (Tool::Move, Some((_, _, _, true))) => {
@@ -449,6 +711,25 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             ui.ctx().set_cursor_icon(icon);
         }
     }
+    // The clip-gain readout while it is dragged.
+    if let Some(DragKind::Gain { clip, .. }) = drag.kind {
+        if let (Some((ti, ci)), Some(hp)) =
+            (st.session.find_clip(clip), resp.interact_pointer_pos())
+        {
+            let db = st.session.tracks[ti].clips[ci].gain_db;
+            egui::show_tooltip_at(
+                ui.ctx(),
+                ui.layer_id(),
+                ui.id().with("af2-gain-tip"),
+                hp + vec2(14.0, -18.0),
+                |ui| {
+                    ui.label(format!("{db:+.1} dB"));
+                },
+            );
+        }
+    }
+    let menu_at = drag.menu;
+    resp.context_menu(|ui| crate::lane_menu::show(ui, st, menu_at));
 
     // Drawing.
     let tc = st.time_ctx();
@@ -471,11 +752,49 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             &th,
         );
     }
-    p.rect_filled(
-        Rect::from_min_max(rect.min, pos2(ruler.left(), ruler.bottom())),
-        Rounding::ZERO,
-        c(th.panel),
+    let corner = Rect::from_min_max(rect.min, pos2(ruler.left(), ruler.bottom()));
+    p.rect_filled(corner, Rounding::ZERO, c(th.panel));
+    p.line_segment(
+        [corner.left_bottom(), corner.right_bottom()],
+        Stroke::new(1.0_f32, c(th.border)),
     );
+    crate::track_views::strip(ui, st, corner);
+    if metro_h > 0.0 {
+        let mlane = Rect::from_min_max(
+            pos2(lanes.left(), metro.top()),
+            pos2(lanes.right(), metro.bottom()),
+        );
+        crate::track_views::metronome_lane(
+            &ui.painter_at(mlane),
+            st,
+            mlane,
+            &|t| time_to_x(&v, lanes, t),
+            &|x| x_to_time(&v, lanes, x),
+        );
+        let mhead = Rect::from_min_max(metro.min, pos2(lanes.left(), metro.bottom()));
+        p.rect_filled(mhead, Rounding::ZERO, c(th.panel));
+        p.rect_filled(
+            Rect::from_min_size(mhead.min, vec2(4.0, mhead.height())),
+            Rounding::ZERO,
+            c(th.accent),
+        );
+        p.line_segment(
+            [mhead.left_bottom(), mhead.right_bottom()],
+            Stroke::new(1.0_f32, c(th.border)),
+        );
+        crate::track_views::metronome_header(ui, st, mhead.shrink2(vec2(8.0, 4.0)));
+        let mr = ui.interact(mlane, ui.id().with("af2-metro-lane"), Sense::click());
+        mr.context_menu(|ui| {
+            let mut m = st.prefs.metronome;
+            let mut ch = false;
+            crate::track_views::metronome_menu(ui, st, &mut m, &mut ch);
+            if ch {
+                st.prefs.metronome = m;
+                st.prefs.save();
+                st.live_metronome();
+            }
+        });
+    }
     let lane_p = ui.painter_at(lanes);
     let head_p = ui.painter_at(headers);
     // Bars and beats under the clips, from the tempo map, when there is
@@ -536,7 +855,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             let sel = st.selected_clip == Some(clip.id);
             let alpha = if heard && !clip.muted { 255 } else { 90 };
             let rnd = Rounding::same(th.rounding.min(cr.height() / 3.0));
-            lane_p.rect_filled(cr, rnd, ca(tr.color, (alpha as f32 * 0.16) as u8));
+            let ccol = clip.props.color.unwrap_or(tr.color);
+            lane_p.rect_filled(cr, rnd, ca(ccol, (alpha as f32 * 0.16) as u8));
             let title = Rect::from_min_size(cr.min, vec2(cr.width(), 15.0));
             lane_p.rect_filled(
                 title,
@@ -546,12 +866,31 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     sw: 0.0,
                     se: 0.0,
                 },
-                ca(tr.color, (alpha as f32 * 0.55) as u8),
+                ca(ccol, (alpha as f32 * 0.55) as u8),
             );
+            let mut badges = String::new();
+            if clip.props.locked {
+                badges.push_str("🔒 ");
+            }
+            if clip.props.reversed {
+                badges.push_str("◀ ");
+            }
+            if clip.props.inverted {
+                badges.push_str("Ø ");
+            }
+            let s = &clip.props.stretch;
+            if s.is_on() {
+                if (s.applied_ratio() - 1.0).abs() > 1e-6 {
+                    badges.push_str(&format!("{:.0}% ", s.applied_ratio() * 100.0));
+                }
+                if s.applied_pitch().abs() > 1e-3 {
+                    badges.push_str(&format!("{:+.1}st ", s.applied_pitch()));
+                }
+            }
             lane_p.text(
-                title.left_center() + vec2(5.0, 0.0),
+                title.left_center() + vec2(if stretch_on { 13.0 } else { 5.0 }, 0.0),
                 Align2::LEFT_CENTER,
-                &clip.name,
+                format!("{badges}{}", clip.name),
                 FontId::proportional(10.0),
                 c(th.background),
             );
@@ -567,19 +906,16 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     let vis1 = x1.min(lanes.right());
                     let t0 = x_to_time(&v, lanes, vis0);
                     let t1 = x_to_time(&v, lanes, vis1);
+                    let ratio = clip.props.stretch.applied_ratio();
                     let src = View {
-                        start: clip.offset + (t0 - clip.start),
-                        len: (t1 - t0).max(1e-6),
+                        start: clip.offset + (t0 - clip.start) / ratio,
+                        len: ((t1 - t0) / ratio).max(1e-6),
                     };
                     let wave =
                         Rect::from_min_max(pos2(vis0, title.bottom()), pos2(vis1, cr.bottom()));
                     let n = buf.num_channels().min(2);
                     let h = wave.height() / n as f32;
-                    let tint = if alpha == 255 {
-                        tr.color
-                    } else {
-                        [90, 90, 100]
-                    };
+                    let tint = if alpha == 255 { ccol } else { [90, 90, 100] };
                     for ch in 0..n {
                         let lane = Rect::from_min_size(
                             pos2(wave.left(), wave.top() + h * ch as f32),
@@ -619,29 +955,125 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     },
                 );
             }
-            // Fades.
-            if clip.fade_in > 0.0 {
-                let fx = time_to_x(&v, lanes, clip.start + clip.fade_in);
-                lane_p.line_segment(
-                    [cr.left_bottom(), pos2(fx, cr.top() + 15.0)],
-                    Stroke::new(1.5_f32, c(th.text)),
-                );
-            }
-            if clip.fade_out > 0.0 {
-                let fx = time_to_x(&v, lanes, clip.end() - clip.fade_out);
-                lane_p.line_segment(
-                    [pos2(fx, cr.top() + 15.0), cr.right_bottom()],
-                    Stroke::new(1.5_f32, c(th.text)),
-                );
+            // Fades, drawn from the clip's own gain curve (so the shape is
+            // what plays).
+            let body_top = cr.top() + 15.0;
+            let unity = af27_core::time::db_to_gain(clip.gain_db).max(1e-9);
+            let mut quiet = clip.clone();
+            quiet.muted = false;
+            for (on, a, b) in [
+                (clip.fade_in > 0.0, clip.start, clip.start + clip.fade_in),
+                (clip.fade_out > 0.0, clip.end() - clip.fade_out, clip.end()),
+            ] {
+                if !on {
+                    continue;
+                }
+                let n = 24;
+                let pts: Vec<egui::Pos2> = (0..=n)
+                    .map(|k| {
+                        let t = a + (b - a) * k as f64 / n as f64;
+                        let g = (quiet.gain_at(t.clamp(clip.start, clip.end() - 1e-9)) / unity)
+                            .clamp(0.0, 1.0);
+                        pos2(
+                            time_to_x(&v, lanes, t),
+                            cr.bottom() - (cr.bottom() - body_top) * g,
+                        )
+                    })
+                    .collect();
+                let mut shade = pts.clone();
+                if a == clip.start {
+                    shade.push(pos2(time_to_x(&v, lanes, b), body_top));
+                    shade.push(pos2(time_to_x(&v, lanes, a), body_top));
+                } else {
+                    shade.push(pos2(time_to_x(&v, lanes, b), body_top));
+                    shade.insert(0, pos2(time_to_x(&v, lanes, a), body_top));
+                }
+                lane_p.add(egui::Shape::Path(egui::epaint::PathShape {
+                    points: shade,
+                    closed: true,
+                    fill: Color32::from_black_alpha(60),
+                    stroke: egui::epaint::PathStroke::NONE,
+                }));
+                lane_p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, c(th.text))));
             }
             let stroke = if sel {
                 Stroke::new(2.0_f32, c(th.accent))
             } else {
-                Stroke::new(1.0_f32, ca(tr.color, 200))
+                Stroke::new(1.0_f32, ca(ccol, 200))
             };
             lane_p.rect_stroke(cr, rnd, stroke);
             if sel {
                 th.glow_rect(&lane_p, cr, th.accent, 0.8);
+            }
+            // Handles: shown on the selected clip and the one under the
+            // pointer, on clips big enough for them.
+            let hovered = resp
+                .hover_pos()
+                .is_some_and(|hp| cr.expand(4.0).contains(hp));
+            if (sel || hovered) && cr.width() >= 24.0 && cr.height() >= 34.0 {
+                let hot = hover_handle.filter(|h| h.1 == clip.id).map(|h| h.2);
+                let hcol = |h: Handle| {
+                    if hot == Some(h) {
+                        c(th.accent)
+                    } else {
+                        c(th.text)
+                    }
+                };
+                for (fin, x) in [
+                    (true, time_to_x(&v, lanes, clip.start + clip.fade_in)),
+                    (false, time_to_x(&v, lanes, clip.end() - clip.fade_out)),
+                ] {
+                    let r = fade_handle(cr, x);
+                    lane_p.rect_filled(r, Rounding::same(1.0), ca(th.background, 200));
+                    lane_p.rect_stroke(
+                        r,
+                        Rounding::same(1.0),
+                        Stroke::new(1.2_f32, hcol(Handle::Fade(fin))),
+                    );
+                }
+                let g = gain_handle(cr);
+                lane_p.rect_filled(g, Rounding::same(2.0), ca(th.background, 190));
+                lane_p.rect_stroke(
+                    g,
+                    Rounding::same(2.0),
+                    Stroke::new(1.0_f32, hcol(Handle::Gain)),
+                );
+                for k in 0..4 {
+                    let bx = g.left() + 3.0 + k as f32 * 3.0;
+                    let bh = 2.0 + k as f32 * 2.0;
+                    lane_p.line_segment(
+                        [pos2(bx, g.bottom() - 2.0), pos2(bx, g.bottom() - 2.0 - bh)],
+                        Stroke::new(1.5_f32, hcol(Handle::Gain)),
+                    );
+                }
+                // Trim grips on the edges.
+                for x in [cr.left() + 1.5, cr.right() - 1.5] {
+                    lane_p.line_segment(
+                        [pos2(x, cr.center().y - 8.0), pos2(x, cr.center().y + 8.0)],
+                        Stroke::new(2.0_f32, ca(th.text, 150)),
+                    );
+                }
+            }
+            if stretch_on && cr.width() >= 24.0 && cr.height() >= 34.0 {
+                let hot = hover_handle.filter(|h| h.1 == clip.id).map(|h| h.2);
+                for left in [true, false] {
+                    let r = stretch_handle(cr, left);
+                    let pts = if left {
+                        vec![r.left_top(), r.right_top(), r.left_bottom()]
+                    } else {
+                        vec![r.left_top(), r.right_top(), r.right_bottom()]
+                    };
+                    let col = if hot == Some(Handle::Stretch(left)) {
+                        c(th.accent)
+                    } else {
+                        ca(th.background, 230)
+                    };
+                    lane_p.add(egui::Shape::convex_polygon(
+                        pts,
+                        col,
+                        Stroke::new(1.0_f32, ca(th.text, 200)),
+                    ));
+                }
             }
         }
         for mc in &tr.midi {
@@ -734,7 +1166,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             [head.left_bottom(), head.right_bottom()],
             Stroke::new(1.0_f32, c(th.border)),
         );
-        track_header(ui, st, ti, head.shrink2(vec2(8.0, 4.0)));
+        crate::track_views::header(ui, st, ti, head.shrink2(vec2(8.0, 4.0)));
     }
     // Add-track hint row.
     let add_row = Rect::from_min_size(pos2(headers.left(), top), vec2(HEADER_W, 26.0));
@@ -745,6 +1177,27 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         );
         if r.clicked() {
             st.add_track();
+        }
+    }
+    // The Master row closes the list.
+    let master_row = Rect::from_min_size(
+        pos2(headers.left(), add_row.bottom() + 6.0),
+        vec2(HEADER_W, crate::track_views::MASTER_H),
+    );
+    if master_row.top() < headers.bottom() && master_row.bottom() > headers.top() {
+        let hp = ui.painter_at(headers);
+        hp.rect_filled(master_row, Rounding::ZERO, lerp(th.panel, th.accent, 0.06));
+        hp.rect_filled(
+            Rect::from_min_size(master_row.min, vec2(4.0, master_row.height())),
+            Rounding::ZERO,
+            c(th.text_dim),
+        );
+        hp.line_segment(
+            [master_row.left_top(), master_row.right_top()],
+            Stroke::new(1.0_f32, c(th.border)),
+        );
+        if master_row.top() >= headers.top() {
+            crate::track_views::master_header(ui, st, master_row.shrink2(vec2(8.0, 4.0)));
         }
     }
     // Selection, markers, playhead.
@@ -1195,82 +1648,6 @@ fn draw_vbar(
             [pos2(thumb.left() + 2.0, y), pos2(thumb.right() - 2.0, y)],
             Stroke::new(1.0_f32, c(th.text)),
         );
-    }
-}
-
-fn track_header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
-    let th = st.theme.clone();
-    let mut changed = false;
-    let before = st.session.clone();
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
-        let tr = &mut st.session.tracks[ti];
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut tr.name)
-                    .desired_width(86.0)
-                    .frame(false)
-                    .font(egui::TextStyle::Body),
-            );
-            let toggle =
-                |ui: &mut egui::Ui, on: &mut bool, label: &str, col: [u8; 3], tip: &str| {
-                    let b =
-                        egui::Button::new(RichText::new(label).strong().size(11.0).color(if *on {
-                            c(th.background)
-                        } else {
-                            c(th.text_dim)
-                        }))
-                        .fill(if *on { c(col) } else { c(th.panel_raised) })
-                        .min_size(vec2(20.0, 18.0));
-                    if ui.add(b).on_hover_text(tip).clicked() {
-                        *on = !*on;
-                        return true;
-                    }
-                    false
-                };
-            changed |= toggle(ui, &mut tr.mute, "M", th.meter_mid, "Mute");
-            changed |= toggle(ui, &mut tr.solo, "S", th.accent, "Solo");
-            changed |= toggle(ui, &mut tr.armed, "R", th.accent_alt, "Arm for recording");
-        });
-        if tr.height >= 76.0 {
-            let id = tr.id;
-            ui.horizontal(|ui| crate::record_input::track_input(ui, &mut st.rec_inputs, id));
-        }
-        if tr.height >= 60.0 {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Vol").size(10.0).color(c(th.text_dim)));
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut tr.volume_db)
-                            .speed(0.1)
-                            .range(-90.0..=12.0)
-                            .suffix(" dB")
-                            .max_decimals(1),
-                    )
-                    .changed();
-                ui.label(RichText::new("Pan").size(10.0).color(c(th.text_dim)));
-                let mut pan = tr.pan * 100.0;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut pan)
-                            .speed(1.0)
-                            .range(-100.0..=100.0)
-                            .max_decimals(0),
-                    )
-                    .changed()
-                {
-                    tr.pan = pan / 100.0;
-                    changed = true;
-                }
-            });
-        }
-    });
-    if changed {
-        let down = ui.input(|i| i.pointer.any_down());
-        if !st.gesture {
-            st.commit_live("Track settings", before);
-            st.gesture = down;
-        }
-        st.live_track(ti);
     }
 }
 

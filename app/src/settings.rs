@@ -87,6 +87,65 @@ pub struct Prefs {
     /// Bring the Effects panel up when an effect is picked from the menu.
     pub show_effects_on_pick: bool,
     pub colors: ColorOverrides,
+    pub audio: AudioPrefs,
+    /// What the Multitrack's track headers show.
+    pub header_view: crate::track_views::HeaderView,
+    /// Stretch handles on clip corners.
+    pub stretch_handles: bool,
+    /// The metronome's sound and level (kept here, not in sessions).
+    pub metronome: af27_core::midi::MetronomeSettings,
+}
+
+/// Settings > Audio Devices.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioPrefs {
+    /// Play through this device (None: the system default).
+    pub output: Option<String>,
+    /// Record from this device (None: the system default).
+    pub input: Option<String>,
+    /// Frames per audio buffer (None: the driver's own).
+    pub buffer: Option<u32>,
+}
+
+impl AudioPrefs {
+    pub fn choice(&self) -> af27_engine::DeviceChoice {
+        af27_engine::DeviceChoice {
+            output: self.output.clone(),
+            input: self.input.clone(),
+            buffer: self.buffer,
+        }
+    }
+}
+
+/// The devices found, listed once when the page opens (and on Refresh).
+#[derive(Clone, Default)]
+struct DeviceList {
+    outputs: Vec<String>,
+    inputs: Vec<String>,
+    default_out: Option<String>,
+    default_in: Option<String>,
+    driver: String,
+}
+
+impl DeviceList {
+    fn scan() -> DeviceList {
+        let (default_out, default_in) = af27_engine::default_devices();
+        DeviceList {
+            outputs: af27_engine::output_devices(),
+            inputs: af27_engine::input_devices(),
+            default_out,
+            default_in,
+            driver: af27_engine::driver_name(),
+        }
+    }
+}
+
+/// Something a page asks the window to do with the app.
+#[derive(Clone, Copy, PartialEq)]
+enum PageAct {
+    RefreshDevices,
+    ReloadThemes,
 }
 
 impl Default for Prefs {
@@ -107,6 +166,10 @@ impl Default for Prefs {
             copy_on_save: true,
             show_effects_on_pick: true,
             colors: ColorOverrides::default(),
+            audio: AudioPrefs::default(),
+            header_view: Default::default(),
+            stretch_handles: false,
+            metronome: Default::default(),
         }
     }
 }
@@ -159,9 +222,10 @@ const PAGES: [&str; 18] = [
 /// What each page will hold that AudiForm 2 cannot do yet.
 fn coming(page: &str) -> &'static [&'static str] {
     match page {
-        "Audio Devices" => &["Choosing the output device for playback, previews and monitoring (falling back to the system default when it is unplugged)."],
         "Editing" => &["The shape new fades start as: straight, or a curve smooth at both ends."],
-        "Multitrack" => &["Exclusive solo: soloing one track un-solos the others, in one undoable step."],
+        "Multitrack" => {
+            &["Exclusive solo: soloing one track un-solos the others, in one undoable step."]
+        }
         "Clips" => &["Clip auto-crossfade where clips overlap."],
         "Playback and Recording" => &[
             "Meter yellow and red levels.",
@@ -169,7 +233,9 @@ fn coming(page: &str) -> &'static [&'static str] {
         ],
         "Time Display" => &["The time format (decimal, samples, bars and beats, SMPTE)."],
         "Loudness" => &["The loudness region and target."],
-        "Cache and Files" => &["Cache sizes, and clearing the waveform drawings (they are rebuilt on demand)."],
+        "Cache and Files" => {
+            &["Cache sizes, and clearing the waveform drawings (they are rebuilt on demand)."]
+        }
         _ => &[],
     }
 }
@@ -185,6 +251,8 @@ struct Draft {
     intro: bool,
     realistic: bool,
     workspace: Workspace,
+    devices: Option<DeviceList>,
+    act: Option<PageAct>,
 }
 
 impl Draft {
@@ -200,6 +268,8 @@ impl Draft {
             intro: st.theme.intro,
             realistic: st.theme.realistic,
             workspace: st.workspace,
+            devices: None,
+            act: None,
         }
     }
 
@@ -232,6 +302,7 @@ impl Draft {
                 self.prefs.copy_on_save = d.copy_on_save;
             }
             "Effects" => self.prefs.show_effects_on_pick = d.show_effects_on_pick,
+            "Audio Devices" => self.prefs.audio = d.audio.clone(),
             "Playback and Recording" => {
                 self.prefs.space_returns = d.space_returns;
                 self.prefs.follow_playhead = d.follow_playhead;
@@ -271,9 +342,16 @@ impl Draft {
         prefs.play_mode = st.prefs.play_mode;
         prefs.time_format = st.prefs.time_format;
         prefs.snap_ruler = st.prefs.snap_ruler;
+        prefs.header_view = st.prefs.header_view;
+        prefs.stretch_handles = st.prefs.stretch_handles;
+        prefs.metronome = st.prefs.metronome;
         if prefs != st.prefs {
+            let reopen = prefs.audio != st.prefs.audio;
             st.prefs = prefs;
             st.prefs.save();
+            if reopen {
+                st.reopen_audio();
+            }
         }
         st.theme_changed = true;
     }
@@ -391,6 +469,13 @@ impl SettingsUi {
                             });
                     });
             });
+        match draft.act.take() {
+            Some(PageAct::RefreshDevices) => draft.devices = Some(DeviceList::scan()),
+            Some(PageAct::ReloadThemes) => {
+                st.themes = crate::theme::load_all(&crate::theme::user_dir());
+            }
+            None => {}
+        }
         if apply {
             draft.apply(st);
             st.zoom = draft.zoom;
@@ -464,21 +549,7 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
             });
         }
         "Appearance" => appearance(ui, d, st, th),
-        "Audio Devices" => {
-            group(ui, th, "Output", |ui| {
-                match (&st.engine, &st.engine_error) {
-                    (Some(e), _) => {
-                        info(ui, th, "Device", &e.device);
-                        info(ui, th, "Sample rate", &format!("{} Hz", e.rate));
-                        note(ui, th, "Playback, previews and monitoring use the system's default output device.");
-                    }
-                    (None, Some(err)) => {
-                        ui.label(RichText::new(err).color(c(th.accent_alt)));
-                    }
-                    _ => note(ui, th, "No audio output is open."),
-                }
-            });
-        }
+        "Audio Devices" => audio_devices(ui, d, st, th),
         "Autosave" => {
             group(ui, th, "Autosave", |ui| {
                 ui.checkbox(
@@ -637,6 +708,125 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
     }
 }
 
+/// Settings > Audio Devices: the driver, what plays and records, the
+/// buffer, and what is open now.
+fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
+    let list = d.devices.get_or_insert_with(DeviceList::scan).clone();
+    let a = &mut d.prefs.audio;
+    let pick = |ui: &mut egui::Ui,
+                id: &str,
+                label: &str,
+                cur: &mut Option<String>,
+                all: &[String],
+                default: &Option<String>| {
+        let dflt = format!(
+            "System default ({})",
+            default.clone().unwrap_or_else(|| "none".into())
+        );
+        let shown = match cur {
+            None => dflt.clone(),
+            Some(n) if all.contains(n) => n.clone(),
+            Some(n) => format!("{n} (not connected)"),
+        };
+        ui.horizontal(|ui| {
+            ui.add_sized(vec2(118.0, 20.0), egui::Label::new(label));
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(shown)
+                .width(380.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(cur, None, dflt);
+                    for n in all {
+                        ui.selectable_value(cur, Some(n.clone()), n);
+                    }
+                });
+        });
+    };
+    group(ui, th, "Audio hardware", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_sized(vec2(118.0, 20.0), egui::Label::new("Device class"));
+            egui::ComboBox::from_id_salt("settings-driver")
+                .selected_text(format!("System ({})", list.driver))
+                .width(380.0)
+                .show_ui(ui, |ui| {
+                    let _ = ui.selectable_label(true, format!("System ({})", list.driver));
+                    ui.add_enabled(
+                        false,
+                        egui::SelectableLabel::new(false, "ASIO (not in this build)"),
+                    );
+                });
+        });
+        pick(
+            ui,
+            "settings-out",
+            "Default output",
+            &mut a.output,
+            &list.outputs,
+            &list.default_out,
+        );
+        pick(
+            ui,
+            "settings-in",
+            "Default input",
+            &mut a.input,
+            &list.inputs,
+            &list.default_in,
+        );
+        ui.horizontal(|ui| {
+            ui.add_sized(vec2(118.0, 20.0), egui::Label::new("Buffer size"));
+            let shown = match a.buffer {
+                None => "Driver's own".to_string(),
+                Some(n) => format!("{n} samples"),
+            };
+            egui::ComboBox::from_id_salt("settings-buffer")
+                .selected_text(shown)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut a.buffer, None, "Driver's own");
+                    for n in [64u32, 128, 256, 512, 1024, 2048] {
+                        ui.selectable_value(&mut a.buffer, Some(n), format!("{n} samples"));
+                    }
+                });
+            if let (Some(n), Some(e)) = (a.buffer, &st.engine) {
+                ui.label(
+                    RichText::new(format!("{:.1} ms", n as f64 * 1000.0 / e.rate as f64))
+                        .color(c(th.text_dim)),
+                );
+            }
+        });
+        note(ui, th, "If a chosen device is unplugged, the system default plays instead, and the chosen one is used again once it is back and you press Apply. Tracks pick their own inputs in the track header.");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("Refresh Devices").clicked() {
+                d.act = Some(PageAct::RefreshDevices);
+            }
+            if ui.button("Open System Sound Settings").clicked() {
+                let _ = std::process::Command::new("explorer")
+                    .arg("ms-settings:sound")
+                    .spawn();
+            }
+        });
+    });
+    group(ui, th, "Open now", |ui| {
+        match (&st.engine, &st.engine_error) {
+            (Some(e), _) => {
+                info(ui, th, "Playing through", &e.device);
+                info(ui, th, "Sample rate", &format!("{} Hz", e.rate));
+                info(
+                    ui,
+                    th,
+                    "Buffer",
+                    &e.buffer
+                        .map_or("Driver's own".to_string(), |n| format!("{n} samples")),
+                );
+            }
+            (None, Some(err)) => {
+                ui.label(RichText::new(err).color(c(th.accent_alt)));
+            }
+            _ => note(ui, th, "No audio output is open."),
+        }
+    });
+}
+
 fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
     group(ui, th, "Theme", |ui| {
         let shown = st
@@ -663,6 +853,21 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                     ui.selectable_value(&mut d.theme, t.name.clone(), label);
                 }
             });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Open Themes Folder")
+                .on_hover_text("Put .af27theme files here to add them to the list")
+                .clicked()
+            {
+                let dir = crate::theme::user_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                crate::sessions::reveal_dir(&dir);
+            }
+            if ui.button("Reload Themes").clicked() {
+                d.act = Some(PageAct::ReloadThemes);
+            }
+        });
+        note(ui, th, "Your own themes: .af27theme files in the themes folder join this list. A file with the same name as a built-in theme replaces it.");
         if d.theme != before {
             // A new theme brings its own saved hues and looks.
             d.hues = crate::state::load_hues(&d.theme);

@@ -301,6 +301,21 @@ pub struct State {
     pub scope_cache: Option<((u64, u64, i64), Vec<[f32; 2]>)>,
     /// Effect slot open for editing in the Inspector: (track or MASTER, slot).
     pub open_slot: Option<(u16, usize)>,
+    /// Effect windows open: (rack, slot).
+    pub fx_windows: Vec<(u16, usize)>,
+    /// The Waveform editor's rack (applied to the file).
+    pub file_chain: Vec<af27_core::EffectSlot>,
+    pub file_rack: af27_core::Rack,
+    /// Track or master rack in the Effects panel.
+    pub rack_tab: crate::rack::RackTab,
+    /// A rack preset being named.
+    pub rack_preset_name: Option<String>,
+    /// Bring the Effects panel to the front.
+    pub want_effects: bool,
+    /// The Effects menu's apply window is open.
+    pub effect_dialog: bool,
+    /// The clip whose Properties show, and a floating window for them.
+    pub want_properties: bool,
     /// A live-edit drag is under way (one undo step per drag).
     pub gesture: bool,
     /// Bring the Piano Roll to the front.
@@ -433,11 +448,12 @@ pub fn data_dir() -> PathBuf {
 
 impl State {
     pub fn new() -> State {
-        let (engine, engine_error) = match Engine::new() {
+        let audio = crate::settings::Prefs::load().audio.choice();
+        let (engine, engine_error) = match Engine::open(&audio) {
             Ok(e) => (Some(e), None),
             Err(e) => (None, Some(e)),
         };
-        let themes = crate::theme::load_all(&data_dir().join("themes"));
+        let themes = crate::theme::load_all(&crate::theme::user_dir());
         let saved_theme = std::fs::read_to_string(data_dir().join("theme.txt")).unwrap_or_default();
         let theme_base = themes
             .iter()
@@ -530,6 +546,14 @@ impl State {
             viz: crate::visualizer::Visualizer::load(),
             scope_cache: None,
             open_slot: None,
+            fx_windows: Vec::new(),
+            file_chain: Vec::new(),
+            file_rack: Default::default(),
+            rack_tab: Default::default(),
+            rack_preset_name: None,
+            want_effects: false,
+            effect_dialog: false,
+            want_properties: false,
             gesture: false,
             want_piano: false,
             session_base: None,
@@ -1263,7 +1287,40 @@ impl State {
     }
 
     /// Called every frame: follow the playhead, meters, jobs.
+    /// Opens the output again with the devices in Settings (the system
+    /// default where the chosen one is missing). Stops playback.
+    pub fn reopen_audio(&mut self) {
+        if self.is_playing() || self.is_recording() {
+            self.stop();
+        }
+        self.engine = None;
+        match af27_engine::Engine::open(&self.prefs.audio.choice()) {
+            Ok(e) => {
+                self.engine = Some(e);
+                self.engine_error = None;
+            }
+            Err(e) => self.engine_error = Some(e),
+        }
+        // Hand the new stream everything again.
+        self.program_key = (Mode::Waveform, u64::MAX as DocId, u64::MAX, u64::MAX);
+        self.sync_program();
+        self.live_metronome();
+    }
+
     pub fn tick(&mut self) {
+        // The output went away (unplugged): play through what is there.
+        if self.engine.as_ref().is_some_and(|e| e.is_lost()) {
+            self.reopen_audio();
+            let text = match &self.engine {
+                Some(e) => format!("The audio device went away; playing through {}.", e.device),
+                None => "The audio device went away.".to_string(),
+            };
+            self.toasts.push(Toast {
+                text,
+                at: Instant::now(),
+                error: true,
+            });
+        }
         self.poll_jobs();
         crate::separation::poll(self);
         crate::spectral_select::poll(self);
@@ -1727,6 +1784,12 @@ impl State {
                 .get_mut(track as usize)
                 .map(|t| &mut t.chain)
         }
+    }
+
+    /// A rack's power, levels or mix changed.
+    pub fn live_rack(&mut self, _track: u16) {
+        // MERGE: send live with Engine::set_rack once the engine has it.
+        self.session_version += 1;
     }
 
     pub fn live_slot(&mut self, track: u16, slot: usize) {

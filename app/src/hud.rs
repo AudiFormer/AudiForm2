@@ -679,6 +679,7 @@ pub enum Icon {
     ToStart,
     ToEnd,
     Loop,
+    #[allow(dead_code)]
     Metronome,
     Rewind,
     FastForward,

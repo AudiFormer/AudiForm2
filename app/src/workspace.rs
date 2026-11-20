@@ -69,8 +69,8 @@ impl Workspace {
     /// saved from the old one is set aside for the new.
     pub fn version(self) -> u32 {
         match self {
-            Workspace::Music => 2,
-            _ => 1,
+            Workspace::Music => 3,
+            _ => 2,
         }
     }
 
@@ -91,8 +91,11 @@ impl Workspace {
                 let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.17, vec![Files, Markers]);
-                let [_files, rack] =
-                    s.split_below(left, 0.36, vec![Inspector, Effects, AiSeparation]);
+                let [_files, rack] = s.split_below(
+                    left,
+                    0.36,
+                    vec![Properties, Inspector, Effects, AiSeparation],
+                );
                 let [_rack, _history] = s.split_below(rack, 0.7, vec![History]);
                 let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
@@ -105,7 +108,7 @@ impl Workspace {
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.17, vec![Files, Markers]);
                 let [_files, rack] =
-                    s.split_below(left, 0.36, vec![Inspector, Effects, Statistics]);
+                    s.split_below(left, 0.36, vec![Properties, Inspector, Effects, Statistics]);
                 let [_rack, _history] = s.split_below(rack, 0.7, vec![History]);
                 let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
@@ -124,7 +127,8 @@ impl Workspace {
                 let [_files, _markers] = s.split_below(left, 0.55, vec![Markers, History]);
                 let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.8, vec![Selection]);
-                let [_mixer, _right] = s.split_right(centre, 0.78, vec![Inspector, Effects]);
+                let [_mixer, _right] =
+                    s.split_right(centre, 0.78, vec![Properties, Inspector, Effects]);
                 d
             }
             Workspace::FocusedEdit => {
@@ -139,8 +143,11 @@ impl Workspace {
             Workspace::Mastering => {
                 let mut d = DockState::new(vec![Editor, Mixer]);
                 let s = d.main_surface_mut();
-                let [centre, left] =
-                    s.split_left(NodeIndex::root(), 0.18, vec![Inspector, Effects]);
+                let [centre, left] = s.split_left(
+                    NodeIndex::root(),
+                    0.18,
+                    vec![Properties, Inspector, Effects],
+                );
                 let [_rack, _files] = s.split_below(left, 0.62, vec![Files, History]);
                 let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);

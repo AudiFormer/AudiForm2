@@ -33,10 +33,12 @@ pub enum Tab {
     Space,
     PianoRoll,
     Visualizer,
+    Properties,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 16] = [
+    pub const ALL: [Tab; 17] = [
+        Tab::Properties,
         Tab::Visualizer,
         Tab::Inspector,
         Tab::Space,
@@ -63,6 +65,7 @@ impl Tab {
             Tab::AiSeparation => "Stems",
             Tab::Visualizer => "Visuals",
             Tab::Inspector => "Track",
+            Tab::Properties => "Props",
             t => t.title(),
         }
     }
@@ -82,6 +85,7 @@ impl Tab {
             Tab::Spectrum => "Spectrum",
             Tab::Selection => "Range",
             Tab::Inspector => "Inspector",
+            Tab::Properties => "Properties",
             Tab::Space => "3D Space",
             Tab::PianoRoll => "Piano Roll",
             Tab::Visualizer => "Visualizer",
@@ -329,7 +333,7 @@ impl Viewer<'_> {
             Tab::Mixer => crate::multitrack::mixer(ui, self.st),
             Tab::Files => crate::panels::files(ui, self.st, self.open_tab),
             Tab::Markers => crate::panels::markers(ui, self.st, self.caches),
-            Tab::Effects => crate::panels::effects(ui, self.st),
+            Tab::Effects => crate::rack::panel(ui, self.st),
             Tab::AiSeparation => crate::separation::show(ui, self.st),
             Tab::History => crate::panels::history(ui, self.st),
             Tab::Levels => crate::panels::levels(ui, self.st),
@@ -338,6 +342,7 @@ impl Viewer<'_> {
             Tab::Spectrum => crate::panels::spectrum(ui, self.st),
             Tab::Selection => crate::panels::range(ui, self.st),
             Tab::Inspector => crate::inspector::panel(ui, self.st),
+            Tab::Properties => crate::clip_props::panel(ui, self.st),
             Tab::Space => crate::space::panel(ui, self.st, &mut self.caches.space_drag),
             Tab::PianoRoll => crate::pianoroll::panel(ui, self.st, &mut self.caches.piano),
             Tab::Visualizer => crate::visualizer::show(ui, self.st),
@@ -420,7 +425,7 @@ impl App {
             Cmd::MatchLoudness => {
                 // It has a target to set, so it opens in the Effects panel.
                 st.effect = Effect::MatchLoudness;
-                self.show_tab(Tab::Effects);
+                st.effect_dialog = true;
             }
             Cmd::AutoHeal => st.toast(AUTO_HEAL_NOTE),
             Cmd::PlayStop => st.toggle_play(),
@@ -468,7 +473,7 @@ impl App {
                 Some((e, vals)) => {
                     st.effect_values.insert(e, vals);
                     st.effect = e;
-                    self.show_tab(Tab::Effects);
+                    st.effect_dialog = true;
                 }
                 None => st.toast("No effect to repeat yet"),
             },
@@ -1265,15 +1270,19 @@ fn effects_menu(
                 if ui.button(item.name()).clicked() {
                     match item {
                         crate::fx_menu::Item::Builtin(e) => {
-                            st.effect = e;
-                            if show {
-                                *open_tab = Some(Tab::Effects);
+                            if !add_to_track_rack(st, e.realtime().then(|| e.id().to_string())) {
+                                st.effect = e;
+                                if show {
+                                    st.effect_dialog = true;
+                                }
                             }
                         }
                         crate::fx_menu::Item::Fx(id, _) => {
-                            st.fx_pick = Some(id);
-                            if show {
-                                *open_tab = Some(Tab::Effects);
+                            if !add_to_track_rack(st, Some(id.clone())) {
+                                st.fx_pick = Some(id);
+                                if show {
+                                    st.effect_dialog = true;
+                                }
                             }
                         }
                         crate::fx_menu::Item::Stems => *open_tab = Some(Tab::AiSeparation),
@@ -1288,6 +1297,44 @@ fn effects_menu(
     disabled_submenu(ui, "VST 3", PLUGIN_NOTE);
     ui.add_enabled(false, egui::Button::new("Audio Plug-In Manager..."))
         .on_disabled_hover_text(PLUGIN_NOTE);
+}
+
+/// In the Multitrack, an effect picked from the Effects menu goes into the
+/// selected track's rack (and opens). False when it did not (Waveform, no
+/// track, or an effect that cannot run live).
+fn add_to_track_rack(st: &mut State, id: Option<String>) -> bool {
+    let Some(id) = id else { return false };
+    if st.mode != Mode::Multitrack {
+        return false;
+    }
+    let Some(ti) = st.selected_track.and_then(|t| st.session.track_index(t)) else {
+        return false;
+    };
+    if st.session.tracks[ti].chain.len() >= af27_core::session::CHAIN_SLOTS {
+        st.toast("This track's rack is full (16 effects).");
+        return true;
+    }
+    let before = st.session.clone();
+    st.session.tracks[ti].chain.push(crate::rack::new_slot(&id));
+    let at = st.session.tracks[ti].chain.len() - 1;
+    crate::rack::open_window(st, ti as u16, at);
+    st.commit_session("Add effect", before);
+    true
+}
+
+/// The Effects menu's own window: one effect applied to the file.
+fn effect_dialog(ctx: &egui::Context, st: &mut State) {
+    if !st.effect_dialog {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Effect")
+        .open(&mut open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(340.0)
+        .show(ctx, |ui| crate::panels::effects(ui, st));
+    st.effect_dialog = open;
 }
 
 /// The spectral selection tools (Waveform editor only) and the brush size.
@@ -1638,20 +1685,8 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         {
             st.tempo_ui.open = true;
         }
-        let m = st.session.tempo.metronome;
-        if crate::hud::transport_button(
-            ui,
-            crate::hud::Icon::Metronome,
-            "Metronome",
-            m,
-            th.accent,
-            &th,
-        )
-        .clicked()
-        {
-            st.session.tempo.metronome = !m;
-            st.live_metronome();
-        }
+        // The metronome is switched on above the track list (it shows as
+        // its own row there).
         ui.add_space(14.0);
         // The transport, in the order and style long-time editors expect:
         // Stop, Play, Pause, previous, Rewind, Fast Forward, next, Record,
@@ -2369,6 +2404,14 @@ impl eframe::App for App {
             self.st.want_piano = false;
             self.show_tab(Tab::PianoRoll);
         }
+        if std::mem::take(&mut self.st.want_properties) {
+            self.show_tab(Tab::Properties);
+        }
+        if std::mem::take(&mut self.st.want_effects) {
+            self.show_tab(Tab::Effects);
+        }
+        crate::rack::windows(ctx, &mut self.st);
+        effect_dialog(ctx, &mut self.st);
         generate_window(ctx, &mut self.st);
         crate::export::poll(&mut self.st, ctx);
         crate::export::show(ctx, &mut self.st);

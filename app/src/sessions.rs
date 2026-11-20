@@ -795,6 +795,17 @@ pub fn list_templates() -> Vec<PathBuf> {
 }
 
 /// Shows a file in the system file manager.
+/// Opens a folder in the file manager.
+pub fn reveal_dir(dir: &Path) {
+    #[cfg(windows)]
+    let cmd = "explorer";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = "xdg-open";
+    let _ = std::process::Command::new(cmd).arg(dir).spawn();
+}
+
 pub fn reveal(path: &Path) {
     #[cfg(windows)]
     {

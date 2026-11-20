@@ -369,3 +369,13 @@ mod tests {
         assert_ne!(out.channels[0], mono.channels[0]);
     }
 }
+
+/// MERGE-STUB: replaced by the engine branch's version.
+pub fn takes_key(effect_id: &str) -> bool {
+    let id = effect_id.to_ascii_lowercase();
+    id.contains("compress")
+        || id.contains("dynamics")
+        || id.contains("gate")
+        || id.contains("duck")
+        || id.contains("limit")
+}

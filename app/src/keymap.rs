@@ -120,7 +120,7 @@ impl Cmd {
             Cmd::AddMarker => "Add Marker",
             Cmd::ClearSelection => "Deselect",
             Cmd::KeyboardShortcuts => "Keyboard Shortcuts...",
-            Cmd::Preferences => "Preferences...",
+            Cmd::Preferences => "Settings...",
             Cmd::SplitAtPlayhead => "Split at Playhead",
             Cmd::Invert => "Invert",
             Cmd::Reverse => "Reverse",
