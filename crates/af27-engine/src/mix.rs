@@ -140,6 +140,8 @@ pub struct SpaceMix {
     peaks: [f32; MAX_SPEAKERS],
     /// Listening on speakers: each on its own device output.
     speakers: bool,
+    /// Export: the bed channel each output channel takes (None: as is).
+    bed_order: Option<Vec<usize>>,
 }
 
 pub struct Mix {
@@ -668,6 +670,7 @@ pub fn build(
             lfe_filter: af27_space::lfe::LfeFilter::new(rate),
             peaks: [0.0; MAX_SPEAKERS],
             speakers: session.monitor == af27_core::space::Monitor::Speakers,
+            bed_order: None,
         }
     });
     let master_slots: &[af27_core::EffectSlot] = if space.is_some() {
@@ -926,17 +929,10 @@ impl Mix {
         // The LFE band and the master chain on the speakers, before
         // listening or export.
         self.space_master(n);
+        if bed_out && self.space.is_some() {
+            return self.write_bed(n, out);
+        }
         if let Some(sp) = &mut self.space {
-            if bed_out {
-                let ch = sp.channels;
-                let mut peak = (0.0f32, 0.0f32);
-                for i in 0..n * ch {
-                    out[i] = sp.bed[i] * self.master;
-                    peak.0 = peak.0.max(out[i].abs());
-                }
-                peak.1 = peak.0;
-                return peak;
-            }
             let mut st = [0.0f32; BLOCK * 2];
             sp.monitor
                 .process(&sp.bed[..n * sp.channels], &mut st[..n * 2]);

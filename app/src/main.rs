@@ -33,6 +33,7 @@ mod sessions;
 mod settings;
 mod skin;
 mod space;
+mod space_export;
 mod spectral_select;
 mod splash;
 mod state;

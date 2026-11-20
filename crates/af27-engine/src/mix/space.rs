@@ -490,6 +490,43 @@ impl Mix {
         }
     }
 
+    /// Writes the last block's bed to `out` (after the master fader), in
+    /// the export's channel order. Returns the peak (on both sides).
+    pub(super) fn write_bed(&mut self, n: usize, out: &mut [f32]) -> (f32, f32) {
+        let master = self.master;
+        let Some(sp) = self.space.as_ref() else {
+            return (0.0, 0.0);
+        };
+        let ch = sp.channels;
+        let mut peak = 0.0f32;
+        for (o, f) in out[..n * ch]
+            .chunks_exact_mut(ch)
+            .zip(sp.bed[..n * ch].chunks_exact(ch))
+        {
+            for (k, v) in o.iter_mut().enumerate() {
+                let from = sp.bed_order.as_ref().map_or(k, |ord| ord[k]);
+                *v = f[from] * master;
+                peak = peak.max(v.abs());
+            }
+        }
+        (peak, peak)
+    }
+
+    /// Sets the export's channel order: output channel `k` takes bed
+    /// channel `order[k]`. Ignored unless it is a reordering of the bed.
+    pub fn set_bed_order(&mut self, order: Option<Vec<usize>>) {
+        if let Some(sp) = &mut self.space {
+            let ok = order.as_ref().is_none_or(|o| {
+                let mut s = o.clone();
+                s.sort_unstable();
+                s == (0..sp.channels).collect::<Vec<_>>()
+            });
+            if ok {
+                sp.bed_order = order;
+            }
+        }
+    }
+
     /// A new spot for a track (live).
     pub fn set_space(&mut self, track: usize, pos: SpacePos) {
         if let Some(p) = self

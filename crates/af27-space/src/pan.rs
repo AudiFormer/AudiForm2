@@ -135,6 +135,30 @@ pub fn channel_mask(layout: SpaceLayout) -> u32 {
     speakers(layout).iter().map(|s| s.mask).sum()
 }
 
+/// The film (cinema) channel order for a layout: sides before rears in a
+/// 7.x bed (L R C LFE Lss Rss Lrs Rrs, then heights). Output channel `k`
+/// takes WAV-order channel `order[k]`. None when it is the WAV order.
+pub fn film_order(layout: SpaceLayout) -> Option<Vec<usize>> {
+    let sp = speakers(layout);
+    let rear = sp.iter().position(|s| s.name == "Lrs")?;
+    let side = sp.iter().position(|s| s.name == "Lss")?;
+    let mut order: Vec<usize> = (0..sp.len()).collect();
+    order[rear] = side;
+    order[rear + 1] = side + 1;
+    order[side] = rear;
+    order[side + 1] = rear + 1;
+    Some(order)
+}
+
+/// Whether FLAC can hold a layout's bed in its own channel order (FLAC
+/// knows the orders of 2.0, 5.1 and 7.1 only).
+pub fn flac_ok(layout: SpaceLayout) -> bool {
+    matches!(
+        layout,
+        SpaceLayout::Stereo20 | SpaceLayout::Surround51 | SpaceLayout::Surround71
+    )
+}
+
 /// What the interface shows about a layout.
 #[derive(Debug, Clone)]
 pub struct LayoutInfo {
@@ -472,5 +496,21 @@ mod tests {
             point_gains(SpaceLayout::Stereo20, 0.3, -1.0, 1.0, 0.0),
             point_gains(SpaceLayout::Stereo20, 0.3, 1.0, 0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn film_order_puts_sides_before_rears() {
+        assert_eq!(film_order(SpaceLayout::Surround51), None);
+        assert_eq!(
+            film_order(SpaceLayout::Surround714).unwrap(),
+            [0, 1, 2, 3, 6, 7, 4, 5, 8, 9, 10, 11]
+        );
+        let names: Vec<_> = film_order(SpaceLayout::Surround71)
+            .unwrap()
+            .iter()
+            .map(|&i| speakers(SpaceLayout::Surround71)[i].name)
+            .collect();
+        assert_eq!(names, ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs"]);
+        assert!(flac_ok(SpaceLayout::Surround71) && !flac_ok(SpaceLayout::Surround512));
     }
 }

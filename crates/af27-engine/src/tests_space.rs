@@ -330,3 +330,34 @@ fn stereo_listening_folds_the_bed() {
     assert!((st.channels[0][100] - 1.0).abs() < 1e-5);
     assert!(st.channels[1][100].abs() < 1e-6);
 }
+
+#[test]
+fn bed_exports_have_their_layout_channels_and_order() {
+    for (layout, n) in [
+        (SpaceLayout::Stereo20, 2),
+        (SpaceLayout::Surround51, 6),
+        (SpaceLayout::Surround71, 8),
+        (SpaceLayout::Surround512, 8),
+        (SpaceLayout::Surround714, 12),
+    ] {
+        let mut f = Fixture::new(Some(layout));
+        f.dc(0.1);
+        assert_eq!(f.bed(0.1).num_channels(), n, "{layout:?}");
+    }
+    // Film order: a source on the left side wall lands on channel 4.
+    let mut f = Fixture::new(Some(SpaceLayout::Surround714));
+    let id = f.dc(0.1);
+    f.t(id).pos = SpacePos {
+        x: -1.0,
+        y: 0.0,
+        ..SpacePos::default()
+    };
+    assert!((f.bed(0.1).channels[6][100] - 1.0).abs() < 1e-5);
+    let mut p = f.program();
+    if let Program::Mix(m) = &mut p {
+        m.set_bed_order(af27_space::pan::film_order(SpaceLayout::Surround714));
+    }
+    let film = render_bed(p, RATE, 0.0, 0.1);
+    assert!((film.channels[4][100] - 1.0).abs() < 1e-5);
+    assert!(film.channels[6][100].abs() < 1e-6);
+}
