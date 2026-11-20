@@ -244,6 +244,8 @@ pub struct State {
     transport_live: bool,
     /// Automation writing and lane display (see `mixing`).
     pub mixing: crate::mixing::Mixing,
+    /// MIDI input for armed MIDI tracks (see `midi_in`).
+    pub midi: crate::midi_in::MidiIn,
     /// A new selection taking over the loop while playing.
     loop_watch: crate::transport::Settle,
     /// Seconds of held Left/Right since playback last skipped along.
@@ -496,6 +498,7 @@ impl State {
             paused: false,
             transport_live: false,
             mixing: Default::default(),
+            midi: Default::default(),
             loop_watch: Default::default(),
             scrub_clock: 0.0,
             born: Instant::now(),
@@ -1361,6 +1364,9 @@ impl State {
             self.follow_new_loop();
             self.auto_tick();
         }
+        if self.mode == Mode::Multitrack {
+            self.midi_tick();
+        }
         let now = self.born.elapsed().as_secs_f64();
         let dt = (now - self.last_tick).clamp(0.0, 1.0);
         self.last_tick = now;
@@ -1432,14 +1438,30 @@ impl State {
     // -------------------------------------------------------- recording
 
     pub fn is_recording(&self) -> bool {
-        self.engine.as_ref().is_some_and(|e| e.is_recording())
+        self.engine.as_ref().is_some_and(|e| e.is_recording()) || self.midi.recording
     }
 
     pub fn start_recording(&mut self) {
+        // Only MIDI tracks armed: record what they hear while playing.
+        let audio_armed = self
+            .session
+            .tracks
+            .iter()
+            .any(|t| t.armed && t.kind == af27_core::TrackKind::Audio);
+        if self.mode == Mode::Multitrack && self.midi_armed() && !audio_armed {
+            self.midi_record_start();
+            self.play();
+            return;
+        }
         let target = match self.mode {
             Mode::Waveform => RecordTarget::NewFile,
             Mode::Multitrack => {
-                let armed = self.session.tracks.iter().find(|t| t.armed).map(|t| t.id);
+                let armed = self
+                    .session
+                    .tracks
+                    .iter()
+                    .find(|t| t.armed && t.kind != af27_core::TrackKind::Midi)
+                    .map(|t| t.id);
                 match armed.or(self.selected_track) {
                     Some(t) => RecordTarget::Track(t, self.session_cursor),
                     None => {
@@ -1455,6 +1477,9 @@ impl State {
             Ok(()) => {
                 self.recording_target = Some(target);
                 if matches!(target, RecordTarget::Track(..)) {
+                    if self.midi_armed() {
+                        self.midi_record_start();
+                    }
                     self.play();
                 }
             }
@@ -1463,6 +1488,15 @@ impl State {
     }
 
     pub fn stop_recording(&mut self) {
+        if self.midi.recording {
+            let reached = self.position();
+            self.midi_record_stop(reached);
+            let audio = self.engine.as_ref().is_some_and(|e| e.is_recording());
+            if !audio {
+                self.stop();
+                return;
+            }
+        }
         let Some(e) = &mut self.engine else { return };
         let takes = e.stop_recording_all();
         if takes.is_empty() {
@@ -1874,7 +1908,7 @@ impl State {
 
     /// Points the engine's audition at track `ti`'s instrument, building
     /// it only when the track or its settings changed.
-    fn audition_for(&mut self, ti: usize) -> bool {
+    pub fn audition_for(&mut self, ti: usize) -> bool {
         let Some(t) = self.session.tracks.get(ti) else {
             return false;
         };

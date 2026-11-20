@@ -278,6 +278,9 @@ fn add_track_items(ui: &mut egui::Ui, st: &mut State) {
     }
 }
 
+/// A track setting a menu item switches.
+type Flag = fn(&mut af27_core::Track) -> &mut bool;
+
 fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     let Some(t) = st.session.tracks.get(ti).cloned() else {
         return;
@@ -362,7 +365,7 @@ fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         }
     });
     ui.separator();
-    let toggles: [(&str, bool, fn(&mut af27_core::Track) -> &mut bool, &str); 3] = [
+    let toggles: [(&str, bool, Flag, &str); 3] = [
         (
             "Mono",
             t.mono,

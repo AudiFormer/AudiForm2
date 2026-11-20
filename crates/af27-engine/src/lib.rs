@@ -542,9 +542,27 @@ pub struct Engine {
     pub rate: u32,
     pub device: String,
     recorders: Vec<Recorder>,
+    /// Notes played live (MIDI input), until a sender is taken.
+    notes: Option<rtrb::Producer<LiveNote>>,
+}
+
+/// A note played live, straight to the audition instrument from another
+/// thread (the MIDI input), without waiting for the UI.
+#[derive(Debug, Clone, Copy)]
+pub enum LiveNote {
+    On { pitch: u8, velocity: u8, pan: f32 },
+    Off(u8),
+    AllOff,
 }
 
 impl Engine {
+    /// The sender for live notes (once per opened engine): the MIDI
+    /// input's thread plays the audition instrument through it, heard
+    /// within one device buffer.
+    pub fn take_note_sender(&mut self) -> Option<rtrb::Producer<LiveNote>> {
+        self.notes.take()
+    }
+
     /// Opens the default output device.
     pub fn new() -> Result<Engine, String> {
         Engine::open(&DeviceChoice::default())
@@ -566,6 +584,7 @@ impl Engine {
         scope::set_rate(rate);
         let (tx, mut rx) = rtrb::RingBuffer::<Cmd>::new(1024);
         let (mut trash_tx, trash) = rtrb::RingBuffer::<Garbage>::new(256);
+        let (notes_tx, mut notes_rx) = rtrb::RingBuffer::<LiveNote>::new(512);
         let shared = Arc::new(Shared {
             playing: AtomicBool::new(false),
             pos: AtomicU64::new(0f64.to_bits()),
@@ -586,6 +605,19 @@ impl Engine {
         let mut callback = move |out: &mut [f32]| {
             while let Ok(cmd) = rx.pop() {
                 voice.apply(cmd, &mut trash_tx);
+            }
+            while let Ok(n) = notes_rx.pop() {
+                if let Some(a) = &mut voice.audition {
+                    match n {
+                        LiveNote::On {
+                            pitch,
+                            velocity,
+                            pan,
+                        } => a.note_on(pitch, velocity, pan),
+                        LiveNote::Off(p) => a.note_off(p),
+                        LiveNote::AllOff => a.all_off(),
+                    }
+                }
             }
             let (l, r) = voice.render(out, channels, rate as f64, false);
             // Hand-played notes, heard whether or not the transport runs.
@@ -656,6 +688,7 @@ impl Engine {
             rate,
             device: name,
             recorders: Vec::new(),
+            notes: Some(notes_tx),
         })
     }
 

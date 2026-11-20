@@ -623,8 +623,62 @@ fn input_row(ui: &mut egui::Ui, st: &mut State, id: TrackId, th: &Theme) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("→").color(c(th.text_dim)))
             .on_hover_text("Input");
-        crate::record_input::track_input(ui, &mut st.rec_inputs, id);
+        let midi = st
+            .session
+            .tracks
+            .iter()
+            .any(|t| t.id == id && t.kind == TrackKind::Midi);
+        if midi {
+            midi_input_pick(ui, st, id);
+        } else {
+            crate::record_input::track_input(ui, &mut st.rec_inputs, id);
+        }
     });
+}
+
+/// A MIDI track's input: every MIDI input, none, or one by name.
+fn midi_input_pick(ui: &mut egui::Ui, st: &mut State, id: TrackId) {
+    let Some(ti) = st.session.track_index(id) else {
+        return;
+    };
+    let cur = st.session.tracks[ti].midi_in.clone();
+    let shown = match cur.as_deref() {
+        None => "All MIDI inputs".to_string(),
+        Some("none") => "No MIDI input".to_string(),
+        Some(p) => p.to_string(),
+    };
+    let ports = st.midi.ports().to_vec();
+    let mut pick: Option<Option<String>> = None;
+    egui::ComboBox::from_id_salt(("midi-in", id))
+        .selected_text(RichText::new(shown).size(11.0))
+        .width(150.0)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(cur.is_none(), "All MIDI inputs")
+                .clicked()
+            {
+                pick = Some(None);
+            }
+            if ui
+                .selectable_label(cur.as_deref() == Some("none"), "No MIDI input")
+                .clicked()
+            {
+                pick = Some(Some("none".into()));
+            }
+            for p in &ports {
+                if ui
+                    .selectable_label(cur.as_deref() == Some(p.as_str()), p)
+                    .clicked()
+                {
+                    pick = Some(Some(p.clone()));
+                }
+            }
+        });
+    if let Some(p) = pick.filter(|p| *p != cur) {
+        let before = st.session.clone();
+        st.session.tracks[ti].midi_in = p;
+        st.commit_live("MIDI input", before);
+    }
 }
 
 /// Master or a bus that does not feed back. True when changed.
