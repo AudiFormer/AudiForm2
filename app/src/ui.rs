@@ -1233,6 +1233,10 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.menu_button("Help", |ui| {
+            if ui.button("Report a Problem...").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/nwh212/AudiForm2/issues/new"));
+                ui.close_menu();
+            }
             if ui.button("About AudiForm 2").clicked() {
                 st.show_about = true;
                 ui.close_menu();
@@ -2246,6 +2250,8 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
         crate::hud::logo_mark(ui.painter(), r, &st.theme, &st.fx, 1.0);
         ui.label(RichText::new("AUDIFORM 2").size(28.0).strong().extra_letter_spacing(6.0).color(c(st.theme.accent)));
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+        ui.label(RichText::new("Highly experimental alpha: expect bugs, and keep backups of sessions you care about.").strong());
+        ui.hyperlink_to("Report a problem (GitHub Issues)", "https://github.com/nwh212/AudiForm2/issues");
         ui.label("A fast, themeable audio editor written entirely in Rust.");
         ui.label("Free software under the GNU General Public License, version 3 or later (see LICENSE and COPYING). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
         ui.label("The sequel to Audiform, by the same project lead.");

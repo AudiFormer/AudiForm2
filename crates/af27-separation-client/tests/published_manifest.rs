@@ -18,5 +18,8 @@ fn the_published_engine_manifest_reads() {
         assert_eq!(a.sha256.len(), 64);
     }
     #[cfg(windows)]
-    assert_eq!(m.asset().unwrap().file, "audiform2-separate-windows-x64.zip");
+    assert_eq!(
+        m.asset().unwrap().file,
+        "audiform2-separate-windows-x64.zip"
+    );
 }

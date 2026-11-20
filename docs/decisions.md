@@ -55,6 +55,8 @@
   enforceable. `af27-dts` stays LGPL, which forbids added restrictions.
   The lead's earlier upstream contributions were licensed to AAE under its
   agreement; this licence does not and cannot change that.
+  *(Superseded later the same day: AudiForm 2 is GPL-3.0-or-later, so
+  ASIO can use Steinberg's GPLv3 option. See `LICENSE`.)*
 
 ## 2026-11-19: AudiForm 2, performance
 

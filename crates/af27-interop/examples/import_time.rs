@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) The Audiform27 contributors.
+
 //! Times importing one session file (read only):
 //! `cargo run --release -p af27-interop --example import_time -- <file>`.
 fn main() {

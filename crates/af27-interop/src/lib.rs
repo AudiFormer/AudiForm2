@@ -164,11 +164,10 @@ mod tests {
 
     #[test]
     fn real_files_on_this_machine_open() {
-        // Optional smoke test against the project lead's own sessions.
-        for p in [
-            r"C:\Users\Nash\Desktop\Untitled Session 125\Untitled Session 125.sesx",
-            r"C:\Users\Nash\AppData\Roaming\io.github.nwh212.audiform\autosave\58ff1bfc-d8dc-4a19-ab18-becb7c8e1cfa.audfrm",
-        ] {
+        // Optional smoke test against real sessions: list them in
+        // AF27_SMOKE_FILES, separated by ';'.
+        let list = std::env::var("AF27_SMOKE_FILES").unwrap_or_default();
+        for p in list.split(';').filter(|p| !p.is_empty()) {
             let p = Path::new(p);
             if p.exists() {
                 let imp = import(p).unwrap();

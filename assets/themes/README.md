@@ -4,8 +4,8 @@ Built into the app by `app/src/pictures.rs`.
 
 | File | Theme | Source | Licence |
 |---|---|---|---|
-| `prism.jpg` | Prism | Made for Audiform in the user's own commits (`src/themes/prism.audtheme`) | AudiForm 2 License |
-| `water.jpg` | Undercurrent | Made for Audiform in the user's own commits (`src/themes/undercurrent.audtheme`) | AudiForm 2 License |
+| `prism.jpg` | Prism | Made for Audiform in the user's own commits (`src/themes/prism.audtheme`) | GPL-3.0-or-later |
+| `water.jpg` | Undercurrent | Made for Audiform in the user's own commits (`src/themes/undercurrent.audtheme`) | GPL-3.0-or-later |
 | `moonlight.jpg` | Moonlight Aero | "Night sky with moon and stars over cotton field in Batesville, Texas", U.S. Department of Agriculture, [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Night_sky_with_moon_and_stars_over_cotton_field_in_Batesville,_Texas.jpg), as graded for Audiform | Public domain (U.S. federal government work) |
 | `walnut.jpg` | Analog | [Wood 067](https://ambientcg.com/view?id=Wood067) from ambientCG, resized and warmed | CC0 1.0 |
 | `marble-day.jpg` | Mall Pastel '95 | [Marble 001](https://ambientcg.com/view?id=Marble001) from ambientCG, graded to lavender | CC0 1.0 |

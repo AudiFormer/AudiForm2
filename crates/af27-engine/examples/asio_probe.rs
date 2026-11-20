@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) The Audiform27 contributors.
+
 //! Lists the ASIO drivers and opens one for a moment (by hand):
 //! `cargo run --release -p af27-engine --features asio --example asio_probe`.
 fn main() {
