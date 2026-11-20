@@ -203,7 +203,40 @@ impl KeyTap {
     }
 }
 
+/// A rack's input (after its input gain) and output peaks since the UI
+/// last read them, as f32 bits.
+#[derive(Debug, Default)]
+pub struct RackMeter {
+    pub input: std::sync::atomic::AtomicU32,
+    pub output: std::sync::atomic::AtomicU32,
+}
+
+impl RackMeter {
+    /// Takes both peaks (linear) and starts again.
+    pub fn take(&self) -> (f32, f32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            f32::from_bits(self.input.swap(0, Relaxed)),
+            f32::from_bits(self.output.swap(0, Relaxed)),
+        )
+    }
+}
+
+fn peak_into(a: &std::sync::atomic::AtomicU32, l: &[f32], r: &[f32], gain: f32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut m = 0.0f32;
+    for (x, y) in l.iter().zip(r) {
+        m = m.max(x.abs()).max(y.abs());
+    }
+    m *= gain;
+    if m > f32::from_bits(a.load(Relaxed)) {
+        a.store(m.to_bits(), Relaxed);
+    }
+}
+
 pub struct MixTrack {
+    /// The rack's meters, shared with the UI.
+    pub meter: std::sync::Arc<RackMeter>,
     pub is_bus: bool,
     /// Heard, given mute and solo (see `Session::heard`).
     pub audible: bool,
@@ -527,8 +560,11 @@ fn run_chain(t: &mut MixTrack, tracks: TrackPtr, n: usize, tin: f64, dt: f64) {
         r,
         auto,
         mono,
+        meter,
         ..
     } = &mut *t;
+    let in_gain = if chain.bypass { 1.0 } else { chain.input };
+    peak_into(&meter.input, &l[..n], &r[..n], in_gain);
     for tap in taps.iter_mut().flatten() {
         // A different strip (keys to itself are dropped), only read here.
         let s = unsafe { &*tracks.get(tap.src) };
@@ -558,6 +594,7 @@ fn run_chain(t: &mut MixTrack, tracks: TrackPtr, n: usize, tin: f64, dt: f64) {
         });
         a = b;
     }
+    peak_into(&meter.output, &l[..n], &r[..n], 1.0);
     if *mono {
         for (x, y) in l[..n].iter_mut().zip(r[..n].iter_mut()) {
             let m = (*x + *y) * 0.5;
@@ -879,6 +916,7 @@ pub fn build(
             let sp =
                 space.map(|layout| space::for_track(layout, t, wide, stereo, rate, ti, steer_lead));
             MixTrack {
+                meter: Default::default(),
                 is_bus: t.kind == TrackKind::Bus,
                 audible,
                 fader: fader_gain(t.volume_db),

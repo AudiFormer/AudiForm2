@@ -32,6 +32,7 @@ fn slot(id: &str, set: &[(usize, f32)]) -> EffectSlot {
         values[*i] = *v;
     }
     EffectSlot {
+        position: None,
         sidechain: None,
         effect: id.into(),
         values,

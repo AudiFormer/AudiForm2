@@ -1185,6 +1185,7 @@ mod tests {
         let bi = s.track_index(bus).unwrap();
         s.tracks[bi].volume_db = -6.0206;
         s.tracks[bi].chain.push(af27_core::EffectSlot {
+            position: None,
             sidechain: None,
             effect: "amplify".into(),
             values: vec![6.0206],
@@ -1260,6 +1261,7 @@ mod tests {
 
     fn amp(db: f32) -> af27_core::EffectSlot {
         af27_core::EffectSlot {
+            position: None,
             sidechain: None,
             effect: "amplify".into(),
             values: vec![db],
@@ -1628,6 +1630,7 @@ mod bench {
     fn slot(id: &str) -> EffectSlot {
         let e = af27_dsp::Effect::from_id(id).unwrap();
         EffectSlot {
+            position: None,
             sidechain: None,
             effect: id.into(),
             values: e.defaults(),

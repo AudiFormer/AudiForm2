@@ -75,6 +75,7 @@ pub fn current_target(st: &State) -> Option<u16> {
         RackTab::Track => st
             .selected_track
             .and_then(|id| st.session.track_index(id))
+            .or((!st.session.tracks.is_empty()).then_some(0))
             .map(|i| i as u16),
     }
 }
@@ -197,7 +198,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
             .color(c(th.text)),
     );
     ui.add_space(2.0);
-    let bottom_h = if target == FILE { 92.0 } else { 64.0 };
+    let bottom_h = if target == FILE { 130.0 } else { 100.0 };
     let avail = (ui.available_height() - bottom_h).max(120.0);
     egui::ScrollArea::vertical()
         .id_salt("rack-slots")
@@ -211,158 +212,269 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
     }
 }
 
-/// The sixteen rows.
+/// Which slot sits in each of the sixteen rows (slots keep their row, so
+/// a rack can have gaps). Slots with no row follow the one before.
+pub fn rows(list: &[EffectSlot]) -> [Option<usize>; CHAIN_SLOTS] {
+    let mut out = [None; CHAIN_SLOTS];
+    let mut next = 0usize;
+    for (i, s) in list.iter().enumerate() {
+        let want = s.position.map_or(next, |p| (p as usize).max(next));
+        let mut r = want.min(CHAIN_SLOTS - 1);
+        while r < CHAIN_SLOTS && out[r].is_some() {
+            r += 1;
+        }
+        if r >= CHAIN_SLOTS {
+            // No room below: the first free row.
+            r = out
+                .iter()
+                .position(Option::is_none)
+                .unwrap_or(CHAIN_SLOTS - 1);
+        }
+        out[r] = Some(i);
+        next = r + 1;
+    }
+    out
+}
+
+/// Puts slots in row order with their rows written down, after a move:
+/// `placed` is (slot index, wanted row) for the slot that moved, which
+/// pushes whatever sits there (and after it) down a row.
+fn place(list: &mut Vec<EffectSlot>, placed: Option<(usize, usize)>) -> Vec<usize> {
+    let mut cur: Vec<(usize, usize)> = rows(list)
+        .iter()
+        .enumerate()
+        .filter_map(|(r, i)| i.map(|i| (i, r)))
+        .collect();
+    if let Some((mi, mr)) = placed {
+        cur.retain(|(i, _)| *i != mi);
+        // Push down from the wanted row.
+        let mut taken: Vec<(usize, usize)> = Vec::new();
+        let row_for = |r: usize, taken: &Vec<(usize, usize)>| {
+            let mut r = r;
+            while taken.iter().any(|(_, x)| *x == r) && r < CHAIN_SLOTS - 1 {
+                r += 1;
+            }
+            r
+        };
+        taken.push((mi, mr.min(CHAIN_SLOTS - 1)));
+        cur.sort_by_key(|(_, r)| *r);
+        for (i, r) in cur {
+            let nr = if r >= mr { row_for(r, &taken) } else { r };
+            let nr = if taken.iter().any(|(_, x)| *x == nr) {
+                row_for(nr, &taken)
+            } else {
+                nr
+            };
+            taken.push((i, nr));
+        }
+        cur = taken;
+    }
+    cur.sort_by_key(|(_, r)| *r);
+    // Old index -> new index, for the effect windows.
+    let order: Vec<usize> = cur.iter().map(|(i, _)| *i).collect();
+    let old = std::mem::take(list);
+    let mut slots: Vec<Option<EffectSlot>> = old.into_iter().map(Some).collect();
+    for (i, r) in &cur {
+        if let Some(mut sl) = slots[*i].take() {
+            sl.position = Some(*r as u8);
+            list.push(sl);
+        }
+    }
+    order
+}
+
+/// The sixteen rows, as the leading editor lays them out: number, power,
+/// name, and a menu on every row (empty ones add an effect there).
 fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
     let before = st.session.clone();
     let list: Vec<EffectSlot> = chain_ref(st, target).cloned().unwrap_or_default();
+    let map = rows(&list);
+    // (slot, to row), slot to remove, (row, effect id) to add, power flips.
     let mut moved: Option<(usize, usize)> = None;
     let mut removed: Option<usize> = None;
     let mut add_at: Option<(usize, String)> = None;
     let mut toggled: Option<usize> = None;
+    let mut open: Option<usize> = None;
     let row_h = 22.0;
-    for i in 0..CHAIN_SLOTS {
-        let slot = list.get(i);
+    let frame = ui.available_rect_before_wrap();
+    ui.painter().rect_stroke(
+        Rect::from_min_size(frame.min, vec2(frame.width(), row_h * CHAIN_SLOTS as f32)),
+        Rounding::ZERO,
+        Stroke::new(1.0_f32, ca(th.border, 200)),
+    );
+    for (row, slot_i) in map.iter().enumerate() {
+        let slot = slot_i.and_then(|i| list.get(i).map(|s| (i, s)));
         let w = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, row_h), Sense::click());
         let p = ui.painter_at(rect);
-        let odd = i % 2 == 1;
+        let selected = st.rack_row == Some((target, row));
         p.rect_filled(
             rect,
             Rounding::ZERO,
-            if odd {
-                ca(th.panel_raised, 120)
+            if selected {
+                ca(th.accent, 40)
+            } else if row % 2 == 1 {
+                ca(th.panel_raised, 110)
             } else {
-                ca(th.panel_raised, 60)
+                ca(th.panel_raised, 55)
             },
         );
+        p.line_segment(
+            [rect.left_bottom(), rect.right_bottom()],
+            Stroke::new(1.0_f32, ca(th.border, 90)),
+        );
+        // Number column.
+        let num = Rect::from_min_size(rect.min, vec2(20.0, row_h));
+        p.line_segment(
+            [num.right_top(), num.right_bottom()],
+            Stroke::new(1.0_f32, ca(th.border, 120)),
+        );
         p.text(
-            pos2(rect.left() + 12.0, rect.center().y),
+            num.center(),
             Align2::CENTER_CENTER,
-            format!("{}", i + 1),
+            format!("{}", row + 1),
             FontId::proportional(11.0),
             c(th.text_dim),
         );
-        let power =
-            Rect::from_center_size(pos2(rect.left() + 34.0, rect.center().y), vec2(18.0, 18.0));
-        let name_r = Rect::from_min_max(
-            pos2(power.right() + 6.0, rect.top()),
-            pos2(rect.right() - 24.0, rect.bottom()),
+        // Power column.
+        let pow_cell = Rect::from_min_size(pos2(num.right(), rect.top()), vec2(22.0, row_h));
+        p.line_segment(
+            [pow_cell.right_top(), pow_cell.right_bottom()],
+            Stroke::new(1.0_f32, ca(th.border, 120)),
         );
-        let arrow = Rect::from_min_max(pos2(name_r.right(), rect.top()), rect.max);
+        let pr = ui.interact(
+            pow_cell,
+            ui.id().with(("rack-pow", target, row)),
+            Sense::click(),
+        );
         match slot {
-            Some(s) => {
-                let pr = ui.interact(power, ui.id().with(("rack-pow", target, i)), Sense::click());
-                power_icon(&p, power, !s.bypass, pr.hovered(), th);
+            Some((_, s)) => {
+                power_icon(&p, pow_cell.shrink(2.0), !s.bypass, pr.hovered(), th);
                 if pr.on_hover_text("On or bypassed").clicked() {
-                    toggled = Some(i);
+                    toggled = *slot_i;
                 }
-                // The name: click to open, drag to move.
-                let id = ui.id().with(("rack-slot", target, i));
-                let open = st.fx_windows.contains(&(target, i));
-                let nr = ui
-                    .allocate_new_ui(egui::UiBuilder::new().max_rect(name_r), |ui| {
-                        ui.dnd_drag_source(id, i, |ui| {
-                            let text = RichText::new(slot_name(s)).color(if s.bypass {
-                                c(th.text_dim)
-                            } else {
-                                c(th.text)
-                            });
-                            let (r, resp) = ui.allocate_exact_size(name_r.size(), Sense::click());
-                            if open || resp.hovered() {
-                                ui.painter().rect_filled(
-                                    r,
-                                    Rounding::same(2.0),
-                                    ca(th.accent, if open { 40 } else { 20 }),
-                                );
-                            }
+            }
+            None => {
+                // An empty slot's switch, dim.
+                let dim = Theme {
+                    accent: th.text_dim,
+                    ..th.clone()
+                };
+                power_icon(&p, pow_cell.shrink(3.0), false, false, &dim);
+            }
+        }
+        // Menu column on the right.
+        let arrow = Rect::from_min_max(pos2(rect.right() - 22.0, rect.top()), rect.max);
+        p.line_segment(
+            [arrow.left_top(), arrow.left_bottom()],
+            Stroke::new(1.0_f32, ca(th.border, 120)),
+        );
+        // The name.
+        let name_r = Rect::from_min_max(
+            pos2(pow_cell.right() + 6.0, rect.top()),
+            pos2(arrow.left() - 4.0, rect.bottom()),
+        );
+        if let Some((i, s)) = slot {
+            let id = ui.id().with(("rack-slot", target, i));
+            let is_open = st.fx_windows.contains(&(target, i));
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(name_r), |ui| {
+                let r = ui
+                    .dnd_drag_source(id, i, |ui| {
+                        let (r, resp) = ui.allocate_exact_size(name_r.size(), Sense::click());
+                        ui.painter().text(
+                            r.left_center(),
+                            Align2::LEFT_CENTER,
+                            crate::plugins::slot_name(s),
+                            FontId::proportional(12.5),
+                            if s.bypass { c(th.text_dim) } else { c(th.text) },
+                        );
+                        if s.sidechain.is_some() {
                             ui.painter().text(
-                                r.left_center() + vec2(4.0, 0.0),
-                                Align2::LEFT_CENTER,
-                                text.text(),
-                                FontId::proportional(12.5),
-                                if s.bypass { c(th.text_dim) } else { c(th.text) },
+                                r.right_center(),
+                                Align2::RIGHT_CENTER,
+                                "key",
+                                FontId::proportional(9.5),
+                                c(th.accent_alt),
                             );
-                            if s.sidechain.is_some() {
-                                ui.painter().text(
-                                    r.right_center() - vec2(4.0, 0.0),
-                                    Align2::RIGHT_CENTER,
-                                    "key",
-                                    FontId::proportional(9.5),
-                                    c(th.accent_alt),
-                                );
-                            }
-                            resp
-                        })
+                        }
+                        if is_open {
+                            ui.painter().line_segment(
+                                [
+                                    r.left_bottom() + vec2(0.0, -2.0),
+                                    r.right_bottom() + vec2(0.0, -2.0),
+                                ],
+                                Stroke::new(1.0_f32, ca(th.accent, 160)),
+                            );
+                        }
+                        resp
                     })
                     .inner;
-                if nr.inner.clicked() {
-                    if open {
-                        st.fx_windows.retain(|w| *w != (target, i));
-                    } else {
-                        open_window(st, target, i);
+                if r.clicked() {
+                    st.rack_row = Some((target, row));
+                }
+                if r.double_clicked() {
+                    open = Some(i);
+                }
+                r.on_hover_text("Double-click to open. Drag to another row to move it.");
+            });
+        } else if resp.clicked() {
+            st.rack_row = Some((target, row));
+        }
+        if resp.double_clicked() {
+            if let Some(i) = *slot_i {
+                open = Some(i);
+            }
+        }
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(arrow), |ui| {
+            ui.menu_button(RichText::new("▸").color(c(th.text)), |ui| match slot {
+                Some((i, _)) => {
+                    if ui.button("Open").clicked() {
+                        open = Some(i);
+                        ui.close_menu();
+                    }
+                    ui.menu_button("Replace With", |ui| {
+                        if let Some(id) = effect_picker(ui) {
+                            removed = Some(i);
+                            add_at = Some((row, id));
+                        }
+                    });
+                    ui.separator();
+                    if ui.button("Remove").clicked() {
+                        removed = Some(i);
+                        ui.close_menu();
                     }
                 }
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(arrow), |ui| {
-                    ui.menu_button("▸", |ui| {
-                        if ui.button("Open").clicked() {
-                            open_window(st, target, i);
-                            ui.close_menu();
-                        }
-                        ui.menu_button("Replace With", |ui| {
-                            if let Some(id) = effect_picker(ui) {
-                                add_at = Some((i, id));
-                                removed = Some(i);
-                            }
-                        });
-                        ui.separator();
-                        if ui
-                            .add_enabled(i > 0, egui::Button::new("Move Up"))
-                            .clicked()
-                        {
-                            moved = Some((i, i - 1));
-                            ui.close_menu();
-                        }
-                        if ui
-                            .add_enabled(i + 1 < list.len(), egui::Button::new("Move Down"))
-                            .clicked()
-                        {
-                            moved = Some((i, i + 1));
-                            ui.close_menu();
-                        }
-                        if ui.button("Remove").clicked() {
-                            removed = Some(i);
-                            ui.close_menu();
-                        }
-                    });
-                });
-            }
-            None if i == list.len() => {
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(name_r), |ui| {
-                    ui.menu_button(RichText::new("+ Add effect").color(c(th.text_dim)), |ui| {
-                        if let Some(id) = effect_picker(ui) {
-                            add_at = Some((i, id));
-                        }
-                    });
-                });
-            }
-            None => {}
-        }
-        // Dropped here: the slot moves to this row (an empty row past the
-        // end: to the end).
-        let resp = ui.interact(rect, ui.id().with(("rack-drop", target, i)), Sense::hover());
-        if let Some(from) = resp.dnd_hover_payload::<usize>() {
-            if *from != i {
+                None => {
+                    ui.label(RichText::new(format!("Slot {}", row + 1)).small());
+                    if let Some(id) = effect_picker(ui) {
+                        add_at = Some((row, id));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(if slot.is_some() {
+                "Effect menu"
+            } else {
+                "Add an effect here"
+            });
+        });
+        // Dropped on this row: the slot moves here (pushing down what is
+        // here and after it).
+        let drop = ui.interact(
+            rect,
+            ui.id().with(("rack-drop", target, row)),
+            Sense::hover(),
+        );
+        if let Some(from) = drop.dnd_hover_payload::<usize>() {
+            if map.get(row).copied().flatten() != Some(*from) {
                 p.line_segment(
                     [rect.left_top(), rect.right_top()],
                     Stroke::new(2.0_f32, c(th.accent)),
                 );
             }
         }
-        if let Some(from) = resp.dnd_release_payload::<usize>() {
-            let to = i.min(list.len().saturating_sub(1));
-            if *from != to {
-                moved = Some((*from, to));
-            }
+        if let Some(from) = drop.dnd_release_payload::<usize>() {
+            moved = Some((*from, row));
         }
     }
     if let Some(i) = toggled {
@@ -373,19 +485,11 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
             st.live_slot(target, i);
             st.commit_live("Bypass", before.clone());
         }
-        crate::plugins::show_bypassed(st, target, i);
+    }
+    if let Some(i) = open {
+        open_window(st, target, i);
     }
     let mut changed = false;
-    if let Some((from, to)) = moved {
-        if let Some(c) = chain_of(st, target) {
-            if from < c.len() && to < c.len() {
-                let s = c.remove(from);
-                c.insert(to, s);
-                changed = true;
-            }
-        }
-        remap_windows(st, target, from, Some(to));
-    }
     if let Some(i) = removed {
         if let Some(c) = chain_of(st, target) {
             if i < c.len() {
@@ -395,15 +499,48 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
         }
         remap_windows(st, target, i, None);
     }
-    if let Some((i, id)) = add_at {
+    if let Some((row, id)) = add_at {
+        let mut made = None;
         if let Some(c) = chain_of(st, target) {
             if c.len() < CHAIN_SLOTS {
-                let at = i.min(c.len());
-                c.insert(at, new_slot(&id));
+                let mut sl = new_slot(&id);
+                sl.position = Some(row as u8);
+                c.push(sl);
+                let new_i = c.len() - 1;
+                let order = place(c, Some((new_i, row)));
+                made = order.iter().position(|&o| o == new_i);
                 changed = true;
-                open_window(st, target, at);
             }
         }
+        st.fx_windows.retain(|(t, _)| *t != target);
+        if let Some(at) = made {
+            open_window(st, target, at);
+            st.rack_row = Some((target, row));
+        }
+    }
+    if let Some((from, row)) = moved {
+        let mut order = None;
+        if let Some(c) = chain_of(st, target) {
+            if from < c.len() {
+                order = Some(place(c, Some((from, row))));
+                changed = true;
+            }
+        }
+        if let Some(order) = order {
+            // Effect windows follow their slots to the new order.
+            st.fx_windows = st
+                .fx_windows
+                .iter()
+                .map(|&(t, i)| {
+                    if t == target {
+                        (t, order.iter().position(|&o| o == i).unwrap_or(i))
+                    } else {
+                        (t, i)
+                    }
+                })
+                .collect();
+        }
+        st.rack_row = Some((target, row));
     }
     if changed {
         structural(st, target, "Effects rack", before);
@@ -415,6 +552,7 @@ pub fn new_slot(id: &str) -> EffectSlot {
         return crate::plugins::new_slot(id);
     }
     EffectSlot {
+        position: None,
         values: crate::fx::defaults(id),
         effect: id.to_string(),
         bypass: false,
@@ -475,42 +613,129 @@ pub fn power_icon(p: &egui::Painter, r: Rect, on: bool, hot: bool, th: &Theme) {
     }
 }
 
-/// The rack's own power, input, output and mix.
+/// A level meter across, -48..0 dB, with its scale under it on the last.
+fn meter(ui: &mut egui::Ui, level: f32, th: &Theme, scale: bool) {
+    let w = ui.available_width().max(40.0);
+    let (r, _) = ui.allocate_exact_size(vec2(w, if scale { 22.0 } else { 12.0 }), Sense::hover());
+    let bar = Rect::from_min_size(r.min, vec2(r.width(), 10.0));
+    let p = ui.painter();
+    p.rect_filled(bar, Rounding::ZERO, c(th.wave_background));
+    p.rect_stroke(
+        bar,
+        Rounding::ZERO,
+        Stroke::new(1.0_f32, ca(th.border, 200)),
+    );
+    let db = 20.0 * level.max(1e-9).log10();
+    let f = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
+    if f > 0.0 {
+        let lit = Rect::from_min_size(bar.min, vec2(bar.width() * f, bar.height()));
+        let col = if db > -0.1 {
+            c(th.meter_high)
+        } else if db > -12.0 {
+            c(th.meter_mid)
+        } else {
+            c(th.meter_low)
+        };
+        p.rect_filled(lit.shrink(1.0), Rounding::ZERO, col);
+    }
+    if scale {
+        for d in [-48.0f32, -36.0, -24.0, -12.0, 0.0] {
+            let x = bar.left() + bar.width() * (d + 48.0) / 48.0;
+            p.line_segment(
+                [pos2(x, bar.bottom()), pos2(x, bar.bottom() + 3.0)],
+                Stroke::new(1.0_f32, ca(th.text_dim, 160)),
+            );
+            p.text(
+                pos2(x, bar.bottom() + 4.0),
+                if d == 0.0 {
+                    Align2::RIGHT_TOP
+                } else {
+                    Align2::CENTER_TOP
+                },
+                format!("{d:.0}"),
+                FontId::proportional(9.0),
+                c(th.text_dim),
+            );
+        }
+        p.text(
+            pos2(bar.left(), bar.bottom() + 4.0),
+            Align2::LEFT_TOP,
+            "dB",
+            FontId::proportional(9.0),
+            c(th.text_dim),
+        );
+    }
+}
+
+/// The rack's input and output (dial and meter each), dry/wet mix, and
+/// the rack's power at the bottom left.
 fn rack_controls(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
     let before = st.session.clone();
     let Some(mut r) = rack_of(st, target).copied() else {
         return;
     };
+    let (lin, lout) = st.rack_levels(target);
     let mut changed = false;
     let mut done = false;
+    for (label, which) in [("Input", 0), ("Output", 1)] {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                vec2(46.0, 18.0),
+                egui::Label::new(RichText::new(format!("{label}:")).color(c(th.text_dim))),
+            );
+            let v = if which == 0 {
+                &mut r.input_db
+            } else {
+                &mut r.output_db
+            };
+            let resp =
+                crate::track_views::dial(ui, v, -24.0..=24.0, 0.0, |v| format!("{v:+.0}"), th)
+                    .on_hover_text("dB. Double-click for 0.");
+            changed |= resp.changed();
+            done |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
+            meter(ui, if which == 0 { lin } else { lout }, th, which == 1);
+        });
+    }
     ui.horizontal(|ui| {
-        let (pr, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+        ui.add_sized(
+            vec2(46.0, 18.0),
+            egui::Label::new(RichText::new("Mix:").color(c(th.text_dim))),
+        );
+        ui.label(RichText::new("Dry").size(11.0).color(c(th.text_dim)));
+        let mut pct = r.mix * 100.0;
+        ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(60.0);
+        let resp = ui.add(crate::widgets::Slider::new(&mut pct, 0.0..=100.0).show_value(false));
+        ui.label(RichText::new("Wet").size(11.0).color(c(th.text_dim)));
+        ui.label(RichText::new(format!("{pct:.0} %")).color(c(th.accent)));
+        if resp.changed() {
+            r.mix = pct / 100.0;
+            changed = true;
+        }
+        if resp.double_clicked() {
+            r.mix = 1.0;
+            changed = true;
+            done = true;
+        }
+        done |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
+    });
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        let (pr, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
+        ui.painter().rect_filled(
+            pr,
+            Rounding::same(2.0),
+            if r.bypass {
+                c(th.panel_raised)
+            } else {
+                ca(th.accent, 50)
+            },
+        );
         power_icon(ui.painter(), pr, !r.bypass, resp.hovered(), th);
         if resp.on_hover_text("The whole rack on or off").clicked() {
             r.bypass = !r.bypass;
             changed = true;
             done = true;
         }
-        ui.add_space(4.0);
-        for (label, v, lo, hi, dflt) in [
-            ("Input", &mut r.input_db, -24.0f32, 24.0f32, 0.0f32),
-            ("Output", &mut r.output_db, -24.0, 24.0, 0.0),
-        ] {
-            ui.label(RichText::new(label).size(11.0).color(c(th.text_dim)));
-            let resp =
-                crate::track_views::dial(ui, v, lo..=hi, dflt, |v| format!("{v:+.1} dB"), th);
-            changed |= resp.changed();
-            done |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
-        }
-        ui.label(RichText::new("Mix").size(11.0).color(c(th.text_dim)));
-        let mut pct = r.mix * 100.0;
-        let resp =
-            crate::track_views::dial(ui, &mut pct, 0.0..=100.0, 100.0, |v| format!("{v:.0}%"), th);
-        if resp.changed() {
-            r.mix = pct / 100.0;
-            changed = true;
-        }
-        done |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
     });
     if changed {
         if let Some(x) = rack_of(st, target) {
@@ -630,7 +855,7 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
         vec2(w, 22.0),
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
-            ui.menu_button("Delete", |ui| {
+            ui.menu_button(RichText::new("🗑").size(14.0), |ui| {
                 if names.is_empty() {
                     ui.label("No presets saved yet.");
                 }
@@ -644,7 +869,7 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
             .response
             .on_hover_text("Delete a saved preset");
             if ui
-                .button("Save")
+                .button(RichText::new("💾").size(14.0))
                 .on_hover_text("Save this rack as a preset")
                 .clicked()
             {
@@ -750,39 +975,43 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
         };
         let mut keep = true;
         let title = format!("{}: {}", target_name(st, target), slot_name(&slot));
-        egui::Window::new(RichText::new(&title).strong())
-            .id(egui::Id::new(("fx-window", target, i)))
-            .open(&mut keep)
-            .resizable(false)
-            .collapsible(true)
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let (pr, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
-                    power_icon(ui.painter(), pr, !slot.bypass, resp.hovered(), &th);
-                    if resp.on_hover_text("On or bypassed").clicked() {
-                        let before = st.session.clone();
-                        if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
-                            s.bypass = !s.bypass;
-                        }
-                        if target != FILE {
-                            st.live_slot(target, i);
-                            st.commit_live("Bypass", before);
-                        }
-                        crate::plugins::show_bypassed(st, target, i);
+        crate::ui::popup(
+            ctx,
+            egui::Id::new(("fx-window", target, i)),
+            RichText::new(&title).strong(),
+        )
+        .id(egui::Id::new(("fx-window", target, i)))
+        .open(&mut keep)
+        .resizable(false)
+        .collapsible(true)
+        .default_width(320.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let (pr, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                power_icon(ui.painter(), pr, !slot.bypass, resp.hovered(), &th);
+                if resp.on_hover_text("On or bypassed").clicked() {
+                    let before = st.session.clone();
+                    if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
+                        s.bypass = !s.bypass;
                     }
-                    ui.label(RichText::new(format!("Slot {}", i + 1)).color(c(th.text_dim)));
-                });
-                if target != FILE && target != MASTER && crate::fx::takes_key(&slot.effect) {
-                    listen_to(ui, st, target, i, &th);
+                    if target != FILE {
+                        st.live_slot(target, i);
+                        st.commit_live("Bypass", before);
+                    }
+                    crate::plugins::show_bypassed(st, target, i);
                 }
-                ui.separator();
-                if af27_core::plugin::is_plugin(&slot.effect) {
-                    crate::plugins::slot_controls(ui, st, target, i, &th);
-                } else {
-                    slot_controls(ui, st, target, i, &th);
-                }
+                ui.label(RichText::new(format!("Slot {}", i + 1)).color(c(th.text_dim)));
             });
+            if target != FILE && target != MASTER && crate::fx::takes_key(&slot.effect) {
+                listen_to(ui, st, target, i, &th);
+            }
+            ui.separator();
+            if af27_core::plugin::is_plugin(&slot.effect) {
+                crate::plugins::slot_controls(ui, st, target, i, &th);
+            } else {
+                slot_controls(ui, st, target, i, &th);
+            }
+        });
         if !keep {
             st.fx_windows.retain(|w| *w != (target, i));
         }
@@ -930,4 +1159,45 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
 #[allow(dead_code)]
 fn faint(th: &Theme) -> Color32 {
     lerp(th.panel, th.text, 0.1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(pos: Option<u8>, id: &str) -> EffectSlot {
+        let mut s = new_slot(id);
+        s.position = pos;
+        s
+    }
+
+    #[test]
+    fn slots_keep_their_rows_with_gaps() {
+        let list = vec![slot(Some(2), "a"), slot(Some(4), "b"), slot(None, "c")];
+        let r = rows(&list);
+        assert_eq!(r[2], Some(0));
+        assert_eq!(r[4], Some(1));
+        assert_eq!(r[5], Some(2), "no row: right after the one before");
+        assert_eq!(r[0], None);
+    }
+
+    #[test]
+    fn a_drop_on_a_taken_row_pushes_down() {
+        let mut list = vec![slot(Some(0), "a"), slot(Some(1), "b"), slot(Some(5), "c")];
+        // Drop "c" on row 1: "b" moves to row 2.
+        let order = place(&mut list, Some((2, 1)));
+        let names: Vec<(String, Option<u8>)> = list
+            .iter()
+            .map(|s| (s.effect.clone(), s.position))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("a".into(), Some(0)),
+                ("c".into(), Some(1)),
+                ("b".into(), Some(2))
+            ]
+        );
+        assert_eq!(order, vec![0, 2, 1]);
+    }
 }

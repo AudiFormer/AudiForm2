@@ -907,15 +907,19 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
     if let Some(job) = &st.export.job {
         let frac = job.done.load(Ordering::Relaxed) as f32 / job.total as f32;
         let mut cancel = false;
-        egui::Window::new("Exporting")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(&job.label);
-                ui.add(egui::ProgressBar::new(frac.min(1.0)).show_percentage());
-                cancel = ui.button("Cancel").clicked();
-            });
+        crate::ui::popup(
+            ctx,
+            egui::Id::new(("af2-popup", "export.rs", 0)),
+            "Exporting",
+        )
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(&job.label);
+            ui.add(egui::ProgressBar::new(frac.min(1.0)).show_percentage());
+            cancel = ui.button("Cancel").clicked();
+        });
         if cancel {
             job.cancel.store(true, Ordering::Relaxed);
         }
@@ -939,7 +943,7 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
     let confirm = st.export.confirm.clone();
     let session_name = st.session.name.clone();
     let session_layout = st.session.space;
-    egui::Window::new(title(purpose))
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "export.rs", 1)), title(purpose))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

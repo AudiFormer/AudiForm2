@@ -976,7 +976,7 @@ fn dialogs(ctx: &egui::Context, st: &mut State) {
         }
     };
     let mut answer = None;
-    egui::Window::new(title)
+    crate::ui::popup(ctx, egui::Id::new(("af2-popup", "separation.rs", 0)), title)
         .id(egui::Id::new("separation_ask"))
         .collapsible(false)
         .resizable(false)
@@ -1061,6 +1061,7 @@ mod tests {
         s.tracks[0].volume_db = -3.0;
         s.tracks[0].solo = true;
         s.tracks[0].chain.push(af27_core::EffectSlot {
+            position: None,
             sidechain: None,
             effect: "gain".into(),
             values: vec![1.0],

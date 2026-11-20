@@ -88,6 +88,7 @@ fn plugin(cid: &str, params: &[(u32, f64)], key: Option<TrackId>) -> EffectSlot 
         d.set_param(id, v);
     }
     EffectSlot {
+        position: None,
         effect: format!("vst3:{cid}"),
         values: Vec::new(),
         bypass: false,

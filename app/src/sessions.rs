@@ -1756,41 +1756,47 @@ pub fn discard_recovery(r: &Recoverable) {
 pub fn windows(ctx: &egui::Context, st: &mut State) {
     if !st.sessions.recovery.is_empty() {
         let mut act: Option<(usize, bool)> = None;
-        egui::Window::new("Recover Unsaved Sessions")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("AudiForm 2 did not close normally last time. These sessions had unsaved changes:");
-                ui.add_space(6.0);
-                for (i, r) in st.sessions.recovery.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        let name = r
-                            .note
-                            .as_ref()
-                            .map_or("Autosave (earlier version)".to_string(), |n| n.name.clone());
-                        let saved = std::fs::metadata(&r.file)
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map(|d| stamp(d.as_secs() as i64))
-                            .unwrap_or_default();
-                        let where_ = r
-                            .note
-                            .as_ref()
-                            .and_then(|n| n.path.as_ref())
-                            .map_or("never saved".to_string(), |p| p.display().to_string());
-                        ui.label(egui::RichText::new(name).strong())
-                            .on_hover_text(format!("{where_}\nCopy written {saved} UTC"));
-                        if ui.button("Recover").clicked() {
-                            act = Some((i, true));
-                        }
-                        if ui.button("Discard").clicked() {
-                            act = Some((i, false));
-                        }
-                    });
-                }
-            });
+        crate::ui::popup(
+            ctx,
+            egui::Id::new(("af2-popup", "sessions.rs", 0)),
+            "Recover Unsaved Sessions",
+        )
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(
+                "AudiForm 2 did not close normally last time. These sessions had unsaved changes:",
+            );
+            ui.add_space(6.0);
+            for (i, r) in st.sessions.recovery.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let name = r
+                        .note
+                        .as_ref()
+                        .map_or("Autosave (earlier version)".to_string(), |n| n.name.clone());
+                    let saved = std::fs::metadata(&r.file)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| stamp(d.as_secs() as i64))
+                        .unwrap_or_default();
+                    let where_ = r
+                        .note
+                        .as_ref()
+                        .and_then(|n| n.path.as_ref())
+                        .map_or("never saved".to_string(), |p| p.display().to_string());
+                    ui.label(egui::RichText::new(name).strong())
+                        .on_hover_text(format!("{where_}\nCopy written {saved} UTC"));
+                    if ui.button("Recover").clicked() {
+                        act = Some((i, true));
+                    }
+                    if ui.button("Discard").clicked() {
+                        act = Some((i, false));
+                    }
+                });
+            }
+        });
         if let Some((i, keep)) = act {
             let r = st.sessions.recovery.remove(i);
             if keep {
@@ -1804,91 +1810,93 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
         let mut open = true;
         let mut done = false;
         let mut cancel = false;
-        egui::Window::new("Session Properties")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                let s = &st.session;
-                egui::Grid::new("af2-session-props")
-                    .num_columns(2)
-                    .spacing([16.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Name");
-                        ui.text_edit_singleline(&mut d.name);
-                        ui.end_row();
-                        ui.label("Sample rate");
-                        egui::ComboBox::from_id_salt("af2-props-rate")
-                            .selected_text(format!("{} Hz", d.rate))
-                            .show_ui(ui, |ui| {
-                                for r in [
-                                    22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400,
-                                    192_000,
-                                ] {
-                                    ui.selectable_value(&mut d.rate, r, format!("{r} Hz"));
-                                }
-                            });
-                        ui.end_row();
-                        let depth = st
-                            .session_base
-                            .as_ref()
-                            .and_then(|b| b["bit_depth"].as_u64())
-                            .unwrap_or(32);
-                        ui.label("Bit depth");
-                        ui.label(format!("{depth}-bit"));
-                        ui.end_row();
-                        let clips: usize =
-                            s.tracks.iter().map(|t| t.clips.len() + t.midi.len()).sum();
-                        let used: std::collections::HashSet<MediaId> = s
-                            .tracks
-                            .iter()
-                            .flat_map(|t| t.clips.iter().map(|c| c.media))
-                            .collect();
-                        for (k, v) in [
-                            ("Tracks", s.tracks.len().to_string()),
-                            ("Clips", clips.to_string()),
-                            ("Files used", used.len().to_string()),
-                            ("Markers", s.markers.len().to_string()),
-                            ("Length", af27_core::time::format_time(s.duration())),
-                        ] {
-                            ui.label(k);
-                            ui.label(v);
-                            ui.end_row();
-                        }
-                        ui.label("File");
-                        ui.label(
-                            st.session_path
-                                .as_ref()
-                                .map_or("Not saved yet".into(), |p| p.display().to_string()),
-                        );
-                        ui.end_row();
-                        let saved = st
-                            .session_path
-                            .as_ref()
-                            .and_then(|p| std::fs::metadata(p).ok())
-                            .and_then(|m| m.modified().ok())
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map_or("Never".into(), |t| {
-                                format!("{} UTC", stamp(t.as_secs() as i64))
-                            });
-                        ui.label("Saved");
-                        ui.label(if st.session_dirty {
-                            format!("{saved} (changed since)")
-                        } else {
-                            saved
+        crate::ui::popup(
+            ctx,
+            egui::Id::new(("af2-popup", "sessions.rs", 1)),
+            "Session Properties",
+        )
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            let s = &st.session;
+            egui::Grid::new("af2-session-props")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut d.name);
+                    ui.end_row();
+                    ui.label("Sample rate");
+                    egui::ComboBox::from_id_salt("af2-props-rate")
+                        .selected_text(format!("{} Hz", d.rate))
+                        .show_ui(ui, |ui| {
+                            for r in [
+                                22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+                            ] {
+                                ui.selectable_value(&mut d.rate, r, format!("{r} Hz"));
+                            }
                         });
+                    ui.end_row();
+                    let depth = st
+                        .session_base
+                        .as_ref()
+                        .and_then(|b| b["bit_depth"].as_u64())
+                        .unwrap_or(32);
+                    ui.label("Bit depth");
+                    ui.label(format!("{depth}-bit"));
+                    ui.end_row();
+                    let clips: usize = s.tracks.iter().map(|t| t.clips.len() + t.midi.len()).sum();
+                    let used: std::collections::HashSet<MediaId> = s
+                        .tracks
+                        .iter()
+                        .flat_map(|t| t.clips.iter().map(|c| c.media))
+                        .collect();
+                    for (k, v) in [
+                        ("Tracks", s.tracks.len().to_string()),
+                        ("Clips", clips.to_string()),
+                        ("Files used", used.len().to_string()),
+                        ("Markers", s.markers.len().to_string()),
+                        ("Length", af27_core::time::format_time(s.duration())),
+                    ] {
+                        ui.label(k);
+                        ui.label(v);
                         ui.end_row();
+                    }
+                    ui.label("File");
+                    ui.label(
+                        st.session_path
+                            .as_ref()
+                            .map_or("Not saved yet".into(), |p| p.display().to_string()),
+                    );
+                    ui.end_row();
+                    let saved = st
+                        .session_path
+                        .as_ref()
+                        .and_then(|p| std::fs::metadata(p).ok())
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map_or("Never".into(), |t| {
+                            format!("{} UTC", stamp(t.as_secs() as i64))
+                        });
+                    ui.label("Saved");
+                    ui.label(if st.session_dirty {
+                        format!("{saved} (changed since)")
+                    } else {
+                        saved
                     });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        done = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
+                    ui.end_row();
                 });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    done = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
             });
+        });
         if done {
             st.apply_props(&d);
         } else if open && !cancel {

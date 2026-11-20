@@ -317,6 +317,12 @@ pub struct State {
     /// File > New Audio File / New Multitrack Session dialogs.
     pub new_file_ui: Option<crate::new_dialogs::NewFileDraft>,
     pub new_session_ui: Option<crate::new_dialogs::NewSessionDraft>,
+    /// The rack row last clicked: (rack, row).
+    pub rack_row: Option<(u16, usize)>,
+    /// Each track's rack meters (from the mix the engine plays), and the
+    /// levels shown (falling back slowly).
+    pub rack_meters: Vec<std::sync::Arc<af27_engine::mix::RackMeter>>,
+    pub rack_shown: HashMap<u16, (f32, f32)>,
     /// The Import from Audiform 1 window.
     pub af1_prompt: Option<crate::af1_import::Prompt>,
     /// The clip whose Properties show, and a floating window for them.
@@ -572,6 +578,9 @@ impl State {
             new_file_ui: None,
             new_session_ui: None,
             af1_prompt: None,
+            rack_row: None,
+            rack_meters: Vec::new(),
+            rack_shown: HashMap::new(),
             want_properties: false,
             gesture: false,
             want_piano: false,
@@ -1112,7 +1121,11 @@ impl State {
             },
             Mode::Multitrack => {
                 let rate = self.engine.as_ref().map_or(self.session.rate, |e| e.rate);
-                af27_engine::mix_program(&self.session, &|m| self.media_buffer(m), rate)
+                let p = af27_engine::mix_program(&self.session, &|m| self.media_buffer(m), rate);
+                if let af27_engine::Program::Mix(m) = &p {
+                    self.rack_meters = m.tracks.iter().map(|t| t.meter.clone()).collect();
+                }
+                p
             }
         };
         if let Some(e) = &mut self.engine {
@@ -1945,6 +1958,25 @@ impl State {
                 .get_mut(track as usize)
                 .map(|t| &mut t.chain)
         }
+    }
+
+    /// A rack's input and output levels to show (linear), falling back
+    /// slowly between peaks. The master's output is the main meter.
+    pub fn rack_levels(&mut self, target: u16) -> (f32, f32) {
+        let fresh = if target == af27_engine::MASTER {
+            (
+                self.meter.0.max(self.meter.1),
+                self.meter.0.max(self.meter.1),
+            )
+        } else {
+            self.rack_meters
+                .get(target as usize)
+                .map_or((0.0, 0.0), |m| m.take())
+        };
+        let e = self.rack_shown.entry(target).or_insert((0.0, 0.0));
+        e.0 = fresh.0.max(e.0 * 0.88);
+        e.1 = fresh.1.max(e.1 * 0.88);
+        *e
     }
 
     /// A rack's power, levels or mix changed.

@@ -457,32 +457,36 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, cache: &mut WheelCache) {
     });
     if cache.colors_open {
         let mut open = true;
-        egui::Window::new("Phase Wheel colors")
-            .open(&mut open)
-            .resizable(false)
-            .show(ui.ctx(), |ui| {
-                let mut lo = st.phase.low.unwrap_or(low);
-                let mut hi = st.phase.high.unwrap_or(high);
-                ui.horizontal(|ui| {
-                    ui.label("Low notes (20 Hz)");
-                    if ui.color_edit_button_srgb(&mut lo).changed() {
-                        st.phase.low = Some(lo);
-                        st.phase.save();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("High notes (20 kHz)");
-                    if ui.color_edit_button_srgb(&mut hi).changed() {
-                        st.phase.high = Some(hi);
-                        st.phase.save();
-                    }
-                });
-                if ui.button("Reset to the theme's colors").clicked() {
-                    st.phase.low = None;
-                    st.phase.high = None;
+        crate::ui::popup(
+            ui.ctx(),
+            egui::Id::new(("af2-popup", "phasewheel.rs", 0)),
+            "Phase Wheel colors",
+        )
+        .open(&mut open)
+        .resizable(false)
+        .show(ui.ctx(), |ui| {
+            let mut lo = st.phase.low.unwrap_or(low);
+            let mut hi = st.phase.high.unwrap_or(high);
+            ui.horizontal(|ui| {
+                ui.label("Low notes (20 Hz)");
+                if ui.color_edit_button_srgb(&mut lo).changed() {
+                    st.phase.low = Some(lo);
                     st.phase.save();
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label("High notes (20 kHz)");
+                if ui.color_edit_button_srgb(&mut hi).changed() {
+                    st.phase.high = Some(hi);
+                    st.phase.save();
+                }
+            });
+            if ui.button("Reset to the theme's colors").clicked() {
+                st.phase.low = None;
+                st.phase.high = None;
+                st.phase.save();
+            }
+        });
         cache.colors_open = open;
     }
     if !details {

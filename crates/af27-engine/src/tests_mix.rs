@@ -107,6 +107,7 @@ impl Fx {
 
 fn limiter(look_ms: f32) -> EffectSlot {
     EffectSlot {
+        position: None,
         sidechain: None,
         effect: "limiter".into(),
         values: vec![0.0, 0.0, look_ms, 100.0],
@@ -118,6 +119,7 @@ fn limiter(look_ms: f32) -> EffectSlot {
 
 fn amp(db: f32) -> EffectSlot {
     EffectSlot {
+        position: None,
         sidechain: None,
         effect: "amplify".into(),
         values: vec![db],
@@ -424,6 +426,7 @@ fn a_key_meets_its_effect_in_step_after_earlier_look_ahead() {
     f.t(voice).volume_db = -200.0;
     f.t(music).chain.push(limiter(5.0));
     f.t(music).chain.push(EffectSlot {
+        position: None,
         sidechain: Some(voice),
         effect: "compressor".into(),
         values: vec![-10.0, 10.0, 1.0, 20.0, 0.0, 0.0],
@@ -450,6 +453,7 @@ fn one_thread_or_many_give_the_same_mix_with_buses_sends_keys_and_latency() {
     f.t(b).sends.push(send(verb, -3.0, 0.2, true));
     f.t(c).chain.push(limiter(3.0));
     f.t(c).chain.push(EffectSlot {
+        position: None,
         sidechain: Some(b),
         effect: "compressor".into(),
         values: vec![-30.0, 4.0, 1.0, 20.0, 0.0, 0.0],

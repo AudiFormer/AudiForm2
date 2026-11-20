@@ -456,89 +456,90 @@ impl SettingsUi {
         let size = vec2(820.0, 540.0)
             .min(ctx.screen_rect().size() - vec2(40.0, 60.0))
             .max(vec2(520.0, 360.0));
-        egui::Window::new("Settings")
-            .open(&mut window_open)
-            .collapsible(false)
-            .resizable(false)
-            .fixed_size(size)
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
-            .show(ctx, |ui| {
-                egui::TopBottomPanel::bottom("settings-foot")
-                    .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(0.0, 8.0)))
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| {
-                        hairline(ui, &th);
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Reset This Page").clicked() {
-                                draft.reset_page(PAGES[self.page], st);
+        crate::ui::popup(
+            ctx,
+            egui::Id::new(("af2-popup", "settings.rs", 0)),
+            "Settings",
+        )
+        .open(&mut window_open)
+        .collapsible(false)
+        .resizable(false)
+        .fixed_size(size)
+        .pivot(Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
+        .show(ctx, |ui| {
+            egui::TopBottomPanel::bottom("settings-foot")
+                .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(0.0, 8.0)))
+                .show_separator_line(false)
+                .show_inside(ui, |ui| {
+                    hairline(ui, &th);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset This Page").clicked() {
+                            draft.reset_page(PAGES[self.page], st);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let ok = egui::Button::new(
+                                RichText::new("   OK   ").strong().color(c(th.background)),
+                            )
+                            .fill(c(th.accent));
+                            if ui.add(ok).clicked() {
+                                apply = true;
+                                close = true;
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let ok = egui::Button::new(
-                                        RichText::new("   OK   ").strong().color(c(th.background)),
-                                    )
-                                    .fill(c(th.accent));
-                                    if ui.add(ok).clicked() {
-                                        apply = true;
-                                        close = true;
-                                    }
-                                    if ui.button("Apply").clicked() {
-                                        apply = true;
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        close = true;
-                                    }
-                                },
-                            );
+                            if ui.button("Apply").clicked() {
+                                apply = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
                         });
                     });
-                egui::SidePanel::left("settings-nav")
-                    .resizable(false)
-                    .exact_width(196.0)
-                    .frame(egui::Frame::none())
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("settings-nav-scroll")
-                            .show(ui, |ui| {
-                                for (i, name) in PAGES.iter().enumerate() {
-                                    if nav_item(ui, name, i == self.page, &th) {
-                                        self.page = i;
-                                    }
+                });
+            egui::SidePanel::left("settings-nav")
+                .resizable(false)
+                .exact_width(196.0)
+                .frame(egui::Frame::none())
+                .show_separator_line(false)
+                .show_inside(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("settings-nav-scroll")
+                        .show(ui, |ui| {
+                            for (i, name) in PAGES.iter().enumerate() {
+                                if nav_item(ui, name, i == self.page, &th) {
+                                    self.page = i;
                                 }
-                            });
-                    });
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::none().inner_margin(egui::Margin {
-                        left: 18.0,
-                        right: 6.0,
-                        top: 2.0,
-                        bottom: 0.0,
-                    }))
-                    .show_inside(ui, |ui| {
-                        let name = PAGES[self.page];
-                        ui.label(RichText::new(name).size(19.0).color(c(th.text)));
-                        ui.add_space(4.0);
-                        hairline(ui, &th);
-                        ui.add_space(8.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("settings-page-scroll")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                page(ui, name, &mut draft, st, &th);
-                                let todo = coming(name);
-                                if !todo.is_empty() {
-                                    ui.add_space(10.0);
-                                    for t in todo {
-                                        note(ui, &th, &format!("Coming: {t}"));
-                                    }
+                            }
+                        });
+                });
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().inner_margin(egui::Margin {
+                    left: 18.0,
+                    right: 6.0,
+                    top: 2.0,
+                    bottom: 0.0,
+                }))
+                .show_inside(ui, |ui| {
+                    let name = PAGES[self.page];
+                    ui.label(RichText::new(name).size(19.0).color(c(th.text)));
+                    ui.add_space(4.0);
+                    hairline(ui, &th);
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("settings-page-scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            page(ui, name, &mut draft, st, &th);
+                            let todo = coming(name);
+                            if !todo.is_empty() {
+                                ui.add_space(10.0);
+                                for t in todo {
+                                    note(ui, &th, &format!("Coming: {t}"));
                                 }
-                            });
-                    });
-            });
+                            }
+                        });
+                });
+        });
         match draft.act.take() {
             Some(PageAct::RefreshDevices) => {
                 ensure_scan(&mut draft, st, true);
@@ -1540,7 +1541,7 @@ impl ShortcutsUi {
         }
         let mut open = true;
         let mut changed = false;
-        egui::Window::new("Keyboard Shortcuts")
+        crate::ui::popup(ctx, egui::Id::new(("af2-popup", "settings.rs", 1)), "Keyboard Shortcuts")
             .open(&mut open)
             .collapsible(false)
             .default_size(vec2(560.0, 560.0))

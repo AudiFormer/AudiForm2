@@ -558,6 +558,7 @@ mod tests {
             values[*i] = *v;
         }
         EffectSlot {
+            position: None,
             sidechain: None,
             effect: id.into(),
             values,
@@ -791,6 +792,7 @@ mod tests {
         let mut wide = 0;
         for e in Effect::all().filter(|e| e.realtime()) {
             let s = EffectSlot {
+                position: None,
                 sidechain: None,
                 effect: e.id().into(),
                 values: e.defaults(),
