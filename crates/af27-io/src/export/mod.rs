@@ -274,6 +274,33 @@ pub struct MarkerOut {
     pub name: String,
     pub time: f64,
     pub length: f64,
+    /// A chapter: FLAC files also get it as `CHAPTERnnn` comments, which
+    /// podcast apps and players read.
+    pub chapter: bool,
+}
+
+/// The `CHAPTERnnn=HH:MM:SS.mmm` and `CHAPTERnnnNAME=` comments for the
+/// chapter markers, in time order.
+pub fn chapter_comments(markers: &[MarkerOut]) -> Vec<String> {
+    let mut ch: Vec<&MarkerOut> = markers.iter().filter(|m| m.chapter).collect();
+    ch.sort_by(|a, b| a.time.total_cmp(&b.time));
+    ch.iter()
+        .enumerate()
+        .flat_map(|(i, m)| {
+            let ms = (m.time.max(0.0) * 1000.0).round() as u64;
+            let stamp = format!(
+                "{:02}:{:02}:{:02}.{:03}",
+                ms / 3_600_000,
+                ms / 60_000 % 60,
+                ms / 1000 % 60,
+                ms % 1000
+            );
+            [
+                format!("CHAPTER{:03}={stamp}", i + 1),
+                format!("CHAPTER{:03}NAME={}", i + 1, m.name),
+            ]
+        })
+        .collect()
 }
 
 /// Markers and tags for a file.
@@ -450,13 +477,14 @@ impl Exporter {
                 };
                 Sink::Wav(wav::WavWriter::new(file, spec, &meta.tags, &cues).map_err(open_err)?)
             }
-            Container::Flac => Sink::Flac(Box::new(flac::FlacWriter::new(
+            Container::Flac => Sink::Flac(Box::new(flac::FlacWriter::with_comments(
                 file,
                 rate,
                 channels,
                 format.bits() as usize,
                 opts.flac_level,
                 &meta.tags,
+                &chapter_comments(&meta.markers),
             )?)),
         };
         Ok(Exporter {
@@ -947,6 +975,7 @@ mod tests {
                 name: "Half".into(),
                 time: 0.5,
                 length: 0.25,
+                chapter: false,
             }],
             ..Default::default()
         };
@@ -961,6 +990,35 @@ mod tests {
         assert_eq!(
             (back.rate, back.num_channels(), back.frames()),
             (48_000, 2, 48_000)
+        );
+    }
+
+    #[test]
+    fn flac_carries_chapter_markers() {
+        let src = tone(48_000, 2, 3.0, 0.5);
+        let p = tmp("chapters.flac");
+        let opts = Options {
+            container: Container::Flac,
+            format: SampleFormat::I16,
+            ..Default::default()
+        };
+        let mk = |name: &str, time: f64, chapter: bool| MarkerOut {
+            name: name.into(),
+            time,
+            length: 0.0,
+            chapter,
+        };
+        let meta = Meta {
+            markers: vec![mk("Interview", 1.5, true), mk("cue", 1.0, false), mk("Intro", 0.0, true)],
+            ..Default::default()
+        };
+        export_buffer(&p, &src, &opts, &meta).unwrap();
+        let info = crate::meta::read_info(&p, 48_000);
+        let names: Vec<(&str, f64)> = info.markers.iter().map(|m| (m.name.as_str(), m.time)).collect();
+        assert_eq!(names, vec![("Intro", 0.0), ("Interview", 1.5)]);
+        assert_eq!(
+            chapter_comments(&meta.markers)[2],
+            "CHAPTER002=00:00:01.500"
         );
     }
 

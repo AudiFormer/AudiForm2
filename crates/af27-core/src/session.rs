@@ -670,12 +670,80 @@ impl Track {
     }
 }
 
+/// What a marker is for. The names are the ones `.audfrm` files save;
+/// a kind AudiForm 2 does not know is kept as it was written.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MarkerKind {
+    #[default]
+    Cue,
+    Chapter,
+    /// A place for an advert (exported as its own list, never as a chapter).
+    AdSlot,
+    /// A stretch to cut out as a short clip for social media.
+    SocialClip,
+    /// A span (a range marker).
+    Range,
+    Other(String),
+}
+
+impl MarkerKind {
+    /// The kinds offered in the Markers panel.
+    pub const OFFERED: [MarkerKind; 5] = [
+        MarkerKind::Cue,
+        MarkerKind::Chapter,
+        MarkerKind::AdSlot,
+        MarkerKind::SocialClip,
+        MarkerKind::Range,
+    ];
+
+    pub fn is_cue(&self) -> bool {
+        *self == MarkerKind::Cue
+    }
+
+    /// The name saved in `.audfrm` files.
+    pub fn key(&self) -> &str {
+        match self {
+            MarkerKind::Cue => "cue",
+            MarkerKind::Chapter => "chapter",
+            MarkerKind::AdSlot => "ad_slot",
+            MarkerKind::SocialClip => "social_clip",
+            MarkerKind::Range => "range",
+            MarkerKind::Other(s) => s,
+        }
+    }
+
+    pub fn from_key(k: &str) -> MarkerKind {
+        match k {
+            "" | "cue" => MarkerKind::Cue,
+            "chapter" => MarkerKind::Chapter,
+            "ad_slot" => MarkerKind::AdSlot,
+            "social_clip" => MarkerKind::SocialClip,
+            "range" => MarkerKind::Range,
+            o => MarkerKind::Other(o.to_string()),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            MarkerKind::Cue => "Cue",
+            MarkerKind::Chapter => "Chapter",
+            MarkerKind::AdSlot => "Ad Slot",
+            MarkerKind::SocialClip => "Social Clip",
+            MarkerKind::Range => "Range",
+            MarkerKind::Other(s) => s,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Marker {
     pub name: String,
     pub time: f64,
     #[serde(default)]
     pub length: f64,
+    /// What the marker is for (a cue, a chapter, an ad slot...).
+    #[serde(default, skip_serializing_if = "MarkerKind::is_cue")]
+    pub kind: MarkerKind,
     /// The object's id in an `.audfrm` file it came from, so saving back
     /// keeps everything Audiform27 does not use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1178,6 +1246,7 @@ mod tests {
             time: 1.0,
             length: 0.0,
             ext_id: None,
+            kind: Default::default(),
         });
         let back = Session::from_json(&s.to_json()).unwrap();
         assert_eq!(back, s);

@@ -521,6 +521,7 @@ fn an_export_reads_back_the_same() {
         time: 1.0,
         length: 0.0,
         ext_id: None,
+        kind: Default::default(),
     });
     let out = dir.join("Copy.sesx");
     let rep = crate::sesx_out::export(&s, &out).unwrap();

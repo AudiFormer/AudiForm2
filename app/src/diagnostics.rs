@@ -277,6 +277,7 @@ pub fn fix(buf: &AudioBuffer, kind: Kind, set: &Settings, items: &[(f64, f64)], 
                 time: *a,
                 length: *l,
                 ext_id: None,
+                kind: af27_core::session::MarkerKind::Range,
             })
             .collect()
     };

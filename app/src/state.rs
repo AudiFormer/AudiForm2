@@ -308,6 +308,8 @@ pub struct State {
     pub loudness: crate::loudness_meter::Meter,
     /// Auto Duck and Speaker Balance (Multitrack > Spoken Word).
     pub podcast: crate::podcast_tools::Dialogs,
+    /// The kind new markers get (Markers panel).
+    pub marker_kind: af27_core::session::MarkerKind,
     pub tool: Tool,
     pub show_about: bool,
     pub last_autosave: Instant,
@@ -593,6 +595,7 @@ impl State {
             diag: Default::default(),
             loudness: Default::default(),
             podcast: Default::default(),
+            marker_kind: Default::default(),
             tool: Tool::Move,
             show_about: false,
             last_autosave: Instant::now(),
@@ -2010,15 +2013,21 @@ impl State {
     }
 
     pub fn add_marker_at(&mut self, t: f64) {
+        let kind = self.marker_kind.clone();
+        let base = match kind {
+            af27_core::session::MarkerKind::Cue => "Marker".to_string(),
+            ref k => k.label().to_string(),
+        };
         match self.mode {
             Mode::Waveform => {
                 if let Some(d) = self.doc_mut() {
                     let n = d.markers.len() + 1;
                     d.markers.push(Marker {
-                        name: format!("Marker {n:02}"),
+                        name: format!("{} {n:02}", base),
                         time: t,
                         length: 0.0,
                         ext_id: None,
+                        kind: kind.clone(),
                     });
                     d.markers.sort_by(|a, b| a.time.total_cmp(&b.time));
                 }
@@ -2027,10 +2036,11 @@ impl State {
                 let before = self.session.clone();
                 let n = self.session.markers.len() + 1;
                 self.session.markers.push(Marker {
-                    name: format!("Marker {n:02}"),
+                    name: format!("{} {n:02}", base),
                     time: t,
                     length: 0.0,
                     ext_id: None,
+                    kind: kind.clone(),
                 });
                 self.session
                     .markers
@@ -2458,9 +2468,7 @@ impl State {
 }
 
 /// The markers and chapters read from a file, as document markers
-/// (ranges keep their length, clipped to the file). The marker model has
-/// no kinds yet, so cue, range and chapter are told apart only by length;
-/// the original kinds stay in `Doc::info`.
+/// (ranges keep their length, clipped to the file; chapters stay chapters).
 fn file_markers(info: &af27_io::meta::FileInfo, dur: f64) -> Vec<Marker> {
     let mut out: Vec<Marker> = info
         .markers
@@ -2471,6 +2479,11 @@ fn file_markers(info: &af27_io::meta::FileInfo, dur: f64) -> Vec<Marker> {
             time: m.time,
             length: m.length.min((dur - m.time).max(0.0)),
             ext_id: None,
+            kind: match m.kind {
+                af27_io::meta::MarkerKind::Cue => af27_core::session::MarkerKind::Cue,
+                af27_io::meta::MarkerKind::Range => af27_core::session::MarkerKind::Range,
+                af27_io::meta::MarkerKind::Chapter => af27_core::session::MarkerKind::Chapter,
+            },
         })
         .collect();
     out.sort_by(|a, b| a.time.total_cmp(&b.time));

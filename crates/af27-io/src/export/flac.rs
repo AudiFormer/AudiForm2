@@ -55,13 +55,19 @@ pub fn level_config(level: u8) -> config::Encoder {
 
 /// A VORBIS_COMMENT block's body.
 pub fn vorbis_comment(tags: &[(Tag, String)], vendor: &str) -> Vec<u8> {
+    vorbis_comment_with(tags, &[], vendor)
+}
+
+/// The same with more `KEY=value` fields after the tags (chapters).
+pub fn vorbis_comment_with(tags: &[(Tag, String)], extra: &[String], vendor: &str) -> Vec<u8> {
     let mut v = (vendor.len() as u32).to_le_bytes().to_vec();
     v.extend_from_slice(vendor.as_bytes());
-    let fields: Vec<String> = tags
+    let mut fields: Vec<String> = tags
         .iter()
         .filter(|(_, s)| !s.is_empty())
         .map(|(t, s)| format!("{}={s}", t.vorbis_name()))
         .collect();
+    fields.extend(extra.iter().cloned());
     v.extend_from_slice(&(fields.len() as u32).to_le_bytes());
     for f in fields {
         v.extend_from_slice(&(f.len() as u32).to_le_bytes());
@@ -108,12 +114,25 @@ pub struct FlacWriter<W: Write + Seek> {
 
 impl<W: Write + Seek> FlacWriter<W> {
     pub fn new(
+        out: W,
+        rate: u32,
+        channels: usize,
+        bits: usize,
+        level: u8,
+        tags: &[(Tag, String)],
+    ) -> Result<FlacWriter<W>, String> {
+        Self::with_comments(out, rate, channels, bits, level, tags, &[])
+    }
+
+    /// [`FlacWriter::new`] with more Vorbis comment fields (chapters).
+    pub fn with_comments(
         mut out: W,
         rate: u32,
         channels: usize,
         bits: usize,
         level: u8,
         tags: &[(Tag, String)],
+        extra: &[String],
     ) -> Result<FlacWriter<W>, String> {
         if channels == 0 || channels > MAX_CHANNELS {
             return Err(format!(
@@ -127,7 +146,7 @@ impl<W: Write + Seek> FlacWriter<W> {
             .into_verified()
             .map_err(|(_, e)| format!("FLAC settings: {e}"))?;
         let info = StreamInfo::new(rate as usize, channels, bits).map_err(ferr("stream"))?;
-        let comment = vorbis_comment(tags, "AudiForm 2 (flacenc)");
+        let comment = vorbis_comment_with(tags, extra, "AudiForm 2 (flacenc)");
         let h = header(&info, &comment, 0)?;
         out.write_all(&h).map_err(|e| e.to_string())?;
         Ok(FlacWriter {

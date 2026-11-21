@@ -1094,6 +1094,7 @@ fn xmp_markers(root: Node) -> Vec<Marker> {
                     .and_then(|t| t.parse::<f64>().ok())
                     .map_or(0.0, |d| d / fps),
                 ext_id: None,
+                kind: Default::default(),
             });
         }
     }
