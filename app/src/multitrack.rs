@@ -90,6 +90,12 @@ pub enum DragKind {
         clip: ClipId,
         left: bool,
     },
+    /// A MIDI clip's edge: the clip gets longer or shorter, its notes stay
+    /// where they sound.
+    TrimMidi {
+        clip: ClipId,
+        left: bool,
+    },
 }
 
 /// A handle on a clip, under the pointer.
@@ -114,6 +120,8 @@ pub struct Drag {
     /// under when the drag began, and still overlaps (it stays under
     /// them; see [`crate::overlap::restack`]).
     pub tucked: Vec<ClipId>,
+    /// Where the clip being dragged snapped this frame (a line shows it).
+    pub snap_line: Option<f64>,
 }
 
 /// The rectangle a clip fills in its row.
@@ -198,6 +206,113 @@ mod vzoom_tests {
         let (a, b) = d.sel.unwrap();
         assert!((a - 1.5).abs() < 1e-9 && (b - 3.5).abs() < 1e-9, "{a} {b}");
         assert!(d.view.start <= a && d.view.start + d.view.len >= b);
+    }
+
+    /// Runs the editor for one frame with `events`, full screen.
+    fn frame(ctx: &egui::Context, st: &mut State, caches: &mut Caches, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| editor(ui, st, caches));
+        });
+    }
+
+    /// Presses at `from`, drags in steps to `to` and lets go.
+    fn drag(ctx: &egui::Context, st: &mut State, caches: &mut Caches, from: egui::Pos2, to: egui::Pos2) {
+        use egui::{Event, PointerButton};
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(ctx, st, caches, vec![Event::PointerMoved(from)]);
+        frame(ctx, st, caches, vec![press(from, true)]);
+        for k in 1..=10 {
+            let p = from + (to - from) * (k as f32 / 10.0);
+            frame(ctx, st, caches, vec![Event::PointerMoved(p)]);
+        }
+        frame(ctx, st, caches, vec![press(to, false)]);
+        frame(ctx, st, caches, vec![]);
+    }
+
+    /// The lanes' left, width and top for a 1600 x 900 editor.
+    fn lanes_geom(st: &State) -> (f32, f32, f32) {
+        let metro = if st.session.tempo.metronome { crate::track_views::METRO_H } else { 0.0 };
+        (HEADER_W, 1600.0 - HEADER_W - VBAR_W, crate::overview::STRIP_H + 22.0 + metro)
+    }
+
+    #[test]
+    fn dragging_a_clip_edge_trims_it_even_after_the_pointer_left_the_edge() {
+        let mut st = State::new();
+        st.mode = crate::state::Mode::Multitrack;
+        st.prefs.snap_ruler = false;
+        let doc = st.add_doc("t.wav".into(), None, af27_core::AudioBuffer::new(48_000, 1, 48_000 * 20));
+        let m = st.media_for_doc(doc).unwrap();
+        let tid = st.session.tracks[0].id;
+        let id = st.session.add_clip(tid, m, 2.0).unwrap();
+        {
+            let (ti, ci) = st.session.find_clip(id).unwrap();
+            st.session.tracks[ti].clips[ci].length = 4.0;
+            st.session.tracks[ti].clips[ci].fade_in = 0.0;
+            st.session.tracks[ti].clips[ci].fade_out = 0.0;
+        }
+        st.session_view = View { start: 0.0, len: 10.0 };
+        let ctx = egui::Context::default();
+        let mut caches = Caches::default();
+        frame(&ctx, &mut st, &mut caches, vec![]);
+        frame(&ctx, &mut st, &mut caches, vec![]);
+        let (left, width, top) = lanes_geom(&st);
+        let x_of = |t: f64| left + width * (t / 10.0) as f32;
+        let y = top + st.session.tracks[0].height * 0.7;
+        // Grab 3 px inside the right edge (6 s) and pull out to 7.5 s.
+        drag(&ctx, &mut st, &mut caches, pos2(x_of(6.0) - 3.0, y), pos2(x_of(7.5), y));
+        let (ti, ci) = st.session.find_clip(id).unwrap();
+        let c = &st.session.tracks[ti].clips[ci];
+        assert!((c.start - 2.0).abs() < 1e-6, "start stays: {}", c.start);
+        assert!((c.end() - 7.5).abs() < 0.05, "end follows: {}", c.end());
+        // And the left edge in.
+        drag(&ctx, &mut st, &mut caches, pos2(x_of(2.0) + 3.0, y), pos2(x_of(3.0), y));
+        let c = &st.session.tracks[ti].clips[ci];
+        assert!((c.start - 3.0).abs() < 0.05, "left edge in: {}", c.start);
+        assert!((c.end() - 7.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn dragging_a_midi_clip_edge_trims_it_and_keeps_its_notes_in_place() {
+        let mut st = State::new();
+        st.mode = crate::state::Mode::Multitrack;
+        let t = st.add_track_kind(af27_core::TrackKind::Midi);
+        let ti = st.session.tracks.iter().position(|x| x.id == t).unwrap();
+        let mut clip = af27_core::midi::MidiClip::new(77, "m", 4.0, 8.0);
+        clip.notes.push(af27_core::midi::MidiNote { pitch: 60, start: 2.0, length: 1.0, velocity: 100, channel: 0, pan: 0.0 });
+        st.session.tracks[ti].midi.push(clip);
+        st.session_view = View { start: 0.0, len: 20.0 };
+        let ctx = egui::Context::default();
+        let mut caches = Caches::default();
+        frame(&ctx, &mut st, &mut caches, vec![]);
+        frame(&ctx, &mut st, &mut caches, vec![]);
+        let tempo = st.session.tempo.clone();
+        let (left, width, top) = lanes_geom(&st);
+        let x_of = |secs: f64| left + width * (secs / 20.0) as f32;
+        let row_top = top + st.session.tracks[..ti].iter().map(|t| t.height).sum::<f32>();
+        let y = row_top + st.session.tracks[ti].height * 0.7;
+        let end = tempo.secs(12.0);
+        drag(&ctx, &mut st, &mut caches, pos2(x_of(end) - 3.0, y), pos2(x_of(tempo.secs(16.0)), y));
+        let c = &st.session.tracks[ti].midi[0];
+        assert!((c.end_beats(&tempo) - 16.0).abs() < 1e-6, "end {}", c.end_beats(&tempo));
+        // Left edge in by two beats: the note stays where it sounds.
+        let note_at = c.start + c.notes[0].start;
+        drag(&ctx, &mut st, &mut caches, pos2(x_of(tempo.secs(4.0)) + 3.0, y), pos2(x_of(tempo.secs(6.0)), y));
+        let c = &st.session.tracks[ti].midi[0];
+        assert!((c.start - 6.0).abs() < 1e-6, "start {}", c.start);
+        assert!((c.start + c.notes[0].start - note_at).abs() < 1e-9);
+        assert!((c.end_beats(&tempo) - 16.0).abs() < 1e-6);
     }
 
     #[test]
@@ -561,8 +676,39 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         }
     }
 
-    // Pointer.
-    if let Some(pp) = resp.interact_pointer_pos() {
+    // A MIDI clip's edge under a point: within 6 px inside it, not on a
+    // stretch handle.
+    let midi_edge_at = |st: &State, pp: egui::Pos2| -> Option<(usize, ClipId, bool)> {
+        if st.tool != Tool::Move || midi_stretch_at(st, pp).is_some() {
+            return None;
+        }
+        let ti = track_at(st, lanes.top(), scroll, pp.y)?;
+        let tr = &st.session.tracks[ti];
+        for c in tr.midi.iter().rev() {
+            let x0 = time_to_x(&v, lanes, tempo.secs(c.start));
+            let x1 = time_to_x(&v, lanes, c.end_secs(&tempo));
+            if pp.x < x0 - 1.0 || pp.x > x1 + 1.0 || x1 - x0 < 14.0 {
+                continue;
+            }
+            if pp.x - x0 < 6.0 {
+                return Some((ti, c.id, true));
+            }
+            if x1 - pp.x < 6.0 {
+                return Some((ti, c.id, false));
+            }
+            return None;
+        }
+        None
+    };
+
+    // Pointer. A drag only begins once the pointer has moved a few
+    // pixels, so what was grabbed is found where the button went down.
+    if let Some(pp_now) = resp.interact_pointer_pos() {
+        let pp = if resp.drag_started_by(egui::PointerButton::Primary) {
+            ui.input(|i| i.pointer.press_origin()).unwrap_or(pp_now)
+        } else {
+            pp_now
+        };
         if resp.drag_started_by(egui::PointerButton::Primary)
             && lanes.contains(pp)
             && st.tool == Tool::Move
@@ -573,6 +719,11 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 st.selected_track = Some(st.session.tracks[ti].id);
                 drag.before = Some(st.session.clone());
                 drag.kind = Some(DragKind::StretchMidi { clip: id, left });
+            } else if let Some((ti, id, left)) = midi_edge_at(st, pp) {
+                st.selected_clip = Some(id);
+                st.selected_track = Some(st.session.tracks[ti].id);
+                drag.before = Some(st.session.clone());
+                drag.kind = Some(DragKind::TrimMidi { clip: id, left });
             } else if let Some((ti, id)) = hit_midi(st, pp) {
                 let (mti, mci) = st.session.find_midi(id).unwrap();
                 let grab = tempo.beats(x_to_time(&v, lanes, pp.x))
@@ -689,28 +840,34 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             drag.kind = kind;
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
+            let pp = pp_now;
             let t = x_to_time(&v, lanes, pp.x).max(0.0);
+            drag.snap_line = None;
             match drag.kind {
                 Some(DragKind::Move { clip, grab }) => {
                     let target = track_at(st, lanes.top(), scroll, pp.y);
                     if let Some((ti, ci)) = st.session.find_clip(clip) {
                         let mut new_start = (t - grab).max(0.0);
-                        // Snap to other clip edges and the playhead within 8 px.
-                        let snap_px = 8.0 * v.len / lanes.width() as f64;
+                        // The nearer of its start or end snaps, within 8 px.
                         let len = st.session.tracks[ti].clips[ci].length;
-                        let mut edges: Vec<f64> = vec![st.session_cursor, 0.0];
-                        for tr in &st.session.tracks {
-                            for c in tr.clips.iter().filter(|c| c.id != clip) {
-                                edges.push(c.start);
-                                edges.push(c.end());
+                        let edges = snap_edges(st, clip, &marker_times);
+                        let tol = 8.0 * v.len / lanes.width() as f64;
+                        let a = snap_time(st, new_start, &edges, tol, &v, lanes);
+                        let b = snap_time(st, new_start + len, &edges, tol, &v, lanes);
+                        match (a, b) {
+                            (Some(x), Some(y)) if (x - new_start).abs() <= (y - new_start - len).abs() => {
+                                new_start = x;
+                                drag.snap_line = Some(x);
                             }
-                        }
-                        for e in edges {
-                            if (new_start - e).abs() < snap_px {
-                                new_start = e;
-                            } else if (new_start + len - e).abs() < snap_px {
-                                new_start = e - len;
+                            (_, Some(y)) => {
+                                new_start = y - len;
+                                drag.snap_line = Some(y);
                             }
+                            (Some(x), None) => {
+                                new_start = x;
+                                drag.snap_line = Some(x);
+                            }
+                            (None, None) => {}
                         }
                         st.session.tracks[ti].clips[ci].start = new_start.max(0.0);
                         if let Some(to) = target.filter(|&to| to != ti) {
@@ -736,6 +893,15 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 }
                 Some(DragKind::TrimLeft { clip }) | Some(DragKind::TrimRight { clip }) => {
                     let left = matches!(drag.kind, Some(DragKind::TrimLeft { .. }));
+                    let edges = snap_edges(st, clip, &marker_times);
+                    let tol = 8.0 * v.len / lanes.width() as f64;
+                    let t = match snap_time(st, t, &edges, tol, &v, lanes) {
+                        Some(x) => {
+                            drag.snap_line = Some(x);
+                            x
+                        }
+                        None => t,
+                    };
                     if let Some((ti, ci)) = st.session.find_clip(clip) {
                         let media_len = {
                             let m = st.session.tracks[ti].clips[ci].media;
@@ -862,6 +1028,16 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         st.session_version += 1;
                     }
                 }
+                Some(DragKind::TrimMidi { clip, left }) => {
+                    if let Some((ti, ci)) = st.session.find_midi(clip) {
+                        // Edges land on whole beats, as MIDI clips move.
+                        let b = tempo.beats(t).round().max(0.0);
+                        let c = &mut st.session.tracks[ti].midi[ci];
+                        trim_midi(c, left, b, &tempo);
+                        drag.snap_line = Some(tempo.secs(b));
+                        st.session_version += 1;
+                    }
+                }
                 Some(DragKind::MoveMidi { clip, grab }) => {
                     if let Some((ti, ci)) = st.session.find_midi(clip) {
                         // Whole beats.
@@ -875,6 +1051,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         }
     }
     if resp.drag_stopped() {
+        drag.snap_line = None;
         if let (Some(kind), Some(before)) = (drag.kind.take(), drag.before.take()) {
             if before != st.session && !matches!(kind, DragKind::Select { .. }) {
                 let label = match kind {
@@ -882,6 +1059,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     DragKind::TrimLeft { .. } | DragKind::TrimRight { .. } => "Trim clip",
                     DragKind::Select { .. } => "Select",
                     DragKind::MoveMidi { .. } => "Move MIDI clip",
+                    DragKind::TrimMidi { .. } => "Trim MIDI clip",
                     DragKind::Fade { .. } => "Fade",
                     DragKind::Gain { .. } => "Clip gain",
                     DragKind::Stretch { .. } => "Stretch clip",
@@ -935,6 +1113,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if let Some(hp) = resp.hover_pos() {
         let icon = match (st.tool, hit(st, hp)) {
             _ if hover_midi_stretch.is_some() => egui::CursorIcon::ResizeHorizontal,
+            _ if midi_edge_at(st, hp).is_some() => egui::CursorIcon::ResizeHorizontal,
             _ if hover_handle.is_some() => match hover_handle.unwrap().2 {
                 Handle::Fade(_) => egui::CursorIcon::Move,
                 Handle::Gain => egui::CursorIcon::ResizeVertical,
@@ -1081,7 +1260,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             [row.left_bottom(), row.right_bottom()],
             Stroke::new(1.0_f32, c(th.grid)),
         );
-        if show_grid {
+        // Bar and beat lines only on MIDI tracks; audio lanes stay clean.
+        if show_grid && tr.kind == af27_core::TrackKind::Midi {
             crate::tempo::draw_grid(
                 &lane_p,
                 None,
@@ -1789,6 +1969,15 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         }
     }
     live_takes(&lane_p, st, lanes, scroll, &|t| time_to_x(&v, lanes, t));
+    if let Some(t) = caches.drag.snap_line.filter(|_| caches.drag.kind.is_some()) {
+        let x = time_to_x(&v, lanes, t);
+        if x >= lanes.left() && x <= lanes.right() {
+            lane_p.line_segment(
+                [pos2(x, lanes.top()), pos2(x, lanes.bottom())],
+                Stroke::new(1.0_f32, egui::Color32::from_white_alpha(220)),
+            );
+        }
+    }
     let x = time_to_x(&v, lanes, st.position());
     if x >= lanes.left() && x <= lanes.right() {
         playhead(&p, x, ruler.top(), lanes.bottom(), &th);
@@ -2903,5 +3092,79 @@ mod mixer_tests {
             assert!((super::fader_db(p) - d).abs() < 0.05, "{d}");
         }
         assert_eq!(super::fader_pos(0.0), 0.78);
+    }
+}
+
+/// Where a dragged clip's edges can snap: every other clip's edges, the
+/// playhead, the markers and the session start.
+fn snap_edges(st: &State, moving: ClipId, markers: &[f64]) -> Vec<f64> {
+    let mut e = vec![0.0, st.session_cursor];
+    e.extend_from_slice(markers);
+    for tr in &st.session.tracks {
+        for c in tr.clips.iter().filter(|c| c.id != moving) {
+            e.push(c.start);
+            e.push(c.end());
+        }
+    }
+    e
+}
+
+/// `t` snapped to the nearest of `edges` within `tol` seconds, else to a
+/// ruler mark when Snap to Ruler is on; None when nothing is near.
+fn snap_time(st: &State, t: f64, edges: &[f64], tol: f64, v: &View, lanes: Rect) -> Option<f64> {
+    let near = edges
+        .iter()
+        .copied()
+        .filter(|e| (e - t).abs() < tol)
+        .min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()));
+    if near.is_some() {
+        return near;
+    }
+    if st.prefs.snap_ruler {
+        let step = st.time_ctx().ruler_step(v.len, lanes.width());
+        let m = crate::transport::snap_to_marks(t, step, tol);
+        if (m - t).abs() > 1e-12 {
+            return Some(m);
+        }
+    }
+    None
+}
+
+/// Moves a MIDI clip's `left` or right edge to beat `b`. Its notes and
+/// controller moves stay where they sound; notes outside the clip are
+/// kept (they come back if the edge goes back) but do not play.
+pub(crate) fn trim_midi(c: &mut af27_core::midi::MidiClip, left: bool, b: f64, tempo: &af27_core::midi::Tempo) {
+    let end = c.end_beats(tempo);
+    if left {
+        let new_start = b.min(end - 0.25).max(0.0);
+        // The clip's own beats per timeline beat at its start.
+        let own = c.length / (end - c.start).max(1e-9);
+        let d = (new_start - c.start) * own;
+        if d.abs() < 1e-12 {
+            return;
+        }
+        c.start = new_start;
+        c.length = (c.length - d).max(0.25 * own);
+        for n in &mut c.notes {
+            n.start -= d;
+        }
+        for e in &mut c.controls {
+            e.at -= d;
+        }
+    } else {
+        let target = b.max(c.start + 0.25);
+        // The length whose end lands on `target` (end grows with length).
+        let (mut lo, mut hi) = (0.0f64, (c.length * 4.0).max(target - c.start) * 4.0 + 4.0);
+        for _ in 0..60 {
+            let mid = (lo + hi) / 2.0;
+            let mut probe = c.clone();
+            probe.length = mid;
+            if probe.end_beats(tempo) < target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        c.length = hi.max(0.0625);
     }
 }
