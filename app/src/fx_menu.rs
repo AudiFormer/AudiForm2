@@ -157,4 +157,17 @@ mod tests {
             &vec![Item::Fx("af.echo".into(), "Delay and Echo".into())]
         );
     }
+
+    #[test]
+    fn the_rack_offers_the_menus_categories() {
+        let groups: Vec<String> = crate::fx::catalog().into_iter().map(|(g, _)| g).collect();
+        assert!(groups.iter().all(|g| CATEGORIES.contains(&g.as_str())), "{groups:?}");
+        assert!(groups.iter().all(|g| !g.contains("(Audiform)")));
+        let amp = crate::fx::catalog()
+            .into_iter()
+            .find(|(g, _)| g == "Amplitude and Compression")
+            .unwrap()
+            .1;
+        assert!(amp.iter().any(|(id, _)| id.starts_with("af.")), "Audiform effects sit with the built-in ones");
+    }
 }

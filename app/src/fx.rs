@@ -23,29 +23,41 @@ pub struct Control {
 }
 
 /// The effects a chain can add, grouped for the Add Effect menu: (group,
-/// [(id, name)]). Retired built-ins (the old Echo) still run in the
-/// sessions that have them but are not offered.
+/// [(id, name)]). The same categories as the Effects menu (built-in and
+/// Audiform effects side by side), keeping only what runs live. Retired
+/// built-ins (the old Echo) still run in the sessions that have them but
+/// are not offered.
 pub fn catalog() -> Vec<(String, Vec<(String, String)>)> {
+    use crate::fx_menu::Item;
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    for (group, list) in af27_dsp::effects::GROUPS {
-        let live: Vec<_> = list
+    let mut placed = std::collections::HashSet::new();
+    for (cat, items) in crate::fx_menu::categories() {
+        let list: Vec<(String, String)> = items
             .iter()
-            .filter(|e| e.realtime() && !crate::fx_menu::RETIRED.contains(e))
-            .map(|e| (e.id().to_string(), e.name().to_string()))
+            .filter_map(|it| match it {
+                Item::Builtin(e) if e.realtime() => Some((e.id().to_string(), e.name().to_string())),
+                Item::Fx(id, name) => Some((id.clone(), name.clone())),
+                _ => None,
+            })
             .collect();
-        if !live.is_empty() {
-            out.push((group.to_string(), live));
+        placed.extend(list.iter().map(|(id, _)| id.clone()));
+        if !list.is_empty() {
+            out.push((cat.to_string(), list));
         }
     }
-    let mut fx: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    for info in af27_fx::registry() {
-        let g = format!("{} (Audiform)", info.category);
-        match fx.iter_mut().find(|(n, _)| *n == g) {
-            Some((_, v)) => v.push((info.id.to_string(), info.name.to_string())),
-            None => fx.push((g, vec![(info.id.to_string(), info.name.to_string())])),
+    // Live built-ins the menu keeps at its top level (Invert...).
+    let rest: Vec<(String, String)> = af27_dsp::Effect::all()
+        .into_iter()
+        .filter(|e| e.realtime() && !crate::fx_menu::RETIRED.contains(e))
+        .filter(|e| !placed.contains(e.id()))
+        .map(|e| (e.id().to_string(), e.name().to_string()))
+        .collect();
+    if !rest.is_empty() {
+        match out.iter_mut().find(|(c, _)| c == "Special") {
+            Some((_, v)) => v.extend(rest),
+            None => out.push(("Special".to_string(), rest)),
         }
     }
-    out.extend(fx);
     out
 }
 
