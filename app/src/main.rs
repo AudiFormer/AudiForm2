@@ -24,6 +24,7 @@ mod hwcursor;
 mod inspector;
 mod keymap;
 mod lane_menu;
+mod loudness_meter;
 mod memstat;
 mod meters;
 mod midi_in;

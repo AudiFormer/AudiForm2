@@ -23,15 +23,17 @@ pub enum Workspace {
     Mixing,
     FocusedEdit,
     Mastering,
+    SpokenWord,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 5] = [
+    pub const ALL: [Workspace; 6] = [
         Workspace::Default,
         Workspace::Music,
         Workspace::Mixing,
         Workspace::FocusedEdit,
         Workspace::Mastering,
+        Workspace::SpokenWord,
     ];
 
     pub fn name(self) -> &'static str {
@@ -41,6 +43,7 @@ impl Workspace {
             Workspace::Mixing => "Mixing",
             Workspace::FocusedEdit => "Focused Edit",
             Workspace::Mastering => "Mastering",
+            Workspace::SpokenWord => "Spoken Word",
         }
     }
 
@@ -51,6 +54,7 @@ impl Workspace {
             Workspace::Mixing => "The Mixer up front with tall meters; files and markers on the left; the track Inspector on the right",
             Workspace::FocusedEdit => "As much room as possible for the timeline: files on the left, levels below",
             Workspace::Mastering => "Loudness statistics, spectrum and Phase Wheel on the right; the effect rack on the left",
+            Workspace::SpokenWord => "For podcasts and voice work: files, markers and the effect rack on the left; Diagnostics and the live Loudness meter on the right",
         }
     }
 
@@ -62,6 +66,7 @@ impl Workspace {
             Workspace::Mixing => "mixing",
             Workspace::FocusedEdit => "focused-edit",
             Workspace::Mastering => "mastering",
+            Workspace::SpokenWord => "spoken-word",
         }
     }
 
@@ -135,6 +140,17 @@ impl Workspace {
                 let [_spec, _phase] = s.split_below(lower, 0.5, vec![Phase, Visualizer]);
                 d
             }
+            Workspace::SpokenWord => {
+                let mut d = DockState::new(vec![Editor, Mixer]);
+                let s = d.main_surface_mut();
+                let [centre, left] = s.split_left(NodeIndex::root(), 0.18, vec![Files, Markers]);
+                let [_files, _rack] = s.split_below(left, 0.45, vec![Effects, History]);
+                let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
+                let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
+                let [_editor, right] = s.split_right(centre, 0.74, vec![Diagnostics]);
+                let [_diag, _loud] = s.split_below(right, 0.55, vec![Loudness, Statistics]);
+                d
+            }
         }
     }
 }
@@ -162,6 +178,15 @@ mod tests {
         assert_eq!(node(Tab::Phase), node(Tab::Spectrum));
         assert_ne!(node(Tab::Space), node(Tab::Phase));
         assert_ne!(node(Tab::AiSeparation), node(Tab::Phase));
+    }
+
+    #[test]
+    fn the_spoken_word_tools_stay_out_of_the_other_layouts() {
+        for w in Workspace::ALL {
+            let d = w.build();
+            let has = d.find_tab(&Tab::Diagnostics).is_some() && d.find_tab(&Tab::Loudness).is_some();
+            assert_eq!(has, w == Workspace::SpokenWord, "{}", w.name());
+        }
     }
 
     #[test]

@@ -159,6 +159,168 @@ pub fn analyze(buf: &AudioBuffer) -> Stats {
     }
 }
 
+/// A running loudness meter fed a stereo stream, per ITU-R BS.1770 and
+/// the EBU's meter definitions: momentary (last 400 ms), short-term
+/// (last 3 s), integrated since the last reset (gated), loudness range
+/// (10th to 95th percentile of gated short-term values) and the highest
+/// true peak (4x oversampled).
+#[derive(Debug, Clone)]
+pub struct LiveLoudness {
+    rate: u32,
+    k: [[Biquad; 2]; 2],
+    /// Frames per 100 ms step.
+    step: usize,
+    in_step: usize,
+    acc: f64,
+    /// Mean square of each 100 ms step (the last few seconds).
+    steps: Vec<f64>,
+    /// Momentary power at every step (the gating blocks).
+    blocks: Vec<f64>,
+    /// Short-term power at every step once 3 s have gone by.
+    shorts: Vec<f64>,
+    hist: [[f32; TP_TAPS]; 2],
+    kern: [[f32; TP_TAPS]; 4],
+    pub max_true_peak: f32,
+}
+
+const TP_TAPS: usize = 12;
+
+/// 4x interpolation taps (windowed sinc), one row per phase.
+fn tp_kernel() -> [[f32; TP_TAPS]; 4] {
+    let mut k = [[0.0f32; TP_TAPS]; 4];
+    for (p, row) in k.iter_mut().enumerate() {
+        for (t, v) in row.iter_mut().enumerate() {
+            let x = t as f64 - (TP_TAPS / 2) as f64 + 1.0 - p as f64 / 4.0;
+            let sinc = if x.abs() < 1e-9 { 1.0 } else { (PI * x).sin() / (PI * x) };
+            let w = 0.5 + 0.5 * (PI * x / (TP_TAPS as f64 / 2.0 + 1.0)).cos();
+            *v = (sinc * w) as f32;
+        }
+    }
+    k
+}
+
+fn lufs(power: f64) -> Option<f64> {
+    (power > 0.0).then(|| -0.691 + 10.0 * power.log10())
+}
+
+impl LiveLoudness {
+    pub fn new(rate: u32) -> Self {
+        let fs = rate.max(1) as f64;
+        Self {
+            rate: rate.max(1),
+            k: [k_weighting(fs), k_weighting(fs)],
+            step: (fs / 10.0).round().max(1.0) as usize,
+            in_step: 0,
+            acc: 0.0,
+            steps: Vec::new(),
+            blocks: Vec::new(),
+            shorts: Vec::new(),
+            hist: [[0.0; TP_TAPS]; 2],
+            kern: tp_kernel(),
+            max_true_peak: 0.0,
+        }
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// Starts again (integrated, range and peak forgotten).
+    pub fn reset(&mut self) {
+        *self = Self::new(self.rate);
+    }
+
+    fn mean(&self, n: usize) -> Option<f64> {
+        (self.steps.len() >= n)
+            .then(|| self.steps[self.steps.len() - n..].iter().sum::<f64>() / n as f64)
+    }
+
+    pub fn feed(&mut self, frames: &[[f32; 2]]) {
+        for f in frames {
+            for c in 0..2 {
+                let mut y = f[c] as f64;
+                for st in &mut self.k[c] {
+                    y = st.process(y);
+                }
+                self.acc += y * y;
+                let h = &mut self.hist[c];
+                h.copy_within(1.., 0);
+                h[TP_TAPS - 1] = f[c];
+                for row in &self.kern {
+                    let v: f32 = row.iter().zip(h.iter()).map(|(a, b)| a * b).sum();
+                    self.max_true_peak = self.max_true_peak.max(v.abs());
+                }
+            }
+            self.in_step += 1;
+            if self.in_step == self.step {
+                self.steps.push(self.acc / self.step as f64);
+                self.acc = 0.0;
+                self.in_step = 0;
+                if let Some(m) = self.mean(4) {
+                    self.blocks.push(m);
+                }
+                if let Some(s) = self.mean(30) {
+                    self.shorts.push(s);
+                }
+                if self.steps.len() > 600 {
+                    self.steps.drain(..300);
+                }
+            }
+        }
+    }
+
+    pub fn momentary(&self) -> Option<f64> {
+        self.mean(4).and_then(lufs)
+    }
+
+    pub fn short_term(&self) -> Option<f64> {
+        self.mean(30).and_then(lufs)
+    }
+
+    pub fn integrated(&self) -> Option<f64> {
+        gated(&self.blocks, 10.0).map(|(p, _)| p).and_then(lufs)
+    }
+
+    /// Loudness range in LU.
+    pub fn range(&self) -> Option<f64> {
+        let (_, kept) = gated(&self.shorts, 20.0)?;
+        if kept.len() < 2 {
+            return None;
+        }
+        let mut l: Vec<f64> = kept.iter().filter_map(|p| lufs(*p)).collect();
+        l.sort_by(f64::total_cmp);
+        let at = |q: f64| l[((l.len() - 1) as f64 * q).round() as usize];
+        Some(at(0.95) - at(0.10))
+    }
+
+    pub fn true_peak_db(&self) -> f64 {
+        db(self.max_true_peak as f64)
+    }
+
+    /// Seconds of programme measured.
+    pub fn measured_secs(&self) -> f64 {
+        self.blocks.len() as f64 / 10.0
+    }
+}
+
+/// Mean power of `blocks` after the absolute (-70 LUFS) gate and a
+/// relative gate `rel` LU under the absolute-gated mean, with the blocks
+/// kept.
+fn gated(blocks: &[f64], rel: f64) -> Option<(f64, Vec<f64>)> {
+    let abs = 10f64.powf((-70.0 + 0.691) / 10.0);
+    let a: Vec<f64> = blocks.iter().copied().filter(|p| *p > abs).collect();
+    if a.is_empty() {
+        return None;
+    }
+    let mean = a.iter().sum::<f64>() / a.len() as f64;
+    let thr = mean * 10f64.powf(-rel / 10.0);
+    let kept: Vec<f64> = a.into_iter().filter(|p| *p > thr).collect();
+    if kept.is_empty() {
+        return None;
+    }
+    Some((kept.iter().sum::<f64>() / kept.len() as f64, kept))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +398,53 @@ mod tests {
         assert!((c - b - 1.49).abs() < 0.05, "{c} {b}");
         assert_eq!(channel_weight(12, 8), 1.41);
         assert_eq!(channel_weight(2, 1), 1.0);
+    }
+
+    #[test]
+    fn the_live_meter_agrees_with_the_file_measure() {
+        let fs = 48_000;
+        let tone: Vec<[f32; 2]> = (0..fs * 6)
+            .map(|i| {
+                let v = (2.0 * PI * 997.0 * i as f64 / fs as f64).sin() as f32 * 0.1;
+                [v, v]
+            })
+            .collect();
+        let mut m = LiveLoudness::new(fs as u32);
+        for chunk in tone.chunks(1000) {
+            m.feed(chunk);
+        }
+        let buf = AudioBuffer {
+            rate: fs as u32,
+            channels: vec![
+                tone.iter().map(|f| f[0]).collect(),
+                tone.iter().map(|f| f[1]).collect(),
+            ],
+        };
+        let want = integrated_loudness(&buf).unwrap();
+        let got = m.integrated().unwrap();
+        assert!((got - want).abs() < 0.2, "{got} vs {want}");
+        assert!((m.momentary().unwrap() - want).abs() < 0.2);
+        assert!((m.short_term().unwrap() - want).abs() < 0.2);
+        assert!(m.range().unwrap() < 0.5, "a steady tone has no range");
+        assert!((m.true_peak_db() + 20.0).abs() < 0.3, "{}", m.true_peak_db());
+        m.reset();
+        assert!(m.integrated().is_none());
+    }
+
+    #[test]
+    fn a_loud_and_quiet_programme_has_a_range() {
+        let fs = 48_000;
+        let mut m = LiveLoudness::new(fs as u32);
+        for (amp, secs) in [(0.3f32, 10), (0.03, 10)] {
+            let part: Vec<[f32; 2]> = (0..fs * secs)
+                .map(|i| {
+                    let v = (2.0 * PI * 500.0 * i as f64 / fs as f64).sin() as f32 * amp;
+                    [v, v]
+                })
+                .collect();
+            m.feed(&part);
+        }
+        let r = m.range().unwrap();
+        assert!((r - 20.0).abs() < 2.5, "{r}");
     }
 }

@@ -40,6 +40,29 @@ pub fn push(l: f32, r: f32) {
 }
 
 /// The newest `n` frames (n at most CAPACITY), oldest first.
+/// The frames written since `pos` (a value this returned before, or 0),
+/// at most the ring's size, and the new position.
+pub fn since(pos: usize) -> (Vec<[f32; 2]>, usize) {
+    let w = WRITTEN.load(Ordering::Acquire);
+    let n = w.wrapping_sub(pos).min(CAPACITY);
+    let start = w.wrapping_sub(n);
+    let out = (0..n)
+        .map(|i| {
+            let at = (start.wrapping_add(i) % CAPACITY) * 2;
+            [
+                f32::from_bits(RING[at].load(Ordering::Relaxed)),
+                f32::from_bits(RING[at + 1].load(Ordering::Relaxed)),
+            ]
+        })
+        .collect();
+    (out, w)
+}
+
+/// Frames written so far (wrapping).
+pub fn written() -> usize {
+    WRITTEN.load(Ordering::Acquire)
+}
+
 pub fn latest(n: usize) -> Vec<[f32; 2]> {
     let n = n.min(CAPACITY);
     let end = WRITTEN.load(Ordering::Acquire);

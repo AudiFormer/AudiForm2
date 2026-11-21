@@ -35,10 +35,11 @@ pub enum Tab {
     Visualizer,
     Properties,
     Diagnostics,
+    Loudness,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 18] = [
+    pub const ALL: [Tab; 19] = [
         Tab::Properties,
         Tab::Visualizer,
         Tab::Inspector,
@@ -57,6 +58,7 @@ impl Tab {
         Tab::Spectrum,
         Tab::Selection,
         Tab::Diagnostics,
+        Tab::Loudness,
     ];
     /// The title for a crowded tab bar.
     pub fn short_title(self) -> &'static str {
@@ -92,6 +94,7 @@ impl Tab {
             Tab::PianoRoll => "Piano Roll",
             Tab::Visualizer => "Visualizer",
             Tab::Diagnostics => "Diagnostics",
+            Tab::Loudness => "Loudness",
         }
     }
 }
@@ -366,6 +369,7 @@ impl Viewer<'_> {
             Tab::PianoRoll => crate::pianoroll::panel(ui, self.st, &mut self.caches.piano),
             Tab::Visualizer => crate::visualizer::show(ui, self.st),
             Tab::Diagnostics => crate::diagnostics::panel(ui, self.st),
+            Tab::Loudness => crate::loudness_meter::panel(ui, self.st),
         }
     }
 }
