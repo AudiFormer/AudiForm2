@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use af27_core::session::{Marker, MediaItem};
 use af27_core::{AudioBuffer, History, MediaId, Range, Session};
@@ -721,6 +721,9 @@ impl State {
         let (tx, rx) = channel();
         let p = path.clone();
         std::thread::spawn(move || {
+            // A few files decode at once: a big session's dozens of files
+            // all at once ran slower and left the memory scattered.
+            let _turn = decode_turn();
             let _ = tx.send((p.clone(), af27_io::open_file(&p)));
         });
         self.jobs.push(Job::Load {
@@ -1498,6 +1501,23 @@ impl State {
 
     pub fn tick(&mut self) {
         let now = Instant::now();
+        if std::env::var_os("AF2_MEMLOG").is_some() {
+            thread_local!(static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
+            let due = LAST.with(|l| l.get().map_or(true, |t| now - t > Duration::from_secs(2)));
+            if due {
+                LAST.with(|l| l.set(Some(now)));
+                let held: usize = self.docs.iter().map(|d| d.buf.frames() * d.buf.num_channels() * 4).sum();
+                eprintln!(
+                    "mem: private {:.0} MB; {} files holding {:.0} MB; {} loading; stretched clips {:.0} MB; {} tracks pre-rendered",
+                    crate::memstat::private_mb(),
+                    self.docs.len(),
+                    held as f64 / 1048576.0,
+                    self.jobs.len(),
+                    af27_engine::stretch::cache_bytes().0 as f64 / 1048576.0,
+                    self.session.tracks.iter().filter(|t| t.prerender).count()
+                );
+            }
+        }
         self.watch_audio(now);
         // How long since the meters last moved: they fall by the second.
         let meter_dt = self
@@ -2478,4 +2498,25 @@ fn audio_view(s: &Session) -> Session {
         t.name.clear();
     }
     s
+}
+
+/// Waits for one of a few decoding turns; the turn ends when dropped.
+fn decode_turn() -> impl Drop {
+    use std::sync::{Condvar, Mutex, OnceLock};
+    struct Turn(&'static (Mutex<usize>, Condvar));
+    impl Drop for Turn {
+        fn drop(&mut self) {
+            *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+            self.0 .1.notify_one();
+        }
+    }
+    static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    let gate = GATE.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let most = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(2, 6);
+    let mut busy = gate.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *busy >= most {
+        busy = gate.1.wait(busy).unwrap_or_else(|e| e.into_inner());
+    }
+    *busy += 1;
+    Turn(gate)
 }

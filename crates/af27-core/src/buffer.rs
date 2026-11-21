@@ -46,7 +46,9 @@ impl AudioBuffer {
     pub fn from_interleaved(rate: u32, channels: usize, data: &[f32]) -> Self {
         let ch = channels.max(1);
         let frames = data.len() / ch;
-        let mut out = vec![Vec::with_capacity(frames); ch];
+        // Each channel sized up front (vec![v; n] clones, and a clone has
+        // no spare capacity, so the channels would grow by doubling).
+        let mut out: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity(frames)).collect();
         for frame in data.chunks_exact(ch) {
             for (c, s) in frame.iter().enumerate() {
                 out[c].push(*s);

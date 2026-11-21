@@ -317,7 +317,14 @@ fn decode_symphonia(src: Source, ext: Option<&str>, path: &Path) -> Result<Decod
     let mut channels = params.channels.map(|c| c.count()).unwrap_or(0);
     // Fixed once audio has been produced; later sections are fitted to it.
     let mut out_spec: Option<(u32, usize)> = None;
-    let mut interleaved: Vec<f32> = Vec::new();
+    // Sized from the file's own frame count when it gives one, so a long
+    // file does not grow by doubling (and hold up to twice its size).
+    let mut interleaved: Vec<f32> = Vec::with_capacity(
+        params
+            .n_frames
+            .map_or(0, |n| (n as usize).saturating_mul(channels.max(1)))
+            .min(1 << 31),
+    );
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut damaged = 0usize;
     let mut consecutive = 0usize;

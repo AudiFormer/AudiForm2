@@ -188,6 +188,18 @@ pub fn pending() -> usize {
     PENDING.load(Ordering::Acquire)
 }
 
+/// Bytes of finished stretched audio held (in use or kept), and entries.
+pub fn cache_bytes() -> (usize, usize) {
+    let c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let done = c.map.values().filter(|p| p.ready().is_some());
+    let (mut bytes, mut n) = (0, 0);
+    for p in done {
+        bytes += p.bytes();
+        n += 1;
+    }
+    (bytes, n)
+}
+
 /// Whether `clip` plays through a prepared buffer.
 pub fn needs(clip: &Clip) -> bool {
     clip.props.stretch.is_on()

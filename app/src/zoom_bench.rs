@@ -245,6 +245,16 @@ fn real_session_bench() {
             Err(_) => missing += 1,
         }
     }
+    let decoded: usize = st
+        .docs
+        .iter()
+        .map(|d| d.buf.frames() * d.buf.num_channels() * 4)
+        .sum();
+    eprintln!(
+        "decoded audio held: {:.0} MB; process private {:.0} MB",
+        decoded as f64 / 1048576.0,
+        crate::memstat::private_mb()
+    );
     let clips: usize = st.session.tracks.iter().map(|t| t.clips.len()).sum();
     let fx: usize = st.session.tracks.iter().map(|t| t.chain.len()).sum();
     eprintln!(
@@ -294,13 +304,30 @@ fn real_session_bench() {
         ms.push(frame(&ctx, &mut st, &mut caches));
     }
     report("draw: idle", ms);
+    eprintln!("after drawing: private {:.0} MB", crate::memstat::private_mb());
 
     // The audio engine: one block at a time from a third of the way in,
     // as the audio thread runs it.
     let rate = 48_000u32;
     let t = Instant::now();
     let program = af27_engine::mix_program(&st.session, &|m| st.media_buffer(m), rate);
-    eprintln!("mix build: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    eprintln!(
+        "mix build: {:.1} ms; private {:.0} MB",
+        t.elapsed().as_secs_f64() * 1e3,
+        crate::memstat::private_mb()
+    );
+    while af27_engine::stretch::pending() > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    eprintln!(
+        "stretched clips ready: {:.0} MB held; private {:.0} MB",
+        af27_engine::stretch::cache_bytes().0 as f64 / 1048576.0,
+        crate::memstat::private_mb()
+    );
+    for _ in 0..5 {
+        frame(&ctx, &mut st, &mut caches);
+    }
+    eprintln!("drawn with stretched clips: private {:.0} MB", crate::memstat::private_mb());
     let af27_engine::Program::Mix(mut mix) = program else {
         panic!("not a mix")
     };
@@ -333,4 +360,5 @@ fn real_session_bench() {
         ms,
     );
     eprintln!("audio: {over} of {blocks} blocks over budget");
+    eprintln!("after playing 20 s: private {:.0} MB", crate::memstat::private_mb());
 }
