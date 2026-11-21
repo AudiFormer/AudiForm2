@@ -27,7 +27,7 @@ pub use meters::SlotMeter;
 
 use effects::{
     amp, center, echo, mixer, modulation, parametric_eq, phase_curve, reverb, tube, tube_master,
-    verb, vocal, width,
+    restore, speech, verb, vocal, width,
 };
 
 /// Every effect, in menu order.
@@ -36,6 +36,13 @@ pub fn registry() -> Vec<EffectInfo> {
         amp::amp_info(),
         tube::preamp_info(),
         tube::opto_info(),
+        speech::leveler_info(),
+        speech::gate_info(),
+        restore::noise_info(),
+        restore::hiss_info(),
+        restore::room_info(),
+        restore::click_info(),
+        restore::clip_info(),
         tube_master::info(),
         vocal::vocal_info(),
         echo::echo_info(),
@@ -97,6 +104,13 @@ pub fn build_with(
     Some(match id {
         amp::AMP => Box::new(amp::AmpModel::new(p, rate, data)),
         tube::OPTO => Box::new(tube::Opto::new(p, rate, meter())),
+        speech::LEVELER => Box::new(speech::SpeechLeveler::new(p, rate)),
+        speech::GATE => Box::new(speech::BreathGate::new(p, rate)),
+        restore::NOISE => Box::new(restore::Spectral::noise(p, rate)),
+        restore::HISS => Box::new(restore::Spectral::hiss(p, rate)),
+        restore::ROOM => Box::new(restore::Spectral::room(p, rate)),
+        restore::CLICK => Box::new(restore::BlockRepair::click(p, rate)),
+        restore::CLIP => Box::new(restore::BlockRepair::clip(p, rate)),
         tube::PREAMP => Box::new(tube::Preamp::new(p, rate, meter())),
         tube_master::ID => Box::new(tube_master::TubeMaster::new(p, rate)),
         vocal::VOCAL => Box::new(vocal::VoxStrip::new(p, rate, meter())),
@@ -284,6 +298,13 @@ mod tests {
         stereo_width_runs_clean => width::WIDTH,
         phase_curve_runs_clean => phase_curve::ID,
         parametric_eq_runs_clean => parametric_eq::ID,
+        speech_leveler_runs_clean => speech::LEVELER,
+        breath_gate_runs_clean => speech::GATE,
+        noise_reducer_runs_clean => restore::NOISE,
+        hiss_reducer_runs_clean => restore::HISS,
+        room_reducer_runs_clean => restore::ROOM,
+        click_repair_runs_clean => restore::CLICK,
+        clip_repair_runs_clean => restore::CLIP,
     }
 
     #[test]
@@ -308,9 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn the_opto_leveler_and_tube_master_take_a_sidechain() {
+    fn the_keyed_effects_take_a_sidechain() {
         for i in registry() {
-            let keyed = [tube::OPTO, tube_master::ID].contains(&i.id);
+            let keyed = [tube::OPTO, tube_master::ID, speech::GATE].contains(&i.id);
             assert_eq!(takes_sidechain(i.id), keyed, "{}", i.id);
         }
         assert!(!takes_sidechain("af.nope"));
