@@ -71,6 +71,8 @@ pub enum DragKind {
         fade_in: bool,
         y0: f32,
         skew0: f32,
+        /// The other half of a linked crossfade, bent the opposite way.
+        partner: Option<ClipId>,
     },
     /// The clip-gain handle: up or right is louder.
     Gain {
@@ -108,6 +110,10 @@ pub struct Drag {
     pub menu: crate::lane_menu::MenuAt,
     /// A track being moved by its colour tab.
     pub track_move: Option<af27_core::TrackId>,
+    /// While a clip is dragged: the clips on its track it was tucked
+    /// under when the drag began, and still overlaps (it stays under
+    /// them; see [`crate::overlap::restack`]).
+    pub tucked: Vec<ClipId>,
 }
 
 /// The rectangle a clip fills in its row.
@@ -163,6 +169,35 @@ mod vzoom_tests {
         assert_eq!(gain_text(0.0), "0.0");
         assert_eq!(gain_text(-0.04), "0.0");
         assert_eq!(gain_text(12.0), "+12.0");
+    }
+
+    #[test]
+    fn double_clicking_a_clip_opens_the_part_of_its_file_it_plays() {
+        let mut st = State::new();
+        st.mode = crate::state::Mode::Multitrack;
+        let doc = st.add_doc(
+            "t.wav".into(),
+            None,
+            af27_core::AudioBuffer::new(48_000, 1, 48_000 * 10),
+        );
+        let m = st.media_for_doc(doc).unwrap();
+        let tid = st.session.tracks[0].id;
+        let id = st.session.add_clip(tid, m, 3.0).unwrap();
+        {
+            let (ti, ci) = st.session.find_clip(id).unwrap();
+            let c = &mut st.session.tracks[ti].clips[ci];
+            c.offset = 1.5;
+            c.length = 4.0;
+            c.props.stretch.mode = af27_core::StretchMode::Live;
+            c.props.stretch.ratio = 2.0; // two timeline seconds per source second
+        }
+        open_clip_source(&mut st, id);
+        assert_eq!(st.mode, crate::state::Mode::Waveform);
+        assert_eq!(st.current, Some(doc));
+        let d = st.doc().unwrap();
+        let (a, b) = d.sel.unwrap();
+        assert!((a - 1.5).abs() < 1e-9 && (b - 3.5).abs() < 1e-9, "{a} {b}");
+        assert!(d.view.start <= a && d.view.start + d.view.len >= b);
     }
 
     #[test]
@@ -398,6 +433,34 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         None
     };
 
+    // A hidden edge (a lower clip's end or start under a clip on top)
+    // under a point in the lower part of a lane, below the fade handles:
+    // (track index, the edge). The top clip's own edges come first.
+    let hidden_at = |st: &State, pp: egui::Pos2| -> Option<(usize, crate::overlap::HiddenEdge)> {
+        if st.tool != Tool::Move || !lanes.contains(pp) {
+            return None;
+        }
+        let ti = track_at(st, lanes.top(), scroll, pp.y)?;
+        let row_top = lanes.top() - scroll
+            + st.session.tracks[..ti]
+                .iter()
+                .map(|t| t.height)
+                .sum::<f32>();
+        let tr = &st.session.tracks[ti];
+        let body_top = row_top + 2.0;
+        let low = if tr.height - 4.0 >= 34.0 {
+            body_top + 28.0
+        } else {
+            body_top + 15.0
+        };
+        if pp.y < low || pp.y > row_top + tr.height - 2.0 {
+            return None;
+        }
+        let edges = crate::overlap::hidden_edges(&tr.clips);
+        crate::overlap::hidden_edge_near(&edges, pp.x, 5.0, |t| time_to_x(&v, lanes, t))
+            .map(|e| (ti, e))
+    };
+
     // Right-click: remember where, select what is there; the menu opens
     // from the lanes' response below.
     if resp.secondary_clicked() {
@@ -480,6 +543,14 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             if let Some((_, id)) = hit_midi(st, pp) {
                 st.piano_clip = Some(id);
                 st.want_piano = true;
+            } else if let Some((_, id, false, false)) = (st.tool != Tool::Razor
+                && lanes.contains(pp)
+                && handle_at(st, pp).is_none()
+                && hidden_at(st, pp).is_none())
+            .then(|| hit(st, pp))
+            .flatten()
+            {
+                open_clip_source(st, id);
             } else if let Some(ti) = track_at(st, lanes.top(), scroll, pp.y) {
                 if st.session.tracks[ti].kind == af27_core::TrackKind::Midi && lanes.contains(pp) {
                     let b = tempo.bar_floor(tempo.beats(x_to_time(&v, lanes, pp.x)).max(0.0));
@@ -518,6 +589,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         {
             let t = x_to_time(&v, lanes, pp.x).max(0.0);
             let handle = (st.tool == Tool::Move).then(|| handle_at(st, pp)).flatten();
+            let hidden = hidden_at(st, pp);
             let locked = |st: &State, id: ClipId| {
                 st.session
                     .find_clip(id)
@@ -540,6 +612,15 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                             } else {
                                 c.props.fade_out_skew
                             },
+                            partner: if st.prefs.link_crossfades {
+                                crate::overlap::crossfade_partner(
+                                    &st.session.tracks[cti].clips,
+                                    id,
+                                    fade_in,
+                                )
+                            } else {
+                                None
+                            },
                         }),
                         Handle::Gain => Some(DragKind::Gain {
                             clip: id,
@@ -553,6 +634,21 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 // On a selection edge: drag that edge, the other stays.
                 (Tool::Move | Tool::TimeSelect, _) if on_edge.is_some() => {
                     on_edge.map(|(_, other)| DragKind::Select { anchor: other })
+                }
+                // A lower clip's hidden edge, low in the lane: trims it
+                // (the top clip's own edges come first).
+                (Tool::Move, h) if hidden.is_some() && !h.is_some_and(|h| h.2 || h.3) => {
+                    let (ti, e) = hidden.unwrap();
+                    st.selected_clip = Some(e.clip);
+                    st.selected_track = Some(st.session.tracks[ti].id);
+                    if locked(st, e.clip) {
+                        st.toast("This clip's position is locked (right-click > Unlock Position).");
+                        None
+                    } else if e.end {
+                        Some(DragKind::TrimRight { clip: e.clip })
+                    } else {
+                        Some(DragKind::TrimLeft { clip: e.clip })
+                    }
                 }
                 (Tool::Move, Some((ti, id, _, _))) if locked(st, id) => {
                     st.selected_clip = Some(id);
@@ -583,6 +679,12 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             };
             if kind.is_some() {
                 drag.before = Some(st.session.clone());
+            }
+            drag.tucked.clear();
+            if let Some(DragKind::Move { clip, .. }) = kind {
+                if let Some((ti, _)) = st.session.find_clip(clip) {
+                    drag.tucked = crate::overlap::tucked_under(&st.session.tracks[ti].clips, clip);
+                }
             }
             drag.kind = kind;
         }
@@ -615,6 +717,19 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                             let c = st.session.tracks[ti].clips.remove(ci);
                             st.session.tracks[to].clips.push(c);
                             st.selected_track = Some(st.session.tracks[to].id);
+                        }
+                        // On top of what it now overlaps, unless it was
+                        // tucked under it; then the automatic crossfades,
+                        // from where the drag began.
+                        if let Some((ti, _)) = st.session.find_clip(clip) {
+                            let clips = &mut st.session.tracks[ti].clips;
+                            crate::overlap::prune_tucked(clips, clip, &mut drag.tucked);
+                            crate::overlap::restack(clips, clip, &drag.tucked);
+                        }
+                        if st.prefs.auto_crossfade {
+                            if let Some(before) = &drag.before {
+                                crate::overlap::auto_crossfade_drag(&mut st.session, before, clip);
+                            }
                         }
                         st.session_version += 1;
                     }
@@ -665,6 +780,11 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         }
                         c.fade_in = c.fade_in.min(c.length);
                         c.fade_out = c.fade_out.min(c.length - c.fade_in);
+                        if st.prefs.auto_crossfade {
+                            if let Some(before) = &drag.before {
+                                crate::overlap::auto_crossfade_drag(&mut st.session, before, clip);
+                            }
+                        }
                         st.session_version += 1;
                     }
                 }
@@ -673,6 +793,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     fade_in,
                     y0,
                     skew0,
+                    partner,
                 }) => {
                     if let Some((ti, ci)) = st.session.find_clip(clip) {
                         let c = &mut st.session.tracks[ti].clips[ci];
@@ -684,6 +805,17 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         } else {
                             c.fade_out = (c.end() - t).clamp(0.0, c.length - c.fade_in);
                             c.props.fade_out_skew = skew;
+                        }
+                        // The other half of a linked crossfade bends the
+                        // opposite way.
+                        if let Some((pti, pci)) = partner.and_then(|p| st.session.find_clip(p)) {
+                            let p = &mut st.session.tracks[pti].clips[pci];
+                            let mirrored = if skew == 0.0 { 0.0 } else { -skew };
+                            if fade_in {
+                                p.props.fade_out_skew = mirrored;
+                            } else {
+                                p.props.fade_in_skew = mirrored;
+                            }
                         }
                         st.session_version += 1;
                     }
@@ -810,6 +942,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             },
             (Tool::Razor, _) => egui::CursorIcon::Crosshair,
             _ if on_edge.is_some() => egui::CursorIcon::ResizeHorizontal,
+            _ if hidden_at(st, hp).is_some() => egui::CursorIcon::ResizeHorizontal,
             (Tool::Move, Some((_, _, true, _))) | (Tool::Move, Some((_, _, _, true))) => {
                 egui::CursorIcon::ResizeHorizontal
             }
@@ -960,7 +1093,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             );
         }
         let heard = heard_all.get(ti).copied().unwrap_or(true);
-        for clip in &tr.clips {
+        // Clips draw in stacking order (list order, later on top), so a
+        // clip on top is drawn last, over the ones under it.
+        for (ci, clip) in tr.clips.iter().enumerate() {
             let x0 = time_to_x(&v, lanes, clip.start);
             let x1 = time_to_x(&v, lanes, clip.end());
             if x1 < lanes.left() || x0 > lanes.right() {
@@ -974,6 +1109,17 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             let alpha = if heard && !clip.muted { 255 } else { 90 };
             let rnd = Rounding::same(th.rounding.min(cr.height() / 3.0));
             let ccol = clip.props.color.unwrap_or(tr.color);
+            // A clip lying over others hides them (they come through only
+            // under its fades, drawn below as their dashed fade lines).
+            let covers = tr.clips[..ci].iter().any(|u| {
+                crate::overlap::overlaps(crate::overlap::span(u), (clip.start, clip.end()))
+            });
+            if covers {
+                lane_p.rect_filled(cr, rnd, c(th.wave_background));
+                if selected {
+                    lane_p.rect_filled(cr, rnd, ca(tr.color, 10));
+                }
+            }
             lane_p.rect_filled(cr, rnd, ca(ccol, (alpha as f32 * 0.16) as u8));
             let title = Rect::from_min_size(cr.min, vec2(cr.width(), 15.0));
             lane_p.rect_filled(
@@ -1046,14 +1192,21 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     let vol = clip
                         .playing_lane(&af27_core::automation::LaneTarget::Volume)
                         .map(|l| l.points.as_slice());
+                    // And through its fades, on the curve playback uses.
+                    let faded = clip.fade_in > 0.0 || clip.fade_out > 0.0;
                     let gain = |x: f32| -> f32 {
+                        let fade = if faded {
+                            crate::overlap::fade_level(clip, x_to_time(&v, lanes, x)) as f32
+                        } else {
+                            1.0
+                        };
                         match vol {
                             Some(pts) => {
                                 let t = x_to_time(&v, lanes, x) - clip.start;
                                 let db = af27_core::automation::value_at(pts, t).unwrap_or(0.0);
-                                level * af27_core::time::db_to_gain(db as f32)
+                                fade * level * af27_core::time::db_to_gain(db as f32)
                             }
-                            None => level,
+                            None => fade * level,
                         }
                     };
                     for ch in 0..n {
@@ -1099,9 +1252,6 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             // Fades, drawn from the clip's own gain curve (so the shape is
             // what plays).
             let body_top = cr.top() + 15.0;
-            let unity = af27_core::time::db_to_gain(clip.gain_db).max(1e-9);
-            let mut quiet = clip.clone();
-            quiet.muted = false;
             for (on, a, b) in [
                 (clip.fade_in > 0.0, clip.start, clip.start + clip.fade_in),
                 (clip.fade_out > 0.0, clip.end() - clip.fade_out, clip.end()),
@@ -1113,8 +1263,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 let pts: Vec<egui::Pos2> = (0..=n)
                     .map(|k| {
                         let t = a + (b - a) * k as f64 / n as f64;
-                        let g = (quiet.gain_at(t.clamp(clip.start, clip.end() - 1e-9)) / unity)
-                            .clamp(0.0, 1.0);
+                        let g = crate::overlap::fade_level(clip, t) as f32;
                         pos2(
                             time_to_x(&v, lanes, t),
                             cr.bottom() - (cr.bottom() - body_top) * g,
@@ -1132,7 +1281,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 lane_p.add(egui::Shape::Path(egui::epaint::PathShape {
                     points: shade,
                     closed: true,
-                    fill: Color32::from_black_alpha(60),
+                    // Lighter now that the waveform tapers too.
+                    fill: Color32::from_black_alpha(36),
                     stroke: egui::epaint::PathStroke::NONE,
                 }));
                 lane_p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, c(th.text))));
@@ -1233,6 +1383,70 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                         Stroke::new(1.0_f32, ca(th.text, 200)),
                     ));
                 }
+            }
+        }
+        // Both halves of a crossfade: where a clip lies under another, its
+        // own fade line across the overlap, dashed in its colour, beside
+        // the top clip's solid one. And a thin line at each of its edges
+        // hidden under a clip on top (they can be grabbed low in the lane).
+        {
+            let cr_top = row.top() + 2.0;
+            let cr_bottom = row.bottom() - 2.0;
+            let body_top = cr_top + 15.0;
+            let y_of = |g: f64| cr_bottom - (cr_bottom - body_top) * g as f32;
+            for (i, lower) in tr.clips.iter().enumerate() {
+                let col = lower.props.color.unwrap_or(tr.color);
+                for upper in &tr.clips[i + 1..] {
+                    let (lo, hi) = (lower.start.max(upper.start), lower.end().min(upper.end()));
+                    if hi <= lo {
+                        continue;
+                    }
+                    for (a, b) in [
+                        (lower.start, lower.start + lower.fade_in),
+                        (lower.end() - lower.fade_out, lower.end()),
+                    ] {
+                        let (a, b) = (a.max(lo), b.min(hi));
+                        if b <= a {
+                            continue;
+                        }
+                        let (xa, xb) = (time_to_x(&v, lanes, a), time_to_x(&v, lanes, b));
+                        if xb < lanes.left() || xa > lanes.right() || xb - xa < 1.0 {
+                            continue;
+                        }
+                        let n = ((xb - xa) / 4.0).clamp(4.0, 48.0) as usize;
+                        let pts: Vec<egui::Pos2> = (0..=n)
+                            .map(|k| {
+                                let t = a + (b - a) * k as f64 / n as f64;
+                                pos2(
+                                    time_to_x(&v, lanes, t),
+                                    y_of(crate::overlap::fade_level(lower, t)),
+                                )
+                            })
+                            .collect();
+                        lane_p.extend(egui::Shape::dashed_line(
+                            &pts,
+                            Stroke::new(1.5_f32, c(col)),
+                            5.0,
+                            3.0,
+                        ));
+                    }
+                }
+            }
+            for e in crate::overlap::hidden_edges(&tr.clips) {
+                let x = time_to_x(&v, lanes, e.t);
+                if x < lanes.left() || x > lanes.right() {
+                    continue;
+                }
+                let col = tr
+                    .clips
+                    .iter()
+                    .find(|c| c.id == e.clip)
+                    .and_then(|c| c.props.color)
+                    .unwrap_or(tr.color);
+                lane_p.line_segment(
+                    [pos2(x, body_top), pos2(x, cr_bottom)],
+                    Stroke::new(1.0_f32, ca(col, 230)),
+                );
             }
         }
         for mc in &tr.midi {
@@ -1353,13 +1567,23 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     && hp.is_some_and(|hp| {
                         handle_at(st, hp).is_none()
                             && !hit(st, hp).is_some_and(|h| h.1 == clip.id && (h.2 || h.3))
+                            && hidden_at(st, hp).is_none()
                     });
                 crate::clip_lanes::overlay(ui, st, clip.id, row, &v, lanes, free);
             }
             // The lines menu at the right of each clip's title bar (on
             // rows tall enough to show lines).
             if row.height() >= 40.0 {
-                for clip in &tr.clips {
+                for (ci, clip) in tr.clips.iter().enumerate() {
+                    // Not on a clip whose end lies under a clip on top
+                    // (the button would sit on the top clip's title).
+                    let end = clip.end();
+                    if tr.clips[ci + 1..]
+                        .iter()
+                        .any(|u| u.start < end && end <= u.end())
+                    {
+                        continue;
+                    }
                     let x0 = time_to_x(&v, lanes, clip.start);
                     let x1 = time_to_x(&v, lanes, clip.end());
                     let cr = clip_rect(row.top(), row.height(), x0, x1);
@@ -1583,6 +1807,35 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         );
     }
     file_drop(ui, st, &resp, &p, lanes, scroll, &v, &snap_marks);
+}
+
+/// Double-click on a clip: its file in the Waveform editor, with the part
+/// the clip plays selected and zoomed to fit.
+pub(crate) fn open_clip_source(st: &mut State, id: ClipId) {
+    let Some((ti, ci)) = st.session.find_clip(id) else {
+        return;
+    };
+    let clip = st.session.tracks[ti].clips[ci].clone();
+    let Some(doc) = st.media_docs.get(&clip.media).copied() else {
+        st.toast("This clip's file is not loaded");
+        return;
+    };
+    let Some(len) = st.doc_by_id(doc).map(|d| d.duration()) else {
+        st.toast("This clip's file is not loaded");
+        return;
+    };
+    let (a, b) = crate::overlap::source_range(&clip, len);
+    st.current = Some(doc);
+    st.mode = crate::state::Mode::Waveform;
+    st.hand_moved_view();
+    let lim = st.doc_limits();
+    if let Some(d) = st.doc_mut() {
+        d.sel = (b > a).then_some((a, b));
+        d.cursor = a;
+        if b > a {
+            d.view = View::show_range(a, b, 0.05, &lim);
+        }
+    }
 }
 
 /// While recording onto tracks: each take so far, drawn as a clip that

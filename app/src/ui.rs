@@ -2290,7 +2290,7 @@ impl eframe::App for App {
         if !self.shown_env_tab {
             self.shown_env_tab = true;
             // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
-            // generate-tones | fx:<effect id>[?key=value&...] |
+            // generate-tones | overlap-demo | fx:<effect id>[?key=value&...] |
             // master-fx:<effect id>, for shots. AF2_FX_SET=key=value,... sets
             // the opened effect's controls (by key; `session_tempo` sets the
             // session's tempo); AF2_OPEN_DATA sets the slot's data (such as
@@ -2299,6 +2299,7 @@ impl eframe::App for App {
                 Ok("new-file") => crate::new_dialogs::open_new_file(&mut self.st),
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
                 Ok("multitrack") => self.st.mode = Mode::Multitrack,
+                Ok("overlap-demo") => crate::overlap::demo(&mut self.st),
                 Ok("generate-noise") => self.st.generate.noise_open = true,
                 Ok("generate-tones") => self.st.generate.tones_open = true,
                 // fx:<effect id>: that effect in the file's rack, open.
