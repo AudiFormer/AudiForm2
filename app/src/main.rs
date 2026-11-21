@@ -37,6 +37,7 @@ mod phasewheel;
 mod pianoroll;
 mod pictures;
 mod plugins;
+mod podcast_tools;
 mod pointers;
 mod prerender;
 mod rack;

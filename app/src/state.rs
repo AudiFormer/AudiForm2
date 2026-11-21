@@ -306,6 +306,8 @@ pub struct State {
     pub diag: crate::diagnostics::Diagnostics,
     /// The Loudness panel's live meter.
     pub loudness: crate::loudness_meter::Meter,
+    /// Auto Duck and Speaker Balance (Multitrack > Spoken Word).
+    pub podcast: crate::podcast_tools::Dialogs,
     pub tool: Tool,
     pub show_about: bool,
     pub last_autosave: Instant,
@@ -590,6 +592,7 @@ impl State {
             stats: None,
             diag: Default::default(),
             loudness: Default::default(),
+            podcast: Default::default(),
             tool: Tool::Move,
             show_about: false,
             last_autosave: Instant::now(),

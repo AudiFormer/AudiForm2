@@ -964,6 +964,24 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.live_metronome();
             }
             playback_menu_items(ui, st, km, &mut cmd);
+            ui.menu_button("Spoken Word", |ui| {
+                if ui
+                    .button("Auto Duck...")
+                    .on_hover_text("Dip music and effects tracks under the talking with volume automation")
+                    .clicked()
+                {
+                    st.podcast.duck_open = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Speaker Balance...")
+                    .on_hover_text("Bring every voice track to the same loudness with clip gain")
+                    .clicked()
+                {
+                    st.podcast.balance_open = true;
+                    ui.close_menu();
+                }
+            });
             ui.menu_button("Export", |ui| {
                 if ui.button("MIDI File...").clicked() {
                     ui.close_menu();
@@ -2753,6 +2771,7 @@ impl eframe::App for App {
         }
         crate::rack::windows(ctx, &mut self.st);
         crate::new_dialogs::show(ctx, &mut self.st);
+        crate::podcast_tools::show(ctx, &mut self.st);
         crate::af1_import::window(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
