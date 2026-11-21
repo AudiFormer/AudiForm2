@@ -4,7 +4,7 @@ members = ["crates/*", "app"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "2.0.0-alpha.1"
+version = "2.0.1"
 edition = "2021"
 authors = ["The Audiform27 contributors"]
 repository = "https://github.com/nwh212/Audiform27"
