@@ -619,3 +619,44 @@ mod tests {
         assert_eq!(clock(3661.25), "1:01:01.250");
     }
 }
+
+/// A file's format in a few words for the Properties panel, from its
+/// header ("WAV 16-bit integer", "FLAC 24-bit", "MP3"...).
+pub fn describe_format(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "wav" | "wave" | "bwf" => match hound::WavReader::open(path) {
+            Ok(r) => {
+                let s = r.spec();
+                match s.sample_format {
+                    hound::SampleFormat::Float => format!("WAV {}-bit float", s.bits_per_sample),
+                    hound::SampleFormat::Int => format!("WAV {}-bit integer", s.bits_per_sample),
+                }
+            }
+            Err(_) => "WAV".into(),
+        },
+        "flac" => match metaflac::Tag::read_from_path(path) {
+            Ok(t) => t
+                .get_streaminfo()
+                .map_or("FLAC".into(), |i| format!("FLAC {}-bit", i.bits_per_sample)),
+            Err(_) => "FLAC".into(),
+        },
+        "aif" | "aiff" | "aifc" => "AIFF".into(),
+        "mp3" => "MP3".into(),
+        "ogg" | "oga" => "Ogg Vorbis".into(),
+        "opus" => "Opus".into(),
+        "mogg" => "Multitrack Ogg".into(),
+        "m4a" | "mp4" | "m4b" | "aac" => match crate::fallback::codec_name(path) {
+            Some(n) => n.to_string(),
+            None => "MPEG-4 audio".into(),
+        },
+        "caf" => "Core Audio".into(),
+        "dts" => "DTS".into(),
+        "" => "Audio".into(),
+        e => e.to_ascii_uppercase(),
+    }
+}

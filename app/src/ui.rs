@@ -2342,6 +2342,23 @@ impl eframe::App for App {
             }
         }
         shot_setup(&mut self.st);
+        // For shots: AF2_SELECT_CLIP=n selects the session's nth clip (from
+        // 1, across tracks) once there is one; a stretched one when n is 0.
+        if let Ok(v) = std::env::var("AF2_SELECT_CLIP") {
+            if self.st.selected_clip.is_none() {
+                let n: usize = v.trim().parse().unwrap_or(1);
+                let all: Vec<&af27_core::Clip> =
+                    self.st.session.tracks.iter().flat_map(|t| &t.clips).collect();
+                let pick = if n == 0 {
+                    all.iter().find(|c| c.props.stretch.is_on()).copied()
+                } else {
+                    all.get(n - 1).copied()
+                };
+                if let Some(c) = pick {
+                    self.st.selected_clip = Some(c.id);
+                }
+            }
+        }
         let __t0 = std::time::Instant::now();
         struct TraceGuard(std::time::Instant, egui::Rect);
         impl Drop for TraceGuard {
