@@ -1140,47 +1140,57 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             });
             crate::pointers::menu_toggle(ui);
             ui.menu_button("Theme Colors", |ui| {
-                ui.label(
-                    RichText::new(format!("Your own hues for {}", st.theme_base.name))
-                        .small()
-                        .color(c(st.theme.text_dim)),
-                );
-                let mut h = st.hues.unwrap_or_else(|| st.theme_base.hues());
-                let mut changed = false;
-                for (label, value, sat, val) in [
-                    ("Main light", &mut h.primary, 1.0, 1.0),
-                    ("Second light", &mut h.secondary, 0.82, 1.0),
-                    ("Base tint", &mut h.surface, 0.6, 0.35),
-                ] {
-                    ui.horizontal(|ui| {
-                        let sw = crate::theme::from_hsv(*value, sat, val);
-                        let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                        ui.painter().rect_filled(r, 2.0, c(sw));
-                        changed |= ui
-                            .add(crate::widgets::Slider::new(value, 0.0..=359.0).suffix("°").text(label))
-                            .changed();
-                    });
+                let system = crate::theme::is_system(&st.theme_base);
+                if system {
+                    ui.label(
+                        RichText::new("The System theme keeps your desktop's colors")
+                            .small()
+                            .color(c(st.theme.text_dim)),
+                    );
                 }
-                if changed {
-                    st.set_hues(Some(h));
-                }
-                ui.horizontal(|ui| {
-                    for (name, p, s, u) in [
-                        ("Ice", 187.0, 325.0, 228.0),
-                        ("Toxic", 105.0, 285.0, 150.0),
-                        ("Ember", 22.0, 350.0, 15.0),
-                        ("Ultraviolet", 275.0, 190.0, 260.0),
-                        ("Gold", 45.0, 200.0, 220.0),
+                ui.add_enabled_ui(!system, |ui| {
+                    ui.label(
+                        RichText::new(format!("Your own hues for {}", st.theme_base.name))
+                            .small()
+                            .color(c(st.theme.text_dim)),
+                    );
+                    let mut h = st.hues.unwrap_or_else(|| st.theme_base.hues());
+                    let mut changed = false;
+                    for (label, value, sat, val) in [
+                        ("Main light", &mut h.primary, 1.0, 1.0),
+                        ("Second light", &mut h.secondary, 0.82, 1.0),
+                        ("Base tint", &mut h.surface, 0.6, 0.35),
                     ] {
-                        if ui.small_button(name).clicked() {
-                            st.set_hues(Some(crate::theme::Hues { primary: p, secondary: s, surface: u }));
+                        ui.horizontal(|ui| {
+                            let sw = crate::theme::from_hsv(*value, sat, val);
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                            ui.painter().rect_filled(r, 2.0, c(sw));
+                            changed |= ui
+                                .add(crate::widgets::Slider::new(value, 0.0..=359.0).suffix("°").text(label))
+                                .changed();
+                        });
+                    }
+                    if changed {
+                        st.set_hues(Some(h));
+                    }
+                    ui.horizontal(|ui| {
+                        for (name, p, s, u) in [
+                            ("Ice", 187.0, 325.0, 228.0),
+                            ("Toxic", 105.0, 285.0, 150.0),
+                            ("Ember", 22.0, 350.0, 15.0),
+                            ("Ultraviolet", 275.0, 190.0, 260.0),
+                            ("Gold", 45.0, 200.0, 220.0),
+                        ] {
+                            if ui.small_button(name).clicked() {
+                                st.set_hues(Some(crate::theme::Hues { primary: p, secondary: s, surface: u }));
+                            }
                         }
+                    });
+                    if ui.button("Back to the theme's own colors").clicked() {
+                        st.set_hues(None);
+                        ui.close_menu();
                     }
                 });
-                if ui.button("Back to the theme's own colors").clicked() {
-                    st.set_hues(None);
-                    ui.close_menu();
-                }
             });
             ui.menu_button("Theme", |ui| {
                 let names: Vec<String> = st.themes.iter().map(|t| t.name.clone()).collect();
@@ -1195,12 +1205,22 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                         ui.label(RichText::new("From Audiform").small().color(c(st.theme.text_dim)));
                     }
                     let label = if st.themes[i].hidden { "Secret Theme" } else { n.as_str() };
-                    if ui.radio(on, label).clicked() {
+                    let r = ui.radio(on, label);
+                    let system = crate::theme::is_system(&st.themes[i]);
+                    let r = if system {
+                        r.on_hover_text("Your desktop's colors, light or dark, following its settings as they change")
+                    } else {
+                        r
+                    };
+                    if r.clicked() {
                         let t = st.themes[i].clone();
                         st.set_theme(t);
                         let _ = std::fs::create_dir_all(data_dir());
                         let _ = std::fs::write(data_dir().join("theme.txt"), n);
                         ui.close_menu();
+                    }
+                    if system {
+                        ui.separator();
                     }
                 }
                 ui.separator();
@@ -2483,6 +2503,15 @@ impl eframe::App for App {
             }
         }
         let _trace = TraceGuard(__t0, ctx.screen_rect());
+        // The System theme follows the desktop's colours as they change.
+        #[cfg(target_os = "linux")]
+        if crate::theme::is_system(&self.st.theme_base) {
+            crate::system_theme::attach(ctx);
+            if crate::system_theme::changed() {
+                let t = self.st.theme_base.clone();
+                self.st.set_theme(t);
+            }
+        }
         if self.st.theme_changed {
             lay_colors(&mut self.st);
             self.st.theme.apply(ctx);

@@ -107,6 +107,11 @@ To add your own, put `.af27theme` JSON files in `%APPDATA%\Audiform27\themes\`
 (Windows) or `~/.local/share/Audiform27/themes/` (Linux). Then pick one
 from **View > Theme**. See `docs/themes/Ice Cave.af27theme`.
 
+On Linux, the **System** theme at the top of **View > Theme** takes your
+desktop's colours and follows them as you change them. On KDE Plasma it
+uses your whole colour scheme; on GNOME and other desktops, light or dark
+and the accent colour.
+
 ## Performance
 
 The engine never allocates or locks on the audio thread. Each track's work is

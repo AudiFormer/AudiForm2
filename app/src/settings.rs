@@ -1512,6 +1512,11 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
             th,
             &format!("Turn the colours of {} to your own hues.", base.name),
         );
+        if crate::theme::is_system(&base) {
+            note(ui, th, "The System theme keeps your desktop's colours.");
+            d.hues = None;
+            return;
+        }
         let mut own = d.hues.is_some();
         if ui.checkbox(&mut own, "Use my own hues").changed() {
             d.hues = own.then(|| base.hues());

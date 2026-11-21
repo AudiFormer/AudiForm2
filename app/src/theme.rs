@@ -649,14 +649,39 @@ impl Theme {
     }
 }
 
-/// Built-ins first, then any `.af27theme` files in the user's folder.
+/// The System theme: the desktop's own colours (Linux; see
+/// `system_theme.rs`). Its colours are made afresh whenever it is chosen
+/// and whenever the desktop's change.
+pub const SYSTEM_NAME: &str = "System";
+pub const SYSTEM_AUTHOR: &str = "Your desktop";
+
+/// Whether `t` is the System theme (never off Linux). A user's own file
+/// that happens to be called System is not.
+pub fn is_system(t: &Theme) -> bool {
+    cfg!(target_os = "linux") && t.name == SYSTEM_NAME && t.author == SYSTEM_AUTHOR
+}
+
+/// `t` as shown: the System theme in the desktop's colours of the moment,
+/// any other theme as it is.
+pub fn resolve(t: Theme) -> Theme {
+    #[cfg(target_os = "linux")]
+    if is_system(&t) {
+        return crate::system_theme::current();
+    }
+    t
+}
+
 /// Where the user's own `.af27theme` files live.
 pub fn user_dir() -> std::path::PathBuf {
     crate::state::data_dir().join("themes")
 }
 
+/// The System theme first (Linux), then the built-ins, then any
+/// `.af27theme` files in the user's folder.
 pub fn load_all(dir: &std::path::Path) -> Vec<Theme> {
     let mut list = Theme::builtins();
+    #[cfg(target_os = "linux")]
+    list.insert(0, crate::system_theme::placeholder());
     if let Ok(rd) = std::fs::read_dir(dir) {
         let mut paths: Vec<_> = rd
             .flatten()

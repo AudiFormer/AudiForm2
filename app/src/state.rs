@@ -470,7 +470,13 @@ pub fn load_hues(name: &str) -> Option<crate::theme::Hues> {
 impl State {
     /// Shows theme `t` with the user's saved hues for it.
     pub fn set_theme(&mut self, t: Theme) {
-        self.hues = load_hues(&t.name);
+        let t = crate::theme::resolve(t);
+        // The System theme keeps the desktop's colours: no hues.
+        self.hues = if crate::theme::is_system(&t) {
+            None
+        } else {
+            load_hues(&t.name)
+        };
         self.theme = match &self.hues {
             Some(h) => t.with_hues(h),
             None => t.clone(),
@@ -516,12 +522,18 @@ impl State {
         };
         let themes = crate::theme::load_all(&crate::theme::user_dir());
         let saved_theme = std::fs::read_to_string(data_dir().join("theme.txt")).unwrap_or_default();
-        let theme_base = themes
-            .iter()
-            .find(|t| t.name == saved_theme.trim())
-            .cloned()
-            .unwrap_or_default();
-        let hues = load_hues(&theme_base.name);
+        let theme_base = crate::theme::resolve(
+            themes
+                .iter()
+                .find(|t| t.name == saved_theme.trim())
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let hues = if crate::theme::is_system(&theme_base) {
+            None
+        } else {
+            load_hues(&theme_base.name)
+        };
         let theme = match &hues {
             Some(h) => theme_base.with_hues(h),
             None => theme_base.clone(),
