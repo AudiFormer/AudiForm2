@@ -461,6 +461,24 @@ fn run_balance(st: &mut State, d: &Dialogs) {
     st.toast(format!("Changed clip gain on {} tracks", changes.len()));
 }
 
+/// Adds the usual tracks of a podcast to the session: two voices with a
+/// clean-up chain, a music bed and a sound effects track, named so Auto
+/// Duck picks them up. One undo step.
+pub fn add_podcast_tracks(st: &mut State) {
+    let before = st.session.clone();
+    for (name, voice) in [("Host", true), ("Guest", true), ("Music Bed", false), ("Sound Effects", false)] {
+        let id = st.session.add_track_of(TrackKind::Audio);
+        if let Some(t) = st.session.track_mut(id) {
+            t.name = name.to_string();
+            if voice {
+                t.chain = crate::rack_builtins::spoken_voice();
+            }
+        }
+    }
+    st.commit_session("Add Podcast Tracks", before);
+    st.toast("Added Host, Guest, Music Bed and Sound Effects tracks");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +565,20 @@ mod tests {
         assert!(lv[50] < -100.0 && lv[250] < -100.0);
         assert!((lv[150] - 20.0 * 0.5f32.log10()).abs() < 0.1, "{}", lv[150]);
         assert!(sounds_like_music("Music Bed") && !sounds_like_music("Guest"));
+    }
+
+    #[test]
+    fn podcast_tracks_are_ready_to_duck_and_undo_in_one_step() {
+        let mut st = State::new();
+        st.mode = crate::state::Mode::Multitrack;
+        let had = st.session.tracks.len();
+        add_podcast_tracks(&mut st);
+        let t = &st.session.tracks[had..];
+        let names: Vec<&str> = t.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Host", "Guest", "Music Bed", "Sound Effects"]);
+        assert!(t[0].chain.iter().any(|s| s.effect == "af.speech_leveler"));
+        assert!(t[2].chain.is_empty() && sounds_like_music(&t[2].name) && !sounds_like_music(&t[1].name));
+        st.undo();
+        assert_eq!(st.session.tracks.len(), had);
     }
 }

@@ -86,6 +86,19 @@ fn leveler() -> EffectSlot {
     s("af.opto_leveler", &[("peak", 35.0), ("tube", 15.0)])
 }
 
+/// A spoken-voice chain built on the restoration effects: low cut, noise
+/// and clicks out, the level ridden, esses softened, peaks held.
+pub fn spoken_voice() -> Vec<EffectSlot> {
+    vec![
+        s("high-pass", &[("Cutoff", 80.0), ("Slope", 2.0)]),
+        s("af.noise_reducer", &[("reduction", 12.0)]),
+        s("af.click_repair", &[]),
+        s("af.speech_leveler", &[("target", -20.0)]),
+        deess(6800.0, -30.0, 6.0),
+        limit(-3.0),
+    ]
+}
+
 /// The Parametric EQ with only the bands named turned up or down.
 fn eq(sets: &[(&str, f32)]) -> EffectSlot {
     s("af.parametric_eq", sets)
@@ -164,6 +177,7 @@ pub fn all() -> Vec<Builtin> {
     const ECHO: &str = "Echo";
     const REPAIR: &str = "Repair";
     const EQ: &str = "EQ and filters";
+    const SPOKEN: &str = "Spoken word";
     vec![
         b(
             VOICE,
@@ -454,6 +468,39 @@ pub fn all() -> Vec<Builtin> {
             )],
         ),
         b(REPAIR, "DC Offset Fix", vec![s("dc-offset", &[])]),
+        b(REPAIR, "Remove Clicks", vec![s("af.click_repair", &[])]),
+        b(REPAIR, "Repair Clipping", vec![s("af.clip_repair", &[])]),
+        b(REPAIR, "Reduce Background Noise", vec![s("af.noise_reducer", &[])]),
+        b(REPAIR, "Reduce Hiss", vec![s("af.hiss_reducer", &[])]),
+        b(REPAIR, "Reduce Room Echo", vec![s("af.room_reducer", &[])]),
+        b(SPOKEN, "Voice Clean-Up", spoken_voice()),
+        b(
+            SPOKEN,
+            "Remote Guest Clean-Up",
+            vec![
+                s("high-pass", &[("Cutoff", 100.0), ("Slope", 2.0)]),
+                s("af.noise_reducer", &[("reduction", 18.0), ("strength", 2.5)]),
+                s("af.room_reducer", &[("amount", 50.0)]),
+                s("af.click_repair", &[]),
+                s("af.speech_leveler", &[("target", -20.0), ("max_gain", 12.0)]),
+                deess(6500.0, -30.0, 6.0),
+                limit(-3.0),
+            ],
+        ),
+        b(
+            SPOKEN,
+            "Audiobook Narration",
+            vec![
+                s("high-pass", &[("Cutoff", 70.0), ("Slope", 2.0)]),
+                s("af.noise_reducer", &[("reduction", 10.0)]),
+                s("af.click_repair", &[("sensitivity", 60.0)]),
+                s("af.speech_leveler", &[("target", -22.0), ("max_gain", 6.0), ("max_cut", 6.0), ("speed", 3000.0)]),
+                deess(6800.0, -32.0, 5.0),
+                limit(-3.0),
+            ],
+        ),
+        b(SPOKEN, "Breath Gate", vec![s("af.breath_gate", &[("threshold", -40.0)])]),
+        b(SPOKEN, "Speech Leveler", vec![s("af.speech_leveler", &[])]),
         b(
             EQ,
             "Mains Hum 60 Hz",
@@ -600,6 +647,11 @@ mod tests {
         check("af.modulation", &["kind", "rate", "depth"]);
         check("af.reverb", &["kind", "size", "decay", "predelay", "wet"]);
         check("af.center_extractor", &["center"]);
+        check("af.noise_reducer", &["reduction", "strength"]);
+        check("af.room_reducer", &["amount"]);
+        check("af.click_repair", &["sensitivity"]);
+        check("af.speech_leveler", &["target", "max_gain", "max_cut", "speed"]);
+        check("af.breath_gate", &["threshold"]);
         check(
             "af.parametric_eq",
             &[

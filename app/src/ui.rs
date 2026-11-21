@@ -966,6 +966,15 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             playback_menu_items(ui, st, km, &mut cmd);
             ui.menu_button("Spoken Word", |ui| {
                 if ui
+                    .button("Add Podcast Tracks")
+                    .on_hover_text("Host and Guest tracks with a voice clean-up chain, plus Music Bed and Sound Effects")
+                    .clicked()
+                {
+                    crate::podcast_tools::add_podcast_tracks(st);
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui
                     .button("Auto Duck...")
                     .on_hover_text("Dip music and effects tracks under the talking with volume automation")
                     .clicked()
