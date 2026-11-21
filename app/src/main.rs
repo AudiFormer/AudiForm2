@@ -10,6 +10,7 @@ mod classic_themes;
 mod clip_lanes;
 mod clip_props;
 mod corners;
+mod diagnostics;
 mod eq_editor;
 mod export;
 mod files_panel;

@@ -34,10 +34,11 @@ pub enum Tab {
     PianoRoll,
     Visualizer,
     Properties,
+    Diagnostics,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 17] = [
+    pub const ALL: [Tab; 18] = [
         Tab::Properties,
         Tab::Visualizer,
         Tab::Inspector,
@@ -55,6 +56,7 @@ impl Tab {
         Tab::Statistics,
         Tab::Spectrum,
         Tab::Selection,
+        Tab::Diagnostics,
     ];
     /// The title for a crowded tab bar.
     pub fn short_title(self) -> &'static str {
@@ -89,6 +91,7 @@ impl Tab {
             Tab::Space => "3D Space",
             Tab::PianoRoll => "Piano Roll",
             Tab::Visualizer => "Visualizer",
+            Tab::Diagnostics => "Diagnostics",
         }
     }
 }
@@ -362,6 +365,7 @@ impl Viewer<'_> {
             Tab::Space => crate::space::panel(ui, self.st, &mut self.caches.space_drag),
             Tab::PianoRoll => crate::pianoroll::panel(ui, self.st, &mut self.caches.piano),
             Tab::Visualizer => crate::visualizer::show(ui, self.st),
+            Tab::Diagnostics => crate::diagnostics::panel(ui, self.st),
         }
     }
 }

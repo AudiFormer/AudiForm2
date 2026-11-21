@@ -302,6 +302,8 @@ pub struct State {
     pub theme_changed: bool,
     pub toasts: Vec<Toast>,
     pub stats: Option<(String, af27_dsp::loudness::Stats)>,
+    /// The Diagnostics panel (scan and repair).
+    pub diag: crate::diagnostics::Diagnostics,
     pub tool: Tool,
     pub show_about: bool,
     pub last_autosave: Instant,
@@ -584,6 +586,7 @@ impl State {
             theme_changed: true,
             toasts: Vec::new(),
             stats: None,
+            diag: Default::default(),
             tool: Tool::Move,
             show_about: false,
             last_autosave: Instant::now(),
