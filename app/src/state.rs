@@ -1583,9 +1583,8 @@ impl State {
             self.follow_new_loop();
             self.auto_tick();
         }
-        if self.mode == Mode::Multitrack {
-            self.midi_tick();
-        }
+        // MIDI keys play armed tracks whichever editor is in front.
+        self.midi_tick();
         let now = self.born.elapsed().as_secs_f64();
         let dt = (now - self.last_tick).clamp(0.0, 1.0);
         self.last_tick = now;

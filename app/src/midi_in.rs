@@ -94,6 +94,9 @@ pub struct MidiIn {
     clock: Vec<(Instant, f64)>,
     pub recording: bool,
     error_shown: bool,
+    /// Inputs that would not open (said once each), and what to tell.
+    failed: Vec<String>,
+    notices: Vec<String>,
 }
 
 impl Default for MidiIn {
@@ -106,6 +109,8 @@ impl Default for MidiIn {
             clock: Vec::new(),
             recording: false,
             error_shown: false,
+            failed: Vec::new(),
+            notices: Vec::new(),
         }
     }
 }
@@ -166,8 +171,20 @@ impl MidiIn {
                 },
                 name.clone(),
             ) {
-                Ok(c) => self.conns.push((name, c)),
-                Err(e) => eprintln!("midi input {name}: {e}"),
+                Ok(c) => {
+                    self.failed.retain(|f| *f != name);
+                    self.conns.push((name, c));
+                }
+                Err(e) => {
+                    // Said once per input: often another program holds it
+                    // (Windows lets only one program have a MIDI input).
+                    if !self.failed.contains(&name) {
+                        self.failed.push(name.clone());
+                        self.notices.push(format!(
+                            "The MIDI input \"{name}\" could not be opened ({e}). If another program is using it, close that program."
+                        ));
+                    }
+                }
             }
         }
     }
@@ -242,6 +259,20 @@ impl State {
         }
         let wanted: Vec<Option<String>> = armed.iter().map(|a| a.2.clone()).collect();
         self.midi.open(&wanted);
+        for n in std::mem::take(&mut self.midi.notices) {
+            self.error(n);
+        }
+        // A track set to an input that is not there now.
+        for (_, _, input) in &armed {
+            if let Some(name) = input {
+                if !self.midi.ports.contains(name) && !self.midi.failed.contains(name) {
+                    self.midi.failed.push(name.clone());
+                    self.error(format!(
+                        "The MIDI input \"{name}\" set on an armed track is not connected. Pick another in the track's input menu."
+                    ));
+                }
+            }
+        }
         if !armed.is_empty() && self.midi.ports.is_empty() && !self.midi.error_shown {
             self.midi.error_shown = true;
             self.error(
@@ -329,3 +360,4 @@ impl State {
         }
     }
 }
+

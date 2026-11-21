@@ -1681,7 +1681,9 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         let pressed = ui.input(|i| i.pointer.primary_pressed() || i.pointer.secondary_pressed());
         if pressed {
             let at = ui.input(|i| i.pointer.press_origin());
-            if at.is_some_and(|p| head.contains(p) && headers.contains(p)) {
+            if at.is_some_and(|p| {
+                head.contains(p) && headers.contains(p) && crate::widgets::press_is_here(ui, p)
+            }) {
                 st.selected_track = Some(st.session.tracks[ti].id);
             }
         }

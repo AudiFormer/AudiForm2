@@ -664,7 +664,11 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             })
     };
     let shift = ui.input(|i| i.modifiers.shift);
-    let press = ui.input(|i| i.pointer.primary_pressed());
+    // Not a press on a popup or window over the roll.
+    let press = ui.input(|i| i.pointer.primary_pressed())
+        && ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|q| crate::widgets::press_is_here(ui, q));
     let released = ui.input(|i| !i.pointer.primary_down());
 
     // Keys play while held.

@@ -970,3 +970,9 @@ mod tests {
         assert_eq!(fmt_unit(350.0, "ms"), "350 ms");
     }
 }
+
+/// Whether a press at `p` belongs to this `ui`'s layer, not to a popup
+/// or window drawn over it. For widgets that read the pointer directly.
+pub fn press_is_here(ui: &Ui, p: egui::Pos2) -> bool {
+    ui.ctx().layer_id_at(p).map_or(true, |l| l == ui.layer_id())
+}

@@ -493,7 +493,9 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 let dbl = ui.input(|inp| {
                     inp.pointer.button_double_clicked(egui::PointerButton::Primary)
                         && inp.pointer.interact_pos().is_some_and(|p| name_r.contains(p))
-                });
+                }) && ui
+                    .input(|inp| inp.pointer.interact_pos())
+                    .is_some_and(|p| crate::widgets::press_is_here(ui, p));
                 if r.double_clicked() || dbl {
                     open = Some(i);
                 }
