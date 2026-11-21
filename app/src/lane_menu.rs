@@ -59,62 +59,48 @@ fn fade_menu(ui: &mut egui::Ui, st: &mut State, clip: ClipId, fade_in: bool) {
     let Some((ti, ci)) = st.session.find_clip(clip) else {
         return;
     };
-    let c = &st.session.tracks[ti].clips[ci];
-    let skew = if fade_in {
-        c.props.fade_in_skew
-    } else {
-        c.props.fade_out_skew
+    let crate::overlap::FadeLook { skew, bell } =
+        crate::overlap::FadeLook::of(&st.session.tracks[ti].clips[ci], fade_in);
+    // A shape (and, with Link crossfades on, the partner's mirrored
+    // shape), as one undoable step.
+    let linked = st.prefs.link_crossfades;
+    let shape = |st: &mut State, look: crate::overlap::FadeLook| {
+        edit(st, "Fade", |s| {
+            let Some((ti, _)) = s.find_clip(clip) else {
+                return false;
+            };
+            crate::overlap::link_fade(&mut s.tracks[ti].clips, clip, fade_in, look, linked);
+            true
+        })
     };
-    let bell = if fade_in {
-        c.props.fade_in_bell
-    } else {
-        c.props.fade_out_bell
-    };
-    let set_bell = |st: &mut State, on: bool| {
+    let remove = |st: &mut State| {
         edit(st, "Fade", |s| {
             let Some((ti, ci)) = s.find_clip(clip) else {
                 return false;
             };
             let c = &mut s.tracks[ti].clips[ci];
             if fade_in {
-                c.props.fade_in_bell = on;
+                c.fade_in = 0.0;
             } else {
-                c.props.fade_out_bell = on;
+                c.fade_out = 0.0;
             }
             true
         })
     };
-    let set = |st: &mut State, v: Option<f32>, remove: bool| {
-        edit(st, "Fade", |s| {
-            let Some((ti, ci)) = s.find_clip(clip) else {
-                return false;
-            };
-            let c = &mut s.tracks[ti].clips[ci];
-            if remove {
-                if fade_in {
-                    c.fade_in = 0.0;
-                } else {
-                    c.fade_out = 0.0;
-                }
-            }
-            if let Some(v) = v {
-                if fade_in {
-                    c.props.fade_in_skew = v;
-                } else {
-                    c.props.fade_out_skew = v;
-                }
-            }
-            true
-        })
-    };
+    use crate::overlap::FadeLook;
     if ui.radio(skew == 0.0 && !bell, "Straight").clicked() {
-        set_bell(st, false);
-        set(st, Some(0.0), false);
+        shape(
+            st,
+            FadeLook {
+                skew: 0.0,
+                bell: false,
+            },
+        );
         ui.close_menu();
     }
     if ui.radio(skew != 0.0 && !bell, "Curve").clicked() {
-        set_bell(st, false);
-        set(st, Some(if skew == 0.0 { 50.0 } else { skew }), false);
+        let skew = if skew == 0.0 { 50.0 } else { skew };
+        shape(st, FadeLook { skew, bell: false });
         ui.close_menu();
     }
     if ui
@@ -122,13 +108,13 @@ fn fade_menu(ui: &mut egui::Ui, st: &mut State, clip: ClipId, fade_in: bool) {
         .on_hover_text("Gentle at both ends; drag the handle up or down to lean it")
         .clicked()
     {
-        set_bell(st, true);
+        shape(st, FadeLook { skew, bell: true });
         ui.close_menu();
     }
     ui.add_enabled(false, egui::Button::new(format!("Skew: {skew:+.0}")))
         .on_disabled_hover_text("Drag the fade handle up or down to bend the curve");
     if ui.button("Reset Skew").clicked() {
-        set(st, Some(0.0), false);
+        shape(st, FadeLook { skew: 0.0, bell });
         ui.close_menu();
     }
     ui.separator();
@@ -138,7 +124,7 @@ fn fade_menu(ui: &mut egui::Ui, st: &mut State, clip: ClipId, fade_in: bool) {
         "Remove Fade Out"
     };
     if ui.button(label).clicked() {
-        set(st, None, true);
+        remove(st);
         ui.close_menu();
     }
 }

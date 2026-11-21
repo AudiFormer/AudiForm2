@@ -29,6 +29,7 @@ mod midi_in;
 mod mixing;
 mod multitrack;
 mod new_dialogs;
+mod overlap;
 mod overview;
 mod panels;
 mod phasewheel;

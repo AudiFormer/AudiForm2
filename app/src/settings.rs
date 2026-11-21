@@ -94,6 +94,12 @@ pub struct Prefs {
     pub stretch_handles: bool,
     /// Every audio clip shows its volume and pan lines.
     pub clip_lines: bool,
+    /// A move or trim that makes clips overlap partly on a track makes a
+    /// crossfade across the overlap.
+    pub auto_crossfade: bool,
+    /// Bending or reshaping one half of a crossfade bends the other half
+    /// the opposite way.
+    pub link_crossfades: bool,
     /// The metronome's sound and level (kept here, not in sessions).
     pub metronome: af27_core::midi::MetronomeSettings,
     /// What New Audio File and New Multitrack Session start with.
@@ -238,6 +244,8 @@ impl Default for Prefs {
             header_view: Default::default(),
             stretch_handles: false,
             clip_lines: true,
+            auto_crossfade: true,
+            link_crossfades: true,
             metronome: Default::default(),
             new_file: Default::default(),
             new_session: Default::default(),
@@ -301,7 +309,6 @@ const PAGES: [&str; 18] = [
 fn coming(page: &str) -> &'static [&'static str] {
     match page {
         "Editing" => &["The shape new fades start as: straight, or a curve smooth at both ends."],
-        "Clips" => &["Clip auto-crossfade where clips overlap."],
         "Playback and Recording" => &[
             "Meter yellow and red levels.",
             "Recording latency offset, punch-in and pre-roll.",
@@ -783,6 +790,32 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                 ui.checkbox(
                     &mut d.prefs.midi_monitor,
                     "Hear what you play on armed MIDI tracks through their instrument",
+                );
+            });
+        }
+        "Clips" => {
+            group(ui, th, "Overlapping clips", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.auto_crossfade,
+                    "Automatic crossfades: clips moved or trimmed to overlap crossfade across the overlap",
+                );
+                note(
+                    ui,
+                    th,
+                    "The earlier clip fades out and the later one fades in across exactly the \
+                     overlap. A clip wholly inside another gets none: the clip on top covers \
+                     the one under it. An automatic crossfade goes when the overlap does; \
+                     fades you set yourself stay.",
+                );
+                ui.checkbox(
+                    &mut d.prefs.link_crossfades,
+                    "Link crossfades: bending one half of a crossfade bends the other the opposite way",
+                );
+                note(
+                    ui,
+                    th,
+                    "Dragging a fade handle up or down, picking Straight, Curve or Bell, or \
+                     Reset Skew on one clip of a crossfade sets its partner's fade too.",
                 );
             });
         }
