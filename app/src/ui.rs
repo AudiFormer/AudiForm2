@@ -2290,9 +2290,11 @@ impl eframe::App for App {
         if !self.shown_env_tab {
             self.shown_env_tab = true;
             // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
-            // generate-tones | fx:<effect id> | master-fx:<effect id>, for
-            // shots. AF2_FX_SET=key=value,... sets the opened effect's
-            // controls (by key; `session_tempo` sets the session's tempo).
+            // generate-tones | fx:<effect id>[?key=value&...] |
+            // master-fx:<effect id>, for shots. AF2_FX_SET=key=value,... sets
+            // the opened effect's controls (by key; `session_tempo` sets the
+            // session's tempo); AF2_OPEN_DATA sets the slot's data (such as
+            // an impulse response's file as JSON).
             match std::env::var("AF2_OPEN").as_deref() {
                 Ok("new-file") => crate::new_dialogs::open_new_file(&mut self.st),
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
@@ -2301,7 +2303,21 @@ impl eframe::App for App {
                 Ok("generate-tones") => self.st.generate.tones_open = true,
                 // fx:<effect id>: that effect in the file's rack, open.
                 Ok(v) if v.starts_with("fx:") => {
-                    let slot = shot_slot(&mut self.st, &v[3..]);
+                    let (id, rest) = v[3..].split_once('?').unwrap_or((&v[3..], ""));
+                    let mut slot = shot_slot(&mut self.st, id);
+                    let carry: Vec<(String, f64)> = rest
+                        .split('&')
+                        .filter_map(|kv| {
+                            let (k, x) = kv.split_once('=')?;
+                            Some((k.to_string(), x.parse().ok()?))
+                        })
+                        .collect();
+                    if !carry.is_empty() {
+                        slot.values = crate::fx_windows::values_for(id, &carry);
+                    }
+                    if let Some(d) = std::env::var("AF2_OPEN_DATA").ok().filter(|d| !d.is_empty()) {
+                        slot.data = Some(d);
+                    }
                     self.st.file_chain.push(slot);
                     let at = self.st.file_chain.len() - 1;
                     crate::rack::open_window(&mut self.st, crate::rack::FILE, at);
