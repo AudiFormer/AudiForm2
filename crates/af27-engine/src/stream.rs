@@ -100,6 +100,9 @@ impl Core {
                         } => a.note_on(pitch, velocity, pan),
                         crate::LiveNote::Off(p) => a.note_off(p),
                         crate::LiveNote::AllOff => a.all_off(),
+                        crate::LiveNote::Control { controller, value } => {
+                            a.control(controller, value)
+                        }
                     }
                 }
             }

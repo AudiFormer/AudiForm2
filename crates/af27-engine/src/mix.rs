@@ -939,7 +939,14 @@ fn render_source(t: &mut MixTrack, tracks: TrackPtr, ts: f64, dt: f64, n: usize)
 /// through its chain (effect lanes moving every [`FX_STEP`] frames) and
 /// what lands inside the clip is added. The chain is cleared when the
 /// clip starts sounding again. No allocation.
-fn clip_through_fx(c: &mut MixClip, fx: &mut ClipFx, ts: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
+fn clip_through_fx(
+    c: &mut MixClip,
+    fx: &mut ClipFx,
+    ts: f64,
+    dt: f64,
+    l: &mut [f32],
+    r: &mut [f32],
+) {
     let n = l.len().min(fx.l.len());
     let lead = dt * fx.lat as f64;
     let t1 = ts + dt * n as f64;
@@ -1190,9 +1197,10 @@ fn read_span(
     };
     let local_first = t0 + dt * first as f64 - c.start;
     let local_last = t0 + dt * (last - 1) as f64 - c.start;
-    let covered = c.covers.iter().any(|cv| {
-        cv.start <= c.start + local_last && cv.start + cv.length > c.start + local_first
-    });
+    let covered = c
+        .covers
+        .iter()
+        .any(|cv| cv.start <= c.start + local_last && cv.start + cv.length > c.start + local_first);
     let flat = !in_fade(local_first) && !in_fade(local_last) && c.vol.is_empty() && !covered;
     let whole = (step - 1.0).abs() < 1e-9 && (x0 - x0.round()).abs() < 1e-6 && x0 >= -0.5;
     // Source Channels and a pan lane go frame by frame.
@@ -1275,6 +1283,7 @@ fn instruments(
     rate: u32,
 ) -> (Option<Synth>, Option<Box<crate::soundfont::SfPlayer>>) {
     let notes = af27_core::midi::plan_notes(&t.midi, tempo);
+    let controls = af27_core::midi::plan_controls(&t.midi, tempo);
     if let Some(sf) = &t.soundfont {
         let list = notes
             .iter()
@@ -1289,7 +1298,7 @@ fn instruments(
             .collect();
         let font = crate::soundfont::SfPlayer::new(sf, list, rate)
             .ok()
-            .map(Box::new);
+            .map(|p| Box::new(p.with_controls(controls)));
         return (None, font);
     }
     let list = notes
@@ -1298,7 +1307,10 @@ fn instruments(
             synth::note(n.start, n.end, n.pitch, velocity_u8(n.velocity), n.pan).detuned(n.detune)
         })
         .collect();
-    (Some(Synth::new(t.instrument, list, rate)), None)
+    (
+        Some(Synth::new(t.instrument, list, rate).with_controls(controls)),
+        None,
+    )
 }
 
 /// A strip's playing lanes, as the engine plays them (None with none).

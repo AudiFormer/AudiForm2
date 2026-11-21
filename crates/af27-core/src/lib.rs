@@ -15,6 +15,7 @@ pub mod plugin;
 pub mod quantize;
 pub mod session;
 pub mod space;
+pub mod synth_model;
 pub mod time;
 
 pub use buffer::{AudioBuffer, Range};
