@@ -488,10 +488,16 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 if r.clicked() {
                     st.rack_row = Some((target, row));
                 }
-                if r.double_clicked() {
+                // Read from the pointer as well: the drag source can take
+                // the second press of a double-click for itself.
+                let dbl = ui.input(|inp| {
+                    inp.pointer.button_double_clicked(egui::PointerButton::Primary)
+                        && inp.pointer.interact_pos().is_some_and(|p| name_r.contains(p))
+                });
+                if r.double_clicked() || dbl {
                     open = Some(i);
                 }
-                r.on_hover_text("Double-click to open. Drag to another row to move it.");
+                r.on_hover_text("Double-click to open its window (a plug-in's own). Drag to another row to move it.");
             });
         } else if resp.clicked() {
             st.rack_row = Some((target, row));

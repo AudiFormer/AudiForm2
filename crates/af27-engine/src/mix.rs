@@ -89,6 +89,10 @@ pub struct MixClip {
     /// clip, once the background work has it; until then the clip reads
     /// its source at `speed`.
     pub prepared: Option<Arc<crate::stretch::Prepared>>,
+    /// The clips above this one on its track that overlap it (later in
+    /// the track's list, as drawn): this clip is heard under them only
+    /// where they fade (see [`cover_gain`]).
+    pub covers: Vec<Cover>,
     /// Audio played from disk (a pre-rendered track): `buf` is then an
     /// empty stand-in and the clip reads through this.
     pub stream: Option<Box<crate::disk::StreamReader>>,
@@ -237,8 +241,102 @@ impl MixClip {
             reversed: p.reversed,
             prepared,
             stream,
+            covers: Vec::new(),
         }
     }
+}
+
+/// A clip above another, as far as covering it goes: where it is and how
+/// it fades (timeline seconds).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cover {
+    pub start: f64,
+    pub length: f64,
+    pub fade_in: f64,
+    pub fade_out: f64,
+    pub fade_in_skew: f32,
+    pub fade_out_skew: f32,
+    pub fade_in_bell: bool,
+    pub fade_out_bell: bool,
+}
+
+impl Cover {
+    pub fn of(c: &af27_core::Clip) -> Cover {
+        let p = &c.props;
+        Cover {
+            start: c.start,
+            length: c.length,
+            fade_in: c.fade_in,
+            fade_out: c.fade_out,
+            fade_in_skew: p.fade_in_skew,
+            fade_out_skew: p.fade_out_skew,
+            fade_in_bell: p.fade_in_bell,
+            fade_out_bell: p.fade_out_bell,
+        }
+    }
+
+    /// How much of the covering clip sounds at timeline `t` (its fades
+    /// alone, 0..1), or None outside it.
+    fn level(&self, t: f64) -> Option<f64> {
+        use af27_core::session::fade_shape;
+        let local = t - self.start;
+        if local < 0.0 || local >= self.length {
+            return None;
+        }
+        let mut g = 1.0;
+        if self.fade_in > 0.0 && local < self.fade_in {
+            g *= fade_shape(local / self.fade_in, self.fade_in_skew, self.fade_in_bell);
+        }
+        if self.fade_out > 0.0 && self.length - local < self.fade_out {
+            g *= fade_shape(
+                (self.length - local) / self.fade_out,
+                self.fade_out_skew,
+                self.fade_out_bell,
+            );
+        }
+        Some(g)
+    }
+}
+
+/// For each of a track's clips (in list order, later on top), the clips
+/// above it that overlap it.
+pub fn covers_of(clips: &[&af27_core::Clip]) -> Vec<Vec<Cover>> {
+    clips
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            clips[i + 1..]
+                .iter()
+                .filter(|u| u.start < c.start + c.length && u.start + u.length > c.start)
+                .map(|u| Cover::of(u))
+                .collect()
+        })
+        .collect()
+}
+
+/// How much of clip `c` is heard at `local` seconds into it under the
+/// clips covering it: a clip on top hides what is under it, which comes
+/// through only where the top clip fades (under its fade in it fades out,
+/// under its fade out it fades back in). Where `c` has a fade of its own
+/// (a crossfade), it plays through its own fade instead.
+#[inline]
+fn cover_gain(c: &MixClip, local: f64) -> f64 {
+    if c.covers.is_empty() {
+        return 1.0;
+    }
+    let own_fade = (c.fade_in > 0.0 && local < c.fade_in)
+        || (c.fade_out > 0.0 && c.length - local < c.fade_out);
+    if own_fade {
+        return 1.0;
+    }
+    let t = c.start + local;
+    let mut g = 1.0;
+    for cv in &c.covers {
+        if let Some(top) = cv.level(t) {
+            g *= 1.0 - top;
+        }
+    }
+    g
 }
 
 /// A send from a strip to a bus.
@@ -974,6 +1072,7 @@ fn clip_gain(c: &MixClip, local: f64) -> f32 {
     if !c.vol.is_empty() {
         g *= lane_gain(&c.vol, local) as f64;
     }
+    g *= cover_gain(c, local);
     g as f32
 }
 
@@ -1091,7 +1190,10 @@ fn read_span(
     };
     let local_first = t0 + dt * first as f64 - c.start;
     let local_last = t0 + dt * (last - 1) as f64 - c.start;
-    let flat = !in_fade(local_first) && !in_fade(local_last) && c.vol.is_empty();
+    let covered = c.covers.iter().any(|cv| {
+        cv.start <= c.start + local_last && cv.start + cv.length > c.start + local_first
+    });
+    let flat = !in_fade(local_first) && !in_fade(local_last) && c.vol.is_empty() && !covered;
     let whole = (step - 1.0).abs() < 1e-9 && (x0 - x0.round()).abs() < 1e-6 && x0 >= -0.5;
     // Source Channels and a pan lane go frame by frame.
     let plain = c.map.is_empty() && c.pan.is_empty();
@@ -1259,9 +1361,18 @@ pub fn build(
             let mut clips: Vec<MixClip> = Vec::new();
             // 3D: clips of more than two channels play from their speakers.
             let mut wide: Vec<MixClip> = Vec::new();
-            for c in t.clips.iter().filter(|c| !c.muted) {
-                let Some(buf) = media(c.media) else { continue };
+            // The clips heard, in stacking order, and what covers each.
+            let heard_clips: Vec<(&af27_core::Clip, Arc<AudioBuffer>)> = t
+                .clips
+                .iter()
+                .filter(|c| !c.muted)
+                .filter_map(|c| media(c.media).map(|b| (c, b)))
+                .collect();
+            let refs: Vec<&af27_core::Clip> = heard_clips.iter().map(|(c, _)| *c).collect();
+            let covers = covers_of(&refs);
+            for ((c, buf), cov) in heard_clips.into_iter().zip(covers) {
                 let mut mc = MixClip::new(c, buf);
+                mc.covers = cov;
                 if space.is_some() && plays_to_speakers(c, mc.buf.num_channels()) {
                     wide.push(mc);
                 } else {

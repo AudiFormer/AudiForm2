@@ -1330,6 +1330,56 @@ mod tests {
         }
     }
 
+    /// A clip on top hides the one under it, which comes through only
+    /// under the top clip's fades; a lower clip fading itself (a
+    /// crossfade) plays its own fade.
+    #[test]
+    fn a_clip_on_top_covers_the_one_under_it() {
+        let (mut s, buf) = session_with_tone();
+        s.media[0].duration = 10.0;
+        let ones = Arc::new(AudioBuffer { rate: 100, channels: vec![vec![1.0; 1000]] });
+        let base = s.tracks[0].clips[0].clone();
+        let mut under = base.clone();
+        under.id = 1;
+        under.start = 0.0;
+        under.length = 8.0;
+        under.fade_out = 0.0;
+        let mut top = base.clone();
+        top.id = 2;
+        top.start = 2.0;
+        top.length = 4.0;
+        top.fade_in = 1.0;
+        top.fade_out = 0.0;
+        s.tracks[0].clips = vec![under.clone(), top.clone()];
+        s.tracks[0].pan = 0.0;
+        let b = ones.clone();
+        let out = render(mix_program(&s, &move |_| Some(b.clone()), 100), 100, 0.0, 8.0);
+        let l = &out.channels[0];
+        let alone = l[100];
+        assert!(alone > 0.1);
+        // Inside the top clip's body only the top clip sounds.
+        assert!((l[450] - alone).abs() < 1e-4, "{} vs {alone}", l[450]);
+        // Under its fade in the two add to one clip's level (a linear fade).
+        assert!((l[250] - alone).abs() < 1e-3, "{} vs {alone}", l[250]);
+        // After it, the lower clip again.
+        assert!((l[700] - alone).abs() < 1e-4);
+        // The other way round, the lower one would be on top: no doubling.
+        s.tracks[0].clips = vec![top.clone(), under.clone()];
+        let b = ones.clone();
+        let out = render(mix_program(&s, &move |_| Some(b.clone()), 100), 100, 0.0, 8.0);
+        assert!((out.channels[0][450] - alone).abs() < 1e-4);
+        // A crossfade: the lower clip fades out over the top one's fade in,
+        // and both follow their own fades.
+        let mut a = under.clone();
+        a.length = 3.0;
+        a.fade_out = 1.0;
+        s.tracks[0].clips = vec![a, top];
+        let b = ones.clone();
+        let out = render(mix_program(&s, &move |_| Some(b.clone()), 100), 100, 0.0, 8.0);
+        assert!((out.channels[0][250] - alone).abs() < 1e-3, "{}", out.channels[0][250]);
+        drop(buf);
+    }
+
     #[test]
     fn offline_mix_places_clips_and_fades() {
         let (mut s, buf) = session_with_tone();
