@@ -268,6 +268,88 @@ pub fn sounds_like_music(name: &str) -> bool {
         .any(|w| n.contains(w))
 }
 
+/// Strip Silence settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripSettings {
+    pub quiet_db: f32,
+    pub min_quiet: f64,
+    pub sound_db: f32,
+    pub min_sound: f64,
+    /// Silence left around each cut, in total.
+    pub keep: f64,
+    /// Take the silent pieces out (otherwise only split there).
+    pub remove: bool,
+}
+
+impl Default for StripSettings {
+    fn default() -> Self {
+        Self {
+            quiet_db: -50.0,
+            min_quiet: 1.0,
+            sound_db: -40.0,
+            min_sound: 0.2,
+            keep: 0.3,
+            remove: true,
+        }
+    }
+}
+
+/// Splits the clips of the tracks `ids` at their silences (and takes
+/// the silent pieces out when asked). Returns how many silences.
+pub fn strip_silence(
+    session: &mut Session,
+    ids: &[TrackId],
+    media: &dyn Fn(MediaId) -> Option<Arc<AudioBuffer>>,
+    set: &StripSettings,
+) -> usize {
+    let rate = session.rate;
+    let rule = af27_dsp::repair::SilenceRule {
+        quiet_db: set.quiet_db,
+        min_quiet: (set.min_quiet / WIN).round().max(1.0) as usize,
+        sound_db: set.sound_db,
+        min_sound: (set.min_sound / WIN).round().max(1.0) as usize,
+    };
+    let mut count = 0;
+    for &tid in ids {
+        let Some(track) = session.track_mut(tid).map(|t| t.clone()) else {
+            continue;
+        };
+        for clip in track.clips.iter().filter(|c| !c.props.locked) {
+            let mut one = track.clone();
+            one.clips = vec![clip.clone()];
+            let lv = dry_levels(&one, media, rate, clip.start, clip.end());
+            let gaps = af27_dsp::repair::find_silences(&lv, rule);
+            // Right to left, so the clip keeps its id on the left.
+            for g in gaps.iter().rev() {
+                let a = clip.start + g.start as f64 * WIN;
+                let b = (clip.start + g.end() as f64 * WIN).min(clip.end());
+                let k = set.keep.min(b - a) / 2.0;
+                let (cut_a, cut_b) = (a + k, b - k);
+                if cut_b - cut_a < 0.02 {
+                    continue;
+                }
+                let at_end = cut_b >= clip.end() - 1e-6;
+                let at_start = cut_a <= clip.start + 1e-6;
+                if !at_end {
+                    session.split_clip(clip.id, cut_b);
+                }
+                let mid = if at_start {
+                    Some(clip.id)
+                } else {
+                    session.split_clip(clip.id, cut_a)
+                };
+                if set.remove {
+                    if let Some(m) = mid {
+                        session.remove_clip(m);
+                    }
+                }
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 // ---------------------------------------------------------------- UI
 
 #[derive(Default)]
@@ -282,6 +364,8 @@ pub struct Dialogs {
     /// the quietest).
     balance_tracks: Vec<TrackId>,
     pub balance_target: Option<f64>,
+    pub strip_open: bool,
+    pub strip: StripSettings,
     seeded_for: u64,
 }
 
@@ -322,7 +406,7 @@ fn track_ticks(ui: &mut egui::Ui, id: &str, s: &Session, list: &mut Vec<TrackId>
 
 pub fn show(ctx: &egui::Context, st: &mut State) {
     let mut d = std::mem::take(&mut st.podcast);
-    if d.duck_open || d.balance_open {
+    if d.duck_open || d.balance_open || d.strip_open {
         d.seed(&st.session, st.session_version);
     } else {
         d.seeded_for = 0;
@@ -400,6 +484,51 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
             open = false;
         }
         d.balance_open = open;
+    }
+    if d.strip_open {
+        let mut open = true;
+        let mut run = false;
+        egui::Window::new("Strip Silence").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label(RichText::new("Splits clips where they go quiet, and can take the quiet parts out. Nothing moves.").size(11.0).color(c(th.text_dim)));
+            track_ticks(ui, "strip-t", &st.session, &mut d.balance_tracks, &[]);
+            egui::Grid::new("strip-set").num_columns(2).show(ui, |ui| {
+                let s = &mut d.strip;
+                ui.label("Quiet below");
+                ui.add(egui::DragValue::new(&mut s.quiet_db).range(-96.0..=-6.0).speed(0.2).suffix(" dB"));
+                ui.end_row();
+                ui.label("Quiet for at least");
+                ui.add(egui::DragValue::new(&mut s.min_quiet).range(0.05..=30.0).speed(0.01).suffix(" s"));
+                ui.end_row();
+                ui.label("Sound above");
+                ui.add(egui::DragValue::new(&mut s.sound_db).range(-96.0..=-3.0).speed(0.2).suffix(" dB"));
+                ui.end_row();
+                ui.label("Keep around each cut");
+                ui.add(egui::DragValue::new(&mut s.keep).range(0.0..=2.0).speed(0.01).suffix(" s"));
+                ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut s.remove, "Take the quiet parts out");
+                ui.end_row();
+            });
+            if ui.add_enabled(!d.balance_tracks.is_empty(), egui::Button::new("Strip")).clicked() {
+                run = true;
+            }
+        });
+        if run {
+            let before = st.session.clone();
+            let ids = d.balance_tracks.clone();
+            let set = d.strip;
+            let mut s = before.clone();
+            let n = strip_silence(&mut s, &ids, &|m| st.media_buffer(m), &set);
+            if n == 0 {
+                st.toast("No silences found with these settings.");
+            } else {
+                st.session = s;
+                st.commit_session("Strip Silence", before);
+                st.toast(format!("Stripped {n} silences"));
+            }
+            open = false;
+        }
+        d.strip_open = open;
     }
     st.podcast = d;
 }
@@ -580,5 +709,38 @@ mod tests {
         assert!(t[2].chain.is_empty() && sounds_like_music(&t[2].name) && !sounds_like_music(&t[1].name));
         st.undo();
         assert_eq!(st.session.tracks.len(), had);
+    }
+
+    #[test]
+    fn strip_silence_cuts_the_quiet_out_of_a_clip() {
+        let mut s = Session::new("t", 48_000, 1);
+        let mut v = vec![0.3f32; 48_000];
+        v.extend(vec![0.0005; 96_000]);
+        v.extend(vec![0.3; 48_000]);
+        let buf = Arc::new(AudioBuffer { rate: 48_000, channels: vec![v] });
+        let tid = s.tracks[0].id;
+        s.tracks[0].clips.push(af27_core::Clip {
+            props: Default::default(),
+            id: 900,
+            media: 7,
+            name: "c".into(),
+            start: 0.0,
+            offset: 0.0,
+            length: 4.0,
+            gain_db: 0.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            muted: false,
+            ext_id: None,
+        });
+        let media = |_m: MediaId| Some(buf.clone());
+        let n = strip_silence(&mut s, &[tid], &media, &StripSettings::default());
+        assert_eq!(n, 1);
+        let c = &s.tracks[0].clips;
+        assert_eq!(c.len(), 2, "{c:?}");
+        let left = c.iter().find(|x| x.start < 0.5).unwrap();
+        assert!((left.end() - 1.15).abs() < 0.02, "{}", left.end());
+        let right = c.iter().find(|x| x.start > 2.0).unwrap();
+        assert!((right.start - 2.85).abs() < 0.02, "{}", right.start);
     }
 }

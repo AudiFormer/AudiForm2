@@ -983,6 +983,14 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     ui.close_menu();
                 }
                 if ui
+                    .button("Strip Silence...")
+                    .on_hover_text("Split clips where they go quiet and take the quiet parts out")
+                    .clicked()
+                {
+                    st.podcast.strip_open = true;
+                    ui.close_menu();
+                }
+                if ui
                     .button("Speaker Balance...")
                     .on_hover_text("Bring every voice track to the same loudness with clip gain")
                     .clicked()
