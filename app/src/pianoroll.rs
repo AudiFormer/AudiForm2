@@ -676,13 +676,11 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         if let Some(q) = ui.input(|i| i.pointer.interact_pos()) {
             if keys_r.contains(q) {
                 let pitch = p_of(q.y).clamp(0, 127) as u8;
-                st.audition_on(ti, pitch, 100, 0.0);
-                ps.held = Some(pitch);
+                hold(st, ps, ti, pitch, 100, 0.0);
             } else if grid_r.contains(q) && ps.tool != Tool::Erase {
                 if let Some((i, _, _)) = hit(q) {
                     let n = notes[i];
-                    st.audition_on(ti, n.pitch, n.velocity, n.pan);
-                    ps.held = Some(n.pitch);
+                    hold(st, ps, ti, n.pitch, n.velocity, n.pan);
                 } else if ps.tool == Tool::Draw && !shift {
                     // Draw: the note appears the moment the button goes
                     // down and sounds while held; moving the pointer moves it.
@@ -696,8 +694,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                     if let Some(h) = ps.held.take() {
                         st.audition_off(h);
                     }
-                    st.audition_on(ti, n.pitch, n.velocity, n.pan);
-                    ps.held = Some(n.pitch);
+                    hold(st, ps, ti, n.pitch, n.velocity, n.pan);
                     ps.held_until = 0.0;
                     ps.drag = Some(NoteDrag::Move {
                         grabbed: i,
@@ -776,8 +773,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         ps.sel = vec![i];
                         ps.orig = st.session.tracks[ti].midi[ci].notes.clone();
                         let n = ps.orig[i];
-                        st.audition_on(ti, n.pitch, n.velocity, n.pan);
-                        ps.held = Some(n.pitch);
+                        hold(st, ps, ti, n.pitch, n.velocity, n.pan);
                         Some(NoteDrag::Move {
                             grabbed: i,
                             grab_beats: n.start,
@@ -827,8 +823,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                             if let Some(h) = ps.held {
                                 st.audition_off(h);
                             }
-                            st.audition_on(ti, n.pitch, n.velocity, n.pan);
-                            ps.held = Some(n.pitch);
+                            hold(st, ps, ti, n.pitch, n.velocity, n.pan);
                         }
                     }
                 }
@@ -977,8 +972,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                             ps.sel = vec![i];
                             let n = st.session.tracks[ti].midi[ci].notes[i];
                             if ps.held.is_none() {
-                                st.audition_on(ti, n.pitch, n.velocity, n.pan);
-                                ps.held = Some(n.pitch);
+                                hold(st, ps, ti, n.pitch, n.velocity, n.pan);
                                 ps.held_until = ui.input(|i| i.time) + 0.3;
                                 ui.ctx()
                                     .request_repaint_after(std::time::Duration::from_millis(320));
@@ -1006,7 +1000,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     }
     // Whatever was sounding from a press stops when the button comes up.
     let now = ui.input(|i| i.time);
-    if released && ps.held.is_some() && ps.drag.is_none() && now >= ps.held_until {
+    if released && ps.held.is_some() && now >= ps.held_until {
         if let Some(h) = ps.held.take() {
             st.audition_off(h);
         }
@@ -1514,4 +1508,14 @@ mod control_lane_tests {
         paint_control(&mut c, 64, 0, 2.0, 2.0, 1.0);
         assert_eq!(c.iter().filter(|e| e.controller == 64).count(), 1);
     }
+}
+
+/// Sounds `pitch` as the held note, stopping whatever was held before (a
+/// note left sounding by a missed release would otherwise stay on).
+fn hold(st: &mut State, ps: &mut PianoState, ti: usize, pitch: u8, velocity: u8, pan: f32) {
+    if let Some(h) = ps.held.take() {
+        st.audition_off(h);
+    }
+    st.audition_on(ti, pitch, velocity, pan);
+    ps.held = Some(pitch);
 }

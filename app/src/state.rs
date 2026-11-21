@@ -253,6 +253,8 @@ pub struct State {
     pub mixing: crate::mixing::Mixing,
     /// MIDI input for armed MIDI tracks (see `midi_in`).
     pub midi: crate::midi_in::MidiIn,
+    /// The MIDI track whose built-in synth's settings window is open.
+    pub synth_editor: Option<af27_core::TrackId>,
     /// A new selection taking over the loop while playing.
     loop_watch: crate::transport::Settle,
     /// Seconds of held Left/Right since playback last skipped along.
@@ -548,6 +550,7 @@ impl State {
             transport_live: false,
             mixing: Default::default(),
             midi: Default::default(),
+            synth_editor: None,
             loop_watch: Default::default(),
             scrub_clock: 0.0,
             born: Instant::now(),
@@ -1275,6 +1278,8 @@ impl State {
 
     /// Plays from the playhead (or continues from Pause).
     pub fn play(&mut self) {
+        // Notes left sounding by the piano roll stop here.
+        self.audition_all_off();
         self.sync_program();
         let len = self.program_len();
         let rec = self.is_recording();
@@ -1310,6 +1315,7 @@ impl State {
     /// playback reached (or goes back to the marker with Return to Start
     /// on Stop).
     pub fn stop(&mut self) {
+        self.audition_all_off();
         let reached = if self.transport_live {
             self.engine.as_ref().map_or(0.0, |e| e.position())
         } else {
