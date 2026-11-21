@@ -22,6 +22,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::synth_model::SynthControls;
+
 use crate::ClipId;
 
 /// Ticks to a beat in bar.beat.tick and in exported `.mid` files.
@@ -751,6 +753,10 @@ pub const AFTERTOUCH: u8 = 128;
 pub const PITCH_BEND: u8 = 129;
 /// The sustain pedal.
 pub const SUSTAIN: u8 = 64;
+/// The sostenuto pedal: holds only the notes down when it goes down.
+pub const SOSTENUTO: u8 = 66;
+/// The mod wheel.
+pub const MOD_WHEEL: u8 = 1;
 
 /// One controller move in a MIDI clip.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -824,7 +830,10 @@ pub struct PlannedNote {
 /// 1/127..1), the clip's timing, stretch and pitch shift apply, and a
 /// sustain pedal held down in the clip keeps released
 /// notes sounding until it comes up (the built-in instruments have no
-/// pedal of their own). Sorted by start; a note always lasts a frame.
+/// pedal of their own). The sostenuto pedal holds only the notes whose
+/// keys were down when it went down, until it comes up (a sustain pedal
+/// still down then holds them on). Sorted by start; a note always lasts a
+/// frame.
 pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
     let mut out = Vec::new();
     for c in clips.iter().filter(|c| !c.muted) {
@@ -851,11 +860,39 @@ pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
                     .map_or(c.length, |e| e.at),
             )
         };
+        let mut sost: Vec<&ControlEvent> = c
+            .controls
+            .iter()
+            .filter(|e| e.controller == SOSTENUTO && e.at < c.length)
+            .collect();
+        sost.sort_by(|a, b| a.at.total_cmp(&b.at));
+        // Sostenuto presses (on `ch`) while a key was down over `a..b`:
+        // where the pedal next comes up.
+        let sost_until = |ch: u8, a: f64, b: f64| -> Option<f64> {
+            let mut down = false;
+            let mut up_at: Option<f64> = None;
+            for (k, e) in sost.iter().enumerate().filter(|(_, e)| e.channel == ch) {
+                let now = e.value >= 0.5;
+                if now && !down && e.at >= a && e.at < b {
+                    up_at = Some(
+                        sost[k + 1..]
+                            .iter()
+                            .find(|x| x.channel == ch && x.value < 0.5)
+                            .map_or(c.length, |x| x.at),
+                    );
+                }
+                down = now;
+            }
+            up_at
+        };
         for n in &c.notes {
             if n.start >= c.length || n.length <= 0.0 || n.start < 0.0 {
                 continue;
             }
             let mut end = (n.start + n.length).min(c.length);
+            if let Some(up) = sost_until(n.channel, n.start, end) {
+                end = up.max(end);
+            }
             if let Some(up) = held_until(n.channel, end) {
                 end = up.max(end);
             }
@@ -877,6 +914,62 @@ pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
         }
     }
     out.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+    out
+}
+
+/// A controller move as it will play: timeline seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlannedControl {
+    pub t: f64,
+    pub controller: u8,
+    /// 0..1 (pitch bend: 0.5 is the middle).
+    pub value: f32,
+}
+
+/// The mod wheel and pitch bend moves of `clips` as they play (muted
+/// clips left out), in time order. A clip that moves either puts it back
+/// (wheel down, bend centred) where it ends, so the next clip starts
+/// clean.
+pub fn plan_controls(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedControl> {
+    let mut out = Vec::new();
+    for c in clips.iter().filter(|c| !c.muted) {
+        let mut used = [false; 2];
+        for e in &c.controls {
+            let k = match e.controller {
+                MOD_WHEEL => 0,
+                PITCH_BEND => 1,
+                _ => continue,
+            };
+            if e.at < 0.0 || e.at >= c.length {
+                continue;
+            }
+            used[k] = true;
+            out.push(PlannedControl {
+                t: c.secs_at(e.at, tempo),
+                controller: e.controller,
+                value: if e.value.is_nan() {
+                    0.0
+                } else {
+                    e.value.clamp(0.0, 1.0)
+                },
+            });
+        }
+        let end = c.secs_at(c.length, tempo);
+        for (k, (controller, value)) in [(MOD_WHEEL, 0.0), (PITCH_BEND, 0.5)]
+            .into_iter()
+            .enumerate()
+        {
+            if used[k] {
+                out.push(PlannedControl {
+                    t: end,
+                    controller,
+                    value,
+                });
+            }
+        }
+    }
+    // Stable: a clip's own moves at one time keep their order.
+    out.sort_by(|a, b| a.t.total_cmp(&b.t));
     out
 }
 
@@ -1081,10 +1174,13 @@ pub enum Wave {
     #[default]
     Saw,
     Square,
+    /// A pulse of the instrument's pulse width (`ext.pw`).
+    Pulse,
 }
 
 /// The built-in synth: one oscillator plus a detuned second, an ADSR
-/// envelope and a resonant low-pass filter.
+/// envelope and a resonant low-pass filter, and in `ext` everything else
+/// a real synth has (see [`crate::synth_model`]).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Instrument {
@@ -1101,6 +1197,10 @@ pub struct Instrument {
     /// 0..1.
     pub resonance: f32,
     pub gain_db: f32,
+    /// The newer controls; saved only when changed, so an instrument
+    /// that never used them saves exactly as before.
+    #[serde(default, skip_serializing_if = "SynthControls::is_default")]
+    pub ext: SynthControls,
 }
 
 impl Default for Instrument {
@@ -1115,6 +1215,7 @@ impl Default for Instrument {
             cutoff: 6000.0,
             resonance: 0.15,
             gain_db: -10.0,
+            ext: SynthControls::default(),
         }
     }
 }
@@ -1347,6 +1448,56 @@ mod tests {
             })
             .collect();
         c
+    }
+
+    fn cc(at: f64, controller: u8, value: f32) -> ControlEvent {
+        ControlEvent {
+            at,
+            controller,
+            value,
+            channel: 0,
+        }
+    }
+
+    #[test]
+    fn sostenuto_holds_only_the_notes_down_when_it_went_down() {
+        // 120 BPM: a beat is 0.5 s. Note A 0..1, note B 1.5..2 (beats).
+        let t = Tempo::default();
+        let mut c = clip_with(&[(0.0, 1.0), (1.5, 0.5)], 0.0, 8.0);
+        c.controls = vec![cc(0.5, SOSTENUTO, 1.0), cc(4.0, SOSTENUTO, 0.0)];
+        let p = plan_notes(std::slice::from_ref(&c), &t);
+        // A was down at the press: held to beat 4. B came after: not held.
+        assert_eq!((p[0].start, p[0].end), (0.0, 2.0));
+        assert_eq!((p[1].start, p[1].end), (0.75, 1.0));
+        // Sustain still down when sostenuto lifts holds A on.
+        c.controls.push(cc(3.0, SUSTAIN, 1.0));
+        c.controls.push(cc(6.0, SUSTAIN, 0.0));
+        let p = plan_notes(std::slice::from_ref(&c), &t);
+        assert_eq!(p[0].end, 3.0);
+    }
+
+    #[test]
+    fn wheel_and_bend_moves_play_in_time_and_reset_at_the_clip_end() {
+        let t = Tempo::default();
+        let mut c = clip_with(&[(0.0, 1.0)], 2.0, 4.0);
+        c.controls = vec![
+            cc(1.0, PITCH_BEND, 1.0),
+            cc(0.5, MOD_WHEEL, 0.6),
+            cc(1.0, SUSTAIN, 1.0),
+        ];
+        let p = plan_controls(std::slice::from_ref(&c), &t);
+        let v: Vec<(f64, u8, f32)> = p.iter().map(|x| (x.t, x.controller, x.value)).collect();
+        assert_eq!(
+            v,
+            vec![
+                (1.25, MOD_WHEEL, 0.6),
+                (1.5, PITCH_BEND, 1.0),
+                (3.0, MOD_WHEEL, 0.0),
+                (3.0, PITCH_BEND, 0.5)
+            ]
+        );
+        c.muted = true;
+        assert!(plan_controls(&[c], &t).is_empty());
     }
 
     #[test]

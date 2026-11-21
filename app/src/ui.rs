@@ -2302,6 +2302,35 @@ impl eframe::App for App {
                 Ok("overlap-demo") => crate::overlap::demo(&mut self.st),
                 Ok("generate-noise") => self.st.generate.noise_open = true,
                 Ok("generate-tones") => self.st.generate.tones_open = true,
+                // synth: the built-in synth's window on the first MIDI
+                // track (one is added when there is none);
+                // AF2_SYNTH_MODEL=<model name> picks its model.
+                Ok("synth") => {
+                    self.st.mode = Mode::Multitrack;
+                    let id = match self
+                        .st
+                        .session
+                        .tracks
+                        .iter()
+                        .find(|t| t.kind == af27_core::TrackKind::Midi)
+                    {
+                        Some(t) => t.id,
+                        None => self.st.add_track_kind(af27_core::TrackKind::Midi),
+                    };
+                    if let Ok(m) = std::env::var("AF2_SYNTH_MODEL") {
+                        if let Some(m) = af27_core::synth_model::SynthModel::ALL
+                            .into_iter()
+                            .find(|x| x.name().eq_ignore_ascii_case(m.trim()))
+                        {
+                            if let Some(t) = self.st.session.track_mut(id) {
+                                t.instrument = m.preset();
+                            }
+                        }
+                    }
+                    self.st.synth_editor = Some(id);
+                    // A shot's own setup: nothing to ask about on quit.
+                    self.st.session_dirty = false;
+                }
                 // fx:<effect id>: that effect in the file's rack, open.
                 Ok(v) if v.starts_with("fx:") => {
                     let (id, rest) = v[3..].split_once('?').unwrap_or((&v[3..], ""));
@@ -2316,7 +2345,10 @@ impl eframe::App for App {
                     if !carry.is_empty() {
                         slot.values = crate::fx_windows::values_for(id, &carry);
                     }
-                    if let Some(d) = std::env::var("AF2_OPEN_DATA").ok().filter(|d| !d.is_empty()) {
+                    if let Some(d) = std::env::var("AF2_OPEN_DATA")
+                        .ok()
+                        .filter(|d| !d.is_empty())
+                    {
                         slot.data = Some(d);
                     }
                     self.st.file_chain.push(slot);
@@ -2348,8 +2380,13 @@ impl eframe::App for App {
         if let Ok(v) = std::env::var("AF2_SELECT_CLIP") {
             if self.st.selected_clip.is_none() {
                 let n: usize = v.trim().parse().unwrap_or(1);
-                let all: Vec<&af27_core::Clip> =
-                    self.st.session.tracks.iter().flat_map(|t| &t.clips).collect();
+                let all: Vec<&af27_core::Clip> = self
+                    .st
+                    .session
+                    .tracks
+                    .iter()
+                    .flat_map(|t| &t.clips)
+                    .collect();
                 let pick = if n == 0 {
                     all.iter().find(|c| c.props.stretch.is_on()).copied()
                 } else {
@@ -2772,6 +2809,7 @@ impl eframe::App for App {
         crate::tempo::window(ctx, &mut self.st);
         crate::tempo::edit_popup(ctx, &mut self.st);
         crate::tempo::replace_prompt(ctx, &mut self.st);
+        crate::synth_ui::window(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);
         let th_now = self.st.theme.clone();

@@ -1512,7 +1512,11 @@ impl State {
             let due = LAST.with(|l| l.get().map_or(true, |t| now - t > Duration::from_secs(2)));
             if due {
                 LAST.with(|l| l.set(Some(now)));
-                let held: usize = self.docs.iter().map(|d| d.buf.frames() * d.buf.num_channels() * 4).sum();
+                let held: usize = self
+                    .docs
+                    .iter()
+                    .map(|d| d.buf.frames() * d.buf.num_channels() * 4)
+                    .sum();
                 eprintln!(
                     "mem: private {:.0} MB; {} files holding {:.0} MB; {} loading; stretched clips {:.0} MB; {} tracks pre-rendered holding {:.0} MB",
                     crate::memstat::private_mb(),
@@ -2244,12 +2248,37 @@ impl State {
         };
         let inst = t.instrument;
         let font_db = t.soundfont.as_ref().map(|f| f.gain_db);
+        // The audition playing this track's built-in synth takes the new
+        // settings too, without letting go of held keys.
+        let builtin = t.soundfont.is_none();
+        let key = Self::audition_key(t);
+        let mine = builtin
+            && self
+                .audition_key
+                .as_deref()
+                .is_some_and(|k| k.split('|').next() == key.split('|').next());
         if let Some(e) = &mut self.engine {
             e.set_instrument(ti, inst);
             if let Some(db) = font_db {
                 e.set_font_gain(ti, db);
             }
+            if mine {
+                e.set_audition_instrument(inst);
+                self.audition_key = Some(key);
+            }
         }
+    }
+
+    /// What the audition was built from (track, instrument, font).
+    fn audition_key(t: &af27_core::Track) -> String {
+        format!(
+            "{}|{:?}|{:?}",
+            t.id,
+            t.instrument,
+            t.soundfont
+                .as_ref()
+                .map(|f| (&f.path, f.bank, f.program, f.gain_db))
+        )
     }
 
     pub fn live_metronome(&mut self) {
@@ -2267,14 +2296,7 @@ impl State {
         let Some(t) = self.session.tracks.get(ti) else {
             return false;
         };
-        let key = format!(
-            "{}|{:?}|{:?}",
-            t.id,
-            t.instrument,
-            t.soundfont
-                .as_ref()
-                .map(|f| (&f.path, f.bank, f.program, f.gain_db))
-        );
+        let key = Self::audition_key(t);
         if self.audition_key.as_deref() == Some(key.as_str()) {
             return self.engine.is_some();
         }
@@ -2518,7 +2540,9 @@ fn decode_turn() -> impl Drop {
     }
     static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
     let gate = GATE.get_or_init(|| (Mutex::new(0), Condvar::new()));
-    let most = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(2, 6);
+    let most = std::thread::available_parallelism()
+        .map_or(2, |n| n.get())
+        .clamp(2, 6);
     let mut busy = gate.0.lock().unwrap_or_else(|e| e.into_inner());
     while *busy >= most {
         busy = gate.1.wait(busy).unwrap_or_else(|e| e.into_inner());

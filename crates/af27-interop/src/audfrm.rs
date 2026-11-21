@@ -3143,6 +3143,21 @@ mod tests {
         assert_eq!(back.tracks[0].sends[0].pan, -1.0);
         assert_eq!(back.tracks[0].lanes[1].points[0].value, -0.25);
         assert_eq!(back.tracks.last().unwrap().name, "Reverb");
+        // A synth model and its controls ride along in `af27_synth` and
+        // read back; a session saved again unchanged is the same document.
+        let mut s2 = back;
+        let mi = s2
+            .tracks
+            .iter()
+            .position(|t| t.kind == af27_core::TrackKind::Midi)
+            .unwrap();
+        let mut acid = af27_core::synth_model::SynthModel::AcidLine.preset();
+        acid.ext.glide = 0.123;
+        s2.tracks[mi].instrument = acid;
+        let out2 = export(&mut s2, Some(&out));
+        let mut s3 = import(&out2.to_string(), Path::new(".")).unwrap().session;
+        assert_eq!(s3.tracks[mi].instrument, acid);
+        same_doc(export(&mut s3, Some(&out2)), out2.clone());
     }
 
     #[test]
