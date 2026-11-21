@@ -108,6 +108,11 @@ pub struct Fx {
     pub data: Option<String>,
     /// New data for the slot, when a panel changed it.
     pub new_data: Option<Option<String>>,
+    /// Another effect for the slot (its id, and the values to carry over
+    /// by key; the rest start at their defaults), when a panel switches
+    /// what the slot is (the Reverb's Impulse Response tab). Taken as one
+    /// undo step; the slot's data, bypass and place are kept.
+    pub new_effect: Option<(String, Vec<(String, f64)>)>,
     pub changed: bool,
     pub released: bool,
     /// A stable id for this window's widgets.
@@ -292,6 +297,7 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
         vals,
         data: slot.data.clone(),
         new_data: None,
+        new_effect: None,
         changed: false,
         released: false,
         uid,
@@ -335,6 +341,28 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
 /// step per gesture, a rebuild when a change is done for effects that
 /// cannot retune while playing.
 fn finish(ui: &egui::Ui, st: &mut State, target: u16, i: usize, slot: &EffectSlot, fx: Fx) {
+    if let Some((id, carry)) = &fx.new_effect {
+        let before = st.session.clone();
+        if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
+            s.effect.clone_from(id);
+            s.values = values_for(id, carry);
+            if let Some(d) = fx.new_data.clone() {
+                s.data = d;
+            }
+        }
+        st.gesture = false;
+        if target != FILE {
+            let label = format!(
+                "{} to {}",
+                crate::fx::name(&slot.effect),
+                crate::fx::name(id)
+            );
+            st.commit_live(&label, before);
+            // A different processor: the chain is rebuilt.
+            st.session_version += 1;
+        }
+        return;
+    }
     let data_changed = fx.new_data.is_some();
     if fx.changed || data_changed {
         let before = st.session.clone();
@@ -359,6 +387,21 @@ fn finish(ui: &egui::Ui, st: &mut State, target: u16, i: usize, slot: &EffectSlo
             st.session_version += 1;
         }
     }
+}
+
+/// Effect `id`'s values: its defaults, with `carry` (by key) in their
+/// place where given, each kept inside its range.
+pub fn values_for(id: &str, carry: &[(String, f64)]) -> Vec<f32> {
+    ctls(id)
+        .iter()
+        .map(|c| {
+            let v = carry
+                .iter()
+                .find(|(k, _)| *k == c.key)
+                .map_or(c.default, |(_, v)| *v);
+            v.clamp(c.min.min(c.max), c.max.max(c.min)) as f32
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------ presets
@@ -837,8 +880,26 @@ mod tests {
                 "fx_on",
                 "fx_style",
                 "fx",
+                "dyn_trim",
+                "tone_trim",
+                "fx_trim",
             ],
         );
+        // The Vox Strip's style icons cover every style.
+        for (m, key) in ["dyn_style", "tone_style", "fx_style"].iter().enumerate() {
+            let c = ctls("af.vox_strip");
+            let c = c.iter().find(|c| c.key == *key).unwrap();
+            for s in &c.choices {
+                assert!(!dynamics::style_icon(m, s).is_empty(), "no icon for {s}");
+            }
+        }
+        // The Reverb's tabs are its kinds, in order, then Impulse Response.
+        let kinds = ctls(space::REVERB_ID);
+        let kinds = &kinds.iter().find(|c| c.key == "kind").unwrap().choices;
+        assert_eq!(kinds.len(), space::IMPULSE);
+        for (k, n) in kinds.iter().enumerate() {
+            assert_eq!(space::TABS[k], n);
+        }
         f(
             "af.phase_curve",
             &[
@@ -851,6 +912,63 @@ mod tests {
                 "p16_phase",
             ],
         );
+    }
+
+    #[test]
+    fn a_panel_can_switch_the_slot_to_another_effect_in_one_undo_step() {
+        use af27_core::session::{Session, TrackKind};
+        let mut st = State::new();
+        st.mode = crate::state::Mode::Multitrack;
+        let mut s = Session::new("s", 48_000, 0);
+        let id = s.add_track_of(TrackKind::Audio);
+        let mut slot = crate::rack::new_slot(space::REVERB_ID);
+        slot.values = values_for(
+            space::REVERB_ID,
+            &[
+                ("kind".into(), 1.0),
+                ("wet".into(), 50.0),
+                ("predelay".into(), 40.0),
+            ],
+        );
+        slot.bypass = true;
+        s.track_mut(id).unwrap().chain.push(slot.clone());
+        st.session = s;
+        let target = st.session.tracks.iter().position(|t| t.id == id).unwrap() as u16;
+        let version = st.session_version;
+        let mut fx = Fx {
+            id: slot.effect.clone(),
+            ctls: ctls(&slot.effect),
+            vals: slot.values.clone(),
+            data: None,
+            new_data: None,
+            new_effect: None,
+            changed: false,
+            released: false,
+            uid: egui::Id::new("test"),
+        };
+        fx.new_effect = Some((space::IMPULSE_ID.into(), space::to_impulse(|k| fx.get(k))));
+        let ctx = egui::Context::default();
+        let mut fx = Some(fx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if let Some(fx) = fx.take() {
+                    finish(ui, &mut st, target, 0, &slot, fx);
+                }
+            });
+        });
+        let now = &st.session.tracks[target as usize].chain[0];
+        assert_eq!(now.effect, space::IMPULSE_ID);
+        assert!(now.bypass, "the slot keeps its bypass");
+        let conv = ctls(space::IMPULSE_ID);
+        let at = |k: &str| now.values[conv.iter().position(|c| c.key == k).unwrap()];
+        assert_eq!(at("predelay"), 40.0);
+        // 50% wet is about -6 dB.
+        assert!((at("wet") + 6.02).abs() < 0.01);
+        assert_eq!(at("length"), 100.0, "the rest start at their defaults");
+        assert!(st.session_version > version, "the chain is rebuilt");
+        // One undo brings the Reverb back as it was.
+        st.undo();
+        assert_eq!(st.session.tracks[target as usize].chain[0], slot);
     }
 
     #[test]

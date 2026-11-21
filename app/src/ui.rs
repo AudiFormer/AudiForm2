@@ -1234,7 +1234,9 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.menu_button("Help", |ui| {
             if ui.button("Report a Problem...").clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/nwh212/AudiForm2/issues/new"));
+                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                    "https://github.com/nwh212/AudiForm2/issues/new",
+                ));
                 ui.close_menu();
             }
             if ui.button("About AudiForm 2").clicked() {
@@ -2288,7 +2290,9 @@ impl eframe::App for App {
         if !self.shown_env_tab {
             self.shown_env_tab = true;
             // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
-            // generate-tones | fx:<effect id>, for shots.
+            // generate-tones | fx:<effect id>[?key=value&key=value], for
+            // shots (AF2_OPEN_DATA sets that slot's data, such as an
+            // impulse response's file as JSON).
             match std::env::var("AF2_OPEN").as_deref() {
                 Ok("new-file") => crate::new_dialogs::open_new_file(&mut self.st),
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
@@ -2297,7 +2301,22 @@ impl eframe::App for App {
                 Ok("generate-tones") => self.st.generate.tones_open = true,
                 // fx:<effect id>: that effect in the file's rack, open.
                 Ok(v) if v.starts_with("fx:") => {
-                    self.st.file_chain.push(crate::rack::new_slot(&v[3..]));
+                    let (id, rest) = v[3..].split_once('?').unwrap_or((&v[3..], ""));
+                    let mut slot = crate::rack::new_slot(id);
+                    let carry: Vec<(String, f64)> = rest
+                        .split('&')
+                        .filter_map(|kv| {
+                            let (k, x) = kv.split_once('=')?;
+                            Some((k.to_string(), x.parse().ok()?))
+                        })
+                        .collect();
+                    if !carry.is_empty() {
+                        slot.values = crate::fx_windows::values_for(id, &carry);
+                    }
+                    slot.data = std::env::var("AF2_OPEN_DATA")
+                        .ok()
+                        .filter(|d| !d.is_empty());
+                    self.st.file_chain.push(slot);
                     let at = self.st.file_chain.len() - 1;
                     crate::rack::open_window(&mut self.st, crate::rack::FILE, at);
                 }
