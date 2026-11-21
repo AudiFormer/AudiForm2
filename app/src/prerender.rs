@@ -16,6 +16,11 @@
 //! made and takes over when it is ready. Going back to an earlier state
 //! reuses its render from the cache folder.
 //!
+//! Renders play from disk: each is kept in the cache folder as 24-bit
+//! FLAC in chunks (`af27_io::chunked`, stored 24 dB down so peaks over
+//! full scale survive) and streamed by `af27_engine::disk`, with only its
+//! first moments and the few seconds around the playhead in memory.
+//!
 //! Ported from Audiform's pre-render (the project lead's own work there).
 
 use std::borrow::Cow;
@@ -35,6 +40,36 @@ use crate::state::State;
 const TAIL: f64 = 6.0;
 /// How many renders the cache folder keeps, newest first.
 const KEEP: usize = 24;
+/// Frames per chunk in a render's cache file.
+const CHUNK: usize = 65_536;
+
+/// A finished render: played from disk through `stream`, standing in the
+/// mix as `stand_in` (an empty buffer the engine knows it by).
+#[derive(Clone)]
+pub struct Ready {
+    pub frames: usize,
+    pub stand_in: Arc<AudioBuffer>,
+    pub stream: Arc<af27_engine::disk::DiskStream>,
+}
+
+/// Opens a render's cache file for streaming.
+fn open_render(path: &Path) -> Result<Ready, String> {
+    let c = af27_io::chunked::Chunked::open(path)?;
+    let (rate, channels, frames, chunk) = (c.rate, c.channels, c.frames, c.chunk);
+    let mut file: Option<std::fs::File> = None;
+    let load = Box::new(move |k: usize| {
+        if file.is_none() {
+            file = std::fs::File::open(&c.path).ok();
+        }
+        c.read(file.as_mut()?, k).ok()
+    });
+    let stream = af27_engine::disk::DiskStream::open(rate, channels, frames, chunk, load)?;
+    Ok(Ready {
+        frames,
+        stand_in: af27_engine::disk::stand_in(&stream),
+        stream,
+    })
+}
 
 /// Where one pre-rendered track stands.
 #[derive(Default)]
@@ -42,7 +77,7 @@ struct Entry {
     /// The fingerprint being rendered now, if any.
     rendering: Option<u64>,
     /// A finished render and its fingerprint.
-    ready: Option<(u64, Arc<AudioBuffer>)>,
+    ready: Option<(u64, Ready)>,
     /// The fingerprint of the track as it is now (None: it cannot be
     /// rendered alone, or its audio is still loading).
     now: Option<u64>,
@@ -51,8 +86,8 @@ struct Entry {
 /// Every pre-rendered track's state (kept in [`State`]).
 pub struct Prerender {
     entries: HashMap<TrackId, Entry>,
-    tx: Sender<(TrackId, u64, Result<Arc<AudioBuffer>, String>)>,
-    rx: Receiver<(TrackId, u64, Result<Arc<AudioBuffer>, String>)>,
+    tx: Sender<(TrackId, u64, Result<Ready, String>)>,
+    rx: Receiver<(TrackId, u64, Result<Ready, String>)>,
     /// What the fingerprints were worked out from (session and files).
     checked: Option<(u64, u64)>,
     /// Bumped whenever what plays changes (a render came or went).
@@ -208,8 +243,8 @@ impl State {
             .filter(|t| t.prerender)
             .filter_map(|t| {
                 let e = self.prerender.entries.get(&t.id)?;
-                let (key, buf) = e.ready.as_ref()?;
-                (e.now == Some(*key)).then_some((t.id, buf.frames() as u64))
+                let (key, r) = e.ready.as_ref()?;
+                (e.now == Some(*key)).then_some((t.id, r.frames as u64))
             })
             .collect();
         if ready.is_empty() {
@@ -264,7 +299,7 @@ impl State {
                 .prerender
                 .entries
                 .get(&id)
-                .and_then(|e| e.ready.as_ref().map(|r| r.1.clone()));
+                .and_then(|e| e.ready.as_ref().map(|r| r.1.stand_in.clone()));
         }
         self.media_buffer(m)
     }
@@ -272,6 +307,7 @@ impl State {
     /// Picks up finished renders and starts one for each pre-rendered
     /// track whose sound changed. Cheap when nothing changed.
     pub fn prerender_poll(&mut self) {
+        self.prerender_hint();
         let mut moved = false;
         while let Ok((id, key, done)) = self.prerender.rx.try_recv() {
             let Some(e) = self.prerender.entries.get_mut(&id) else {
@@ -344,10 +380,10 @@ impl State {
             if e.ready.as_ref().is_some_and(|r| r.0 == key) || e.rendering == Some(key) {
                 continue;
             }
-            let path = cache_dir().join(format!("{key:016x}.wav"));
-            if let Ok(buf) = af27_io::decode_file(&path) {
-                if buf.rate == self.session.rate {
-                    e.ready = Some((key, Arc::new(buf)));
+            let path = cache_dir().join(format!("{key:016x}.afr"));
+            if let Ok(r) = open_render(&path) {
+                if r.stream.rate == self.session.rate {
+                    e.ready = Some((key, r));
                     moved = true;
                     continue;
                 }
@@ -382,25 +418,55 @@ impl State {
     }
 }
 
-/// Renders one track alone: stereo at the session rate from the start,
-/// kept as a 32-bit float file in the cache folder for later.
+impl State {
+    /// Tells each playing render where playback will go next, so its
+    /// audio is loaded before then: the playhead while stopped, the loop
+    /// start while looping.
+    fn prerender_hint(&self) {
+        if self.prerender.entries.is_empty() {
+            return;
+        }
+        let rate = self.session.rate as f64;
+        let at = if !self.is_playing() {
+            Some(self.session_cursor)
+        } else if self.play_mode() == crate::transport::PlayMode::Loop {
+            self.session_sel.map(|s| s.0)
+        } else {
+            None
+        };
+        let frame = at.map(|t| (t.max(0.0) * rate) as usize);
+        for e in self.prerender.entries.values() {
+            if let Some((_, r)) = &e.ready {
+                r.stream.hint(frame);
+            }
+        }
+    }
+
+    /// Bytes the renders hold in memory now.
+    pub fn prerender_bytes(&self) -> usize {
+        self.prerender
+            .entries
+            .values()
+            .filter_map(|e| e.ready.as_ref())
+            .map(|r| r.1.stream.bytes())
+            .sum()
+    }
+}
+
+/// Renders one track alone (stereo at the session rate from the start),
+/// saves it to the cache folder and opens it to stream from there.
 fn render(
     job: &Session,
     media: &HashMap<MediaId, Arc<AudioBuffer>>,
     path: &Path,
-) -> Result<Arc<AudioBuffer>, String> {
+) -> Result<Ready, String> {
     let rate = job.rate;
     let program = af27_engine::mix_program(job, &|m| media.get(&m).cloned(), rate);
     let to = job.duration() + TAIL;
     let buf = af27_engine::render(program, rate, 0.0, to);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let tmp = path.with_extension("part.wav");
-    if af27_io::write_wav(&tmp, &buf, af27_io::WavFormat::Float32).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    }
-    Ok(Arc::new(buf))
+    af27_io::chunked::write(path, &buf, CHUNK)?;
+    drop(buf);
+    open_render(path)
 }
 
 /// Removes all but the newest [`KEEP`] renders.
@@ -408,12 +474,22 @@ fn prune(dir: &Path) {
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = read
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "wav"))
-        .filter(|e| !e.path().to_string_lossy().ends_with(".part.wav"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-        .collect();
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for e in read.flatten() {
+        let p = e.path();
+        match p.extension().and_then(|x| x.to_str()) {
+            Some("afr") => {
+                if let Some(t) = e.metadata().ok().and_then(|m| m.modified().ok()) {
+                    files.push((t, p));
+                }
+            }
+            // Renders from before they streamed (32-bit float WAV).
+            Some("wav") => {
+                let _ = std::fs::remove_file(p);
+            }
+            _ => {}
+        }
+    }
     files.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (_, path) in files.into_iter().skip(KEEP) {
         let _ = std::fs::remove_file(path);
@@ -463,12 +539,15 @@ mod tests {
             .chain
             .push(crate::rack::new_slot("amplify"));
         let key = fingerprint(&st.session, id, &|_| None).unwrap();
-        let buf = Arc::new(AudioBuffer::new(48_000, 2, 96_000));
+        let dir = std::env::temp_dir().join(format!("af2-pr-test-{}", std::process::id()));
+        let path = dir.join("r.afr");
+        af27_io::chunked::write(&path, &AudioBuffer::new(48_000, 2, 96_000), CHUNK).unwrap();
+        let ready = open_render(&path).unwrap();
         st.prerender.entries.insert(
             id,
             Entry {
                 rendering: None,
-                ready: Some((key, buf)),
+                ready: Some((key, ready)),
                 now: Some(key),
             },
         );
@@ -481,7 +560,10 @@ mod tests {
         assert_eq!((t.volume_db, t.pan), (-6.0, 0.5));
         let m = t.clips[0].media;
         assert!(h.media.iter().any(|x| x.id == m));
-        assert_eq!(st.heard_media(m).map(|b| b.frames()), Some(96_000));
+        // The mix gets a stand-in for the stream that plays it from disk.
+        let stand_in = st.heard_media(m).unwrap();
+        let stream = af27_engine::disk::stream_for(&stand_in).expect("streamed");
+        assert_eq!(stream.frames, 96_000);
         assert_eq!(st.prerender_status(id), Some(Status::Ready));
         // A change to the sound: the live track plays again.
         drop(h);

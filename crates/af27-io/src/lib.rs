@@ -3,6 +3,7 @@
 
 //! Reading any common audio file into an [`AudioBuffer`], and writing WAV.
 
+pub mod chunked;
 pub mod export;
 
 use std::fs::File;

@@ -1508,13 +1508,14 @@ impl State {
                 LAST.with(|l| l.set(Some(now)));
                 let held: usize = self.docs.iter().map(|d| d.buf.frames() * d.buf.num_channels() * 4).sum();
                 eprintln!(
-                    "mem: private {:.0} MB; {} files holding {:.0} MB; {} loading; stretched clips {:.0} MB; {} tracks pre-rendered",
+                    "mem: private {:.0} MB; {} files holding {:.0} MB; {} loading; stretched clips {:.0} MB; {} tracks pre-rendered holding {:.0} MB",
                     crate::memstat::private_mb(),
                     self.docs.len(),
                     held as f64 / 1048576.0,
                     self.jobs.len(),
                     af27_engine::stretch::cache_bytes().0 as f64 / 1048576.0,
-                    self.session.tracks.iter().filter(|t| t.prerender).count()
+                    self.session.tracks.iter().filter(|t| t.prerender).count(),
+                    self.prerender_bytes() as f64 / 1048576.0
                 );
             }
         }

@@ -89,6 +89,9 @@ pub struct MixClip {
     /// clip, once the background work has it; until then the clip reads
     /// its source at `speed`.
     pub prepared: Option<Arc<crate::stretch::Prepared>>,
+    /// Audio played from disk (a pre-rendered track): `buf` is then an
+    /// empty stand-in and the clip reads through this.
+    pub stream: Option<Box<crate::disk::StreamReader>>,
     /// The clip's volume lane (dB, clip time) and pan lane (-1..1), each
     /// empty when it has none playing.
     pub vol: Vec<LanePoint>,
@@ -202,6 +205,7 @@ impl MixClip {
     pub fn new(c: &af27_core::Clip, buf: Arc<AudioBuffer>) -> MixClip {
         let p = &c.props;
         let prepared = crate::stretch::needs(c).then(|| crate::stretch::prepare(&buf, c));
+        let stream = crate::disk::stream_for(&buf).map(|s| Box::new(s.reader()));
         let g = db_to_gain(c.gain_db);
         let lane = |target: LaneTarget| {
             c.playing_lane(&target)
@@ -232,6 +236,7 @@ impl MixClip {
             speed: 1.0 / p.stretch.applied_ratio(),
             reversed: p.reversed,
             prepared,
+            stream,
         }
     }
 }
@@ -836,7 +841,7 @@ fn render_source(t: &mut MixTrack, tracks: TrackPtr, ts: f64, dt: f64, n: usize)
 /// through its chain (effect lanes moving every [`FX_STEP`] frames) and
 /// what lands inside the clip is added. The chain is cleared when the
 /// clip starts sounding again. No allocation.
-fn clip_through_fx(c: &MixClip, fx: &mut ClipFx, ts: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
+fn clip_through_fx(c: &mut MixClip, fx: &mut ClipFx, ts: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
     let n = l.len().min(fx.l.len());
     let lead = dt * fx.lat as f64;
     let t1 = ts + dt * n as f64;
@@ -991,10 +996,51 @@ fn mapped_frame(buf: &AudioBuffer, map: &[[f32; 2]], x: f64) -> (f32, f32) {
 /// Adds one clip's sound for the block starting at `t0` (frames `dt`
 /// apart) into `l` and `r`: from its prepared (stretched) audio when that
 /// is ready, otherwise from its source at its speed and direction.
-fn read_clip(c: &MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
+fn read_clip(c: &mut MixClip, t0: f64, dt: f64, l: &mut [f32], r: &mut [f32]) {
+    if let Some(mut s) = c.stream.take() {
+        read_streamed(c, &mut s, t0, dt, l, r);
+        c.stream = Some(s);
+        return;
+    }
     match c.prepared.as_deref().and_then(|p| p.ready()) {
         Some(buf) => read_span(c, buf, 0.0, 1.0, false, t0, dt, l, r),
         None => read_span(c, &c.buf, c.offset, c.speed, c.reversed, t0, dt, l, r),
+    }
+}
+
+/// [`read_clip`] for a clip played from disk: each piece of the block
+/// is fetched into the reader's scratch buffer and read from there as if
+/// it were the file (the clip plays at speed 1, forwards).
+fn read_streamed(
+    c: &MixClip,
+    s: &mut crate::disk::StreamReader,
+    t0: f64,
+    dt: f64,
+    l: &mut [f32],
+    r: &mut [f32],
+) {
+    let rate = s.stream().rate as f64;
+    let n = l.len();
+    let mut a = 0;
+    while a < n {
+        let b = (a + crate::disk::SCRATCH).min(n);
+        let ta = t0 + dt * a as f64;
+        let src = ((c.offset + ta - c.start) * rate).floor();
+        let s0 = src.max(0.0) as usize;
+        let span = ((b - a) as f64 * dt * rate).ceil() as usize + 2;
+        let buf = s.fill(s0, span);
+        read_span(
+            c,
+            buf,
+            c.offset - s0 as f64 / rate,
+            1.0,
+            false,
+            ta,
+            dt,
+            &mut l[a..b],
+            &mut r[a..b],
+        );
+        a = b;
     }
 }
 
@@ -1573,6 +1619,9 @@ impl Mix {
     /// every block.
     pub fn set_offline(&mut self) {
         for t in &mut self.tracks {
+            for s in t.clips.iter_mut().filter_map(|c| c.stream.as_deref_mut()) {
+                s.blocking = true;
+            }
             for fx in t.clips.iter_mut().filter_map(|c| c.fx.as_deref_mut()) {
                 fx.chain.set_offline(true);
                 fx.lat = fx.chain.latency();

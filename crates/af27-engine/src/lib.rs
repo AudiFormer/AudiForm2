@@ -19,6 +19,7 @@ pub mod health;
 mod meter;
 pub mod mix;
 pub mod pool;
+pub mod disk;
 mod record;
 pub use record::LIVE_BIN as RECORD_LIVE_BIN;
 pub mod routing;
@@ -1272,6 +1273,61 @@ mod tests {
             ext_id: None,
         });
         (s, buf)
+    }
+
+    /// A clip played from disk sounds exactly as the same audio in memory,
+    /// offline (waiting for chunks) and live once its chunks are loaded.
+    #[test]
+    fn a_streamed_clip_matches_the_same_audio_in_memory() {
+        let (mut s, _) = session_with_tone();
+        let frames = 20_000usize;
+        let src: Vec<Vec<f32>> = vec![
+            (0..frames).map(|i| ((i as f32) * 0.037).sin()).collect(),
+            (0..frames).map(|i| ((i as f32) * 0.011).cos() * 0.5).collect(),
+        ];
+        let mem = Arc::new(AudioBuffer { rate: 100, channels: src.clone() });
+        s.media[0].duration = 200.0;
+        s.media[0].channels = 2;
+        let c = &mut s.tracks[0].clips[0];
+        c.start = 0.3;
+        c.offset = 1.7;
+        c.length = 150.0;
+        c.fade_out = 0.0;
+        let chunk = 700;
+        let data = src.clone();
+        let stream = disk::DiskStream::open(
+            100,
+            2,
+            frames,
+            chunk,
+            Box::new(move |k| {
+                let a = k * chunk;
+                let b = (a + chunk).min(frames);
+                Some(data.iter().map(|ch| ch[a..b].to_vec()).collect())
+            }),
+        )
+        .unwrap();
+        let stand_in = disk::stand_in(&stream);
+        let m2 = mem.clone();
+        let want = render(mix_program(&s, &move |_| Some(m2.clone()), 100), 100, 0.0, 160.0);
+        let si = stand_in.clone();
+        let got = render(mix_program(&s, &move |_| Some(si.clone()), 100), 100, 0.0, 160.0);
+        assert_eq!(want.channels, got.channels, "offline");
+        // Live: a mix reading without waiting, the chunks already there.
+        let si = stand_in.clone();
+        let Program::Mix(mut live) = mix_program(&s, &move |_| Some(si.clone()), 100) else {
+            panic!()
+        };
+        let at = 90.0;
+        stream.hint(Some((at * 100.0) as usize));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        live.start(at);
+        let mut out = vec![0.0f32; 64 * 2];
+        live.render(at, 0.01, 64, &mut out, false);
+        let w = (at * 100.0) as usize;
+        for i in 0..64 {
+            assert_eq!(out[i * 2], want.channels[0][w + i], "live frame {i}");
+        }
     }
 
     #[test]
