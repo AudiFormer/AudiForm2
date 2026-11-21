@@ -2687,6 +2687,43 @@ mod tests {
     }
 
     #[test]
+    fn a_delay_and_echo_loads_by_its_keys_and_writes_back_as_audiforms() {
+        let text = SAMPLE.replace(
+            r#""effect": "altaudio.stereo_width", "enabled": false, "params": {"pan": 10.0, "width": 150.0}"#,
+            r#""effect": "altaudio.echo", "enabled": true, "params": {"kind": 1, "time": 420.0, "pingpong": 1, "analog": 3, "l_time": -12.5, "units": 1}"#,
+        );
+        assert_ne!(text, SAMPLE);
+        let imp = import(&text, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session;
+        let e = &s.tracks[0].chain[1];
+        assert_eq!(e.effect, "af.echo");
+        let info = af27_fx::info(&e.effect).unwrap();
+        let k = |key: &str| info.params.iter().position(|p| p.key == key).unwrap();
+        assert_eq!(e.values[k("kind")], 1.0);
+        assert_eq!(e.values[k("time")], 420.0);
+        assert_eq!(e.values[k("pingpong")], 1.0);
+        assert_eq!(e.values[k("analog")], 3.0);
+        assert_eq!(e.values[k("l_time")], -12.5);
+        assert_eq!(e.values[k("units")], 1.0);
+        // Left out: the defaults.
+        assert_eq!(e.values[k("feedback")], 35.0);
+        assert_eq!(e.values[k("wet")], 30.0);
+        // Unchanged: the same document; an edit goes back under its key.
+        let mut out = export(&mut s, Some(&base));
+        let mut want = base.clone();
+        out.as_object_mut().unwrap().remove("modified");
+        want.as_object_mut().unwrap().remove("modified");
+        assert_eq!(out, want);
+        s.tracks[0].chain[1].values[k("feedback")] = 60.0;
+        let out = export(&mut s, Some(&base));
+        let slot = &out["tracks"][0]["effects"]["slots"][1];
+        assert_eq!(slot["effect"], json!("altaudio.echo"));
+        assert_eq!(slot["params"]["feedback"], json!(60.0));
+        assert_eq!(slot["params"]["time"], json!(420.0));
+    }
+
+    #[test]
     fn a_parametric_eq_plays_and_round_trips_by_its_keys() {
         let text = SAMPLE.replace(
             r#""effect": "altaudio.stereo_width", "enabled": false, "params": {"pan": 10.0, "width": 150.0}"#,

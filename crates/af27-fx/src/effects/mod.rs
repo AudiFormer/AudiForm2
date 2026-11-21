@@ -9,6 +9,7 @@ pub use crate::info;
 
 pub mod amp;
 pub mod center;
+pub mod echo;
 pub mod mixer;
 pub mod modulation;
 pub mod parametric_eq;

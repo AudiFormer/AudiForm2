@@ -2,11 +2,12 @@
 // Copyright (c) The Audiform27 contributors.
 
 //! Audiform27's effects, ported from the effects their author wrote for
-//! Audiform (see PORTING.md): Amp Model, Opto Leveler, Tube Preamp, Delay
-//! and Echo, Reverb, Convolution Reverb, Modulation, Center Channel
-//! Extractor, Channel Mixer, Stereo Width, Phase Curve, Vox Strip and
-//! Parametric EQ; and Tube Master, a valve mastering compressor for mono,
-//! stereo or a speaker bed, written for AF2.
+//! Audiform (see PORTING.md): Amp Model, Opto Leveler, Tube Preamp,
+//! Reverb, Convolution Reverb, Modulation, Center Channel Extractor,
+//! Channel Mixer, Stereo Width, Phase Curve, Vox Strip and Parametric EQ;
+//! and two written for AF2: Tube Master, a valve mastering compressor for
+//! mono, stereo or a speaker bed, and Delay and Echo (its sound our own,
+//! its controls Audiform's so sessions carry over).
 //!
 //! [`registry`] lists them, [`build`] makes a running [`Processor`] for
 //! one, and [`params_from`] turns saved values into [`Params`].
@@ -25,8 +26,8 @@ pub use framework::{choice, db_to_gain, num, toggle, EffectInfo, ParamInfo, Para
 pub use meters::SlotMeter;
 
 use effects::{
-    amp, center, mixer, modulation, parametric_eq, phase_curve, reverb, tube, tube_master, verb,
-    vocal, width,
+    amp, center, echo, mixer, modulation, parametric_eq, phase_curve, reverb, tube, tube_master,
+    verb, vocal, width,
 };
 
 /// Every effect, in menu order.
@@ -37,6 +38,7 @@ pub fn registry() -> Vec<EffectInfo> {
         tube::opto_info(),
         tube_master::info(),
         vocal::vocal_info(),
+        echo::echo_info(),
         verb::verb_info(),
         reverb::reverb_info(),
         modulation::modulation_info(),
@@ -98,6 +100,7 @@ pub fn build_with(
         tube::PREAMP => Box::new(tube::Preamp::new(p, rate, meter())),
         tube_master::ID => Box::new(tube_master::TubeMaster::new(p, rate)),
         vocal::VOCAL => Box::new(vocal::VoxStrip::new(p, rate, meter())),
+        echo::ID => Box::new(echo::Echo::new(p, rate)),
         verb::ID => Box::new(verb::Reverb::new(p, rate)),
         reverb::ID => Box::new(reverb::ConvolutionReverb::new(p, rate, data)),
         modulation::ID => Box::new(modulation::Modulation::new(p, rate)),
@@ -111,10 +114,17 @@ pub fn build_with(
 }
 
 /// The effects with their own form on a speaker bed (more than two
-/// channels): the Reverb, the Convolution Reverb, Modulation and Tube
+/// channels): the Reverb, the Convolution Reverb, Modulation, Tube
 /// Master (the same circuit on every channel, Independent or Linked
-/// detection, the LFE untouched).
-pub const NATIVE_WIDE: [&str; 4] = [verb::ID, reverb::ID, modulation::ID, tube_master::ID];
+/// detection, the LFE untouched) and Delay and Echo (a line per speaker,
+/// ping-pong round the room, the LFE dry).
+pub const NATIVE_WIDE: [&str; 5] = [
+    verb::ID,
+    reverb::ID,
+    modulation::ID,
+    tube_master::ID,
+    echo::ID,
+];
 
 /// A running processor for effect `id` over a speaker bed with channels
 /// named `names`, for the effects in [`NATIVE_WIDE`]; it processes
@@ -134,6 +144,7 @@ pub fn build_wide(
         reverb::ID => Box::new(reverb::ConvolutionReverb::wide(params, rate, data, names)),
         modulation::ID => Box::new(modulation::Modulation::wide(params, rate, names)),
         tube_master::ID => Box::new(tube_master::TubeMaster::wide(params, rate, names)),
+        echo::ID => Box::new(echo::Echo::wide(params, rate, names)),
         _ => return None,
     })
 }
@@ -264,6 +275,7 @@ mod tests {
         opto_leveler_runs_clean => tube::OPTO,
         tube_master_runs_clean => tube_master::ID,
         vox_strip_runs_clean => vocal::VOCAL,
+        delay_and_echo_runs_clean => echo::ID,
         reverb_runs_clean => verb::ID,
         convolution_reverb_runs_clean => reverb::ID,
         modulation_runs_clean => modulation::ID,

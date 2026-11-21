@@ -25,7 +25,7 @@ use crate::theme::{c, ca, lerp, Theme};
 
 /// The lit display between the big dials: a big readout, a small line
 /// under it, and a picture drawn by `draw` (in the display's light).
-fn screen(
+pub(super) fn screen(
     ui: &mut egui::Ui,
     th: &Theme,
     size: egui::Vec2,
@@ -74,7 +74,7 @@ fn r_rect(r: Rect) -> Rect {
     r.shrink(0.5)
 }
 
-fn bar(p: &egui::Painter, x: f32, base: f32, h: f32, w: f32, col: Color32) {
+pub(super) fn bar(p: &egui::Painter, x: f32, base: f32, h: f32, w: f32, col: Color32) {
     if h > 0.3 {
         p.rect_filled(
             Rect::from_min_max(pos2(x - w / 2.0, base - h), pos2(x + w / 2.0, base)),
@@ -84,7 +84,7 @@ fn bar(p: &egui::Painter, x: f32, base: f32, h: f32, w: f32, col: Color32) {
     }
 }
 
-fn secs(ms: f64) -> String {
+pub(super) fn secs(ms: f64) -> String {
     if ms >= 1000.0 {
         format!("{:.2} s", ms / 1000.0)
     } else {
@@ -114,7 +114,7 @@ fn spatial_note(ui: &mut egui::Ui, env: &Env, w: f32, text: &str) {
 }
 
 /// A face with a hero dial either side of a display `display` wide.
-const fn hero_w(display: f32) -> f32 {
+pub(super) const fn hero_w(display: f32) -> f32 {
     2.0 * SIDE + display + 2.0 * GAP
 }
 
