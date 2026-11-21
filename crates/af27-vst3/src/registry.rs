@@ -52,6 +52,23 @@ impl Found {
         }
     }
 
+    /// An instrument's kind from its sub-categories (`Instrument|Synth`
+    /// is "Synth", `Instrument|Drum` "Drum"), or None when it says none.
+    pub fn instrument_kind(&self) -> Option<String> {
+        self.info
+            .sub_categories
+            .split('|')
+            .map(str::trim)
+            .find(|s| {
+                !s.is_empty()
+                    && !s.eq_ignore_ascii_case("instrument")
+                    && !s.eq_ignore_ascii_case("fx")
+                    && !s.eq_ignore_ascii_case("mono")
+                    && !s.eq_ignore_ascii_case("stereo")
+            })
+            .map(str::to_string)
+    }
+
     pub fn maker(&self) -> String {
         let v = self.info.vendor.trim();
         if v.is_empty() {
@@ -269,6 +286,17 @@ impl Registry {
                 f.info.name.to_lowercase(),
             )
         });
+        v
+    }
+
+    /// Instruments the user has not turned off, by maker, then name.
+    pub fn instruments(&self) -> Vec<&Found> {
+        let mut v: Vec<&Found> = self
+            .plugins
+            .iter()
+            .filter(|f| f.info.instrument && !self.is_disabled(&f.info.cid))
+            .collect();
+        v.sort_by_key(|f| (f.maker().to_lowercase(), f.info.name.to_lowercase()));
         v
     }
 

@@ -880,6 +880,65 @@ pub fn plan_notes(clips: &[MidiClip], tempo: &Tempo) -> Vec<PlannedNote> {
     out
 }
 
+/// A controller move as it will play: timeline seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlannedControl {
+    pub at: f64,
+    /// 0..127, [`AFTERTOUCH`] or [`PITCH_BEND`].
+    pub controller: u8,
+    /// 0..1.
+    pub value: f32,
+    pub channel: u8,
+}
+
+/// Every note and controller move of `clips` as an instrument with a
+/// pedal of its own (a plug-in) hears them: as [`plan_notes`], except
+/// that notes end where they are written (the sustain pedal is sent as
+/// controller 64, not folded into the notes). Controller moves inside
+/// each unmuted clip come along, in timeline seconds. Both are sorted.
+pub fn plan_events(clips: &[MidiClip], tempo: &Tempo) -> (Vec<PlannedNote>, Vec<PlannedControl>) {
+    let mut notes = Vec::new();
+    let mut controls = Vec::new();
+    for c in clips.iter().filter(|c| !c.muted) {
+        for n in &c.notes {
+            if n.start >= c.length || n.length <= 0.0 || n.start < 0.0 {
+                continue;
+            }
+            let end = (n.start + n.length).min(c.length);
+            let start = c.secs_at(n.start, tempo);
+            let stop = c.secs_at(end, tempo);
+            notes.push(PlannedNote {
+                start,
+                end: stop.max(start + 1e-6),
+                pitch: c.shifted(n.pitch),
+                detune: c.detune(),
+                velocity: c.velocity(n),
+                channel: n.channel.min(15),
+                pan: if n.pan.is_nan() {
+                    0.0
+                } else {
+                    n.pan.clamp(-1.0, 1.0)
+                },
+            });
+        }
+        for e in c.controls.iter().filter(|e| e.at >= 0.0 && e.at < c.length) {
+            controls.push(PlannedControl {
+                at: c.secs_at(e.at, tempo),
+                controller: e.controller.min(PITCH_BEND),
+                value: if e.value.is_finite() {
+                    e.value.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+                channel: e.channel.min(15),
+            });
+        }
+    }
+    notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+    controls.sort_by(|a, b| a.at.total_cmp(&b.at));
+    (notes, controls)
+}
+
 /// The controllers controller lanes offer first.
 pub const LANE_CONTROLLERS: [u8; 10] = [64, 1, 11, 7, 10, 2, 66, 67, PITCH_BEND, AFTERTOUCH];
 

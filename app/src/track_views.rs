@@ -779,86 +779,171 @@ fn strip_options_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -
 }
 
 /// A MIDI track's instrument: the built-in synth, a SoundFont (and its
-/// preset), or a VST3 instrument (listed; playing them is next).
+/// preset) or a VST3 instrument. The name opens its settings (the
+/// synth's window, the SoundFont's presets, the plug-in's own window);
+/// the arrow next to it picks another.
 fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
     let sf = st.session.tracks[ti].soundfont.clone();
-    let shown = match &sf {
-        Some(f) if !f.preset_name.is_empty() => f.preset_name.clone(),
-        Some(f) => f
-            .path
-            .file_stem()
-            .map_or("SoundFont".into(), |s| s.to_string_lossy().to_string()),
-        None => "Built-in Synth".into(),
+    let plug = crate::instruments::slot_of(st, ti).cloned();
+    let stopped = plug.as_ref().and_then(|_| crate::instruments::stopped(st, ti));
+    let (shown, hover) = match (&plug, &sf) {
+        (Some(p), _) => {
+            let n = crate::instruments::name(p);
+            let hover = match &stopped {
+                Some(why) => format!("{n}: stopped. {why}"),
+                None => format!("{n}: click to open its window"),
+            };
+            (n, hover)
+        }
+        (None, Some(f)) => {
+            let n = if f.preset_name.is_empty() {
+                f.path
+                    .file_stem()
+                    .map_or("SoundFont".into(), |s| s.to_string_lossy().to_string())
+            } else {
+                f.preset_name.clone()
+            };
+            (n, "SoundFont: click for its presets".to_string())
+        }
+        (None, None) => (
+            "Built-in Synth".to_string(),
+            "Built-in Synth: click for its settings".to_string(),
+        ),
     };
+    let current = plug.as_ref().map(|p| p.effect.clone());
     let mut builtin = false;
     let mut font = false;
+    let mut picked: Option<String> = None;
     let mut preset: Option<af27_engine::soundfont::Preset> = None;
+    let mut settings = false;
+    let mut restart = false;
+    let popup = egui::Id::new(("instrument-presets", ti));
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
         ui.label(RichText::new("♪").color(c(th.text_dim)))
             .on_hover_text("Instrument");
-        egui::ComboBox::from_id_salt(("track-instrument", ti))
-            .selected_text(RichText::new(shown).size(11.0))
-            .width(150.0)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(sf.is_none(), "Built-in Synth")
-                    .clicked()
-                {
-                    builtin = true;
+        let mut text = RichText::new(&shown).size(11.0);
+        if stopped.is_some() {
+            text = text.color(egui::Color32::from_rgb(230, 90, 80));
+        }
+        let name = ui
+            .add_sized(
+                [128.0, 18.0],
+                egui::Button::new(text).wrap_mode(egui::TextWrapMode::Truncate),
+            )
+            .on_hover_text(hover);
+        if name.clicked() {
+            settings = true;
+        }
+        // A SoundFont's presets drop down under its name.
+        if let Some(f) = &sf {
+            egui::popup::popup_below_widget(
+                ui,
+                popup,
+                &name,
+                egui::PopupCloseBehavior::CloseOnClickOutside,
+                |ui| {
+                    ui.set_min_width(220.0);
+                    match af27_engine::soundfont::load(&f.path) {
+                        Ok(loaded) => {
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for p in af27_engine::soundfont::presets(&loaded) {
+                                        let on = p.bank == f.bank && p.program == f.program;
+                                        let label =
+                                            format!("{:03}:{:03} {}", p.bank, p.program, p.name);
+                                        if ui.selectable_label(on, label).clicked() {
+                                            preset = Some(p);
+                                            ui.memory_mut(|m| m.close_popup());
+                                        }
+                                    }
+                                });
+                        }
+                        Err(e) => {
+                            ui.label(e);
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Another SoundFont...").clicked() {
+                        font = true;
+                        ui.memory_mut(|m| m.close_popup());
+                    }
+                },
+            );
+        }
+        let bar = ui.id();
+        let arrow = ui.menu_button(RichText::new("▾").size(11.0), |ui| {
+            ui.set_min_width(190.0);
+            if ui
+                .selectable_label(sf.is_none() && plug.is_none(), "Built-in Synth")
+                .clicked()
+            {
+                builtin = true;
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(sf.is_some() && plug.is_none(), "SoundFont (.sf2)...")
+                .clicked()
+            {
+                font = true;
+                ui.close_menu();
+            }
+            ui.separator();
+            picked = crate::instruments::menu_items(ui, current.as_deref(), th);
+            if plug.is_some() {
+                ui.separator();
+                if stopped.is_some() {
+                    if ui.button("Restart Instrument").clicked() {
+                        restart = true;
+                        ui.close_menu();
+                    }
+                } else if ui.button("Show Instrument Window").clicked() {
+                    settings = true;
+                    ui.close_menu();
                 }
-                if ui.selectable_label(false, "SoundFont (.sf2)...").clicked() {
+            }
+        });
+        let arrow = arrow.response.on_hover_text("Pick the instrument");
+        // For screenshots (AF2_OPEN=instrument-menu): the menu opens.
+        if crate::instruments::take_shot_open() {
+            let mut bs = egui::menu::BarState::load(ui.ctx(), bar);
+            let mut at = arrow.rect.left_bottom();
+            at.x -= egui::Frame::menu(ui.style()).total_margin().left;
+            at.y += ui.style().spacing.menu_spacing;
+            **bs = Some(egui::menu::MenuRoot::new(at, arrow.id));
+            bs.store(ui.ctx(), bar);
+        }
+    });
+    if settings {
+        match (&plug, &sf) {
+            (Some(_), _) => crate::instruments::open_editor(st, ti),
+            (None, Some(f)) => {
+                if af27_engine::soundfont::load(&f.path).is_ok() {
+                    ui.memory_mut(|m| m.toggle_popup(popup));
+                } else {
                     font = true;
                 }
-                if let Some(f) = &sf {
-                    if let Ok(loaded) = af27_engine::soundfont::load(&f.path) {
-                        ui.separator();
-                        ui.label(RichText::new("Presets").small());
-                        egui::ScrollArea::vertical()
-                            .max_height(260.0)
-                            .show(ui, |ui| {
-                                for p in af27_engine::soundfont::presets(&loaded) {
-                                    let on = p.bank == f.bank && p.program == f.program;
-                                    if ui
-                                        .selectable_label(
-                                            on,
-                                            format!("{:03}:{:03} {}", p.bank, p.program, p.name),
-                                        )
-                                        .clicked()
-                                    {
-                                        preset = Some(p);
-                                    }
-                                }
-                            });
-                    }
-                }
-                let reg = af27_vst3::live::manager().registry();
-                let insts: Vec<String> = reg
-                    .plugins
-                    .iter()
-                    .filter(|p| p.info.instrument)
-                    .map(|p| format!("{} ({})", p.info.name, p.maker()))
-                    .collect();
-                drop(reg);
-                if !insts.is_empty() {
-                    ui.separator();
-                    ui.menu_button("VST3 Instruments", |ui| {
-                        for n in insts {
-                            ui.add_enabled(false, egui::Button::new(n))
-                                .on_disabled_hover_text("Playing VST3 instruments is coming next.");
-                        }
-                    });
-                }
-            });
-    });
-    if builtin && sf.is_some() {
+            }
+            (None, None) => st.synth_editor = Some(st.session.tracks[ti].id),
+        }
+    }
+    if restart {
+        crate::instruments::restart(st, ti);
+    }
+    if builtin && (sf.is_some() || plug.is_some()) {
         let before = st.session.clone();
         st.session.tracks[ti].soundfont = None;
+        crate::instruments::clear(st, ti);
         st.commit_session("Instrument", before);
     }
     if font {
         if let Some(p) = crate::inspector::pick_soundfont() {
             crate::inspector::set_soundfont(st, ti, p);
         }
+    }
+    if let Some(id) = picked {
+        crate::instruments::choose(st, ti, &id);
     }
     if let (Some(p), Some(_)) = (preset, sf) {
         let before = st.session.clone();

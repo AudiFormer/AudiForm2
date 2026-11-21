@@ -39,6 +39,10 @@ struct Shared {
     sender: Option<rtrb::Producer<LiveNote>>,
     /// Recording: (arrival, track, event).
     capture: Option<Vec<(Instant, TrackId, KeyEvent)>>,
+    /// VST3 instruments (crate::instruments): the monitored track plays
+    /// one, through the engine's keys player and this sender.
+    keys_on: bool,
+    keys: Option<rtrb::Producer<af27_dsp::instrument::NoteEvent>>,
 }
 
 impl Shared {
@@ -50,6 +54,8 @@ impl Shared {
             monitor,
             sender,
             capture,
+            keys_on,
+            keys,
         } = self;
         for r in routes.iter_mut() {
             if r.input.as_deref().is_some_and(|p| p != port) {
@@ -58,7 +64,13 @@ impl Shared {
             events.clear();
             r.keys.feed(msg, &mut events);
             for e in &events {
-                if *monitor == Some(r.track) {
+                // A VST3 instrument plays it (crate::instruments).
+                if *monitor == Some(r.track) && *keys_on {
+                    if let Some(k) = keys.as_mut() {
+                        let _ = k.push(crate::instruments::note_event(e));
+                    }
+                }
+                if *monitor == Some(r.track) && !*keys_on {
                     if let Some(s) = sender.as_mut() {
                         let n = match *e {
                             KeyEvent::On {
@@ -231,11 +243,38 @@ impl State {
         } else {
             None
         };
+        // VST3 instruments (crate::instruments): the keys player and its
+        // sender, and whether each armed track's instrument takes the
+        // sustain pedal itself.
+        let keys_on = match &monitor {
+            Some((ti, _, _)) => crate::instruments::keys_for(self, *ti),
+            None => {
+                crate::instruments::keys_stop(self);
+                false
+            }
+        };
+        let keys_gone = self.midi.lock().keys.as_ref().is_none_or(|p| p.is_abandoned());
+        let fresh_keys = if keys_gone {
+            self.engine.as_mut().and_then(|e| e.take_keys_sender())
+        } else {
+            None
+        };
+        if fresh_keys.is_some() {
+            crate::instruments::keys_forget();
+        }
+        let pedals: Vec<(TrackId, bool)> = armed
+            .iter()
+            .filter_map(|(_, id, _)| Some((*id, crate::instruments::pass_pedal(self, *id)?)))
+            .collect();
         {
             let mut s = self.midi.lock();
             if fresh.is_some() {
                 s.sender = fresh;
             }
+            if fresh_keys.is_some() {
+                s.keys = fresh_keys;
+            }
+            s.keys_on = keys_on;
             let old_monitor = s.monitor;
             s.monitor = monitor.map(|m| m.1);
             if old_monitor != s.monitor {
@@ -255,6 +294,11 @@ impl State {
                     input: input.clone(),
                     keys,
                 });
+                if let Some(&(_, pass)) = pedals.iter().find(|p| p.0 == *id) {
+                    if let Some(r) = s.routes.last_mut() {
+                        r.keys.pass_pedal = pass;
+                    }
+                }
             }
         }
         let wanted: Vec<Option<String>> = armed.iter().map(|a| a.2.clone()).collect();

@@ -23,7 +23,7 @@ pub mod presets;
 pub mod protocol;
 pub mod registry;
 
-pub use live::{build_live, manager, Manager, PIPELINE_DEFAULT};
+pub use live::{build_instrument, build_live, manager, Manager, PIPELINE_DEFAULT};
 pub use registry::{Found, Registry};
 
 /// The effect id prefix of a plug-in slot: `vst3:<32 hex class id>`.

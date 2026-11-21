@@ -2282,6 +2282,7 @@ impl eframe::App for App {
         crate::plugins::remember_window(frame);
         let pt = std::time::Instant::now();
         crate::plugins::tick(&mut self.st);
+        crate::instruments::tick(&mut self.st);
         if std::env::var_os("AF2_TRACE").is_some() {
             eprintln!("plugins tick {:.1} ms", pt.elapsed().as_secs_f64() * 1e3);
         }
@@ -2300,6 +2301,9 @@ impl eframe::App for App {
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
                 Ok("multitrack") => self.st.mode = Mode::Multitrack,
                 Ok("overlap-demo") => crate::overlap::demo(&mut self.st),
+                Ok(v) if v.starts_with("instrument-menu") => {
+                    crate::instruments::shot(&mut self.st, v)
+                }
                 Ok("generate-noise") => self.st.generate.noise_open = true,
                 Ok("generate-tones") => self.st.generate.tones_open = true,
                 // fx:<effect id>: that effect in the file's rack, open.

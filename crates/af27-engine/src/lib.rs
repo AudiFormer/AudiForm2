@@ -18,6 +18,7 @@ pub mod devices;
 pub mod health;
 mod meter;
 pub mod mix;
+pub mod plugin_inst;
 pub mod pool;
 pub mod disk;
 mod record;
@@ -175,6 +176,12 @@ enum Cmd {
     AllNotesOff,
     /// Where each channel goes on the device (handled by the callback).
     Routes(routing::Routes),
+    /// A MIDI keyboard plays a track's plug-in instrument through this
+    /// (None: no longer). Handled by the callback.
+    Keys(Option<Box<plugin_inst::KeysPlayer>>),
+    KeysGain([f32; 2]),
+    KeysEvent(af27_dsp::instrument::NoteEvent),
+    KeysAllOff,
 }
 
 /// What the audio thread hands back to be freed on the UI thread.
@@ -182,6 +189,7 @@ enum Cmd {
 enum Garbage {
     Program(Box<Program>),
     Audition(Box<soundfont::Audition>),
+    Keys(Box<plugin_inst::KeysPlayer>),
 }
 
 struct Shared {
@@ -417,8 +425,12 @@ impl Voice {
                     a.all_off();
                 }
             }
-            // The device callback keeps the routes.
-            Cmd::Routes(_) => {}
+            // The device callback keeps the routes and the keys player.
+            Cmd::Routes(_)
+            | Cmd::Keys(_)
+            | Cmd::KeysGain(_)
+            | Cmd::KeysEvent(_)
+            | Cmd::KeysAllOff => {}
         }
     }
 
@@ -667,6 +679,9 @@ pub struct Engine {
     recorders: Vec<record::Recorder>,
     /// Notes played live (MIDI input), until a sender is taken.
     notes: Option<rtrb::Producer<LiveNote>>,
+    /// Events for a plug-in instrument played live (MIDI input), until a
+    /// sender is taken.
+    keys: Option<rtrb::Producer<af27_dsp::instrument::NoteEvent>>,
 }
 
 /// A note played live, straight to the audition instrument from another
@@ -953,6 +968,32 @@ impl Engine {
             track: track as u16,
             db,
         });
+    }
+
+    /// The sender for a MIDI keyboard playing a track's plug-in instrument
+    /// (once per opened engine), from the MIDI input's thread.
+    pub fn take_keys_sender(&mut self) -> Option<rtrb::Producer<af27_dsp::instrument::NoteEvent>> {
+        self.keys.take()
+    }
+
+    /// What a MIDI keyboard plays a plug-in instrument through (built on
+    /// this thread), or None to stop.
+    pub fn set_keys_player(&mut self, p: Option<plugin_inst::KeysPlayer>) {
+        self.send(Cmd::Keys(p.map(Box::new)));
+    }
+
+    /// The keys player's left and right gain (the track's fader and pan).
+    pub fn set_keys_gain(&mut self, gain: [f32; 2]) {
+        self.send(Cmd::KeysGain(gain));
+    }
+
+    /// One event for the keys player (the piano roll's notes).
+    pub fn keys_event(&mut self, e: af27_dsp::instrument::NoteEvent) {
+        self.send(Cmd::KeysEvent(e));
+    }
+
+    pub fn keys_all_off(&mut self) {
+        self.send(Cmd::KeysAllOff);
     }
 
     /// Sets what hand-played notes go through (built on this thread).

@@ -1202,7 +1202,7 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
     let mut by_uuid: HashMap<String, u64> = HashMap::new();
     let mut pending: Vec<(u64, Value)> = Vec::new();
     let mut silent_fx = 0usize;
-    let mut plugin_instruments = 0usize;
+
     let mut looped = 0usize;
     let mut bus_pos: HashMap<TrackId, u32> = HashMap::new();
     let lists = [
@@ -1290,8 +1290,9 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
             if kind == TrackKind::Audio {
                 tr.input = t["input"].as_str().map(str::to_string);
             }
-            if t["instrument"].is_object() {
-                plugin_instruments += 1;
+            // Audiform's instrument slot (a VST3 plug-in) plays the track.
+            if kind == TrackKind::Midi && t["instrument"].is_object() {
+                tr.instrument_plugin = Some(slot_from(&t["instrument"]));
             }
             if let Some(h) = t["height"].as_f64() {
                 tr.height = (h as f32).max(40.0);
@@ -1372,9 +1373,7 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
             "{looped} looped clip(s) play their source once here; the loop is kept and saved back."
         ));
     }
-    if plugin_instruments > 0 {
-        notices.push(format!("{plugin_instruments} MIDI track(s) play a VST3 instrument, which Audiform27 does not host on MIDI tracks yet; the built-in synth plays them, and the instrument is kept and saved back."));
-    }
+
     if silent_fx > 0 {
         notices.push(format!("{silent_fx} effect(s) Audiform27 does not have stay in their chains, silent here, and are saved back unchanged."));
     }
@@ -1493,84 +1492,92 @@ fn write_chain(
     let base_slots = base_chain.and_then(|c| c["slots"].as_array());
     let out: Vec<Value> = slots
         .iter_mut()
-        .map(|s| {
-            let orig = by_id(base_slots, s.ext_id.as_deref());
-            let id = s.ext_id.get_or_insert_with(new_uuid).clone();
-            let mut o = obj(orig.cloned().unwrap_or(Value::Null));
-            o.insert("id".into(), json!(id));
-            o.insert("enabled".into(), json!(!s.bypass));
-            if let Some(p) = s.position {
-                if o.get("position").and_then(Value::as_u64) != Some(p as u64) {
-                    o.insert("position".into(), json!(p));
-                }
-            }
-            write_sidechain(&mut o, s.sidechain, uuid_of);
-            if let Some(info) = af27_fx::info(&s.effect) {
-                o.insert(
-                    "effect".into(),
-                    json!(s.effect.replacen("af.", "altaudio.", 1)),
-                );
-                let mut params = obj(o.get("params").cloned().unwrap_or(Value::Null));
-                // Values read and not moved keep their saved text, and keys
-                // the file left out stay out while at their defaults.
-                for (p, val) in info.params.iter().zip(&s.values) {
-                    let unchanged = match params.get(p.key).and_then(Value::as_f64) {
-                        Some(had) => had as f32 == *val,
-                        None => orig.is_some() && *val == p.default as f32,
-                    };
-                    if !unchanged {
-                        put_f32(&mut params, p.key, *val);
-                    }
-                }
-                o.insert("params".into(), Value::Object(params));
-                if let Some(d) = &s.data {
-                    o.insert(
-                        "data".into(),
-                        serde_json::from_str(d).unwrap_or_else(|_| json!(d)),
-                    );
-                }
-            } else if af27_core::plugin::is_plugin(&s.effect) {
-                write_plugin(&mut o, s);
-            } else if orig.is_none() && s.effect.starts_with("altaudio.") {
-                // An Audiform effect made on import (a converted
-                // Parametric EQ): its settings, by Audiform's keys, are
-                // the slot's data.
-                o.insert("effect".into(), json!(s.effect));
-                let params = s
-                    .data
-                    .as_deref()
-                    .and_then(|d| serde_json::from_str::<Value>(d).ok())
-                    .filter(Value::is_object)
-                    .unwrap_or_else(|| json!({}));
-                o.insert("params".into(), params);
-            } else if orig.is_none() || af27_dsp::Effect::from_id(&s.effect).is_some() {
-                // Audiform27's own effect: a slot Audiform skips but keeps.
-                o.insert("effect".into(), json!(format!("{AF27}{}", s.effect)));
-                o.insert("params".into(), json!({ "values": s.values }));
-                // Its own data (an impulse file, a kept component), as text.
-                let had = match o.get("data") {
-                    None | Some(Value::Null) => None,
-                    Some(Value::String(t)) => Some(t.clone()),
-                    Some(other) => Some(other.to_string()),
-                };
-                if had != s.data {
-                    match &s.data {
-                        Some(d) => {
-                            o.insert("data".into(), json!(d));
-                        }
-                        None => {
-                            o.shift_remove("data");
-                        }
-                    }
-                }
-            }
-            // Otherwise an effect only Audiform has: its original slot, as is.
-            o.entry("params").or_insert_with(|| json!({}));
-            Value::Object(o)
-        })
+        .map(|s| write_slot(s, base_slots, uuid_of))
         .collect();
     chain.insert("slots".into(), Value::Array(out));
     Value::Object(chain)
+}
+
+/// One slot as Audiform keeps it, over its original in `base_slots`
+/// (by id) when it has one.
+fn write_slot(
+    s: &mut EffectSlot,
+    base_slots: Option<&Vec<Value>>,
+    uuid_of: &HashMap<u64, String>,
+) -> Value {
+    let orig = by_id(base_slots, s.ext_id.as_deref());
+    let id = s.ext_id.get_or_insert_with(new_uuid).clone();
+    let mut o = obj(orig.cloned().unwrap_or(Value::Null));
+    o.insert("id".into(), json!(id));
+    o.insert("enabled".into(), json!(!s.bypass));
+    if let Some(p) = s.position {
+        if o.get("position").and_then(Value::as_u64) != Some(p as u64) {
+            o.insert("position".into(), json!(p));
+        }
+    }
+    write_sidechain(&mut o, s.sidechain, uuid_of);
+    if let Some(info) = af27_fx::info(&s.effect) {
+        o.insert(
+            "effect".into(),
+            json!(s.effect.replacen("af.", "altaudio.", 1)),
+        );
+        let mut params = obj(o.get("params").cloned().unwrap_or(Value::Null));
+        // Values read and not moved keep their saved text, and keys
+        // the file left out stay out while at their defaults.
+        for (p, val) in info.params.iter().zip(&s.values) {
+            let unchanged = match params.get(p.key).and_then(Value::as_f64) {
+                Some(had) => had as f32 == *val,
+                None => orig.is_some() && *val == p.default as f32,
+            };
+            if !unchanged {
+                put_f32(&mut params, p.key, *val);
+            }
+        }
+        o.insert("params".into(), Value::Object(params));
+        if let Some(d) = &s.data {
+            o.insert(
+                "data".into(),
+                serde_json::from_str(d).unwrap_or_else(|_| json!(d)),
+            );
+        }
+    } else if af27_core::plugin::is_plugin(&s.effect) {
+        write_plugin(&mut o, s);
+    } else if orig.is_none() && s.effect.starts_with("altaudio.") {
+        // An Audiform effect made on import (a converted
+        // Parametric EQ): its settings, by Audiform's keys, are
+        // the slot's data.
+        o.insert("effect".into(), json!(s.effect));
+        let params = s
+            .data
+            .as_deref()
+            .and_then(|d| serde_json::from_str::<Value>(d).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        o.insert("params".into(), params);
+    } else if orig.is_none() || af27_dsp::Effect::from_id(&s.effect).is_some() {
+        // Audiform27's own effect: a slot Audiform skips but keeps.
+        o.insert("effect".into(), json!(format!("{AF27}{}", s.effect)));
+        o.insert("params".into(), json!({ "values": s.values }));
+        // Its own data (an impulse file, a kept component), as text.
+        let had = match o.get("data") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(t)) => Some(t.clone()),
+            Some(other) => Some(other.to_string()),
+        };
+        if had != s.data {
+            match &s.data {
+                Some(d) => {
+                    o.insert("data".into(), json!(d));
+                }
+                None => {
+                    o.shift_remove("data");
+                }
+            }
+        }
+    }
+    // Otherwise an effect only Audiform has: its original slot, as is.
+    o.entry("params").or_insert_with(|| json!({}));
+    Value::Object(o)
 }
 
 /// Writes `session` as an Audiform session. `base` is the document it was
@@ -1970,6 +1977,23 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 }
                 None => {
                     o.shift_remove("af27_soundfont");
+                }
+            }
+            // The VST3 instrument: Audiform's `instrument` slot, written
+            // over the original (only what changed).
+            match t.instrument_plugin.as_mut() {
+                Some(slot) => {
+                    let base: Option<Vec<Value>> = o
+                        .get("instrument")
+                        .filter(|v| v.is_object())
+                        .map(|v| vec![v.clone()]);
+                    let v = write_slot(slot, base.as_ref(), &uuid_of);
+                    o.insert("instrument".into(), v);
+                }
+                None => {
+                    if o.get("instrument").is_some_and(Value::is_object) {
+                        o.insert("instrument".into(), Value::Null);
+                    }
                 }
             }
         }
@@ -3292,6 +3316,65 @@ mod plugin_slots {
         assert_eq!(n["params"], json!({"p3": 0.75}));
         assert!(n["id"].is_string());
         assert!(n.get("plugin_state").is_none());
+    }
+
+    #[test]
+    fn a_midi_tracks_vst3_instrument_is_audiforms_instrument_slot() {
+        let mut s = Session::new("inst", 48_000, 0);
+        let t = s.add_track_of(TrackKind::Midi);
+        let mut d = PluginData {
+            inst: "x".into(),
+            ..Default::default()
+        };
+        d.set_param(7, 0.25);
+        d.state = Some("AAECAw==".into());
+        s.track_mut(t).unwrap().instrument_plugin = Some(EffectSlot {
+            position: None,
+            effect: ID.into(),
+            values: Vec::new(),
+            bypass: false,
+            sidechain: None,
+            data: Some(d.to_json()),
+            ext_id: None,
+        });
+        let out = export(&mut s, None);
+        let o = &out["tracks"][0]["instrument"];
+        assert_eq!(o["effect"], json!(ID));
+        assert_eq!(o["enabled"], json!(true));
+        assert_eq!(o["params"], json!({"p7": 0.25}));
+        assert_eq!(o["plugin_state"], json!("AAECAw=="));
+        assert!(o["id"].is_string());
+        // Read back: the same plug-in and settings, the copy named after
+        // the slot's id.
+        let text = serde_json::to_string_pretty(&out).unwrap();
+        let imp = import(&text, Path::new(".")).unwrap();
+        assert!(imp.notices.is_empty(), "{:?}", imp.notices);
+        let mut back = imp.session;
+        let slot = back.tracks[0].instrument_plugin.clone().unwrap();
+        assert_eq!(slot.effect, ID);
+        let bd = slot.plugin_data();
+        assert_eq!(bd.param(7), Some(0.25));
+        assert_eq!(bd.state.as_deref(), Some("AAECAw=="));
+        assert_eq!(Some(bd.inst.as_str()), o["id"].as_str());
+        // Unchanged, it saves back exactly.
+        let base = imp.base.unwrap();
+        let mut again = export(&mut back.clone(), Some(&base));
+        let mut want = base.clone();
+        want.as_object_mut().unwrap().remove("modified");
+        again.as_object_mut().unwrap().remove("modified");
+        assert_eq!(
+            serde_json::to_string_pretty(&again).unwrap(),
+            serde_json::to_string_pretty(&want).unwrap()
+        );
+        // Taken off the track: Audiform's slot is emptied.
+        back.tracks[0].instrument_plugin = None;
+        let out = export(&mut back, Some(&base));
+        assert_eq!(out["tracks"][0]["instrument"], Value::Null);
+        // A track without one never gets the field.
+        let mut plain = Session::new("plain", 48_000, 0);
+        plain.add_track_of(TrackKind::Midi);
+        let out = export(&mut plain, None);
+        assert!(out["tracks"][0].get("instrument").is_none());
     }
 }
 

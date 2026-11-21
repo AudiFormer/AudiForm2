@@ -388,11 +388,39 @@ impl Plug {
         bytes: &mut Vec<u8>,
         timeout: Duration,
     ) -> Result<bool, Late> {
+        self.process_events(
+            input.len() / 2,
+            Some(input),
+            key,
+            changes,
+            &[],
+            out,
+            bytes,
+            timeout,
+        )
+    }
+
+    /// Runs one block of `frames` frames with note and controller
+    /// `events` placed in it: `input` None is silence (an instrument; no
+    /// samples go over the pipe).
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_events(
+        &self,
+        frames: usize,
+        input: Option<&[f32]>,
+        key: Option<&[f32]>,
+        changes: &[(u32, f64)],
+        events: &[Timed],
+        out: &mut Vec<f32>,
+        bytes: &mut Vec<u8>,
+        timeout: Duration,
+    ) -> Result<bool, Late> {
         if !self.alive() {
             return Err(Late::Stopped);
         }
+        let frames = input.map_or(frames, |i| i.len() / 2);
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
-        encode_audio(bytes, seq, input, key, changes);
+        encode_audio(bytes, seq, frames, input, key, changes, events);
         if self.conn.write(AUDIO, self.id, bytes).is_err() {
             return Err(Late::Stopped);
         }
@@ -404,7 +432,7 @@ impl Plug {
                 Ok(payload) => match decode_audio_reply(&payload, out) {
                     // An answer to an earlier, late block: dropped.
                     Some((s, _)) if s != seq => continue,
-                    Some((_, ok)) if out.len() == input.len() => return Ok(ok),
+                    Some((_, ok)) if out.len() == frames * 2 => return Ok(ok),
                     _ => return Err(Late::Stopped),
                 },
                 Err(RecvTimeoutError::Timeout) => return Err(Late::Timeout),

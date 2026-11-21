@@ -118,6 +118,7 @@ impl IPlugInterfaceSupportTrait for HostApp {
             IAttributeList::IID,
             IParameterChanges::IID,
             IParamValueQueue::IID,
+            IEventList::IID,
             IMidiMapping::IID,
             vst3::Steinberg::IPlugFrame::IID,
             vst3::Steinberg::IPlugView::IID,
@@ -537,6 +538,70 @@ impl IParameterChangesTrait for ParamChanges {
         }
         self.queues.borrow()[i].1.as_ptr()
     }
+}
+
+// ---- Note events ----------------------------------------------------------
+
+/// A block's note events (made once, reused; it allocates only past its
+/// first capacity).
+pub struct EventList {
+    events: RefCell<Vec<vst3::Steinberg::Vst::Event>>,
+}
+
+impl Class for EventList {
+    type Interfaces = (vst3::Steinberg::Vst::IEventList,);
+}
+
+impl EventList {
+    pub fn new() -> ComWrapper<EventList> {
+        ComWrapper::new(EventList {
+            events: RefCell::new(Vec::with_capacity(512)),
+        })
+    }
+
+    pub fn clear(&self) {
+        self.events.borrow_mut().clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.borrow().is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.borrow().len()
+    }
+
+    pub fn push(&self, e: vst3::Steinberg::Vst::Event) {
+        self.events.borrow_mut().push(e);
+    }
+}
+
+impl vst3::Steinberg::Vst::IEventListTrait for EventList {
+    unsafe fn getEventCount(&self) -> int32 {
+        self.events.borrow().len() as int32
+    }
+
+    unsafe fn getEvent(&self, index: int32, e: *mut vst3::Steinberg::Vst::Event) -> tresult {
+        match self.events.borrow().get(index.max(0) as usize) {
+            Some(x) if index >= 0 && !e.is_null() => {
+                *e = *x;
+                kResultOk
+            }
+            _ => kInvalidArgument,
+        }
+    }
+
+    unsafe fn addEvent(&self, e: *mut vst3::Steinberg::Vst::Event) -> tresult {
+        if e.is_null() {
+            return kInvalidArgument;
+        }
+        self.events.borrow_mut().push(*e);
+        kResultOk
+    }
+}
+
+pub fn events_ptr(c: &ComWrapper<EventList>) -> Option<ComPtr<vst3::Steinberg::Vst::IEventList>> {
+    c.to_com_ptr::<vst3::Steinberg::Vst::IEventList>()
 }
 
 // ---- The component handler ------------------------------------------------

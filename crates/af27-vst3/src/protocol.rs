@@ -13,21 +13,31 @@
 //! from it, each with a request id (`rid`). Replies carry the id of their
 //! request; events the host sends unasked carry 0.
 //!
-//! `AUDIO` to the host: `seq u32`, `frames u32`, `keyed u8`, `n u32`
-//! parameter changes (`u32` id, `f64` normalized value), then `frames * 2`
-//! interleaved stereo `f32` samples, then (when keyed) as many sidechain
-//! key samples. Back: `seq u32`, `frames u32`, `ok u8` (0: the plug-in did
-//! not run and the samples are the input), then the processed samples.
+//! `AUDIO` to the host: `seq u32`, `frames u32`, `flags u8` ([`KEYED`]:
+//! a sidechain key follows; [`SILENT`]: no input samples, the input is
+//! silence, as for an instrument), `n u32` parameter changes (`u32` id,
+//! `f64` normalized value), `m u32` note and controller events (16 bytes
+//! each, see [`encode_audio`]), then `frames * 2` interleaved stereo `f32`
+//! samples (unless silent), then (when keyed) as many sidechain key
+//! samples. Back: `seq u32`, `frames u32`, `ok u8` (0: the plug-in did not
+//! run and the samples are the input), then the processed samples.
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a frame or message changes shape.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub const HELLO: u8 = 0;
 pub const CONTROL: u8 = 1;
 pub const AUDIO: u8 = 2;
+
+/// AUDIO flags: a sidechain key follows the input.
+pub const KEYED: u8 = 1;
+/// AUDIO flags: no input samples are sent; the input is silence.
+pub const SILENT: u8 = 2;
+
+pub use af27_dsp::instrument::{NoteEvent, Timed};
 
 /// The longest block a plug-in is handed at once; longer ones are split.
 pub const MAX_BLOCK: usize = 8192;
@@ -153,6 +163,13 @@ pub struct Loaded {
     /// The parameter values right after loading (state and settings in).
     #[serde(default)]
     pub values: Vec<(u32, f64)>,
+    /// It takes note events (an event input).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub events: bool,
+    /// The MIDI controllers (0..127, 128 aftertouch, 129 pitch bend) its
+    /// MIDI mapping turns into controls, on the first channel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controllers: Vec<u8>,
 }
 
 /// To the host.
@@ -257,26 +274,95 @@ pub fn decode_control<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> Option<(u
     Some((e.rid, e.body))
 }
 
-/// Writes an AUDIO payload to the host into `out` (cleared first).
+/// One event on the wire: `offset u32`, `kind u8` (0 on, 1 off, 2
+/// controller), `channel u8`, `pitch or controller u8`, a spare byte,
+/// `value f32` (velocity or controller value), `tuning f32` (cents).
+fn put_event(out: &mut Vec<u8>, e: &Timed) {
+    let (kind, ch, data, value, tuning) = match e.event {
+        NoteEvent::On {
+            pitch,
+            velocity,
+            channel,
+            tuning,
+        } => (0u8, channel, pitch, velocity, tuning),
+        NoteEvent::Off { pitch, channel } => (1, channel, pitch, 0.0, 0.0),
+        NoteEvent::Control {
+            controller,
+            value,
+            channel,
+        } => (2, channel, controller, value, 0.0),
+    };
+    out.extend_from_slice(&e.offset.to_le_bytes());
+    out.extend_from_slice(&[kind, ch, data, 0]);
+    out.extend_from_slice(&value.to_le_bytes());
+    out.extend_from_slice(&tuning.to_le_bytes());
+}
+
+fn get_event(b: &mut &[u8]) -> Option<Timed> {
+    let offset = u32_at(b)?;
+    let h = take(b, 4)?;
+    let (kind, channel, data) = (h[0], h[1] & 15, h[2]);
+    let value = f32::from_le_bytes(take(b, 4)?.try_into().ok()?);
+    let tuning = f32::from_le_bytes(take(b, 4)?.try_into().ok()?);
+    let event = match kind {
+        0 => NoteEvent::On {
+            pitch: data & 0x7f,
+            velocity: value,
+            channel,
+            tuning,
+        },
+        1 => NoteEvent::Off {
+            pitch: data & 0x7f,
+            channel,
+        },
+        2 => NoteEvent::Control {
+            controller: data,
+            value,
+            channel,
+        },
+        _ => return None,
+    };
+    Some(Timed { offset, event })
+}
+
+/// Writes an AUDIO payload to the host into `out` (cleared first): a
+/// block of `frames` frames, with `input` (interleaved stereo) or, when
+/// None, silence, and the note and controller `events` in it.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_audio(
     out: &mut Vec<u8>,
     seq: u32,
-    input: &[f32],
+    frames: usize,
+    input: Option<&[f32]>,
     key: Option<&[f32]>,
     changes: &[(u32, f64)],
+    events: &[Timed],
 ) {
-    let frames = input.len() / 2;
+    let frames = input.map_or(frames, |i| (i.len() / 2).min(frames));
     out.clear();
     out.extend_from_slice(&seq.to_le_bytes());
     out.extend_from_slice(&(frames as u32).to_le_bytes());
-    out.push(key.is_some() as u8);
+    let mut flags = 0;
+    if key.is_some() {
+        flags |= KEYED;
+    }
+    if input.is_none() {
+        flags |= SILENT;
+    }
+    out.push(flags);
     out.extend_from_slice(&(changes.len() as u32).to_le_bytes());
     for (id, v) in changes {
         out.extend_from_slice(&id.to_le_bytes());
         out.extend_from_slice(&v.to_le_bytes());
     }
-    for s in &input[..frames * 2] {
-        out.extend_from_slice(&s.to_le_bytes());
+    out.extend_from_slice(&(events.len() as u32).to_le_bytes());
+    for e in events {
+        put_event(out, e);
+    }
+    if let Some(input) = input {
+        for s in &input[..frames * 2] {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
     }
     if let Some(k) = key {
         for i in 0..frames * 2 {
@@ -291,6 +377,7 @@ pub struct AudioIn {
     pub seq: u32,
     pub frames: usize,
     pub changes: Vec<(u32, f64)>,
+    pub events: Vec<Timed>,
     pub samples: Vec<f32>,
     pub key: Option<Vec<f32>>,
 }
@@ -325,7 +412,11 @@ pub fn decode_audio(payload: &[u8], a: &mut AudioIn) -> Option<()> {
     let mut b = payload;
     a.seq = u32_at(&mut b)?;
     a.frames = u32_at(&mut b)? as usize;
-    let keyed = take(&mut b, 1)?[0] != 0;
+    if a.frames > MAX_FRAME / 8 {
+        return None;
+    }
+    let flags = take(&mut b, 1)?[0];
+    let keyed = flags & KEYED != 0;
     let n = u32_at(&mut b)? as usize;
     a.changes.clear();
     for _ in 0..n {
@@ -333,7 +424,20 @@ pub fn decode_audio(payload: &[u8], a: &mut AudioIn) -> Option<()> {
         let v = f64::from_le_bytes(take(&mut b, 8)?.try_into().ok()?);
         a.changes.push((id, v));
     }
-    f32s(&mut b, a.frames.checked_mul(2)?, &mut a.samples)?;
+    let m = u32_at(&mut b)? as usize;
+    a.events.clear();
+    for _ in 0..m {
+        let e = get_event(&mut b)?;
+        if (e.offset as usize) < a.frames.max(1) {
+            a.events.push(e);
+        }
+    }
+    if flags & SILENT != 0 {
+        a.samples.clear();
+        a.samples.resize(a.frames * 2, 0.0);
+    } else {
+        f32s(&mut b, a.frames.checked_mul(2)?, &mut a.samples)?;
+    }
     if keyed {
         let mut k = a.key.take().unwrap_or_default();
         f32s(&mut b, a.frames * 2, &mut k)?;
@@ -620,19 +724,54 @@ mod tests {
         let key: Vec<f32> = (0..20).map(|i| -(i as f32)).collect();
         let mut out = Vec::new();
         let mut a = AudioIn::default();
+        let events = [
+            Timed {
+                offset: 2,
+                event: NoteEvent::On {
+                    pitch: 60,
+                    velocity: 0.5,
+                    channel: 3,
+                    tuning: -12.5,
+                },
+            },
+            Timed {
+                offset: 4,
+                event: NoteEvent::Control {
+                    controller: 129,
+                    value: 0.75,
+                    channel: 0,
+                },
+            },
+            Timed {
+                offset: 9,
+                event: NoteEvent::Off {
+                    pitch: 60,
+                    channel: 3,
+                },
+            },
+        ];
         encode_audio(
             &mut out,
             9,
-            &input,
+            10,
+            Some(&input),
             Some(&key),
             &[(3, 0.5), (u32::MAX, 1.0)],
+            &events,
         );
         decode_audio(&out, &mut a).unwrap();
         assert_eq!((a.seq, a.frames), (9, 10));
         assert_eq!(a.changes, vec![(3, 0.5), (u32::MAX, 1.0)]);
+        assert_eq!(a.events, events);
         assert_eq!(a.samples, input);
         assert_eq!(a.key.as_deref(), Some(&key[..]));
-        encode_audio(&mut out, 10, &input, None, &[]);
+        // An instrument's block: no input samples on the wire.
+        encode_audio(&mut out, 11, 10, None, None, &[], &events[..1]);
+        assert_eq!(out.len(), 4 + 4 + 1 + 4 + 4 + 16);
+        decode_audio(&out, &mut a).unwrap();
+        assert_eq!(a.samples, vec![0.0; 20]);
+        assert_eq!(a.events, events[..1]);
+        encode_audio(&mut out, 10, 10, Some(&input), None, &[], &[]);
         decode_audio(&out, &mut a).unwrap();
         assert!(a.key.is_none());
         let mut back = Vec::new();

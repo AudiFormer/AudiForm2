@@ -15,6 +15,8 @@
 //! - "AF2 Test Keyed": the same, plus a sidechain input. While the key
 //!   input is on, its output is the key (64 samples late, the latency it
 //!   reports then) instead of the gained input.
+//! - "AF2 Test Synth": an instrument (see `synth.rs`), with a controller
+//!   of its own that maps MIDI controllers.
 
 #![allow(
     non_snake_case,
@@ -32,6 +34,9 @@ use std::sync::Mutex;
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{uid, Class, ComRef, ComWrapper};
+
+mod synth;
+use synth::{SynthCtrl, SynthProc, SYNTH_CID, SYNTH_CTRL_CID};
 
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     for (d, s) in dst.iter_mut().zip(src.bytes().chain([0])) {
@@ -444,7 +449,40 @@ impl IEditControllerTrait for Ctrl {
 struct Factory;
 
 impl Class for Factory {
-    type Interfaces = (IPluginFactory,);
+    type Interfaces = (IPluginFactory, IPluginFactory2);
+}
+
+/// (class id, category, name, sub-categories) of every class.
+const CLASSES: [(TUID, &str, &str, &str); 5] = [
+    (GAIN_CID, "Audio Module Class", "AF2 Test Gain", "Fx"),
+    (KEYED_CID, "Audio Module Class", "AF2 Test Keyed", "Fx|Dynamics"),
+    (CTRL_CID, "Component Controller Class", "AF2 Test Controller", ""),
+    (SYNTH_CID, "Audio Module Class", "AF2 Test Synth", "Instrument|Synth"),
+    (
+        SYNTH_CTRL_CID,
+        "Component Controller Class",
+        "AF2 Test Synth Controller",
+        "",
+    ),
+];
+
+impl IPluginFactory2Trait for Factory {
+    unsafe fn getClassInfo2(&self, index: i32, info: *mut PClassInfo2) -> tresult {
+        let Some(&(cid, cat, name, sub)) = CLASSES.get(index.max(0) as usize) else {
+            return kInvalidArgument;
+        };
+        let info = &mut *info;
+        info.cid = cid;
+        info.cardinality = PClassInfo_::ClassCardinality_::kManyInstances as int32;
+        copy_cstring(cat, &mut info.category);
+        copy_cstring(name, &mut info.name);
+        info.classFlags = 0;
+        copy_cstring(sub, &mut info.subCategories);
+        copy_cstring("AudiForm Tests", &mut info.vendor);
+        copy_cstring("1.0.0", &mut info.version);
+        copy_cstring("VST 3.7", &mut info.sdkVersion);
+        kResultOk
+    }
 }
 
 impl IPluginFactoryTrait for Factory {
@@ -458,21 +496,14 @@ impl IPluginFactoryTrait for Factory {
     }
 
     unsafe fn countClasses(&self) -> i32 {
-        3
+        CLASSES.len() as i32
     }
 
     unsafe fn getClassInfo(&self, index: i32, info: *mut PClassInfo) -> tresult {
         let info = &mut *info;
         info.cardinality = PClassInfo_::ClassCardinality_::kManyInstances as int32;
-        let (cid, cat, name) = match index {
-            0 => (GAIN_CID, "Audio Module Class", "AF2 Test Gain"),
-            1 => (KEYED_CID, "Audio Module Class", "AF2 Test Keyed"),
-            2 => (
-                CTRL_CID,
-                "Component Controller Class",
-                "AF2 Test Controller",
-            ),
-            _ => return kInvalidArgument,
+        let Some(&(cid, cat, name, _)) = CLASSES.get(index.max(0) as usize) else {
+            return kInvalidArgument;
         };
         info.cid = cid;
         copy_cstring(cat, &mut info.category);
@@ -496,6 +527,10 @@ impl IPluginFactoryTrait for Factory {
                 gain: Cell::new(0.5),
             })
             .to_com_ptr::<FUnknown>()
+        } else if cid == SYNTH_CID {
+            ComWrapper::new(SynthProc::new()).to_com_ptr::<FUnknown>()
+        } else if cid == SYNTH_CTRL_CID {
+            ComWrapper::new(SynthCtrl::new()).to_com_ptr::<FUnknown>()
         } else {
             None
         };

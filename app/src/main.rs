@@ -21,6 +21,7 @@ mod graph;
 mod hud;
 mod hwcursor;
 mod inspector;
+mod instruments;
 mod keymap;
 mod lane_menu;
 mod memstat;

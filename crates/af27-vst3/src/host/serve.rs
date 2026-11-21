@@ -84,7 +84,7 @@ fn audio_loop(out: Out, to_main: mpsc::Sender<ToMain>, new_audio: mpsc::Receiver
                 processed.resize(a.frames * 2, 0.0);
                 let ok = match audios.get_mut(&id) {
                     Some(au) => {
-                        au.process(&a.samples, a.key.as_deref(), &a.changes, &mut processed)
+                        au.process(&a.samples, a.key.as_deref(), &a.changes, &a.events, &mut processed)
                     }
                     None => {
                         processed.copy_from_slice(&a.samples);

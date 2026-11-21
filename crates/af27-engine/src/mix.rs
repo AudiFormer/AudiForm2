@@ -541,6 +541,8 @@ pub struct MixTrack {
     pub synth: Option<Synth>,
     /// A SoundFont in place of the built-in synth.
     pub font: Option<Box<crate::soundfont::SfPlayer>>,
+    /// A plug-in instrument in place of both (silent when it is missing).
+    pub plug: Option<Box<crate::plugin_inst::PlugTrack>>,
     pub chain: Chain,
     /// Index of the bus track it feeds, or None for the master (also
     /// when the output would close a loop).
@@ -572,6 +574,12 @@ pub struct MixTrack {
 }
 
 impl MixTrack {
+    /// How late the track's own sound is made (a plug-in instrument's
+    /// latency), before its chain.
+    fn source_latency(&self) -> usize {
+        self.plug.as_ref().map_or(0, |p| p.latency())
+    }
+
     /// Whether another track's effect listens to this one.
     pub fn is_key(&self) -> bool {
         self.keyed
@@ -911,6 +919,9 @@ fn render_source(t: &mut MixTrack, tracks: TrackPtr, ts: f64, dt: f64, n: usize)
     t.l[..n].fill(0.0);
     t.r[..n].fill(0.0);
     let t1 = ts + dt * n as f64;
+    if let Some(p) = &mut t.plug {
+        p.render(ts, dt, &mut t.l[..n], &mut t.r[..n]);
+    }
     let MixTrack { clips, l, r, .. } = &mut *t;
     for c in clips.iter_mut() {
         if let Some(mut fx) = c.fx.take() {
@@ -1266,14 +1277,26 @@ fn velocity_u8(v: f32) -> u8 {
     (v * 127.0).round().clamp(1.0, 127.0) as u8
 }
 
-/// A MIDI track's instrument with its notes: its SoundFont, or else the
-/// built-in synth. A font that is missing or cannot play leaves the track
-/// silent.
-fn instruments(
-    t: &af27_core::Track,
-    tempo: &af27_core::midi::Tempo,
-    rate: u32,
-) -> (Option<Synth>, Option<Box<crate::soundfont::SfPlayer>>) {
+/// What a MIDI track plays through.
+type Instruments = (
+    Option<Synth>,
+    Option<Box<crate::soundfont::SfPlayer>>,
+    Option<Box<crate::plugin_inst::PlugTrack>>,
+);
+
+/// A MIDI track's instrument with its notes: its plug-in instrument, its
+/// SoundFont, or else the built-in synth. A plug-in or font that is
+/// missing or cannot play leaves the track silent.
+fn instruments(t: &af27_core::Track, tempo: &af27_core::midi::Tempo, rate: u32) -> Instruments {
+    if let Some(slot) = &t.instrument_plugin {
+        let plug = af27_dsp::instrument::build_instrument(
+            slot,
+            rate,
+            af27_dsp::instrument::Use::Playback,
+        )
+        .map(|i| Box::new(crate::plugin_inst::PlugTrack::new(i, &t.midi, tempo)));
+        return (None, None, plug);
+    }
     let notes = af27_core::midi::plan_notes(&t.midi, tempo);
     if let Some(sf) = &t.soundfont {
         let list = notes
@@ -1290,7 +1313,7 @@ fn instruments(
         let font = crate::soundfont::SfPlayer::new(sf, list, rate)
             .ok()
             .map(Box::new);
-        return (None, font);
+        return (None, font, None);
     }
     let list = notes
         .iter()
@@ -1298,7 +1321,7 @@ fn instruments(
             synth::note(n.start, n.end, n.pitch, velocity_u8(n.velocity), n.pan).detuned(n.detune)
         })
         .collect();
-    (Some(Synth::new(t.instrument, list, rate)), None)
+    (Some(Synth::new(t.instrument, list, rate)), None, None)
 }
 
 /// A strip's playing lanes, as the engine plays them (None with none).
@@ -1380,10 +1403,10 @@ pub fn build(
                     clips.push(mc);
                 }
             }
-            let (synth, font) = if t.kind == TrackKind::Midi {
+            let (synth, font, plug) = if t.kind == TrackKind::Midi {
                 instruments(t, &session.tempo, rate)
             } else {
-                (None, None)
+                (None, None, None)
             };
             let stereo =
                 t.kind != TrackKind::Audio || clips.iter().any(|c| c.buf.num_channels() >= 2);
@@ -1403,6 +1426,7 @@ pub fn build(
                 clips,
                 synth,
                 font,
+                plug,
                 chain: {
                     let mut c = build_chain(&t.chain, rate, BLOCK);
                     c.set_rack(&t.rack);
@@ -1601,7 +1625,7 @@ fn align(
         }
         let t = &mut tracks[i];
         t.in_t = t_in;
-        t.out_t = t_in + t.chain.latency();
+        t.out_t = t_in + t.source_latency() + t.chain.latency();
         if t.output.is_none() {
             master_in = master_in.max(t.out_t);
         }
@@ -1627,6 +1651,7 @@ fn align(
             .map(|(slot, k)| {
                 k.map(|src| {
                     let d = in_t.saturating_sub(tracks[src].out_t)
+                        + tracks[i].source_latency()
                         + tracks[i].chain.latency_before(slot);
                     KeyTap::new(src, d)
                 })
@@ -1713,6 +1738,9 @@ impl Mix {
             if let Some(f) = &mut t.font {
                 f.reset();
             }
+            if let Some(p) = &mut t.plug {
+                p.reset();
+            }
         }
         for tap in self.master_taps.iter_mut().flatten() {
             tap.delay.clear();
@@ -1739,6 +1767,18 @@ impl Mix {
             }
             t.chain.set_offline(true);
         }
+        // Plug-in instruments start copies of their own and get their
+        // sounds in, side by side.
+        std::thread::scope(|s| {
+            for t in &mut self.tracks {
+                if let Some(p) = t.plug.as_deref_mut() {
+                    s.spawn(move || {
+                        p.inst.set_offline(true);
+                        p.inst.warm_up();
+                    });
+                }
+            }
+        });
         self.master_chain.set_offline(true);
         let (lead, master_in, taps) = align(
             &mut self.tracks,
@@ -1780,6 +1820,9 @@ impl Mix {
             };
             if o.sig == t.sig {
                 t.chain.adopt(&mut o.chain, &t.vals);
+            }
+            if let (Some(p), Some(q)) = (t.plug.as_deref_mut(), o.plug.as_deref_mut()) {
+                p.adopt(q);
             }
             if o.in_t == t.in_t {
                 std::mem::swap(&mut t.in_delay, &mut o.in_delay);

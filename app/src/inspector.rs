@@ -376,6 +376,8 @@ pub fn set_soundfont(st: &mut State, ti: usize, path: std::path::PathBuf) {
                 .or_else(|| list.first())
                 .cloned();
             let before = st.session.clone();
+            // A SoundFont plays in place of a VST3 instrument.
+            crate::instruments::clear(st, ti);
             st.session.tracks[ti].soundfont = Some(af27_core::midi::SoundFontRef {
                 path,
                 bank: pick.as_ref().map_or(0, |p| p.bank),
@@ -396,19 +398,22 @@ pub fn pick_soundfont() -> Option<std::path::PathBuf> {
 fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
     let th = st.theme.clone();
     let current = st.session.tracks[ti].soundfont.clone();
+    let plugin = crate::instruments::slot_of(st, ti).map(crate::instruments::name);
     let mut want_font = false;
     let mut want_builtin = false;
     ui.horizontal(|ui| {
         ui.label("Instrument");
         egui::ComboBox::from_id_salt(("instrument", ti))
-            .selected_text(if current.is_some() {
+            .selected_text(if let Some(p) = &plugin {
+                p.as_str()
+            } else if current.is_some() {
                 "SoundFont (.sf2)"
             } else {
                 "Built-in synth"
             })
             .show_ui(ui, |ui| {
                 if ui
-                    .selectable_label(current.is_none(), "Built-in synth")
+                    .selectable_label(current.is_none() && plugin.is_none(), "Built-in synth")
                     .clicked()
                 {
                     want_builtin = true;
@@ -421,9 +426,10 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                 }
             });
     });
-    if want_builtin && current.is_some() {
+    if want_builtin && (current.is_some() || plugin.is_some()) {
         let before = st.session.clone();
         st.session.tracks[ti].soundfont = None;
+        crate::instruments::clear(st, ti);
         st.commit_session("Instrument", before);
     }
     let set_file = set_soundfont;

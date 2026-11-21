@@ -12,6 +12,7 @@ pub mod biquad;
 pub mod effects;
 pub mod fft;
 pub mod generate;
+pub mod instrument;
 pub mod live;
 pub mod loudness;
 pub mod noise;

@@ -466,6 +466,12 @@ pub struct Track {
     /// built-in synth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub soundfont: Option<crate::midi::SoundFontRef>,
+    /// MIDI tracks: a VST3 instrument that plays the notes instead of the
+    /// built-in synth or a SoundFont (a plug-in slot: `vst3:<class id>`,
+    /// its settings in the slot's data). Audiform keeps it as the track's
+    /// `instrument`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument_plugin: Option<EffectSlot>,
     /// Folds left and right into one centred signal after the chain,
     /// before the fader and pan.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -814,6 +820,7 @@ impl Session {
             midi: Vec::new(),
             instrument: Default::default(),
             soundfont: None,
+            instrument_plugin: None,
             mono: false,
             prerender: false,
             polarity: false,

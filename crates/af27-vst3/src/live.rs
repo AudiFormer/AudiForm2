@@ -17,6 +17,12 @@
 //!
 //! One copy runs per slot (by the id in its data), kept across chain
 //! rebuilds, stops and starts, so its window and inner state carry on.
+//!
+//! Instruments ([`VstInstrument`]) go the same way, with note and
+//! controller events riding along with each block and silence as their
+//! input (the "dry" sound of an instrument that is late or stopped is
+//! silence). A MIDI keyboard plays a copy of its own (its key ends in
+//! [`KEYS`]) with a shorter buffer, so playing feels immediate.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -27,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use af27_core::plugin::PluginData;
 use af27_core::EffectSlot;
+use af27_dsp::instrument::{Instrument, Timed, Use};
 use af27_dsp::live::Live;
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -36,6 +43,16 @@ use crate::registry::{Found, Registry};
 
 /// The live buffer when the app has not set one (frames).
 pub const PIPELINE_DEFAULT: usize = 1024;
+/// The shortest buffer of a copy played from a MIDI keyboard (frames).
+pub const KEYS_PIPELINE_MIN: usize = 256;
+/// Ends the key of a copy played from a MIDI keyboard (an instrument or
+/// an effect after it), apart from playback's copy of the same slot.
+pub const KEYS: &str = "#keys";
+/// Events the ring to a pump holds.
+const EVENT_RING: usize = 1 << 13;
+/// How long an export's instrument copy plays silence first, so one that
+/// loads its sounds in the background has them (seconds of audio).
+pub const WARMUP_SECS: f64 = 2.5;
 /// Samples the rings between the audio thread and a pump hold (frames).
 const RING_FRAMES: usize = 1 << 15;
 /// The dry delay line (frames, a power of two).
@@ -54,6 +71,10 @@ struct InMeta {
     gen: u32,
     frames: u32,
     keyed: bool,
+    /// Note events that go with the block (in the event ring).
+    events: u32,
+    /// The input is silence (an instrument): not sent to the host.
+    silent: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -68,6 +89,7 @@ struct OutMeta {
 struct AudioSide {
     in_data: Producer<f32>,
     in_meta: Producer<InMeta>,
+    in_events: Producer<Timed>,
     out_data: Consumer<f32>,
     out_meta: Consumer<OutMeta>,
     cur: Option<(OutMeta, usize)>,
@@ -87,6 +109,7 @@ struct AudioSide {
 struct PumpSide {
     in_data: Consumer<f32>,
     in_meta: Consumer<InMeta>,
+    in_events: Consumer<Timed>,
     out_data: Producer<f32>,
     out_meta: Producer<OutMeta>,
 }
@@ -96,10 +119,12 @@ fn rings(pipeline: usize) -> (AudioSide, PumpSide) {
     let (imp, imc) = RingBuffer::<InMeta>::new(512);
     let (op, oc) = RingBuffer::<f32>::new(RING_FRAMES * 2);
     let (omp, omc) = RingBuffer::<OutMeta>::new(512);
+    let (iep, iec) = RingBuffer::<Timed>::new(EVENT_RING);
     (
         AudioSide {
             in_data: ip,
             in_meta: imp,
+            in_events: iep,
             out_data: oc,
             out_meta: omc,
             cur: None,
@@ -114,6 +139,7 @@ fn rings(pipeline: usize) -> (AudioSide, PumpSide) {
         PumpSide {
             in_data: ic,
             in_meta: imc,
+            in_events: iec,
             out_data: op,
             out_meta: omp,
         },
@@ -147,6 +173,8 @@ impl AudioSide {
         offline: bool,
         pump: Option<&Thread>,
         shared_gen: &AtomicU32,
+        events: &[Timed],
+        silent: bool,
     ) {
         let n = l.len().min(r.len());
         let now = Instant::now();
@@ -162,8 +190,22 @@ impl AudioSide {
         }
         self.dry_w = base.wrapping_add(n);
         let total = (self.pipeline + latency).min(DRY_FRAMES - protocol_block() - 1);
-        // Hand the block to the pump.
-        let sent = if self.in_data.slots() >= n * 4 && self.in_meta.slots() >= 1 {
+        // Hand the block to the pump (an instrument's events first: the
+        // pump reads them once it has the block's description).
+        let room = self.in_data.slots() >= n * 4
+            && self.in_meta.slots() >= 1
+            && self.in_events.slots() >= events.len();
+        let sent = if room {
+            if let Ok(ch) = self.in_events.write_chunk_uninit(events.len()) {
+                ch.fill_from_iter(
+                    events
+                        .iter()
+                        .map(|e| Timed {
+                            offset: e.offset.min(n.saturating_sub(1) as u32),
+                            event: e.event,
+                        }),
+                );
+            }
             if let Ok(chunk) = self.in_data.write_chunk_uninit(n * 4) {
                 let (kl, kr) = key.unwrap_or((&[], &[]));
                 chunk.fill_from_iter((0..n).flat_map(|i| {
@@ -178,6 +220,8 @@ impl AudioSide {
                     gen: self.gen,
                     frames: n as u32,
                     keyed: key.is_some(),
+                    events: events.len() as u32,
+                    silent,
                 });
                 true
             } else {
@@ -343,9 +387,36 @@ pub struct Instance {
     /// When the plug-in last processed live (ns since the manager began).
     pub editor_open: AtomicBool,
     params: Mutex<Vec<crate::protocol::ParamInfo>>,
+    /// The MIDI controllers it takes (bits; 130 of them), once started.
+    controllers: [AtomicU64; 3],
+    controllers_known: AtomicBool,
 }
 
 impl Instance {
+    /// Whether it takes MIDI controller `c` (sustain, mod wheel, pitch
+    /// bend...). True until it has started and said.
+    pub fn takes(&self, c: u8) -> bool {
+        if !self.controllers_known.load(Ordering::Relaxed) {
+            return true;
+        }
+        let c = c as usize;
+        c < 192 && self.controllers[c / 64].load(Ordering::Relaxed) & (1 << (c % 64)) != 0
+    }
+
+    fn set_controllers(&self, list: &[u8]) {
+        let mut bits = [0u64; 3];
+        for &c in list {
+            let c = c as usize;
+            if c < 192 {
+                bits[c / 64] |= 1 << (c % 64);
+            }
+        }
+        for (a, b) in self.controllers.iter().zip(bits) {
+            a.store(b, Ordering::Relaxed);
+        }
+        self.controllers_known.store(true, Ordering::Relaxed);
+    }
+
     pub fn status(&self) -> Status {
         self.status.lock().unwrap().clone()
     }
@@ -570,6 +641,7 @@ impl Drop for Instance {
 fn pump(me: Weak<Instance>, mut side: PumpSide) {
     let mut input: Vec<f32> = Vec::new();
     let mut key: Vec<f32> = Vec::new();
+    let mut events: Vec<Timed> = Vec::new();
     let mut out: Vec<f32> = Vec::new();
     let mut bytes: Vec<u8> = Vec::new();
     let mut last_gen = u32::MAX;
@@ -595,6 +667,16 @@ fn pump(me: Weak<Instance>, mut side: PumpSide) {
             continue;
         };
         let n = m.frames as usize;
+        events.clear();
+        if let Ok(ch) = side
+            .in_events
+            .read_chunk((m.events as usize).min(side.in_events.slots()))
+        {
+            let (a, b) = ch.as_slices();
+            events.extend_from_slice(a);
+            events.extend_from_slice(b);
+            ch.commit_all();
+        }
         input.clear();
         key.clear();
         if let Ok(ch) = side.in_data.read_chunk((n * 4).min(side.in_data.slots())) {
@@ -621,7 +703,17 @@ fn pump(me: Weak<Instance>, mut side: PumpSide) {
                 }
                 let changes = inst.take_pending();
                 let k = m.keyed.then_some(&key[..]);
-                match p.process(&input, k, &changes, &mut out, &mut bytes, PROCESS_TIMEOUT) {
+                let i = (!m.silent).then_some(&input[..]);
+                match p.process_events(
+                    n,
+                    i,
+                    k,
+                    &changes,
+                    &events,
+                    &mut out,
+                    &mut bytes,
+                    PROCESS_TIMEOUT,
+                ) {
                     Ok(ok) => {
                         dry = !ok;
                         late_since = None;
@@ -674,6 +766,7 @@ pub struct Manager {
     instances: Mutex<HashMap<String, Arc<Instance>>>,
     conns: Mutex<HashMap<(u32, String, u32), Weak<Conn>>>,
     pipeline: AtomicUsize,
+    keys_pipeline: AtomicUsize,
     serial: AtomicU64,
 }
 
@@ -688,6 +781,7 @@ pub fn manager() -> &'static Manager {
         instances: Mutex::new(HashMap::new()),
         conns: Mutex::new(HashMap::new()),
         pipeline: AtomicUsize::new(PIPELINE_DEFAULT),
+        keys_pipeline: AtomicUsize::new(PIPELINE_DEFAULT),
         serial: AtomicU64::new(0),
     })
 }
@@ -746,6 +840,19 @@ impl Manager {
         self.pipeline.load(Ordering::SeqCst)
     }
 
+    /// The buffer of copies played from a MIDI keyboard: twice the
+    /// device's buffer (`frames`, what it really asks for), at least
+    /// [`KEYS_PIPELINE_MIN`]. Copies started after this use it.
+    pub fn set_keys_buffer(&self, frames: Option<u32>) {
+        let want = frames.map_or(PIPELINE_DEFAULT, |f| (f as usize * 2).next_power_of_two());
+        self.keys_pipeline
+            .store(want.clamp(KEYS_PIPELINE_MIN, 8192), Ordering::SeqCst);
+    }
+
+    pub fn keys_pipeline(&self) -> usize {
+        self.keys_pipeline.load(Ordering::SeqCst)
+    }
+
     pub fn find(&self, cid: &str) -> Option<Found> {
         self.registry.lock().unwrap().find(cid).cloned()
     }
@@ -777,7 +884,13 @@ impl Manager {
         rate: u32,
         offline: bool,
     ) -> Arc<Instance> {
-        let pipeline = if offline { 0 } else { self.pipeline() };
+        let pipeline = if offline {
+            0
+        } else if key.ends_with(KEYS) {
+            self.keys_pipeline()
+        } else {
+            self.pipeline()
+        };
         let (audio, pump_side) = rings(pipeline);
         let inst = Arc::new(Instance {
             key: key.to_string(),
@@ -804,6 +917,8 @@ impl Manager {
             quit: AtomicBool::new(false),
             editor_open: AtomicBool::new(false),
             params: Mutex::new(found.info.params.clone()),
+            controllers: Default::default(),
+            controllers_known: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&inst);
         if let Ok(h) = std::thread::Builder::new()
@@ -841,6 +956,9 @@ impl Manager {
                 if !p.info.params.is_empty() {
                     *inst.params.lock().unwrap() = p.info.params.clone();
                 }
+                if p.info.events {
+                    inst.set_controllers(&p.info.controllers);
+                }
                 {
                     let mut k = inst.known.lock().unwrap();
                     for &(id, v) in &p.info.values {
@@ -862,6 +980,17 @@ impl Manager {
     /// running. None for a plug-in that is not installed (the slot is
     /// skipped).
     pub fn live(&self, slot: &EffectSlot, rate: u32) -> Option<Arc<Instance>> {
+        self.live_as(slot, rate, "")
+    }
+
+    /// The copy a MIDI keyboard plays of a slot's instrument: one of its
+    /// own (key `<slot's>#keys`), apart from playback's, with the shorter
+    /// keys buffer. Started in the background if it is not running.
+    pub fn live_keys(&self, slot: &EffectSlot, rate: u32) -> Option<Arc<Instance>> {
+        self.live_as(slot, rate, KEYS)
+    }
+
+    fn live_as(&self, slot: &EffectSlot, rate: u32, suffix: &str) -> Option<Arc<Instance>> {
         let cid = crate::cid_of(&slot.effect)?;
         let found = self.find(cid)?;
         let d = slot.plugin_data();
@@ -869,7 +998,7 @@ impl Manager {
             format!("{}#{}", slot.effect, slot.ext_id.as_deref().unwrap_or(""))
         } else {
             d.inst.clone()
-        };
+        } + suffix;
         let mut map = self.instances.lock().unwrap();
         let mut pooled = true;
         if let Some(i) = map.get(&key) {
@@ -896,7 +1025,8 @@ impl Manager {
         let found = self.find(cid)?;
         let mut d = slot.plugin_data();
         // The live copy's settings are newer than the slot's, if it runs.
-        if let Some(live) = self.get(&d.inst) {
+        let playback = d.inst.strip_suffix(KEYS).unwrap_or(&d.inst).to_string();
+        if let Some(live) = self.get(&playback) {
             if live.running() {
                 if let Some(s) = live.state_now() {
                     d.state = Some(s);
@@ -980,7 +1110,7 @@ impl VstEffect {
         let lat = inst.total_latency(self.keyed) - inst.pipeline;
         let pump = inst.pump.get();
         if let Ok(mut side) = inst.audio.try_lock() {
-            side.process(l, r, key, lat, self.offline, pump, &inst.gen);
+            side.process(l, r, key, lat, self.offline, pump, &inst.gen, &[], false);
         }
     }
 }
@@ -1051,4 +1181,100 @@ impl VstEffect {
 /// stays in the session and is skipped.
 pub fn build_live(slot: &EffectSlot, rate: u32) -> Option<Box<dyn Live>> {
     VstEffect::new(slot, rate).map(|v| Box::new(v) as Box<dyn Live>)
+}
+
+/// A MIDI track's VST3 instrument.
+pub struct VstInstrument {
+    inst: Option<Arc<Instance>>,
+    slot: EffectSlot,
+    rate: u32,
+    offline: bool,
+}
+
+impl VstInstrument {
+    /// A slot's instrument: playback's copy, or (`Use::Keys`) the copy a
+    /// MIDI keyboard plays. None when it is not installed.
+    pub fn new(slot: &EffectSlot, rate: u32, use_: Use) -> Option<VstInstrument> {
+        let inst = match use_ {
+            Use::Playback => manager().live(slot, rate)?,
+            Use::Keys => manager().live_keys(slot, rate)?,
+        };
+        Some(VstInstrument {
+            inst: Some(inst),
+            slot: slot.clone(),
+            rate,
+            offline: false,
+        })
+    }
+
+    pub fn instance(&self) -> Option<&Arc<Instance>> {
+        self.inst.as_ref()
+    }
+}
+
+impl Instrument for VstInstrument {
+    fn render(&mut self, events: &[Timed], l: &mut [f32], r: &mut [f32]) {
+        l.fill(0.0);
+        r.fill(0.0);
+        let Some(inst) = &self.inst else {
+            return;
+        };
+        let lat = inst.total_latency(false) - inst.pipeline;
+        let pump = inst.pump.get();
+        if let Ok(mut side) = inst.audio.try_lock() {
+            side.process(l, r, None, lat, self.offline, pump, &inst.gen, events, true);
+        }
+    }
+
+    fn latency(&self) -> usize {
+        self.inst.as_ref().map_or(0, |i| i.total_latency(false))
+    }
+
+    fn reset(&mut self) {
+        if let Some(i) = &self.inst {
+            i.reset_audio();
+        }
+    }
+
+    fn set_offline(&mut self, offline: bool) {
+        if offline == self.offline {
+            return;
+        }
+        self.offline = offline;
+        self.inst = if offline {
+            manager().offline(&self.slot, self.rate)
+        } else {
+            manager().live(&self.slot, self.rate)
+        };
+    }
+
+    /// Plays silence for [`WARMUP_SECS`] at about playback's pace, so a
+    /// sampler loading its sounds in the background has them when the
+    /// export starts.
+    fn warm_up(&mut self) {
+        if !self.offline || !self.inst.as_ref().is_some_and(|i| i.running()) {
+            return;
+        }
+        let block = 1024;
+        let mut l = vec![0.0f32; block];
+        let mut r = vec![0.0f32; block];
+        let mut left = (WARMUP_SECS * self.rate as f64) as usize;
+        let pace = Duration::from_secs_f64(block as f64 / self.rate as f64 / 2.0);
+        while left > 0 {
+            self.render(&[], &mut l, &mut r);
+            left = left.saturating_sub(block);
+            std::thread::sleep(pace);
+        }
+    }
+
+    fn takes(&self, controller: u8) -> bool {
+        self.inst.as_ref().is_none_or(|i| i.takes(controller))
+    }
+}
+
+/// The instrument for a MIDI track's plug-in slot (registered with the
+/// engine by the app). None when the plug-in is not installed: the track
+/// stays as it is and is silent.
+pub fn build_instrument(slot: &EffectSlot, rate: u32, use_: Use) -> Option<Box<dyn Instrument>> {
+    VstInstrument::new(slot, rate, use_).map(|v| Box::new(v) as Box<dyn Instrument>)
 }

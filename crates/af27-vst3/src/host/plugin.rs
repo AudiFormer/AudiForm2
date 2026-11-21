@@ -17,9 +17,14 @@ use vst3::Steinberg::Vst::{
 use vst3::Steinberg::{kResultOk, kResultTrue, IBStream, IPluginBaseTrait, IPluginFactoryTrait};
 use vst3::{ComPtr, ComWrapper, Interface};
 
-use super::com::{self, Edit, Edits, MemStream, ParamChanges, Sendable};
+use super::com::{self, Edit, EventList, Edits, MemStream, ParamChanges, Sendable};
 use super::module::{wstr, Module};
-use crate::protocol::{join_state, split_state, Loaded, ParamInfo, MAX_BLOCK};
+use crate::protocol::{join_state, split_state, Loaded, NoteEvent, ParamInfo, Timed, MAX_BLOCK};
+
+/// MIDI controllers a mapping can name: 0..127, aftertouch, pitch bend.
+const CONTROLLERS: usize = 130;
+/// No control for this controller.
+const UNMAPPED: u32 = u32::MAX;
 
 const STEREO: SpeakerArrangement = 3;
 const MONO: SpeakerArrangement = 1 << 19; // kSpeakerM
@@ -86,6 +91,12 @@ pub struct Audio {
     out_buses: Vec<AudioBusBuffers>,
     changes: ComWrapper<ParamChanges>,
     changes_ptr: ComPtr<IParameterChanges>,
+    /// Note events for the block, and whether it has an event input.
+    events: ComWrapper<EventList>,
+    events_ptr: ComPtr<vst3::Steinberg::Vst::IEventList>,
+    takes_events: bool,
+    /// Per channel and controller, the control its MIDI mapping names.
+    midi_map: Vec<u32>,
     ctx: Box<ProcessContext>,
     rate: f64,
     time: i64,
@@ -311,6 +322,33 @@ impl Plugin {
         let instrument = n_ev > 0 && n_in == 0;
         let changes = ParamChanges::new();
         let changes_ptr = com::changes_ptr(&changes).ok_or("No parameter list.")?;
+        let events = EventList::new();
+        let events_ptr = com::events_ptr(&events).ok_or("No event list.")?;
+        // MIDI controllers (sustain, mod wheel, pitch bend...) reach a
+        // VST3 plug-in as controls, by its MIDI mapping.
+        let mut midi_map = vec![UNMAPPED; 16 * CONTROLLERS];
+        if n_ev > 0 {
+            stage("reading its MIDI mapping");
+            if let Some(m) = controller
+                .as_ref()
+                .and_then(|c| c.cast::<vst3::Steinberg::Vst::IMidiMapping>())
+            {
+                use vst3::Steinberg::Vst::IMidiMappingTrait;
+                for ch in 0..16i16 {
+                    for cc in 0..CONTROLLERS as i16 {
+                        let mut id: u32 = 0;
+                        let r = m.getMidiControllerAssignment(0, ch, cc, &mut id);
+                        if r == kResultOk || r == kResultTrue {
+                            midi_map[ch as usize * CONTROLLERS + cc as usize] = id;
+                        }
+                    }
+                }
+            }
+        }
+        let controllers: Vec<u8> = (0..CONTROLLERS)
+            .filter(|&cc| midi_map[cc] != UNMAPPED)
+            .map(|cc| cc as u8)
+            .collect();
         let to_audio = Arc::new(Mutex::new(Vec::new()));
         let mut audio = Audio {
             processor: processor.clone(),
@@ -326,6 +364,10 @@ impl Plugin {
             out_buses: Vec::new(),
             changes,
             changes_ptr,
+            events,
+            events_ptr,
+            takes_events: n_ev > 0,
+            midi_map,
             ctx: Box::new(std::mem::zeroed()),
             rate,
             time: 0,
@@ -374,6 +416,8 @@ impl Plugin {
                 sidechain,
                 instrument,
                 values,
+                events: n_ev > 0,
+                controllers,
             },
         ))
     }
@@ -575,20 +619,94 @@ impl Audio {
             },
             inputParameterChanges: changes,
             outputParameterChanges: std::ptr::null_mut(),
-            inputEvents: std::ptr::null_mut(),
+            inputEvents: if self.takes_events {
+                self.events_ptr.as_ptr()
+            } else {
+                std::ptr::null_mut()
+            },
             outputEvents: std::ptr::null_mut(),
             processContext: &mut *self.ctx,
         }
     }
 
+    /// Fills the event list (and controller moves as control changes) for
+    /// the frames `at..at + n` of a block.
+    fn take_events(&mut self, events: &[Timed], at: usize, n: usize) {
+        use vst3::Steinberg::Vst::Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent};
+        use vst3::Steinberg::Vst::{Event, Event__type0, NoteOffEvent, NoteOnEvent};
+        self.events.clear();
+        for e in events {
+            let off = e.offset as usize;
+            if off < at || off >= at + n {
+                continue;
+            }
+            let rel = (off - at) as i32;
+            let note = |r#type: i32, body: Event__type0| Event {
+                busIndex: 0,
+                sampleOffset: rel,
+                ppqPosition: 0.0,
+                flags: 0,
+                r#type: r#type as u16,
+                __field0: body,
+            };
+            match e.event {
+                NoteEvent::On {
+                    pitch,
+                    velocity,
+                    channel,
+                    tuning,
+                } => self.events.push(note(
+                    kNoteOnEvent,
+                    Event__type0 {
+                        noteOn: NoteOnEvent {
+                            channel: channel as i16 & 15,
+                            pitch: pitch as i16 & 0x7f,
+                            tuning,
+                            // Velocity 0 would read as a note off.
+                            velocity: velocity.clamp(1.0 / 127.0, 1.0),
+                            length: 0,
+                            noteId: -1,
+                        },
+                    },
+                )),
+                NoteEvent::Off { pitch, channel } => self.events.push(note(
+                    kNoteOffEvent,
+                    Event__type0 {
+                        noteOff: NoteOffEvent {
+                            channel: channel as i16 & 15,
+                            pitch: pitch as i16 & 0x7f,
+                            velocity: 0.0,
+                            noteId: -1,
+                            tuning: 0.0,
+                        },
+                    },
+                )),
+                NoteEvent::Control {
+                    controller,
+                    value,
+                    channel,
+                } => {
+                    let k = (channel as usize & 15) * CONTROLLERS
+                        + (controller as usize).min(CONTROLLERS - 1);
+                    let id = self.midi_map[k];
+                    if id != UNMAPPED {
+                        self.changes.add(id, rel, value.clamp(0.0, 1.0) as f64);
+                    }
+                }
+            }
+        }
+    }
+
     /// Runs `input` (interleaved stereo) through the plug-in into `out`
-    /// (the same length). `key` is the sidechain, when one feeds it.
-    /// Returns false when the plug-in did not run (the input passes).
+    /// (the same length), with note and controller `events` placed in it.
+    /// `key` is the sidechain, when one feeds it. Returns false when the
+    /// plug-in did not run (the input passes).
     pub fn process(
         &mut self,
         input: &[f32],
         key: Option<&[f32]>,
         changes: &[(u32, f64)],
+        events: &[Timed],
         out: &mut [f32],
     ) -> bool {
         let frames = input.len() / 2;
@@ -616,6 +734,7 @@ impl Audio {
                 }
                 self.pending.clear();
             }
+            self.take_events(events, at, n);
             ok &= self.block(
                 &input[at * 2..(at + n) * 2],
                 key.map(|k| &k[at * 2..(at + n) * 2]),
@@ -624,6 +743,7 @@ impl Audio {
             at += n;
         }
         self.changes.clear();
+        self.events.clear();
         ok
     }
 

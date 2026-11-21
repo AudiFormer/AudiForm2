@@ -2295,6 +2295,10 @@ impl State {
 
     /// Starts a note on track `ti`'s instrument (the piano roll).
     pub fn audition_on(&mut self, ti: usize, pitch: u8, velocity: u8, pan: f32) {
+        // A VST3 instrument plays it through the keys player.
+        if crate::instruments::audition_on(self, ti, pitch, velocity) {
+            return;
+        }
         if self.audition_for(ti) {
             if let Some(e) = &mut self.engine {
                 e.note_on(pitch, velocity, pan);
@@ -2303,12 +2307,14 @@ impl State {
     }
 
     pub fn audition_off(&mut self, pitch: u8) {
+        crate::instruments::audition_off(self, pitch);
         if let Some(e) = &mut self.engine {
             e.note_off(pitch);
         }
     }
 
     pub fn audition_all_off(&mut self) {
+        crate::instruments::audition_all_off(self);
         if let Some(e) = &mut self.engine {
             e.all_notes_off();
         }

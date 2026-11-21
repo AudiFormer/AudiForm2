@@ -46,6 +46,10 @@ pub(crate) struct Core {
     dev: Vec<f32>,
     /// Notes played live (MIDI input), from another thread.
     notes: Option<rtrb::Consumer<crate::LiveNote>>,
+    /// A track's plug-in instrument played live, and its events from the
+    /// MIDI input's thread.
+    keys: Option<Box<crate::plugin_inst::KeysPlayer>>,
+    keys_rx: Option<rtrb::Consumer<af27_dsp::instrument::NoteEvent>>,
 }
 
 impl Core {
@@ -78,6 +82,8 @@ impl Core {
             scratch: vec![0.0; CHUNK * MAX_SPEAKERS.max(2)],
             dev: vec![0.0; CHUNK * channels],
             notes: None,
+            keys: None,
+            keys_rx: None,
         }
     }
 
@@ -86,6 +92,32 @@ impl Core {
         while let Ok(cmd) = self.rx.pop() {
             match cmd {
                 Cmd::Routes(r) => self.routes = r,
+                Cmd::Keys(p) => {
+                    let old = std::mem::replace(&mut self.keys, p);
+                    if let Some(old) = old {
+                        if let Err(rtrb::PushError::Full(old)) =
+                            self.trash.push(Garbage::Keys(old))
+                        {
+                            // Never free on the audio thread.
+                            std::mem::forget(old);
+                        }
+                    }
+                }
+                Cmd::KeysGain(g) => {
+                    if let Some(k) = &mut self.keys {
+                        k.gain = g;
+                    }
+                }
+                Cmd::KeysEvent(e) => {
+                    if let Some(k) = &mut self.keys {
+                        k.queue(e);
+                    }
+                }
+                Cmd::KeysAllOff => {
+                    if let Some(k) = &mut self.keys {
+                        k.all_off();
+                    }
+                }
                 other => self.voice.apply(other, &mut self.trash),
             }
         }
@@ -121,6 +153,17 @@ impl Core {
         // Hand-played notes, heard whether or not the transport runs.
         if let Some(a) = &mut self.voice.audition {
             a.render(src, width, 1.0 / self.rate as f64);
+        }
+        // A plug-in instrument played from a MIDI keyboard, likewise.
+        if let Some(rx) = &mut self.keys_rx {
+            while let Ok(e) = rx.pop() {
+                if let Some(k) = &mut self.keys {
+                    k.queue(e);
+                }
+            }
+        }
+        if let Some(k) = &mut self.keys {
+            k.render(src, width);
         }
         if self.voice.playing {
             for f in src.chunks_exact(width) {
@@ -190,6 +233,7 @@ struct Built {
     fault: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
     notes: rtrb::Producer<crate::LiveNote>,
+    keys: rtrb::Producer<af27_dsp::instrument::NoteEvent>,
 }
 
 fn build(
@@ -224,6 +268,8 @@ fn build(
     let (notes, notes_rx) = rtrb::RingBuffer::<crate::LiveNote>::new(512);
     let mut core = core;
     core.notes = Some(notes_rx);
+    let (keys, keys_rx) = rtrb::RingBuffer::<af27_dsp::instrument::NoteEvent>::new(1024);
+    core.keys_rx = Some(keys_rx);
     macro_rules! go {
         ($t:ty) => {{
             let (h, s, f, l) = (hush.clone(), stats.clone(), fault.clone(), lost.clone());
@@ -265,6 +311,7 @@ fn build(
         fault,
         lost,
         notes,
+        keys,
     })
 }
 
@@ -402,6 +449,7 @@ pub(crate) fn open(choice: &DeviceChoice) -> Result<Engine, String> {
         asio_device: (host == HostKind::Asio).then(|| device.clone()),
         recorders: Vec::new(),
         notes: Some(built.notes),
+        keys: Some(built.keys),
     })
 }
 

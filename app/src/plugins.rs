@@ -64,6 +64,11 @@ pub fn remember_window(frame: &eframe::Frame) {
     }
 }
 
+/// The app window's handle (an HWND), 0 before it is known.
+pub fn owner() -> u64 {
+    OWNER.load(Ordering::Relaxed)
+}
+
 // ------------------------------------------------------------ names
 
 fn cid(effect: &str) -> &str {
@@ -639,6 +644,8 @@ pub fn tick(st: &mut State) {
                 }
             }
         }
+        // MIDI tracks' instruments (and the keys' copies).
+        crate::instruments::keep(st, &mut keep);
         manager().retain(&keep);
     }
 }
@@ -661,6 +668,12 @@ fn take_notices(st: &mut State) {
     let mut commit = false;
     for (inst, n) in notices {
         let place = at.get(&inst).copied();
+        // A MIDI track's instrument (only playback's copy reports edits).
+        let instrument = if place.is_none() {
+            crate::instruments::track_of(st, &inst)
+        } else {
+            None
+        };
         // Only changes made in the plug-in's own window are the user's
         // edits (an undo step, unsaved changes). A plug-in reporting its
         // settings as it loads just updates the slot quietly.
@@ -674,6 +687,11 @@ fn take_notices(st: &mut State) {
                         begin_pending(st);
                     }
                     edit_slot(st, t, i, |d| d.set_param(id, value));
+                } else if let Some(ti) = instrument.filter(|_| !inst.ends_with(af27_vst3::live::KEYS)) {
+                    if by_user {
+                        begin_pending(st);
+                    }
+                    crate::instruments::edit(st, ti, |d| d.set_param(id, value));
                 }
             }
             Notice::State(s) => {
@@ -683,6 +701,12 @@ fn take_notices(st: &mut State) {
                         commit = true;
                     }
                     edit_slot(st, t, i, |d| d.state = Some(s.clone()));
+                } else if let Some(ti) = instrument.filter(|_| !inst.ends_with(af27_vst3::live::KEYS)) {
+                    if by_user {
+                        begin_pending(st);
+                        commit = true;
+                    }
+                    crate::instruments::edit(st, ti, |d| d.state = Some(s.clone()));
                 }
             }
             Notice::EndEdit(_) | Notice::EditorClosed => commit = true,
@@ -702,6 +726,11 @@ fn take_notices(st: &mut State) {
                 if place.is_some() {
                     st.toast(format!(
                         "A plug-in stopped: {why} Restart it from its effect window."
+                    ));
+                } else if let Some(ti) = instrument {
+                    let track = st.session.tracks[ti].name.clone();
+                    st.toast(format!(
+                        "The instrument on \"{track}\" stopped: {why} The track is silent; restart it from its instrument menu."
                     ));
                 }
             }
@@ -767,6 +796,7 @@ pub fn capture_all(st: &mut State) {
             });
         }
     }
+    crate::instruments::capture(st);
 }
 
 // ------------------------------------------------------------ manager

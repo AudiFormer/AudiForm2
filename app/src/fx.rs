@@ -276,10 +276,11 @@ fn wide_factory(
 }
 
 /// Lets every chain build the ported Audiform effects, on stereo and on
-/// a speaker bed.
+/// a speaker bed, and MIDI tracks play VST3 instruments.
 pub fn register() {
     af27_dsp::live::register_factory(factory);
     af27_dsp::wide::register_wide_factory(wide_factory);
+    af27_dsp::instrument::register_instrument_factory(af27_vst3::build_instrument);
 }
 
 /// Whether an effect can be keyed by another track or bus (a sidechain),
