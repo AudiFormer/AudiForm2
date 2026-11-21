@@ -34,7 +34,7 @@ marked as pre-releases while AudiForm 2 is in alpha.
 cargo run --release -p audiform2
 ```
 
-Windows is the main target. Linux needs the ALSA headers (`libasound2-dev`).
+Windows is the main target. Linux builds need the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora).
 You can pass files or sessions on the command line, or drop them on the window.
 
 ASIO is optional. It needs LLVM (`LIBCLANG_PATH`) and builds against

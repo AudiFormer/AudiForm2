@@ -4,7 +4,7 @@ about: Something in AudiForm 2 went wrong
 labels: bug
 ---
 
-**Build** (Help > About, e.g. 2.0.1):
+**Build** (Help > About, e.g. 2.0.2):
 
 **Windows version:**
 

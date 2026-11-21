@@ -641,12 +641,13 @@ impl Audio {
                 continue;
             }
             let rel = (off - at) as i32;
-            let note = |r#type: i32, body: Event__type0| Event {
+            // The event type constants are i32 on Windows and u32 elsewhere.
+            let note = |r#type: u16, body: Event__type0| Event {
                 busIndex: 0,
                 sampleOffset: rel,
                 ppqPosition: 0.0,
                 flags: 0,
-                r#type: r#type as u16,
+                r#type,
                 __field0: body,
             };
             match e.event {
@@ -656,7 +657,7 @@ impl Audio {
                     channel,
                     tuning,
                 } => self.events.push(note(
-                    kNoteOnEvent,
+                    kNoteOnEvent as u16,
                     Event__type0 {
                         noteOn: NoteOnEvent {
                             channel: channel as i16 & 15,
@@ -670,7 +671,7 @@ impl Audio {
                     },
                 )),
                 NoteEvent::Off { pitch, channel } => self.events.push(note(
-                    kNoteOffEvent,
+                    kNoteOffEvent as u16,
                     Event__type0 {
                         noteOff: NoteOffEvent {
                             channel: channel as i16 & 15,

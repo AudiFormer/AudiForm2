@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use vst3::ComPtr;
 use vst3::Steinberg::{
     IPluginFactory, IPluginFactory2, IPluginFactory2Trait, IPluginFactoryTrait, PClassInfo,
-    PClassInfo2, PFactoryInfo,
+    PClassInfo2,
 };
 
 use crate::protocol::cid_hex;
@@ -136,7 +136,7 @@ impl Module {
             let Some(factory) = ComPtr::from_raw(get()) else {
                 return Err("It gave no plug-in factory.".into());
             };
-            let mut info: PFactoryInfo = std::mem::zeroed();
+            let mut info: vst3::Steinberg::PFactoryInfo = std::mem::zeroed();
             let vendor = if factory.getFactoryInfo(&mut info) == vst3::Steinberg::kResultOk {
                 cstr(&info.vendor)
             } else {
