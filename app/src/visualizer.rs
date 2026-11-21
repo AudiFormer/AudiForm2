@@ -845,10 +845,11 @@ pub enum Look {
     Ripples,
     Stars,
     Radial,
+    Dancer,
 }
 
 /// In the order the list shows them.
-pub const LOOKS: [Look; 7] = [
+pub const LOOKS: [Look; 8] = [
     Look::Lava,
     Look::Bars,
     Look::Waves,
@@ -856,6 +857,7 @@ pub const LOOKS: [Look; 7] = [
     Look::Ripples,
     Look::Stars,
     Look::Radial,
+    Look::Dancer,
 ];
 
 impl Look {
@@ -868,6 +870,7 @@ impl Look {
             Look::Ripples => "ripples",
             Look::Stars => "stars",
             Look::Radial => "radial",
+            Look::Dancer => "dancer",
         }
     }
     pub fn name(self) -> &'static str {
@@ -879,6 +882,7 @@ impl Look {
             Look::Ripples => "Ripples",
             Look::Stars => "Starfield",
             Look::Radial => "Radial",
+            Look::Dancer => "TV Dancer",
         }
     }
     /// The look with this id, or the first.
@@ -894,6 +898,7 @@ impl Look {
             Look::Ripples => Box::new(Ripples::default()),
             Look::Stars => Box::new(Stars::default()),
             Look::Radial => Box::new(Radial::default()),
+            Look::Dancer => Box::new(Dancer::default()),
         }
     }
 }
@@ -1385,6 +1390,247 @@ impl Visual for Radial {
     }
 }
 
+// TV Dancer: a little alien of our own on an old television, floating and
+// doing slow, goofy dance moves. The bob and sway follow the level, each
+// beat moves it on to its next move, its antennae wobble on the highs and
+// its mouth sings with the loudness. Quiet, it just floats and blinks.
+
+#[derive(Default)]
+struct Dancer {
+    /// Where the dance is: one unit per move.
+    phase: f32,
+    /// The move being danced, and the one before (blended over a beat).
+    step: usize,
+    blend: f32,
+    /// Seconds to the next blink, and how far through one.
+    blink_in: f32,
+    blink: f32,
+    /// Smoothed loudness, so the moves swell rather than twitch.
+    energy: f32,
+    wobble: f32,
+}
+
+/// A pose: arm and leg angles (radians, 0 = straight down, outward
+/// positive) and how far the body leans and dips.
+#[derive(Clone, Copy)]
+struct Pose {
+    upper_l: f32,
+    lower_l: f32,
+    upper_r: f32,
+    lower_r: f32,
+    hip_l: f32,
+    knee_l: f32,
+    hip_r: f32,
+    knee_r: f32,
+    lean: f32,
+    dip: f32,
+}
+
+/// The moves: each a pair of poses it swings between.
+const MOVES: [[Pose; 2]; 4] = [
+    // The noodle: arms rolling out and in, knees bent wide.
+    [
+        Pose { upper_l: 1.1, lower_l: -1.4, upper_r: 0.6, lower_r: -0.5, hip_l: 0.35, knee_l: -0.5, hip_r: 0.35, knee_r: -0.5, lean: -0.08, dip: 0.0 },
+        Pose { upper_l: 0.6, lower_l: -0.5, upper_r: 1.1, lower_r: -1.4, hip_l: 0.35, knee_l: -0.5, hip_r: 0.35, knee_r: -0.5, lean: 0.08, dip: 0.6 },
+    ],
+    // The wave: one arm up over the head, swaying.
+    [
+        Pose { upper_l: 2.6, lower_l: 0.5, upper_r: 0.4, lower_r: -0.3, hip_l: 0.2, knee_l: -0.2, hip_r: 0.45, knee_r: -0.8, lean: -0.12, dip: 0.3 },
+        Pose { upper_l: 2.2, lower_l: -0.6, upper_r: 0.5, lower_r: -0.6, hip_l: 0.45, knee_l: -0.8, hip_r: 0.2, knee_r: -0.2, lean: 0.1, dip: 0.7 },
+    ],
+    // The squat bounce: hands on knees, sinking and rising.
+    [
+        Pose { upper_l: 0.5, lower_l: -0.9, upper_r: 0.5, lower_r: -0.9, hip_l: 0.55, knee_l: -1.0, hip_r: 0.55, knee_r: -1.0, lean: 0.0, dip: 1.0 },
+        Pose { upper_l: 0.7, lower_l: -0.3, upper_r: 0.7, lower_r: -0.3, hip_l: 0.25, knee_l: -0.3, hip_r: 0.25, knee_r: -0.3, lean: 0.0, dip: 0.0 },
+    ],
+    // The sprinkler: both arms out, turning side to side.
+    [
+        Pose { upper_l: 1.6, lower_l: 0.2, upper_r: 1.5, lower_r: 1.2, hip_l: 0.3, knee_l: -0.4, hip_r: 0.3, knee_r: -0.4, lean: -0.15, dip: 0.2 },
+        Pose { upper_l: 1.5, lower_l: 1.2, upper_r: 1.6, lower_r: 0.2, hip_l: 0.3, knee_l: -0.4, hip_r: 0.3, knee_r: -0.4, lean: 0.15, dip: 0.5 },
+    ],
+];
+
+fn mix_pose(a: &Pose, b: &Pose, t: f32) -> Pose {
+    let m = |x: f32, y: f32| x + (y - x) * t;
+    Pose {
+        upper_l: m(a.upper_l, b.upper_l),
+        lower_l: m(a.lower_l, b.lower_l),
+        upper_r: m(a.upper_r, b.upper_r),
+        lower_r: m(a.lower_r, b.lower_r),
+        hip_l: m(a.hip_l, b.hip_l),
+        knee_l: m(a.knee_l, b.knee_l),
+        hip_r: m(a.hip_r, b.hip_r),
+        knee_r: m(a.knee_r, b.knee_r),
+        lean: m(a.lean, b.lean),
+        dip: m(a.dip, b.dip),
+    }
+}
+
+/// The pose of move `step` at `phase` (0..1 swings there and back, eased).
+fn pose_of(step: usize, phase: f32) -> Pose {
+    let mv = &MOVES[step % MOVES.len()];
+    let swing = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
+    mix_pose(&mv[0], &mv[1], swing)
+}
+
+impl Visual for Dancer {
+    fn draw(&mut self, cv: &mut Canvas, a: &Analysis, pal: &Palette) {
+        let (w, h) = (cv.w as f32, cv.h as f32);
+        let dt = a.dt.clamp(0.0, 0.1);
+        // The room behind the set.
+        cv.fill_rect(0.0, 0.0, w, h, [24.0, 22.0, 30.0], 1.0);
+        cv.fill_rect(0.0, h * 0.8, w, h * 0.2, [34.0, 30.0, 40.0], 1.0);
+
+        // The television.
+        let tv_w = (w * 0.86).min(h * 1.15);
+        let tv_h = tv_w * 0.78;
+        let (tx, ty) = ((w - tv_w) / 2.0, (h - tv_h) / 2.0 - h * 0.02);
+        let body = [150.0, 152.0, 160.0];
+        cv.fill_rect(tx + tv_w * 0.18, ty + tv_h, tv_w * 0.64, tv_h * 0.05, [40.0, 40.0, 46.0], 1.0);
+        cv.fill_rect(tx, ty, tv_w, tv_h, body, 1.0);
+        cv.fill_rect(tx, ty + tv_h * 0.86, tv_w, tv_h * 0.14, [128.0, 130.0, 138.0], 1.0);
+        // Speaker grilles either side of the screen.
+        let grille = [118.0, 120.0, 128.0];
+        for side in [0.0f32, 1.0] {
+            let gx = tx + tv_w * (0.035 + side * 0.865);
+            for row in 0..14 {
+                for col in 0..3 {
+                    cv.disc(
+                        gx + col as f32 * tv_w * 0.025 + tv_w * 0.012,
+                        ty + tv_h * 0.1 + row as f32 * tv_h * 0.052,
+                        tv_w * 0.005,
+                        grille,
+                        1.0,
+                    );
+                }
+            }
+        }
+        // Knobs and the tape slot along the bottom.
+        cv.ring(tx + tv_w * 0.16, ty + tv_h * 0.93, tv_w * 0.018, 2.0, [60.0, 60.0, 66.0], 1.0);
+        cv.ring(tx + tv_w * 0.2, ty + tv_h * 0.93, tv_w * 0.012, 2.0, [60.0, 60.0, 66.0], 1.0);
+        cv.fill_rect(tx + tv_w * 0.3, ty + tv_h * 0.905, tv_w * 0.42, tv_h * 0.05, [110.0, 112.0, 120.0], 1.0);
+        // The screen, faintly lit in the scheme's colour.
+        let (sx, sy, sw, sh) = (tx + tv_w * 0.16, ty + tv_h * 0.07, tv_w * 0.68, tv_h * 0.74);
+        cv.fill_rect(sx - 4.0, sy - 4.0, sw + 8.0, sh + 8.0, [70.0, 70.0, 80.0], 1.0);
+        cv.fill_rect(sx, sy, sw, sh, [6.0, 6.0, 10.0], 1.0);
+        let tint = pal.css(a.tk(0.02));
+        cv.fill_rect(sx, sy, sw, sh, tint, 0.04 + a.level * 0.05);
+
+        // The dance.
+        // Up quickly with the music, down slowly, like a meter.
+        let target = a.level.max(a.bass * 0.8);
+        let rate = if target > self.energy { 8.0 } else { 0.8 };
+        self.energy += (target - self.energy) * (dt * rate).min(1.0);
+        let lively = self.energy.clamp(0.0, 1.0);
+        // Slow, floaty moves: quicker when it's louder, never frantic.
+        self.phase += dt * (0.22 + lively * 0.35);
+        if a.beat && self.blend >= 1.0 && lively > 0.15 {
+            self.step = (self.step + 1) % MOVES.len();
+            self.blend = 0.0;
+        }
+        self.blend = (self.blend + dt * 1.2).min(1.0);
+        let now = pose_of(self.step, self.phase);
+        let was = pose_of(self.step + MOVES.len() - 1, self.phase);
+        let calm = Pose { upper_l: 0.35, lower_l: -0.2, upper_r: 0.35, lower_r: -0.2, hip_l: 0.15, knee_l: -0.15, hip_r: 0.15, knee_r: -0.15, lean: 0.0, dip: 0.2 };
+        let dancing = mix_pose(&was, &now, self.blend);
+        let p = mix_pose(&calm, &dancing, (0.25 + lively * 1.5).min(1.0));
+        self.wobble += dt * (2.0 + a.treble * 14.0);
+        // Blinks.
+        if self.blink_in <= 0.0 {
+            self.blink_in = 2.5 + (a.time * 7.13).sin().abs() as f32 * 3.0;
+            self.blink = 1.0;
+        }
+        self.blink_in -= dt;
+        self.blink = (self.blink - dt * 7.0).max(0.0);
+
+        // Its size and where it floats.
+        let u = sh / 9.0;
+        let float = (a.time as f32 * 0.9).sin() * u * 0.25 + p.dip * u * 0.35;
+        let cx = sx + sw / 2.0 + p.lean * u * 2.0;
+        let hip_y = sy + sh * 0.62 + float;
+        let skin = {
+            let t = pal.css(0.35);
+            [t[0] * 0.55 + 90.0, t[1] * 0.55 + 110.0, t[2] * 0.55 + 80.0]
+        };
+        let shade = [skin[0] * 0.72, skin[1] * 0.72, skin[2] * 0.72];
+        let limb = u * 0.32;
+        // A limb from `from` at `ang` (0 down; `dir` -1 left, +1 right).
+        let joint = |from: (f32, f32), ang: f32, len: f32, dir: f32| {
+            (from.0 + ang.sin() * len * dir, from.1 + ang.cos() * len)
+        };
+        // Legs.
+        for (dir, hip, knee) in [(-1.0f32, p.hip_l, p.knee_l), (1.0, p.hip_r, p.knee_r)] {
+            let top = (cx + dir * u * 0.35, hip_y);
+            let k = joint(top, hip, u * 1.35, dir);
+            let f = joint(k, hip + knee, u * 1.3, dir);
+            cv.segment(top, k, limb, true, shade, 1.0);
+            cv.segment(k, f, limb * 0.9, true, shade, 1.0);
+            // A little three-toed foot, toes pointed down (it floats).
+            for t in [-0.35f32, 0.0, 0.35] {
+                cv.segment(f, (f.0 + dir * u * 0.15 + t * u * 0.3, f.1 + u * 0.3), limb * 0.45, true, shade, 1.0);
+            }
+        }
+        // Body: a soft pear.
+        let neck = (cx + p.lean * u * 0.6, hip_y - u * 2.0);
+        cv.segment((cx, hip_y - u * 0.2), neck, u * 1.25, true, skin, 1.0);
+        cv.disc(cx, hip_y - u * 0.55, u * 0.78, skin, 1.0);
+        // Arms.
+        for (dir, upper, lower) in [(-1.0f32, p.upper_l, p.lower_l), (1.0, p.upper_r, p.lower_r)] {
+            let sh_pt = (neck.0 + dir * u * 0.55, neck.1 + u * 0.25);
+            let e = joint(sh_pt, upper, u * 1.15, dir);
+            let hand = joint(e, upper + lower, u * 1.1, dir);
+            cv.segment(sh_pt, e, limb * 0.9, true, skin, 1.0);
+            cv.segment(e, hand, limb * 0.8, true, skin, 1.0);
+            // Three long fingers, splayed.
+            let fa = upper + lower;
+            for k in [-0.45f32, 0.0, 0.45] {
+                let tip = joint(hand, fa + k, u * 0.42, dir);
+                cv.segment(hand, tip, limb * 0.35, true, skin, 1.0);
+            }
+        }
+        // Head: big and round, a little tilted with the sway.
+        let head = (neck.0 + p.lean * u * 1.2, neck.1 - u * 1.25);
+        let hr = u * 1.15;
+        cv.disc(head.0, head.1, hr, skin, 1.0);
+        cv.disc(head.0, head.1 + hr * 0.45, hr * 0.62, skin, 1.0);
+        // Antennae with bobbles, wobbling on the highs.
+        for dir in [-1.0f32, 1.0] {
+            let base = (head.0 + dir * hr * 0.45, head.1 - hr * 0.8);
+            let sway = (self.wobble + dir).sin() * (0.15 + a.treble * 0.5);
+            let tip = (base.0 + dir * u * 0.5 + sway * u * 0.6, base.1 - u * 1.0);
+            cv.segment(base, tip, limb * 0.35, true, shade, 1.0);
+            cv.disc(tip.0, tip.1, u * 0.18, pal.css(0.7 + dir * 0.1), 1.0);
+        }
+        // Eyes: huge, glossy, almond-ish (two discs each), with a blink.
+        let open = 1.0 - (self.blink * std::f32::consts::PI).sin().max(0.0) * 0.9;
+        for dir in [-1.0f32, 1.0] {
+            let ex = head.0 + dir * hr * 0.42;
+            let ey = head.1 + hr * 0.02;
+            let er = hr * 0.3 * open.max(0.15);
+            cv.disc(ex, ey, er, [8.0, 8.0, 14.0], 1.0);
+            cv.disc(ex + dir * er * 0.35, ey - er * 0.2, er * 0.9, [8.0, 8.0, 14.0], 1.0);
+            if open > 0.5 {
+                cv.disc(ex - er * 0.3, ey - er * 0.35, er * 0.22, [240.0, 240.0, 250.0], 0.9);
+            }
+        }
+        // A little round mouth that sings with the loudness.
+        let mouth = u * (0.08 + lively * 0.22);
+        cv.disc(head.0, head.1 + hr * 0.62, mouth, [40.0, 20.0, 30.0], 1.0);
+
+        // The screen's own look: scan lines and a soft vignette.
+        let mut y = sy;
+        while y < sy + sh {
+            cv.fill_rect(sx, y, sw, 1.0, [0.0, 0.0, 0.0], 0.22);
+            y += 3.0;
+        }
+        for k in 0..6 {
+            let inset = k as f32 * u * 0.12;
+            cv.fill_rect(sx + inset, sy + inset, sw - inset * 2.0, u * 0.12, [0.0, 0.0, 0.0], 0.12);
+            cv.fill_rect(sx + inset, sy + sh - inset - u * 0.12, sw - inset * 2.0, u * 0.12, [0.0, 0.0, 0.0], 0.12);
+        }
+    }
+}
+
 // ------------------------------------------------------------------- panel
 
 const FPS: [u32; 3] = [15, 30, 60];
@@ -1655,6 +1901,33 @@ mod tests {
 
     fn quiet() -> Analysis {
         Analyser::default().feed(&[], 1.0, 0.03, 1.0)
+    }
+
+    /// The TV Dancer dances to music (changing moves on beats) and only
+    /// floats and blinks in silence; its picture stays sane.
+    #[test]
+    fn the_tv_dancer_dances_to_the_music() {
+        let mut cv = Canvas::default();
+        cv.resize(320, 240);
+        let pal = Palette::new(Scheme::Theme, None, None);
+        let mut d = Dancer::default();
+        let q = quiet();
+        for _ in 0..60 {
+            d.draw(&mut cv, &q, &pal);
+        }
+        assert_eq!(d.step, 0, "no moves in silence");
+        let mut a = Analyser::default();
+        let quiet_db = [-80.0f32; BANDS];
+        let mut loud = [-80.0f32; BANDS];
+        loud[..10].fill(-6.0);
+        for k in 0..400 {
+            let x = a.feed(if k % 20 < 3 { &loud } else { &quiet_db }, 1.0, 0.033, 1.0);
+            d.draw(&mut cv, &x, &pal);
+        }
+        assert!(d.step != 0 || d.blend < 1.0, "the beats moved it on");
+        assert!(d.energy > 0.0);
+        let img = cv.image();
+        assert_eq!(img.size, [320, 240]);
     }
 
     #[test]
