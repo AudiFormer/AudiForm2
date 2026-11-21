@@ -23,13 +23,14 @@ pub struct Control {
 }
 
 /// The effects a chain can add, grouped for the Add Effect menu: (group,
-/// [(id, name)]).
+/// [(id, name)]). Retired built-ins (the old Echo) still run in the
+/// sessions that have them but are not offered.
 pub fn catalog() -> Vec<(String, Vec<(String, String)>)> {
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for (group, list) in af27_dsp::effects::GROUPS {
         let live: Vec<_> = list
             .iter()
-            .filter(|e| e.realtime())
+            .filter(|e| e.realtime() && !crate::fx_menu::RETIRED.contains(e))
             .map(|e| (e.id().to_string(), e.name().to_string()))
             .collect();
         if !live.is_empty() {
@@ -468,6 +469,7 @@ mod tests {
             let input = noise(9600, n);
             for id in [
                 "echo",
+                af27_fx::effects::echo::ID,
                 "reverb",
                 af27_fx::effects::verb::ID,
                 af27_fx::effects::reverb::ID,

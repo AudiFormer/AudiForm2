@@ -11,7 +11,9 @@
 //! windows, rebuilt here in egui (see docs/clean-room.md for the list and
 //! each file's provenance): the dial columns (Audiform's effect
 //! controls), the Phase Curve graph, the Reverb and Convolution Reverb
-//! faceplates, the Delay faceplate (driving AudiForm 2's Echo) and the
+//! faceplates, the Delay faceplate (driving AudiForm 2's Echo), the
+//! Delay and Echo faceplate (`delay.rs`, Audiform's Delay window with its
+//! kinds, tempo and ping-pong, driving `af.echo`) and the
 //! Opto Leveler / Tube Preamp and Vox Strip panels. The Compressor,
 //! Limiter, Noise Gate and De-Esser units are AudiForm 2's own.
 //!
@@ -24,6 +26,7 @@
 //! few dozen points, and the windows ask for frames only while sound
 //! plays (for the meters) or a needle is still settling.
 
+mod delay;
 mod dynamics;
 pub mod layout;
 mod parts;
@@ -56,6 +59,7 @@ pub const PANELS: &[(&str, Panel)] = &[
     ("af.convolution_reverb", space::convolution),
     ("reverb", space::room),
     ("echo", space::echo),
+    ("af.echo", delay::panel),
     ("af.phase_curve", phase::panel),
 ];
 
@@ -250,6 +254,9 @@ pub struct Env {
     /// On a 3D Space session's speaker bed (or a surround file).
     pub spatial: bool,
     pub rate: u32,
+    /// The session's tempo (BPM at its start), for effects that follow
+    /// it; None in the Waveform editor.
+    pub tempo: Option<f64>,
     /// The window's own id, for state that lasts between frames.
     pub key: egui::Id,
 }
@@ -308,12 +315,14 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
     } else {
         st.session.rate
     };
+    let tempo = (target != FILE).then(|| st.session.tempo.bpm);
     let env = Env {
         th: th.clone(),
         levels,
         playing,
         spatial,
         rate,
+        tempo,
         key: uid,
     };
     presets_row(ui, &mut fx, th);
@@ -748,7 +757,9 @@ mod tests {
             .flat_map(|(_, l)| l.into_iter().map(|(id, _)| id))
             .collect();
         for (id, _) in PANELS {
-            assert!(all.iter().any(|a| a == id), "{id} is not an effect");
+            // The built-in Echo is no longer offered but still opens.
+            let kept = af27_dsp::Effect::from_id(id).is_some();
+            assert!(kept || all.iter().any(|a| a == id), "{id} is not an effect");
         }
         // Keys used by the panels resolve.
         let f = |id: &str, keys: &[&str]| {
@@ -774,6 +785,14 @@ mod tests {
         );
         f("de-esser", &["Threshold", "Reduction"]);
         f("echo", &["Delay", "Feedback", "Mix"]);
+        f(
+            "af.echo",
+            &[
+                "kind", "time", "sync", "note", "tempo", "feedback", "pingpong", "spread",
+                "low_cut", "tone", "depth", "rate", "drive", "analog", "dry", "wet", "l_time",
+                "l_mix", "l_invert", "r_time", "r_mix", "r_invert", "units",
+            ],
+        );
         f(
             "reverb",
             &["Room size", "Damping", "Mix", "Width", "Pre-delay"],

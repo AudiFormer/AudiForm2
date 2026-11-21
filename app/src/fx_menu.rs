@@ -49,9 +49,16 @@ pub const TOP_LEVEL: [Effect; 4] = [
     Effect::MatchLoudness,
 ];
 
+/// Built-in effects kept for the sessions that use them but no longer
+/// offered: the Echo, whose place is taken by Delay and Echo (`af.echo`).
+pub const RETIRED: [Effect; 1] = [Effect::Echo];
+
 /// Where a built-in effect goes.
 fn builtin_category(e: Effect) -> Option<&'static str> {
     use Effect as E;
+    if RETIRED.contains(&e) {
+        return None;
+    }
     Some(match e {
         E::Amplify
         | E::Normalize
@@ -71,8 +78,12 @@ fn builtin_category(e: Effect) -> Option<&'static str> {
     })
 }
 
-/// Where an Audiform effect goes, by the category it was filed under.
-fn fx_category(category: &str) -> &'static str {
+/// Where an Audiform effect goes, by the category it was filed under
+/// (Delay and Echo by name: it is filed with the reverbs).
+fn fx_category(id: &str, category: &str) -> &'static str {
+    if id == af27_fx::effects::echo::ID {
+        return "Delay and Echo";
+    }
     match category {
         "Amplitude" | "Dynamics" => "Amplitude and Compression",
         "Delay and Reverb" | "Reverb" => "Reverb",
@@ -102,7 +113,7 @@ pub fn categories() -> Vec<(&'static str, Vec<Item>)> {
     }
     for info in af27_fx::registry() {
         put(
-            fx_category(info.category),
+            fx_category(info.id, info.category),
             Item::Fx(info.id.to_string(), info.name.to_string()),
         );
     }
@@ -119,11 +130,13 @@ mod tests {
         let cats = categories();
         let items: Vec<&Item> = cats.iter().flat_map(|(_, v)| v.iter()).collect();
         for e in Effect::all() {
+            let offered = items.contains(&&Item::Builtin(e));
             assert!(
-                TOP_LEVEL.contains(&e) || items.contains(&&Item::Builtin(e)),
+                TOP_LEVEL.contains(&e) || offered || RETIRED.contains(&e),
                 "{} is in no menu",
                 e.name()
             );
+            assert!(!(offered && RETIRED.contains(&e)), "{}", e.name());
         }
         for info in af27_fx::registry() {
             assert!(items
@@ -133,5 +146,15 @@ mod tests {
         assert!(cats
             .iter()
             .any(|(c, v)| *c == "Special" && v.contains(&Item::Stems)));
+    }
+
+    #[test]
+    fn delay_and_echo_is_the_echo_offered() {
+        let cats = categories();
+        let (_, delays) = cats.iter().find(|(c, _)| *c == "Delay and Echo").unwrap();
+        assert_eq!(
+            delays,
+            &vec![Item::Fx("af.echo".into(), "Delay and Echo".into())]
+        );
     }
 }

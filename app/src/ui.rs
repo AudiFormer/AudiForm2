@@ -1234,7 +1234,9 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.menu_button("Help", |ui| {
             if ui.button("Report a Problem...").clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/nwh212/AudiForm2/issues/new"));
+                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                    "https://github.com/nwh212/AudiForm2/issues/new",
+                ));
                 ui.close_menu();
             }
             if ui.button("About AudiForm 2").clicked() {
@@ -2288,7 +2290,9 @@ impl eframe::App for App {
         if !self.shown_env_tab {
             self.shown_env_tab = true;
             // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
-            // generate-tones | fx:<effect id>, for shots.
+            // generate-tones | fx:<effect id> | master-fx:<effect id>, for
+            // shots. AF2_FX_SET=key=value,... sets the opened effect's
+            // controls (by key; `session_tempo` sets the session's tempo).
             match std::env::var("AF2_OPEN").as_deref() {
                 Ok("new-file") => crate::new_dialogs::open_new_file(&mut self.st),
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
@@ -2297,9 +2301,18 @@ impl eframe::App for App {
                 Ok("generate-tones") => self.st.generate.tones_open = true,
                 // fx:<effect id>: that effect in the file's rack, open.
                 Ok(v) if v.starts_with("fx:") => {
-                    self.st.file_chain.push(crate::rack::new_slot(&v[3..]));
+                    let slot = shot_slot(&mut self.st, &v[3..]);
+                    self.st.file_chain.push(slot);
                     let at = self.st.file_chain.len() - 1;
                     crate::rack::open_window(&mut self.st, crate::rack::FILE, at);
+                }
+                // master-fx:<effect id>: in the Multitrack's master rack.
+                Ok(v) if v.starts_with("master-fx:") => {
+                    self.st.mode = Mode::Multitrack;
+                    let slot = shot_slot(&mut self.st, &v[10..]);
+                    self.st.session.master_chain.push(slot);
+                    let at = self.st.session.master_chain.len() - 1;
+                    crate::rack::open_window(&mut self.st, af27_engine::MASTER, at);
                 }
                 _ => {}
             }
@@ -2772,6 +2785,30 @@ pub fn meter_db(x: f32) -> f32 {
 /// For documentation shots, once the first file is open:
 /// `AF2_CHANNELS_OFF=2,5` switches those channels off (counting from 1),
 /// and `AF2_SPECTRAL_BOX=t0,t1,hz0,hz1` draws a Box selection.
+/// A new slot of `id` for a documentation shot, with the controls named
+/// in `AF2_FX_SET` (key=value, comma separated) set.
+fn shot_slot(st: &mut State, id: &str) -> af27_core::EffectSlot {
+    let mut slot = crate::rack::new_slot(id);
+    let keys: Vec<&str> =
+        af27_fx::info(id).map_or_else(Vec::new, |i| i.params.iter().map(|p| p.key).collect());
+    for pair in std::env::var("AF2_FX_SET").unwrap_or_default().split(',') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let Ok(v) = v.trim().parse::<f64>() else {
+            continue;
+        };
+        if k.trim() == "session_tempo" {
+            st.session.tempo.bpm = v;
+        } else if let Some(i) = keys.iter().position(|x| *x == k.trim()) {
+            if let Some(x) = slot.values.get_mut(i) {
+                *x = v as f32;
+            }
+        }
+    }
+    slot
+}
+
 fn shot_setup(st: &mut State) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static DONE: AtomicBool = AtomicBool::new(false);

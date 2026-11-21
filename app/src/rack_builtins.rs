@@ -134,15 +134,19 @@ fn drive(amount: f32) -> EffectSlot {
 }
 
 /// The project lead's echo settings from Audiform (time ms, feedback %,
-/// tone Hz, wet %). The Echo here has no ping-pong.
-fn echo(time: f32, feedback: f32, tone: f32, wet: f32) -> EffectSlot {
+/// tone Hz, wet %, ping-pong), on a Digital Delay and Echo with the dry
+/// sound at full level.
+fn echo(time: f32, feedback: f32, tone: f32, wet: f32, pingpong: bool) -> EffectSlot {
     s(
-        "echo",
+        af27_fx::effects::echo::ID,
         &[
-            ("Delay", time),
-            ("Feedback", feedback / 100.0),
-            ("Tone", tone),
-            ("Mix", wet / 100.0),
+            ("kind", 0.0),
+            ("time", time),
+            ("feedback", feedback),
+            ("tone", tone),
+            ("dry", 100.0),
+            ("wet", wet),
+            ("pingpong", if pingpong { 1.0 } else { 0.0 }),
         ],
     )
 }
@@ -402,21 +406,25 @@ pub fn all() -> Vec<Builtin> {
                 ],
             )],
         ),
-        b(ECHO, "Slapback Echo", vec![echo(110.0, 8.0, 5000.0, 28.0)]),
+        b(
+            ECHO,
+            "Slapback Echo",
+            vec![echo(110.0, 8.0, 5000.0, 28.0, false)],
+        ),
         b(
             ECHO,
             "Podcast Room Echo",
-            vec![echo(240.0, 25.0, 4500.0, 18.0)],
+            vec![echo(240.0, 25.0, 4500.0, 18.0, false)],
         ),
         b(
             ECHO,
             "Ping-Pong Echo",
-            vec![echo(375.0, 40.0, 6000.0, 30.0)],
+            vec![echo(375.0, 40.0, 6000.0, 30.0, true)],
         ),
         b(
             ECHO,
             "Long Dark Echo",
-            vec![echo(700.0, 55.0, 2800.0, 35.0)],
+            vec![echo(700.0, 55.0, 2800.0, 35.0, false)],
         ),
         b(
             REPAIR,
@@ -580,7 +588,10 @@ mod tests {
         );
         check("de-esser", &["Frequency", "Threshold", "Reduction"]);
         check("limiter", &["Ceiling", "Look-ahead", "Release"]);
-        check("echo", &["Delay", "Feedback", "Tone", "Mix"]);
+        check(
+            "af.echo",
+            &["kind", "time", "feedback", "tone", "dry", "wet", "pingpong"],
+        );
         check("high-pass", &["Cutoff", "Slope"]);
         check("low-pass", &["Cutoff", "Slope"]);
         check("hum-remover", &["Base", "Harmonics", "Q"]);
@@ -601,12 +612,35 @@ mod tests {
 
     #[test]
     fn the_echoes_keep_the_project_leads_settings() {
-        let (chain, _) = find("Slapback Echo").unwrap();
-        let v = &chain[0].values;
-        assert_eq!(chain[0].effect, "echo");
-        assert_eq!(v[index("echo", "Delay").unwrap()], 110.0);
-        assert!((v[index("echo", "Feedback").unwrap()] - 0.08).abs() < 1e-6);
-        assert_eq!(v[index("echo", "Tone").unwrap()], 5000.0);
-        assert!((v[index("echo", "Mix").unwrap()] - 0.28).abs() < 1e-6);
+        let get = |name: &str| {
+            let (chain, _) = find(name).unwrap();
+            assert_eq!(chain.len(), 1, "{name}");
+            assert_eq!(chain[0].effect, "af.echo", "{name}");
+            let v = chain[0].values.clone();
+            move |key: &str| v[index("af.echo", key).unwrap()]
+        };
+        let v = get("Slapback Echo");
+        assert_eq!(v("kind"), 0.0);
+        assert_eq!(
+            (v("time"), v("feedback"), v("tone"), v("wet")),
+            (110.0, 8.0, 5000.0, 28.0)
+        );
+        assert_eq!((v("dry"), v("pingpong")), (100.0, 0.0));
+        let v = get("Podcast Room Echo");
+        assert_eq!(
+            (v("time"), v("feedback"), v("tone"), v("wet")),
+            (240.0, 25.0, 4500.0, 18.0)
+        );
+        let v = get("Ping-Pong Echo");
+        assert_eq!(
+            (v("time"), v("feedback"), v("tone"), v("wet")),
+            (375.0, 40.0, 6000.0, 30.0)
+        );
+        assert_eq!(v("pingpong"), 1.0);
+        let v = get("Long Dark Echo");
+        assert_eq!(
+            (v("time"), v("feedback"), v("tone"), v("wet")),
+            (700.0, 55.0, 2800.0, 35.0)
+        );
     }
 }
