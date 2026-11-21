@@ -29,6 +29,7 @@ pub mod soundfont;
 mod stream;
 pub mod stretch;
 pub mod synth;
+mod synth_voice;
 pub mod transport;
 
 #[cfg(test)]
@@ -174,6 +175,8 @@ enum Cmd {
     },
     NoteOff(u8),
     AllNotesOff,
+    /// New built-in synth settings for the audition (held notes carry on).
+    AuditionInstrument(af27_core::midi::Instrument),
     /// Where each channel goes on the device (handled by the callback).
     Routes(routing::Routes),
     /// A MIDI keyboard plays a track's plug-in instrument through this
@@ -418,6 +421,11 @@ impl Voice {
             Cmd::NoteOff(pitch) => {
                 if let Some(a) = &mut self.audition {
                     a.note_off(pitch);
+                }
+            }
+            Cmd::AuditionInstrument(inst) => {
+                if let Some(a) = &mut self.audition {
+                    a.set_instrument(inst);
                 }
             }
             Cmd::AllNotesOff => {
@@ -691,6 +699,9 @@ pub enum LiveNote {
     On { pitch: u8, velocity: u8, pan: f32 },
     Off(u8),
     AllOff,
+    /// A controller (64 sustain, 66 sostenuto, 1 mod wheel, 129 pitch
+    /// bend...), value 0..1.
+    Control { controller: u8, value: f32 },
 }
 
 impl Drop for Engine {
@@ -1015,6 +1026,11 @@ impl Engine {
 
     pub fn all_notes_off(&mut self) {
         self.send(Cmd::AllNotesOff);
+    }
+
+    /// New settings for the built-in synth the audition plays, live.
+    pub fn set_audition_instrument(&mut self, inst: af27_core::midi::Instrument) {
+        self.send(Cmd::AuditionInstrument(inst));
     }
 
     pub fn is_playing(&self) -> bool {

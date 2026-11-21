@@ -53,6 +53,7 @@ mod space;
 mod space_export;
 mod spectral_select;
 mod splash;
+mod synth_ui;
 mod state;
 mod tempo;
 mod theme;

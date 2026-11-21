@@ -14,7 +14,7 @@
 //! The instrument's latency is part of the track's (the mix's delay
 //! compensation lines it up, as for effects).
 
-use af27_core::midi::{plan_events, PlannedControl, PlannedNote, Tempo, PITCH_BEND, SUSTAIN};
+use af27_core::midi::{plan_events, PlannedMove, PlannedNote, Tempo, PITCH_BEND, SUSTAIN};
 use af27_dsp::instrument::{Instrument, NoteEvent, Timed};
 use af27_dsp::live::Chain;
 
@@ -37,7 +37,7 @@ struct Ev {
 pub struct PlugTrack {
     pub inst: Box<dyn Instrument>,
     notes: Vec<PlannedNote>,
-    controls: Vec<PlannedControl>,
+    controls: Vec<PlannedMove>,
     ev: Vec<Ev>,
     next: usize,
     /// Where the next block should start (None: catch up first).

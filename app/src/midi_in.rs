@@ -81,7 +81,9 @@ impl Shared {
                                 pan: 0.0,
                             }),
                             KeyEvent::Off { pitch, .. } => Some(LiveNote::Off(pitch)),
-                            KeyEvent::Control { .. } => None,
+                            KeyEvent::Control {
+                                controller, value, ..
+                            } => Some(LiveNote::Control { controller, value }),
                         };
                         if let Some(n) = n {
                             let _ = s.push(n);
@@ -287,7 +289,14 @@ impl State {
             for (_, id, input) in &armed {
                 let keys = match old.iter().position(|r| r.track == *id && r.input == *input) {
                     Some(k) => old.remove(k).keys,
-                    None => Keys::default(),
+                    // The pedals go on to the instrument (which holds
+                    // notes while they are down), and a recording keeps
+                    // them as controller moves with the keys' own lengths.
+                    None => {
+                        let mut k = Keys::default();
+                        k.pass_pedal = true;
+                        k
+                    }
                 };
                 s.routes.push(Route {
                     track: *id,
@@ -404,4 +413,3 @@ impl State {
         }
     }
 }
-

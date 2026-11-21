@@ -102,15 +102,19 @@ pub fn clear(st: &mut State, ti: usize) {
     }
 }
 
+/// (kind, name, effect id) of one instrument in the menu.
+type Entry = (String, String, String);
+
 /// The VST3 part of the instrument menu: Maker ▸ instruments (grouped by
 /// kind when a maker has several), or a search over all of them.
 /// Returns the effect id picked.
 pub fn menu_items(ui: &mut egui::Ui, current: Option<&str>, th: &Theme) -> Option<String> {
     let mut picked = None;
     // (maker, [(kind, name, effect id)]), sorted.
-    let list: BTreeMap<String, Vec<(String, String, String)>> = {
+    let list: Vec<(String, Vec<Entry>)> = {
         let reg = manager().registry();
-        let mut m: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+        // By maker, ignoring case.
+        let mut m: BTreeMap<String, (String, Vec<Entry>)> = BTreeMap::new();
         for f in reg.instruments() {
             // A kind that only repeats the maker ("Instrument|Waves") says
             // nothing.
@@ -119,18 +123,21 @@ pub fn menu_items(ui: &mut egui::Ui, current: Option<&str>, th: &Theme) -> Optio
                 .instrument_kind()
                 .filter(|k| !maker.contains(&k.to_lowercase()))
                 .unwrap_or_default();
-            m.entry(f.maker()).or_default().push((
+            m.entry(maker.clone())
+                .or_insert_with(|| (f.maker(), Vec::new()))
+                .1
+                .push((
                 kind,
                 f.info.name.clone(),
                 format!("{}{}", af27_vst3::PREFIX, f.info.cid),
             ));
         }
-        for v in m.values_mut() {
+        for (_, v) in m.values_mut() {
             v.sort_by_key(|(k, n, _)| (k.to_lowercase(), n.to_lowercase()));
         }
-        m
+        m.into_values().collect()
     };
-    let total: usize = list.values().map(Vec::len).sum();
+    let total: usize = list.iter().map(|(_, v)| v.len()).sum();
     ui.label(RichText::new("VST3 Instruments").small().color(c(th.text_dim)));
     if total == 0 {
         ui.label(RichText::new("None found yet.").color(c(th.text_dim)));

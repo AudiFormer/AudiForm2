@@ -129,9 +129,48 @@ pub struct SfPlayer {
     gain: f32,
     sl: Vec<f32>,
     sr: Vec<f32>,
+    /// Clip mod-wheel and pitch-bend moves (time order), the next one,
+    /// the bend now (semitones) and each channel's note detune.
+    ctl: Vec<af27_core::midi::PlannedControl>,
+    ctl_at: usize,
+    bend: f32,
+    detune: [f32; 16],
 }
 
 impl SfPlayer {
+    /// With the clips' mod-wheel and pitch-bend moves (in time order).
+    pub fn with_controls(mut self, ctl: Vec<af27_core::midi::PlannedControl>) -> SfPlayer {
+        self.ctl = ctl;
+        self.seek = true;
+        self
+    }
+
+    /// Sends the bend (the clip's plus each channel's note detune).
+    fn send_bend(&mut self) {
+        for ch in CHANNELS {
+            let b = bend_value(self.detune[ch as usize] + self.bend);
+            self.synth.process_midi_message(ch, 0xE0, b & 0x7F, b >> 7);
+        }
+    }
+
+    fn apply(&mut self, c: af27_core::midi::PlannedControl) {
+        use af27_core::midi::{MOD_WHEEL, PITCH_BEND};
+        match c.controller {
+            PITCH_BEND => {
+                self.bend =
+                    ((c.value.clamp(0.0, 1.0) * 16383.0 - 8192.0) / 8192.0).clamp(-1.0, 1.0) * 2.0;
+                self.send_bend();
+            }
+            MOD_WHEEL => {
+                let v = (c.value.clamp(0.0, 1.0) * 127.0).round() as i32;
+                for ch in CHANNELS {
+                    self.synth.process_midi_message(ch, 0xB0, 0x01, v);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn new(sf: &SoundFontRef, mut notes: Vec<SfNote>, rate: u32) -> Result<SfPlayer, String> {
         let font = load(&sf.path)?;
         let synth = synthesizer(&font, rate, sf.bank, sf.program)
@@ -167,6 +206,10 @@ impl SfPlayer {
             gain: db_to_gain(sf.gain_db),
             sl: vec![0.0; BLOCK],
             sr: vec![0.0; BLOCK],
+            ctl: Vec::new(),
+            ctl_at: 0,
+            bend: 0.0,
+            detune: [0.0; 16],
         })
     }
 
@@ -188,7 +231,8 @@ impl SfPlayer {
         let ch = Self::channel(i);
         self.synth
             .process_midi_message(ch, 0xB0, 0x0A, pan_cc(n.pan));
-        let bend = bend_value(n.detune);
+        self.detune[ch as usize] = n.detune;
+        let bend = bend_value(n.detune + self.bend);
         self.synth
             .process_midi_message(ch, 0xE0, bend & 0x7F, bend >> 7);
         self.synth.note_on(ch, n.key as i32, n.velocity as i32);
@@ -206,6 +250,27 @@ impl SfPlayer {
             self.seek = false;
             self.synth.note_off_all(true);
             self.cursor = self.events.partition_point(|e| e.t < t0);
+            // Controllers as they stand here.
+            self.ctl_at = self.ctl.partition_point(|e| e.t < t0);
+            if !self.ctl.is_empty() {
+                use af27_core::midi::{PlannedControl, MOD_WHEEL, PITCH_BEND};
+                let before = &self.ctl[..self.ctl_at];
+                let last = |c: u8, v: f32| {
+                    before
+                        .iter()
+                        .rev()
+                        .find(|e| e.controller == c)
+                        .copied()
+                        .unwrap_or(PlannedControl {
+                            t: t0,
+                            controller: c,
+                            value: v,
+                        })
+                };
+                let (w, b) = (last(MOD_WHEEL, 0.0), last(PITCH_BEND, 0.5));
+                self.apply(w);
+                self.apply(b);
+            }
             // Notes already sounding here start now.
             for i in 0..self.notes.len() {
                 let x = self.notes[i];
@@ -219,22 +284,38 @@ impl SfPlayer {
         }
         let t1 = t0 + dt * n as f64;
         let mut done = 0usize;
-        while let Some(e) = self.events.get(self.cursor).copied() {
-            if e.t >= t1 {
-                break;
-            }
-            let at = (((e.t - t0) / dt).floor().max(0.0) as usize).min(n);
+        loop {
+            let e = self.events.get(self.cursor).copied().filter(|e| e.t < t1);
+            let c = self.ctl.get(self.ctl_at).copied().filter(|c| c.t < t1);
+            // Whichever comes first (a controller before a note at the
+            // same time).
+            let te = match (e, c) {
+                (None, None) => break,
+                (Some(e), Some(c)) => e.t.min(c.t),
+                (Some(e), None) => e.t,
+                (None, Some(c)) => c.t,
+            };
+            let at = (((te - t0) / dt).floor().max(0.0) as usize).min(n);
             if at > done {
                 self.synth
                     .render(&mut self.sl[done..at], &mut self.sr[done..at]);
                 done = at;
             }
-            if e.on {
-                self.start(e.note);
-            } else {
-                self.stop(e.note);
+            match (e, c) {
+                (_, Some(c)) if c.t <= te => {
+                    self.apply(c);
+                    self.ctl_at += 1;
+                }
+                (Some(e), _) => {
+                    if e.on {
+                        self.start(e.note);
+                    } else {
+                        self.stop(e.note);
+                    }
+                    self.cursor += 1;
+                }
+                _ => break,
             }
-            self.cursor += 1;
         }
         if n > done {
             self.synth
@@ -248,13 +329,17 @@ impl SfPlayer {
     }
 }
 
-/// Notes played by hand (the piano roll), through a track's instrument,
-/// whether or not the transport runs.
+/// Notes played by hand (the piano roll, a MIDI keyboard), through a
+/// track's instrument, whether or not the transport runs. The sustain
+/// and sostenuto pedals are kept here, the same for either instrument:
+/// a key let go while the sustain pedal is down sounds on until it comes
+/// up; the sostenuto pedal holds just the keys down when it went down.
 pub struct Audition {
     kind: AuditionKind,
     t: f64,
     l: Vec<f32>,
     r: Vec<f32>,
+    pedals: Pedals,
 }
 
 enum AuditionKind {
@@ -265,16 +350,42 @@ enum AuditionKind {
 /// Notes the built-in synth's audition can hold at once.
 const AUDITION_NOTES: usize = 32;
 
+/// The pedals and which keys they hold.
+#[derive(Debug, Clone, Copy)]
+struct Pedals {
+    sustain: bool,
+    sostenuto: bool,
+    /// Keys down.
+    down: [bool; 128],
+    /// Let go, still sounding for a pedal.
+    held: [bool; 128],
+    /// Caught by the sostenuto pedal.
+    caught: [bool; 128],
+}
+
+impl Default for Pedals {
+    fn default() -> Self {
+        Pedals {
+            sustain: false,
+            sostenuto: false,
+            down: [false; 128],
+            held: [false; 128],
+            caught: [false; 128],
+        }
+    }
+}
+
 impl Audition {
     /// Through the built-in synth.
     pub fn synth(inst: af27_core::midi::Instrument, rate: u32) -> Audition {
-        let mut s = crate::synth::Synth::new(inst, Vec::new(), rate);
+        let mut s = crate::synth::Synth::live(inst, rate);
         s.notes.reserve(AUDITION_NOTES);
         Audition {
             kind: AuditionKind::Synth(s),
             t: 0.0,
             l: vec![0.0; BLOCK],
             r: vec![0.0; BLOCK],
+            pedals: Pedals::default(),
         }
     }
 
@@ -288,18 +399,25 @@ impl Audition {
             t: 0.0,
             l: vec![0.0; BLOCK],
             r: vec![0.0; BLOCK],
+            pedals: Pedals::default(),
         })
     }
 
-    pub fn note_on(&mut self, pitch: u8, velocity: u8, pan: f32) {
+    /// New settings for the built-in synth, live (held notes carry on).
+    pub fn set_instrument(&mut self, inst: af27_core::midi::Instrument) {
+        if let AuditionKind::Synth(s) = &mut self.kind {
+            s.set(inst);
+        }
+    }
+
+    /// Whether this plays the built-in synth.
+    pub fn is_synth(&self) -> bool {
+        matches!(self.kind, AuditionKind::Synth(_))
+    }
+
+    fn start(&mut self, pitch: u8, velocity: u8, pan: f32) {
         match &mut self.kind {
-            AuditionKind::Synth(s) => {
-                if s.notes.len() < s.notes.capacity() {
-                    let t = self.t;
-                    s.notes
-                        .push(crate::synth::note(t, t + 3600.0, pitch, velocity, pan));
-                }
-            }
+            AuditionKind::Synth(s) => s.key_on(self.t, pitch, velocity, pan),
             AuditionKind::Font(s, _) => {
                 s.process_midi_message(0, 0xB0, 0x0A, pan_cc(pan));
                 s.note_on(0, pitch as i32, velocity as i32);
@@ -307,27 +425,110 @@ impl Audition {
         }
     }
 
-    pub fn note_off(&mut self, pitch: u8) {
+    fn stop(&mut self, pitch: u8) {
         match &mut self.kind {
-            AuditionKind::Synth(s) => {
-                let f = af27_core::midi::note_freq(pitch as f32);
-                let t = self.t;
-                for n in s.notes.iter_mut().filter(|n| n.freq == f && n.end > t) {
-                    n.end = t;
-                }
-            }
+            AuditionKind::Synth(s) => s.key_off(self.t, pitch),
             AuditionKind::Font(s, _) => s.note_off(0, pitch as i32),
         }
     }
 
-    pub fn all_off(&mut self) {
-        match &mut self.kind {
-            AuditionKind::Synth(s) => {
-                let t = self.t;
-                for n in s.notes.iter_mut().filter(|n| n.end > t) {
-                    n.end = t;
+    pub fn note_on(&mut self, pitch: u8, velocity: u8, pan: f32) {
+        let k = (pitch & 0x7f) as usize;
+        // Struck again while a pedal holds it: the old one ends first.
+        if self.pedals.held[k] {
+            self.pedals.held[k] = false;
+            self.stop(pitch);
+        }
+        self.pedals.down[k] = true;
+        self.start(pitch, velocity, pan);
+    }
+
+    pub fn note_off(&mut self, pitch: u8) {
+        let k = (pitch & 0x7f) as usize;
+        let p = &mut self.pedals;
+        if !p.down[k] && !p.held[k] {
+            // Not ours (or already let go): make sure it stops.
+            self.stop(pitch);
+            return;
+        }
+        p.down[k] = false;
+        if p.sustain || (p.sostenuto && p.caught[k]) {
+            p.held[k] = true;
+        } else {
+            self.stop(pitch);
+        }
+    }
+
+    /// A controller from a player: 64 sustain, 66 sostenuto, 1 the mod
+    /// wheel, pitch bend; value 0..1.
+    pub fn control(&mut self, controller: u8, value: f32) {
+        use af27_core::midi::{MOD_WHEEL, PITCH_BEND, SOSTENUTO, SUSTAIN};
+        let down = value >= 0.5;
+        match controller {
+            SUSTAIN => {
+                self.pedals.sustain = down;
+                if !down {
+                    for k in 0..128 {
+                        let p = &self.pedals;
+                        if p.held[k] && !(p.sostenuto && p.caught[k]) {
+                            self.pedals.held[k] = false;
+                            self.stop(k as u8);
+                        }
+                    }
                 }
             }
+            SOSTENUTO => {
+                let p = &mut self.pedals;
+                if down && !p.sostenuto {
+                    p.caught = p.down;
+                } else if !down {
+                    for k in 0..128 {
+                        let p = &mut self.pedals;
+                        let was = p.caught[k];
+                        p.caught[k] = false;
+                        if was && p.held[k] && !p.sustain {
+                            p.held[k] = false;
+                            self.stop(k as u8);
+                        }
+                    }
+                }
+                self.pedals.sostenuto = down;
+            }
+            MOD_WHEEL => match &mut self.kind {
+                AuditionKind::Synth(s) => s.set_wheel(value),
+                AuditionKind::Font(s, _) => s.process_midi_message(
+                    0,
+                    0xB0,
+                    0x01,
+                    (value.clamp(0.0, 1.0) * 127.0).round() as i32,
+                ),
+            },
+            PITCH_BEND => match &mut self.kind {
+                AuditionKind::Synth(s) => s.set_bend(value),
+                AuditionKind::Font(s, _) => {
+                    let b = (value.clamp(0.0, 1.0) * 16383.0).round() as i32;
+                    s.process_midi_message(0, 0xE0, b & 0x7F, b >> 7);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    pub fn all_off(&mut self) {
+        let wheel_bend = |k: &mut AuditionKind| match k {
+            AuditionKind::Synth(s) => {
+                s.set_bend(0.5);
+                s.set_wheel(0.0);
+            }
+            AuditionKind::Font(s, _) => {
+                s.process_midi_message(0, 0xE0, 0, 64);
+                s.process_midi_message(0, 0xB0, 0x01, 0);
+            }
+        };
+        wheel_bend(&mut self.kind);
+        self.pedals = Pedals::default();
+        match &mut self.kind {
+            AuditionKind::Synth(s) => s.keys_off(self.t),
             AuditionKind::Font(s, _) => s.note_off_all(false),
         }
     }
@@ -344,7 +545,7 @@ impl Audition {
                 AuditionKind::Synth(s) => {
                     l.fill(0.0);
                     r.fill(0.0);
-                    let rel = s.inst.release.max(0.001) as f64;
+                    let rel = s.release();
                     let t = self.t;
                     s.notes.retain(|x| x.end + rel > t);
                     s.render(self.t, dt, l, r);
@@ -400,6 +601,79 @@ mod tests {
             AuditionKind::Synth(s) => assert_eq!(s.notes.capacity(), cap),
             _ => unreachable!(),
         }
+    }
+
+    fn level(a: &mut Audition, secs: f64) -> f32 {
+        let mut out = vec![0.0f32; 480 * 2];
+        let mut peak = 0.0f32;
+        for _ in 0..(secs * 100.0) as usize {
+            out.fill(0.0);
+            a.render(&mut out, 2, 1.0 / 48_000.0);
+            peak = out.iter().fold(0.0, |m, v| m.max(v.abs()));
+        }
+        // The level over the last 10 ms.
+        peak
+    }
+
+    #[test]
+    fn the_sustain_pedal_holds_live_notes_until_it_lifts() {
+        use af27_core::synth_model::SynthModel;
+        for inst in [
+            af27_core::midi::Instrument::default(),
+            SynthModel::PolyChorus.preset(),
+            SynthModel::MonoLadder.preset(),
+        ] {
+            let mut a = Audition::synth(inst, 48_000);
+            a.note_on(60, 100, 0.0);
+            assert!(level(&mut a, 0.1) > 0.01);
+            a.control(64, 1.0);
+            a.note_off(60);
+            // Key up, pedal down: still sounding a second later.
+            assert!(level(&mut a, 1.0) > 0.01, "{:?}", inst.ext.model);
+            a.control(64, 0.0);
+            assert!(level(&mut a, 1.5) < 1e-4, "{:?}", inst.ext.model);
+            // Without the pedal a key lets go at once.
+            a.note_on(62, 100, 0.0);
+            level(&mut a, 0.1);
+            a.note_off(62);
+            assert!(level(&mut a, 1.5) < 1e-4);
+        }
+    }
+
+    #[test]
+    fn sostenuto_holds_only_keys_down_when_it_went_down() {
+        let mut a = Audition::synth(af27_core::midi::Instrument::default(), 48_000);
+        a.note_on(60, 100, 0.0);
+        a.control(66, 1.0);
+        a.note_on(64, 100, 0.0);
+        level(&mut a, 0.05);
+        a.note_off(60);
+        a.note_off(64);
+        level(&mut a, 0.05);
+        let t = a.t;
+        let sounding = |a: &Audition, p: u8| match &a.kind {
+            AuditionKind::Synth(s) => s.notes.iter().any(|n| n.pitch == p && n.end > t),
+            _ => unreachable!(),
+        };
+        assert!(sounding(&a, 60));
+        assert!(!sounding(&a, 64));
+        a.control(66, 0.0);
+        assert!(!sounding(&a, 60));
+        assert!(level(&mut a, 1.0) < 1e-4);
+    }
+
+    #[test]
+    fn a_new_instrument_keeps_held_live_notes() {
+        let mut a = Audition::synth(af27_core::midi::Instrument::default(), 48_000);
+        a.note_on(60, 100, 0.0);
+        level(&mut a, 0.1);
+        // Into the full engine and back while the key is held.
+        a.set_instrument(af27_core::synth_model::SynthModel::BrassPoly.preset());
+        assert!(level(&mut a, 0.3) > 0.01);
+        a.set_instrument(af27_core::midi::Instrument::default());
+        assert!(level(&mut a, 0.3) > 0.01);
+        a.note_off(60);
+        assert!(level(&mut a, 1.0) < 1e-4);
     }
 
     /// Plays a real font when `AF27_SF2` names one:
