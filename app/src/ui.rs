@@ -1373,6 +1373,23 @@ fn effects_menu(
     });
     ui.separator();
     cmd_item(ui, km, Cmd::MatchLoudness, "Match Loudness", true, cmd);
+    if ui
+        .add_enabled(has_doc, egui::Button::new("Capture Noise Print"))
+        .on_hover_text("Learn the background noise from the selection (select only noise)")
+        .on_disabled_hover_text(no_doc)
+        .clicked()
+    {
+        crate::noise_print::capture(st);
+        ui.close_menu();
+    }
+    if ui
+        .add_enabled(has_doc, egui::Button::new("Reduce Noise with Print..."))
+        .on_disabled_hover_text(no_doc)
+        .clicked()
+    {
+        st.noise_print.open = true;
+        ui.close_menu();
+    }
     ui.add_enabled(
         false,
         egui::Button::new("Auto Heal Selection").shortcut_text(km.text(Cmd::AutoHeal)),
@@ -1406,6 +1423,14 @@ fn effects_menu(
                             }
                         }
                         crate::fx_menu::Item::Stems => *open_tab = Some(Tab::AiSeparation),
+                        crate::fx_menu::Item::Diagnose(k) => {
+                            if st.diag.kind != k {
+                                st.diag.kind = k;
+                                st.diag.found.clear();
+                                st.diag.scanned = None;
+                            }
+                            *open_tab = Some(Tab::Diagnostics);
+                        }
                     }
                     ui.close_menu();
                 }
@@ -2781,6 +2806,7 @@ impl eframe::App for App {
         crate::rack::windows(ctx, &mut self.st);
         crate::new_dialogs::show(ctx, &mut self.st);
         crate::podcast_tools::show(ctx, &mut self.st);
+        crate::noise_print::show(ctx, &mut self.st);
         crate::af1_import::window(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);

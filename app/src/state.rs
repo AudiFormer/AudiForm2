@@ -310,6 +310,8 @@ pub struct State {
     pub podcast: crate::podcast_tools::Dialogs,
     /// The kind new markers get (Markers panel).
     pub marker_kind: af27_core::session::MarkerKind,
+    /// Capture Noise Print / Reduce Noise with Print.
+    pub noise_print: crate::noise_print::NoisePrintUi,
     pub tool: Tool,
     pub show_about: bool,
     pub last_autosave: Instant,
@@ -596,6 +598,7 @@ impl State {
             loudness: Default::default(),
             podcast: Default::default(),
             marker_kind: Default::default(),
+            noise_print: Default::default(),
             tool: Tool::Move,
             show_about: false,
             last_autosave: Instant::now(),

@@ -15,6 +15,8 @@ pub enum Item {
     Fx(String, String),
     /// AI Stem Separation, in its own tab.
     Stems,
+    /// A Diagnostics scan, in the Diagnostics panel.
+    Diagnose(crate::diagnostics::Kind),
 }
 
 impl Item {
@@ -23,6 +25,7 @@ impl Item {
             Item::Builtin(e) => e.name().to_string(),
             Item::Fx(_, n) => n.clone(),
             Item::Stems => "AI Stem Separation...".to_string(),
+            Item::Diagnose(k) => format!("{}...", k.name()),
         }
     }
 }
@@ -118,6 +121,9 @@ pub fn categories() -> Vec<(&'static str, Vec<Item>)> {
         );
     }
     put("Special", Item::Stems);
+    for k in crate::diagnostics::Kind::ALL {
+        put("Diagnostics", Item::Diagnose(k));
+    }
     out
 }
 
@@ -146,6 +152,8 @@ mod tests {
         assert!(cats
             .iter()
             .any(|(c, v)| *c == "Special" && v.contains(&Item::Stems)));
+        let (_, diag) = cats.iter().find(|(c, _)| *c == "Diagnostics").unwrap();
+        assert_eq!(diag.len(), crate::diagnostics::Kind::ALL.len());
     }
 
     #[test]
