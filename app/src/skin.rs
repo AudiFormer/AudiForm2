@@ -487,6 +487,21 @@ pub fn install_fonts(ctx: &egui::Context, font: &str) {
         }
         bold.push("cjk".into());
     }
+    // Symbol fallbacks (arrows, shapes, Ø) for systems with no Japanese
+    // font that has them, as on many Linux installs. Last, so they change
+    // nothing where the fonts above already have the glyph.
+    for (k, paths) in SYMBOL_FONTS.iter().enumerate() {
+        if let Some(b) = system_font(paths) {
+            let name = format!("symbols-{k}");
+            fonts
+                .font_data
+                .insert(name.clone(), egui::FontData::from_static(b));
+            for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.entry(fam).or_default().push(name.clone());
+            }
+            bold.push(name);
+        }
+    }
     fonts
         .families
         .insert(egui::FontFamily::Name(BOLD.into()), bold);
@@ -523,6 +538,23 @@ pub fn text_sizes(
     sizes
 }
 
+/// System fonts with arrows and other symbols, each tried in order of
+/// its list (Fedora, Debian/Ubuntu, Arch, macOS).
+const SYMBOL_FONTS: &[&[&str]] = &[
+    &[
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    ],
+    &[
+        "/usr/share/fonts/google-noto-sans-symbols-2-fonts/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        "/System/Library/Fonts/Apple Symbols.ttf",
+    ],
+];
+
 /// A system Japanese font, read once.
 fn cjk_font() -> Option<(&'static [u8], u32)> {
     static FONT: std::sync::OnceLock<Option<(&'static [u8], u32)>> = std::sync::OnceLock::new();
@@ -544,6 +576,7 @@ fn read_cjk_font() -> Option<(Vec<u8>, u32)> {
         ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
         ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
         ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
+        ("/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc", 0),
     ];
     candidates
         .into_iter()

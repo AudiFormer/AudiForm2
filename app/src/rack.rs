@@ -378,9 +378,10 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
         Rounding::ZERO,
         Stroke::new(1.0_f32, ca(th.border, 200)),
     );
+    // One width for every row, so nothing a row draws can widen the next.
+    let w = ui.available_width();
     for (row, slot_i) in map.iter().enumerate() {
         let slot = slot_i.and_then(|i| list.get(i).map(|s| (i, s)));
-        let w = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(vec2(w, row_h), Sense::click());
         let p = ui.painter_at(rect);
         let selected = st.rack_row == Some((target, row));
@@ -510,7 +511,12 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
             }
         }
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(arrow), |ui| {
-            ui.menu_button(RichText::new("▸").color(c(th.text)), |ui| match slot {
+            // The arrow is drawn, not a font glyph: not every system's
+            // fonts have one, and the button keeps exactly the cell's size.
+            let btn = egui::Button::new("")
+                .frame(false)
+                .min_size(arrow.size());
+            let inner = egui::menu::menu_custom_button(ui, btn, |ui| match slot {
                 Some((i, _)) => {
                     if ui.button("Open").clicked() {
                         open = Some(i);
@@ -534,9 +540,16 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                         add_at = Some((row, id));
                     }
                 }
-            })
-            .response
-            .on_hover_text(if slot.is_some() {
+            });
+            let r = inner.response;
+            let col = if r.hovered() { c(th.accent) } else { c(th.text) };
+            let m = arrow.center();
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![m + vec2(-2.5, -4.5), m + vec2(3.5, 0.0), m + vec2(-2.5, 4.5)],
+                col,
+                Stroke::NONE,
+            ));
+            r.on_hover_text(if slot.is_some() {
                 "Effect menu"
             } else {
                 "Add an effect here"
