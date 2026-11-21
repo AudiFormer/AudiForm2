@@ -18,6 +18,7 @@ pub mod loudness;
 pub mod noise;
 pub mod peaks;
 pub mod phase;
+pub mod repair;
 pub mod resample;
 pub mod reverb;
 pub mod spectral_edit;

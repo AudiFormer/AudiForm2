@@ -22,14 +22,39 @@ pub fn files(ui: &mut egui::Ui, st: &mut State, _open: &mut Option<Tab>) {
 // ---------------------------------------------------------------- Markers
 
 pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
+    use af27_core::session::MarkerKind;
     ui.horizontal(|ui| {
         if ui.button("➕ Add at Playhead (M)").clicked() {
             st.add_marker();
         }
+        egui::ComboBox::from_id_salt("marker-new-kind")
+            .selected_text(st.marker_kind.label().to_string())
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for k in MarkerKind::OFFERED {
+                    let l = k.label().to_string();
+                    ui.selectable_value(&mut st.marker_kind, k, l);
+                }
+            })
+            .response
+            .on_hover_text("The kind new markers get");
+        ui.menu_button("Export…", |ui| {
+            for (kind, what) in [(MarkerKind::Chapter, "Chapters"), (MarkerKind::AdSlot, "Ad Slots")] {
+                ui.menu_button(what, |ui| {
+                    for f in crate::chapters::Format::ALL {
+                        if ui.button(f.name()).clicked() {
+                            ui.close_menu();
+                            export_markers(st, &kind, f);
+                        }
+                    }
+                });
+            }
+        });
     });
     ui.separator();
     let mut jump = None;
     let mut remove = None;
+    let mut changed = false;
     let markers: &mut Vec<af27_core::Marker> = match st.mode {
         Mode::Waveform => match st.doc_mut() {
             Some(d) => &mut d.markers,
@@ -39,12 +64,13 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     };
     egui::Grid::new("markers")
         .striped(true)
-        .num_columns(3)
+        .num_columns(4)
         .show(ui, |ui| {
             for (i, m) in markers.iter_mut().enumerate() {
                 if caches.marker_edit == Some(i) {
                     if ui.text_edit_singleline(&mut m.name).lost_focus() {
                         caches.marker_edit = None;
+                        changed = true;
                     }
                 } else {
                     let r = ui.selectable_label(false, &m.name);
@@ -56,6 +82,15 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     }
                 }
                 ui.label(RichText::new(format_time(m.time)).monospace());
+                egui::ComboBox::from_id_salt(("marker-kind", i))
+                    .selected_text(m.kind.label().to_string())
+                    .width(84.0)
+                    .show_ui(ui, |ui| {
+                        for k in MarkerKind::OFFERED {
+                            let l = k.label().to_string();
+                            changed |= ui.selectable_value(&mut m.kind, k, l).changed();
+                        }
+                    });
                 if ui.small_button("✕").clicked() {
                     remove = Some(i);
                 }
@@ -64,9 +99,56 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         });
     if let Some(i) = remove {
         markers.remove(i);
+        changed = true;
+    }
+    if changed && st.mode == Mode::Multitrack {
+        st.session_dirty = true;
+        st.session_version += 1;
     }
     if let Some(t) = jump {
         st.set_cursor(t);
+    }
+}
+
+/// Saves the chapter or ad list (Markers panel > Export).
+fn export_markers(st: &mut State, kind: &af27_core::session::MarkerKind, f: crate::chapters::Format) {
+    let (markers, duration, name) = match st.mode {
+        Mode::Waveform => match st.doc() {
+            Some(d) => (d.markers.clone(), d.duration(), d.name.clone()),
+            None => return,
+        },
+        Mode::Multitrack => (st.session.markers.clone(), st.session.duration(), st.session.name.clone()),
+    };
+    let list = crate::chapters::of_kind(&markers, kind);
+    if list.is_empty() {
+        st.toast(format!("There are no {} markers to export.", kind.label()));
+        return;
+    }
+    let stem = std::path::Path::new(&name)
+        .file_stem()
+        .map_or(name.clone(), |s| s.to_string_lossy().to_string());
+    let suffix = if *kind == af27_core::session::MarkerKind::AdSlot { "ads" } else { "chapters" };
+    let Some(path) = rfd::FileDialog::new()
+        .set_file_name(format!("{stem} {suffix}.{}", f.ext()))
+        .add_filter(f.name(), &[f.ext()])
+        .save_file()
+    else {
+        return;
+    };
+    match std::fs::write(&path, crate::chapters::render(&list, f)) {
+        Ok(()) => {
+            let warn = if *kind == af27_core::session::MarkerKind::Chapter {
+                crate::chapters::warnings(&list, duration)
+            } else {
+                Vec::new()
+            };
+            if warn.is_empty() {
+                st.toast(format!("Saved {} {}", list.len(), suffix));
+            } else {
+                st.toast(format!("Saved {} {}. Note: {}", list.len(), suffix, warn.join(" ")));
+            }
+        }
+        Err(e) => st.error(format!("Could not save {}: {e}", path.display())),
     }
 }
 

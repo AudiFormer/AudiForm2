@@ -435,6 +435,7 @@ fn session_meta(s: &Session, from: f64, to: f64, title: &str) -> Meta {
                 name: m.name.clone(),
                 time: m.time - from,
                 length: m.length.min(to - m.time),
+                chapter: m.kind == af27_core::session::MarkerKind::Chapter,
             })
             .collect(),
         tags: tags(title),
@@ -579,6 +580,7 @@ fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, opts: Options) {
                 name: m.name.clone(),
                 time: m.time,
                 length: m.length,
+                chapter: m.kind == af27_core::session::MarkerKind::Chapter,
             })
             .collect(),
         tags: tags(&stem_of(

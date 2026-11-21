@@ -23,8 +23,8 @@ our own feature names.
 - ✅ Range (selection and view, editable) · ✅ Level Statistics · ✅ Phase Scope with correlation
 - ✅ Spectrum analyzer · ✅ Mixer · ✅ AI Stems (no counterpart in the reference product)
 - 🟡 Effect chains: 16 live slots per track, bus and master ✅; per clip ⬜
-- ⬜ Loudness meter (live momentary, short-term, LRA) · ⬜ Loudness matcher for many files
-- ⬜ Repair scanner (clicks, clipping, silence) · ⬜ Batch processor · ⬜ Quick actions / macros
+- ✅ Loudness meter (live momentary, short-term, integrated, LRA, true peak) · ⬜ Loudness matcher for many files
+- ✅ Repair scanner (Diagnostics: pauses, clicks, clipping, sound) · ⬜ Batch processor · ⬜ Quick actions / macros
 - ⬜ File browser · ⬜ Metadata editor · ⬜ Track manager · ⬜ Video preview
 - ⬜ Quick Mix Assistant (role-based one-click processing)
 - 🟡 Docking: drag, tab, split, float, close, saved layout ✅; named workspaces ⬜
@@ -50,7 +50,7 @@ our own feature names.
 ## Effects
 **Amplitude and dynamics**: ✅ Amplify · ✅ Normalize · ✅ Match Loudness · ✅ Fade In/Out ·
 ✅ Compressor · ✅ Limiter · ✅ Noise Gate · ✅ De-Esser · ⬜ Channel matrix · ⬜ Curve dynamics ·
-⬜ Multiband dynamics · ⬜ Voice leveler · ⬜ Warm (tube-style) compressor · ⬜ Gain and fade curves
+⬜ Multiband dynamics · ✅ Voice leveler (Speech Leveler) · ✅ Breath Gate · ⬜ Warm (tube-style) compressor · ⬜ Gain and fade curves
 
 **Delay**: ✅ Echo · ⬜ Simple L/R delay · ⬜ Tape/analog delay
 
@@ -60,9 +60,9 @@ our own feature names.
 **Modulation**: ✅ Chorus · ✅ Flanger · ✅ Phaser · ✅ Double Track (Audiform's Modulation)
 
 **Restoration**: ✅ Noise Reduction (adaptive estimate) · ✅ Hum Remover · ✅ Remove DC Offset ·
-⬜ Noise reduction from a learned noise profile (the code exists in `af27-dsp::noise::learn`; no UI yet) ·
-⬜ Declicker · ⬜ Clip restorer · ⬜ Silence remover · ⬜ Auto marker · ⬜ Reverb reducer ·
-⬜ Hiss remover · ⬜ Learned sound removal · ⬜ Auto phase align
+✅ Noise reduction from a captured noise print · ✅ Live noise reducer (learns as it plays) ·
+✅ Declicker (Click Repair) · ✅ Clip restorer (Clip Repair) · ✅ Silence remover (Diagnostics, Strip Silence) · ✅ Auto marker (Diagnostics: Mark Sound) · ✅ Reverb reducer (Room Reducer) ·
+✅ Hiss remover (Hiss Reducer) · ⬜ Learned sound removal · ⬜ Auto phase align
 
 **Reverb**: ✅ Reverb · ✅ Convolution reverb · ✅ Room, Hall, Plate, Spring and Tape reverb · ✅ Surround reverb (the Reverb and Convolution Reverb fill a speaker bed, a different room in every speaker, none in the LFE)
 
@@ -83,13 +83,13 @@ our own feature names.
 - ✅ Mute, solo, arm, volume, pan · ⬜ safe solo · ⬜ monitor input
 - ⬜ Automation lanes and modes (read, write, latch, touch)
 - 🟡 Clips: gain, fades, mute, colour, lock ✅; clip effects racks, clip automation (volume, pan, effect values), Source Channels ✅; loop, group ⬜
-- ⬜ Clip time stretch · ⬜ auto-length music fit · ⬜ auto duck · ⬜ silence splitter
+- ⬜ Clip time stretch · ⬜ auto-length music fit · ✅ auto duck (Spoken Word > Auto Duck) · ✅ silence splitter (Strip Silence) · ✅ speaker balance
 - ⬜ Bounce to track · ⬜ punch-in · ✅ metronome · 🟡 tempo (one tempo; changes kept in files) · ⬜ latency compensation
 
 ## Analysis and metering
 - ✅ Integrated loudness, true peak, sample peak, RMS, DC offset
 - ✅ Phase Wheel and correlation · ✅ Spectrum at the playhead · ✅ Peak meters with hold
-- ⬜ Live loudness meter · ⬜ FFT settings (size, window, scale)
+- ✅ Live loudness meter · ⬜ FFT settings (size, window, scale)
 
 ## Recording and the rest
 - 🟡 Recording: default input into a new file or onto an armed track ✅; device and driver picker, per-channel track inputs, output channel map ✅; ASIO behind the off-by-default `asio` feature (docs/asio.md) 🟡; punch-in ⬜
@@ -117,3 +117,10 @@ Pairs go by speaker name (L/R, Ls/Rs, Lrs/Rrs, Lss/Rss, Ltf/Rtf, Ltr/Rtr,
 Ltm/Rtm); a lone speaker (C) is fed to both sides and averaged back;
 numbered channels pair by order. Each copy is set apart (`vary`) so
 sweeps and tails do not move in lockstep.
+
+## Spoken word
+
+See `docs/podcast-features.md` for the full podcast and voice inventory:
+Diagnostics, the Loudness panel, Auto Duck, Strip Silence, Speaker
+Balance, marker kinds and chapter export, the speech and restoration
+effects, and what is still to do.

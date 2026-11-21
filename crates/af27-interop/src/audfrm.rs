@@ -1366,6 +1366,7 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
             time: secs(&m["position"]),
             length: secs(&m["duration"]),
             ext_id: m["id"].as_str().map(str::to_string),
+            kind: af27_core::session::MarkerKind::from_key(m["kind"].as_str().unwrap_or("")),
         });
     }
     if looped > 0 {
@@ -2043,7 +2044,11 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
                 json!(m.ext_id.get_or_insert_with(new_uuid).clone()),
             );
             mo.insert("name".into(), json!(m.name));
-            mo.entry("kind").or_insert_with(|| json!("cue"));
+            // Kept as written when unchanged (a missing kind reads as cue).
+            let had = mo.get("kind").and_then(Value::as_str);
+            if had.map(af27_core::session::MarkerKind::from_key) != Some(m.kind.clone()) {
+                mo.insert("kind".into(), json!(m.kind.key()));
+            }
             mo.insert("position".into(), json!(samples(m.time)));
             mo.insert("duration".into(), json!(samples(m.length)));
             mo.entry("description").or_insert_with(|| json!(""));
@@ -2670,7 +2675,25 @@ mod tests {
         assert_eq!(s.tempo.bpm, 96.0);
         assert_eq!(s.tempo.beats_per_bar, 3);
         assert_eq!(s.markers[0].name, "Intro");
+        assert_eq!(s.markers[0].kind, af27_core::session::MarkerKind::Chapter);
         assert!((s.master_db + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn marker_kinds_save_back_only_when_changed() {
+        use af27_core::session::MarkerKind;
+        let imp = import(SAMPLE, Path::new(".")).unwrap();
+        let base = imp.base.clone().unwrap();
+        let mut s = imp.session.clone();
+        let same = export(&mut s, Some(&base));
+        assert_eq!(same["markers"][0]["kind"], "chapter");
+        s.markers[0].kind = MarkerKind::AdSlot;
+        let out = export(&mut s, Some(&base));
+        assert_eq!(out["markers"][0]["kind"], "ad_slot");
+        assert_eq!(out["markers"][0]["chapter"]["url"], "https://x", "the rest is kept");
+        // A kind AudiForm 2 does not know comes back as written.
+        assert_eq!(MarkerKind::from_key("cart_timer").key(), "cart_timer");
+        assert_eq!(MarkerKind::from_key(""), MarkerKind::Cue);
     }
 
     #[test]
@@ -3203,6 +3226,7 @@ mod tests {
             time: 1.0,
             length: 0.0,
             ext_id: None,
+            kind: Default::default(),
         });
         let out = export(&mut s, None);
         for k in [

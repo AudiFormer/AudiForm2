@@ -696,6 +696,7 @@ pub fn import(path: &Path, audio_dir: &Path) -> Result<Imported, String> {
                 time: t,
                 length: t1 - t,
                 ext_id: None,
+                kind: Default::default(),
             });
         }
     }

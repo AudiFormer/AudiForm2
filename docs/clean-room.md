@@ -137,3 +137,23 @@ are written fresh from the feature list of professional editors.
   `eq-graph.ts`, `EqGraph.svelte` and `graph.ts`, files the lead's own
   sessions created (commits 36d74db and 8a61a53) and AAE never edited.
   They are rewritten in Rust/egui, with no code or headers copied.
+- Speech and restoration effects (`af27-fx/src/effects/speech.rs`,
+  `restore.rs`; finders in `af27-dsp/src/repair.rs`), 2026-11-20: Speech
+  Leveler, Breath Gate, Click Repair, Clip Repair, Noise Reducer, Hiss
+  Reducer and Room Reducer. Their processing, descriptions and code are
+  new, written from textbook methods: a second-difference click detector
+  with a median scale, cubic Hermite fills, minimum-tracking spectral
+  noise estimation, and late-reverberation prediction from a decayed
+  past spectrum. So that Audiform sessions' voice chains load, only the
+  interface was matched: the slot ids (`altaudio.<name>`) with each
+  control's key, range and default. These were read from the effect
+  description blocks in Audiform's `dynamics.rs` and `restore.rs`. None of
+  their processing code was read or used. The lead should confirm that
+  matching these names and numbers is acceptable, as was done for the
+  Parametric EQ's keys.
+- Diagnostics, Loudness panel, Auto Duck, Strip Silence, Speaker Balance,
+  marker kinds and chapter export (2026-11-20): written for AudiForm 2 from
+  public descriptions of how these tools behave (see
+  `docs/podcast-features.md`). The `.audfrm` marker `kind` names (`cue`,
+  `chapter`, `ad_slot`, `social_clip`, `range`) are file-format names. The
+  podcast chapters JSON is the open 1.2.0 format.

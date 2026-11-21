@@ -34,10 +34,12 @@ pub enum Tab {
     PianoRoll,
     Visualizer,
     Properties,
+    Diagnostics,
+    Loudness,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 17] = [
+    pub const ALL: [Tab; 19] = [
         Tab::Properties,
         Tab::Visualizer,
         Tab::Inspector,
@@ -55,6 +57,8 @@ impl Tab {
         Tab::Statistics,
         Tab::Spectrum,
         Tab::Selection,
+        Tab::Diagnostics,
+        Tab::Loudness,
     ];
     /// The title for a crowded tab bar.
     pub fn short_title(self) -> &'static str {
@@ -89,6 +93,8 @@ impl Tab {
             Tab::Space => "3D Space",
             Tab::PianoRoll => "Piano Roll",
             Tab::Visualizer => "Visualizer",
+            Tab::Diagnostics => "Diagnostics",
+            Tab::Loudness => "Loudness",
         }
     }
 }
@@ -362,6 +368,8 @@ impl Viewer<'_> {
             Tab::Space => crate::space::panel(ui, self.st, &mut self.caches.space_drag),
             Tab::PianoRoll => crate::pianoroll::panel(ui, self.st, &mut self.caches.piano),
             Tab::Visualizer => crate::visualizer::show(ui, self.st),
+            Tab::Diagnostics => crate::diagnostics::panel(ui, self.st),
+            Tab::Loudness => crate::loudness_meter::panel(ui, self.st),
         }
     }
 }
@@ -956,6 +964,41 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.live_metronome();
             }
             playback_menu_items(ui, st, km, &mut cmd);
+            ui.menu_button("Spoken Word", |ui| {
+                if ui
+                    .button("Add Podcast Tracks")
+                    .on_hover_text("Host and Guest tracks with a voice clean-up chain, plus Music Bed and Sound Effects")
+                    .clicked()
+                {
+                    crate::podcast_tools::add_podcast_tracks(st);
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui
+                    .button("Auto Duck...")
+                    .on_hover_text("Dip music and effects tracks under the talking with volume automation")
+                    .clicked()
+                {
+                    st.podcast.duck_open = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Strip Silence...")
+                    .on_hover_text("Split clips where they go quiet and take the quiet parts out")
+                    .clicked()
+                {
+                    st.podcast.strip_open = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Speaker Balance...")
+                    .on_hover_text("Bring every voice track to the same loudness with clip gain")
+                    .clicked()
+                {
+                    st.podcast.balance_open = true;
+                    ui.close_menu();
+                }
+            });
             ui.menu_button("Export", |ui| {
                 if ui.button("MIDI File...").clicked() {
                     ui.close_menu();
@@ -1338,6 +1381,23 @@ fn effects_menu(
     });
     ui.separator();
     cmd_item(ui, km, Cmd::MatchLoudness, "Match Loudness", true, cmd);
+    if ui
+        .add_enabled(has_doc, egui::Button::new("Capture Noise Print"))
+        .on_hover_text("Learn the background noise from the selection (select only noise)")
+        .on_disabled_hover_text(no_doc)
+        .clicked()
+    {
+        crate::noise_print::capture(st);
+        ui.close_menu();
+    }
+    if ui
+        .add_enabled(has_doc, egui::Button::new("Reduce Noise with Print..."))
+        .on_disabled_hover_text(no_doc)
+        .clicked()
+    {
+        st.noise_print.open = true;
+        ui.close_menu();
+    }
     ui.add_enabled(
         false,
         egui::Button::new("Auto Heal Selection").shortcut_text(km.text(Cmd::AutoHeal)),
@@ -1371,6 +1431,14 @@ fn effects_menu(
                             }
                         }
                         crate::fx_menu::Item::Stems => *open_tab = Some(Tab::AiSeparation),
+                        crate::fx_menu::Item::Diagnose(k) => {
+                            if st.diag.kind != k {
+                                st.diag.kind = k;
+                                st.diag.found.clear();
+                                st.diag.scanned = None;
+                            }
+                            *open_tab = Some(Tab::Diagnostics);
+                        }
                     }
                     ui.close_menu();
                 }
@@ -2804,6 +2872,8 @@ impl eframe::App for App {
         }
         crate::rack::windows(ctx, &mut self.st);
         crate::new_dialogs::show(ctx, &mut self.st);
+        crate::podcast_tools::show(ctx, &mut self.st);
+        crate::noise_print::show(ctx, &mut self.st);
         crate::af1_import::window(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
