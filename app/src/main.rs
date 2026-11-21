@@ -26,6 +26,8 @@ mod inspector;
 mod instruments;
 mod keymap;
 mod lane_menu;
+#[cfg(target_os = "linux")]
+mod linux_desktop;
 mod loudness_meter;
 mod memstat;
 mod meters;
@@ -113,6 +115,13 @@ fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Re
     // The Zero Point icon until the theme's own is put up (app_icon.rs).
     if let Some(icon) = app_icon::default_icon_data() {
         viewport = viewport.with_icon(icon);
+    }
+    // On Wayland the desktop finds the icon through the app ID and the
+    // launcher entry of that name (linux_desktop.rs).
+    #[cfg(target_os = "linux")]
+    {
+        viewport = viewport.with_app_id(linux_desktop::APP_ID);
+        linux_desktop::prepare_before_window();
     }
     let options = eframe::NativeOptions {
         viewport: viewport

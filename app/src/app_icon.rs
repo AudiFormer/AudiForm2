@@ -19,6 +19,9 @@
 //! small (title bar) icons are set separately, each from the drawing made
 //! for its size; elsewhere the 256 px picture goes to the window.
 //!
+//! On Linux the icon is also installed for the desktop to find, since
+//! Wayland shows only that one (see `linux_desktop.rs`).
+//!
 //! The exe's own icon (Explorer, shortcuts) is the Zero Point one, built
 //! in by `app/build.rs` from `assets/icon/audiform2.ico`.
 
@@ -255,7 +258,7 @@ pub fn build(th: &Theme, size: u32) -> Option<Picture> {
 
 /// What the current icon was made from, so a theme change that leaves it
 /// alone does nothing.
-fn key(th: &Theme) -> String {
+pub fn key(th: &Theme) -> String {
     if PICTURES.iter().any(|(n, _)| *n == th.icon) {
         format!("picture:{}", th.icon)
     } else {
@@ -273,6 +276,10 @@ pub fn apply(ctx: &egui::Context, th: &Theme) {
     if LAST.with(|l| *l.borrow() == k) {
         return;
     }
+    // Wayland ignores a window's own icon: the desktop shows the one
+    // installed under the app ID, so that one follows the theme too.
+    #[cfg(target_os = "linux")]
+    crate::linux_desktop::install_icon(th);
     if set_native(th) {
         LAST.with(|l| *l.borrow_mut() = k);
         return;

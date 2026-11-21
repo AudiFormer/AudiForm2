@@ -123,6 +123,10 @@ pub struct Prefs {
     pub midi_monitor: bool,
     /// The level meters' range, response, hold, type and clip lights.
     pub meters: crate::meters::MeterPrefs,
+    /// Messages that come up while the window isn't focused also go out as
+    /// desktop notifications (Linux; see `linux_desktop.rs`).
+    #[cfg(target_os = "linux")]
+    pub desktop_notifications: bool,
 }
 
 /// Settings > Audio Devices and Settings > Channel Routing.
@@ -256,6 +260,8 @@ impl Default for Prefs {
             solo_exclusive: false,
             midi_monitor: true,
             meters: Default::default(),
+            #[cfg(target_os = "linux")]
+            desktop_notifications: true,
         }
     }
 }
@@ -366,6 +372,10 @@ impl Draft {
                 self.prefs.renderer = d.renderer;
                 self.zoom = ZoomPrefs::default();
                 self.workspace = Workspace::from_key("");
+                #[cfg(target_os = "linux")]
+                {
+                    self.prefs.desktop_notifications = d.desktop_notifications;
+                }
             }
             "Appearance" => {
                 self.hues = None;
@@ -691,6 +701,14 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     "Low-latency drawing: the playhead, rulers and drags follow the pointer with less lag",
                 );
                 note(ui, th, "Draws without waiting for the screen's refresh, at most 240 frames a second. Turn it off if you see tearing. Takes effect the next time AudiForm 2 starts.");
+            });
+            #[cfg(target_os = "linux")]
+            group(ui, th, "Notifications", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.desktop_notifications,
+                    "Show messages as desktop notifications while AudiForm 2 isn't in front",
+                );
+                note(ui, th, "An export or bounce finishing, or an error, pops up with the theme's icon.");
             });
         }
         "Appearance" => appearance(ui, d, st, th),

@@ -33,12 +33,14 @@ egui_dock = { version = "0.14", features = ["serde"] }
 midir = "0.10.4"
 rtrb.workspace = true
 
-# Use KDE Colors listens for scheme changes on the XDG Settings portal.
-# All three are already in the tree through rfd.
+# The System theme listens for scheme changes on the XDG Settings portal.
+# Already in the tree through rfd.
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
 futures-util = { version = "0.3", default-features = false }
 pollster = "0.4"
+# Desktop notifications (org.freedesktop.Notifications); also in the tree.
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [target.'cfg(windows)'.build-dependencies]
 # Builds the icon into the exe (MIT/Apache-2.0).

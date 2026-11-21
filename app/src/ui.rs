@@ -2519,6 +2519,13 @@ impl eframe::App for App {
             self.st.theme_changed = false;
         }
         crate::app_icon::frame();
+        #[cfg(target_os = "linux")]
+        crate::linux_desktop::notify_toasts(
+            &self.st.toasts,
+            ctx.input(|i| i.viewport().focused.unwrap_or(true)),
+            self.st.prefs.desktop_notifications,
+            &self.st.theme,
+        );
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files

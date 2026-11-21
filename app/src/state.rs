@@ -507,6 +507,40 @@ impl State {
     }
 }
 
+/// The theme saved from last time: as made, the user's hues for it, and
+/// with those hues.
+fn saved_theme(themes: &[Theme]) -> (Theme, Option<crate::theme::Hues>, Theme) {
+    let saved = std::fs::read_to_string(data_dir().join("theme.txt")).unwrap_or_default();
+    let theme_base = crate::theme::resolve(
+        themes
+            .iter()
+            .find(|t| t.name == saved.trim())
+            .cloned()
+            .unwrap_or_default(),
+    );
+    let hues = if crate::theme::is_system(&theme_base) {
+        None
+    } else {
+        load_hues(&theme_base.name)
+    };
+    let theme = match &hues {
+        Some(h) => theme_base.with_hues(h),
+        None => theme_base.clone(),
+    };
+    (theme_base, hues, theme)
+}
+
+/// The theme the window will open in, colour overrides and all, worked out
+/// before there is a window (for its icon on Linux; see `linux_desktop.rs`).
+#[cfg(target_os = "linux")]
+pub fn opening_theme() -> Theme {
+    let themes = crate::theme::load_all(&crate::theme::user_dir());
+    let (_, _, theme) = saved_theme(&themes);
+    let mut shown = theme.clone();
+    crate::settings::Prefs::load().colors.apply(&mut shown, &theme);
+    shown
+}
+
 pub fn data_dir() -> PathBuf {
     af27_separation::data_root().join("Audiform27")
 }
@@ -521,23 +555,7 @@ impl State {
             Err(e) => (None, Some(e)),
         };
         let themes = crate::theme::load_all(&crate::theme::user_dir());
-        let saved_theme = std::fs::read_to_string(data_dir().join("theme.txt")).unwrap_or_default();
-        let theme_base = crate::theme::resolve(
-            themes
-                .iter()
-                .find(|t| t.name == saved_theme.trim())
-                .cloned()
-                .unwrap_or_default(),
-        );
-        let hues = if crate::theme::is_system(&theme_base) {
-            None
-        } else {
-            load_hues(&theme_base.name)
-        };
-        let theme = match &hues {
-            Some(h) => theme_base.with_hues(h),
-            None => theme_base.clone(),
-        };
+        let (theme_base, hues, theme) = saved_theme(&themes);
         let prefs = crate::settings::Prefs::load();
         let mut session = Session::default();
         for (i, t) in session.tracks.iter_mut().enumerate() {
