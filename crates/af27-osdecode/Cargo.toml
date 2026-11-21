@@ -1,0 +1,14 @@
+[package]
+name = "af27-osdecode"
+description = "Decoding through the operating system's own audio decoders (Windows Media Foundation), for formats with no open decoder (Dolby Digital, Dolby Digital Plus, AC-4, HE-AAC, multichannel AAC)"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }

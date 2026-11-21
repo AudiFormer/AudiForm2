@@ -4,6 +4,7 @@
 //! Reading any common audio file into an [`AudioBuffer`], and writing WAV.
 
 pub mod chunked;
+pub mod fallback;
 pub mod export;
 
 use std::fs::File;
@@ -103,6 +104,20 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, String> {
 }
 
 fn decode_checked(path: &Path) -> Result<Decoded, String> {
+    match decode_own(path) {
+        Ok(d) => Ok(d),
+        // Missing or unreadable files: nothing else will do better.
+        Err(e) if e.starts_with("Could not open") => Err(e),
+        Err(e) => fallback::decode(path, &e).map(|(buf, note)| Decoded {
+            buf,
+            damaged: 0,
+            notes: vec![note],
+        }),
+    }
+}
+
+/// The open decoders only.
+fn decode_own(path: &Path) -> Result<Decoded, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())

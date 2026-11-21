@@ -85,7 +85,9 @@ cargo build --release -p audiform2 --features asio
 | --- | --- |
 | WAV, BWF, RF64, AIFF/AIFC, FLAC, MP3, MP2, Ogg Vorbis, Opus, AAC/M4A/MP4, CAF, MKV/WebM audio | Every channel is kept |
 | DTS in WAV (DTS music CDs) and raw `.dts` | Decoded to 5.1 / 6.1 by `af27-dts` |
-| `.mogg` | Unencrypted multitrack Ogg; encrypted files are refused |
+| `.mogg` | Unencrypted multitrack Ogg, any number of channels; encrypted files are refused |
+| Dolby Digital (AC-3), Dolby Digital Plus (E-AC-3), HE-AAC, AC-4 | Through Windows' own decoders (AC-4 needs Dolby's decoder installed). Dolby Atmos music opens as its 5.1 or 7.1 bed, which carries the whole mix; the height objects need Dolby's renderer |
+| Anything else ffmpeg reads | If you have ffmpeg installed (on the PATH, or named by `AF2_FFMPEG`), files nothing else opens go through it, on any system. AudiForm 2 never downloads or ships it |
 
 | Sessions | |
 | --- | --- |

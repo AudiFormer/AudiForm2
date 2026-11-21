@@ -41,3 +41,10 @@ Tahoma, with Tahoma Bold for window captions), read from the system's font
 folder at run time. No font file is copied into AudiForm 2 or shipped with
 it; elsewhere the theme falls back to egui's built-in fonts.
 
+## Decoding help
+
+| Part | Licence | Use |
+| --- | --- | --- |
+| `symphonia-codec-vorbis` 0.5.5 (Project Symphonia), in `vendor/` | MPL-2.0 | One change: Ogg Vorbis with more than 8 channels (multitrack `.mogg`) decodes instead of being refused. See `vendor/README.md` |
+| Windows Media Foundation | Part of Windows | `crates/af27-osdecode` asks Windows' own decoders for Dolby Digital, Dolby Digital Plus, HE-AAC and AC-4. Nothing of theirs is shipped. Dolby, Dolby Atmos and AC-4 are trademarks of Dolby Laboratories |
+| ffmpeg | Not shipped | Used only if the user has it installed, as a separate program, for files nothing else opens |
