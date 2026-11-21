@@ -20,6 +20,7 @@ mod meter;
 pub mod mix;
 pub mod pool;
 mod record;
+pub use record::LIVE_BIN as RECORD_LIVE_BIN;
 pub mod routing;
 pub mod scope;
 pub mod soundfont;
@@ -1038,6 +1039,17 @@ impl Engine {
             .iter()
             .map(|r| r.len_secs())
             .fold(0.0, f64::max)
+    }
+
+    /// The takes so far, for drawing while recording: calls `f` with each
+    /// source's index (as given to [`Engine::start_recording_from`]), its
+    /// rate, and min/max pairs of [`record::LIVE_BIN`] frames each.
+    pub fn recording_live(&self, mut f: impl FnMut(usize, u32, &[[f32; 2]])) {
+        for r in &self.recorders {
+            for (i, peaks) in r.live() {
+                f(i, r.rate, peaks);
+            }
+        }
     }
 
     pub fn recording_level(&self) -> f32 {

@@ -49,6 +49,11 @@ pub(crate) struct Recorder {
     targets: Vec<Target>,
     rx: rtrb::Consumer<f32>,
     data: Vec<f32>,
+    /// The take so far as min/max pairs, one per [`LIVE_BIN`] frames, for
+    /// each target (drawn behind the playhead while recording).
+    live: Vec<Vec<[f32; 2]>>,
+    /// Frames of `data` already summed into `live`.
+    scanned: usize,
     pub(crate) rate: u32,
     pub(crate) channels: usize,
     pub(crate) peak: Arc<AtomicU32>,
@@ -76,6 +81,9 @@ struct Reopen {
 
 /// Frames of silence for a gap of `gap` at `rate` (the time no sound came
 /// while the stream restarted).
+/// Frames per min/max pair in a recorder's live overview.
+pub const LIVE_BIN: usize = 256;
+
 pub fn gap_frames(gap: Duration, rate: u32) -> usize {
     (gap.as_secs_f64() * rate as f64).round() as usize
 }
@@ -201,6 +209,8 @@ impl Recorder {
             }],
             rx,
             data: Vec::new(),
+            live: Vec::new(),
+            scanned: 0,
             peak,
             power: (0.0, 0),
             errors: Vec::new(),
@@ -237,6 +247,8 @@ impl Recorder {
             targets,
             rx,
             data: Vec::new(),
+            live: Vec::new(),
+            scanned: 0,
             rate: config.sample_rate().0,
             channels: (config.channels() as usize).max(1),
             peak,
@@ -268,6 +280,7 @@ impl Recorder {
         if got {
             self.heard = Instant::now();
         }
+        self.scan();
         if self.reset.load(Ordering::Relaxed) && self.retry.due(Instant::now()) {
             self.reset.store(false, Ordering::Relaxed);
             self.restart();
@@ -342,6 +355,46 @@ impl Recorder {
                 self.reopen = Some(re);
             }
         }
+    }
+
+    /// Sums the frames that came in since the last call into `live`
+    /// (whole bins only; the rest waits for more).
+    fn scan(&mut self) {
+        let ch = self.channels.max(1);
+        let frames = self.data.len() / ch;
+        if self.live.len() != self.targets.len() {
+            self.live = vec![Vec::new(); self.targets.len()];
+        }
+        while self.scanned + LIVE_BIN <= frames {
+            let block = &self.data[self.scanned * ch..(self.scanned + LIVE_BIN) * ch];
+            for (t, out) in self.targets.iter().zip(self.live.iter_mut()) {
+                let (mut lo, mut hi) = (0.0f32, 0.0f32);
+                let mut each = |c: usize| {
+                    if c < ch {
+                        for f in 0..LIVE_BIN {
+                            let s = block[f * ch + c];
+                            lo = lo.min(s);
+                            hi = hi.max(s);
+                        }
+                    }
+                };
+                match &t.channels {
+                    None => (0..ch).for_each(&mut each),
+                    Some(cs) => cs.iter().for_each(|&c| each(usize::from(c))),
+                }
+                out.push([lo, hi]);
+            }
+            self.scanned += LIVE_BIN;
+        }
+    }
+
+    /// The take so far for each target: (source index, min/max per
+    /// [`LIVE_BIN`] frames).
+    pub(crate) fn live(&self) -> impl Iterator<Item = (usize, &[[f32; 2]])> {
+        self.targets
+            .iter()
+            .zip(&self.live)
+            .map(|(t, l)| (t.index, l.as_slice()))
     }
 
     pub(crate) fn len_secs(&self) -> f64 {
@@ -438,6 +491,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_live_overview_follows_each_targets_channels() {
+        let frames = LIVE_BIN * 2 + 10;
+        let mut data = Vec::new();
+        for f in 0..frames {
+            data.push(if f < LIVE_BIN { 0.5 } else { 0.0 });
+            data.push(-0.25);
+        }
+        let targets = vec![
+            Target { index: 0, source: RecordSource::Input, channels: Some(vec![0]) },
+            Target { index: 1, source: RecordSource::Input, channels: Some(vec![1]) },
+        ];
+        let mut r = fake(targets, 2, data);
+        r.scan();
+        let live: Vec<_> = r.live().map(|(i, l)| (i, l.to_vec())).collect();
+        assert_eq!(live[0].1, vec![[0.0, 0.5], [0.0, 0.0]]);
+        assert_eq!(live[1].1, vec![[-0.25, 0.0], [-0.25, 0.0]]);
+        assert_eq!(r.scanned, LIVE_BIN * 2);
+    }
+
+    #[test]
     fn gaps_are_filled_by_the_clock() {
         assert_eq!(gap_frames(Duration::from_millis(250), 48_000), 12_000);
         assert_eq!(gap_frames(Duration::ZERO, 48_000), 0);
@@ -451,6 +524,8 @@ mod tests {
             targets,
             rx,
             data,
+            live: Vec::new(),
+            scanned: 0,
             rate: 48_000,
             channels,
             peak: Arc::new(AtomicU32::new(0)),

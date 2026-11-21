@@ -46,6 +46,13 @@ pub struct RecordInputs {
     pending: Option<mpsc::Receiver<Listing>>,
 }
 
+impl RecordInputs {
+    /// While recording: the tracks take `i` goes to.
+    pub fn tracks_of_take(&self, i: usize) -> &[TrackId] {
+        self.plan.get(i).map_or(&[], Vec::as_slice)
+    }
+}
+
 impl Default for RecordInputs {
     fn default() -> Self {
         Self::load()

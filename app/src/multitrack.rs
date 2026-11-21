@@ -1562,6 +1562,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             crate::ruler::ghost(&p, x, ruler.top(), lanes.bottom(), &th);
         }
     }
+    live_takes(&lane_p, st, lanes, scroll, &|t| time_to_x(&v, lanes, t));
     let x = time_to_x(&v, lanes, st.position());
     if x >= lanes.left() && x <= lanes.right() {
         playhead(&p, x, ruler.top(), lanes.bottom(), &th);
@@ -1582,6 +1583,83 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         );
     }
     file_drop(ui, st, &resp, &p, lanes, scroll, &v, &snap_marks);
+}
+
+/// While recording onto tracks: each take so far, drawn as a clip that
+/// grows behind the playhead on every track it goes to.
+fn live_takes(
+    p: &egui::Painter,
+    st: &State,
+    lanes: Rect,
+    scroll: f32,
+    x_of: &dyn Fn(f64) -> f32,
+) {
+    let Some(crate::state::RecordTarget::Track(_, at)) = st.recording_target else {
+        return;
+    };
+    let Some(e) = st.engine.as_ref() else { return };
+    if !e.is_recording() {
+        return;
+    }
+    let th = &st.theme;
+    let rec = Color32::from_rgb(230, 70, 70);
+    let mut tops = std::collections::HashMap::new();
+    let mut y = lanes.top() - scroll;
+    for t in &st.session.tracks {
+        tops.insert(t.id, (y, t.height));
+        y += t.height;
+    }
+    e.recording_live(|i, rate, peaks| {
+        if peaks.is_empty() || rate == 0 {
+            return;
+        }
+        let bin = af27_engine::RECORD_LIVE_BIN as f64 / rate as f64;
+        let len = peaks.len() as f64 * bin;
+        let x0 = x_of(at);
+        let x1 = x_of(at + len);
+        for tid in st.rec_inputs.tracks_of_take(i) {
+            let Some(&(top, h)) = tops.get(tid) else { continue };
+            let r = clip_rect(top, h, x0, x1.max(x0 + 1.0));
+            if !r.intersects(lanes) {
+                continue;
+            }
+            p.rect_filled(r, Rounding::same(4.0), ca(th.panel, 220));
+            p.rect_filled(r, Rounding::same(4.0), rec.gamma_multiply(0.18));
+            p.rect_stroke(r, Rounding::same(4.0), Stroke::new(1.0_f32, rec));
+            let body = r.shrink2(vec2(0.0, 4.0));
+            let mid = body.center().y;
+            let half = body.height() * 0.5;
+            let wave = c(th.wave_centre);
+            let left = r.left().max(lanes.left()).floor() as i32;
+            let right = r.right().min(lanes.right()).ceil() as i32;
+            let px_secs = if x1 > x0 { len / (x1 - x0) as f64 } else { len };
+            for px in left..right {
+                let t0 = (px as f32 - x0) as f64 * px_secs;
+                let a = ((t0 / bin).floor().max(0.0)) as usize;
+                let b = (((t0 + px_secs) / bin).ceil() as usize).clamp(a + 1, peaks.len());
+                if a >= peaks.len() {
+                    break;
+                }
+                let (mut lo, mut hi) = (0.0f32, 0.0f32);
+                for pk in &peaks[a..b] {
+                    lo = lo.min(pk[0]);
+                    hi = hi.max(pk[1]);
+                }
+                let (y0, y1) = (mid - hi.min(1.0) * half, mid - lo.max(-1.0) * half);
+                p.line_segment(
+                    [pos2(px as f32 + 0.5, y0), pos2(px as f32 + 0.5, y1.max(y0 + 1.0))],
+                    Stroke::new(1.0_f32, wave),
+                );
+            }
+            p.text(
+                r.left_top() + vec2(6.0, 3.0),
+                Align2::LEFT_TOP,
+                "Recording",
+                FontId::proportional(11.0),
+                rec,
+            );
+        }
+    });
 }
 
 /// No session open (all were closed, or none made yet): say so, offer New
