@@ -231,11 +231,122 @@ impl StereoBiquad {
 
 /// The Q of each second-order section of a Butterworth filter of order
 /// `2 * sections`: 1 / (2 sin((2k + 1) pi / (2n))).
-pub fn butterworth_qs(sections: usize) -> Vec<f64> {
+pub fn butterworth_qs(sections: usize) -> Fixed<f64, 8> {
     let n = (2 * sections) as f64;
     (0..sections)
         .map(|k| 1.0 / (2.0 * ((2 * k + 1) as f64 * PI / (2.0 * n)).sin()))
         .collect()
+}
+
+/// A value to fill a [`Fixed`]'s unused places with.
+pub trait Blank: Copy {
+    const BLANK: Self;
+}
+
+impl Blank for f64 {
+    const BLANK: Self = 0.0;
+}
+
+impl Blank for realfft::num_complex::Complex64 {
+    const BLANK: Self = realfft::num_complex::Complex64::new(0.0, 0.0);
+}
+
+impl<A: Blank, B: Blank> Blank for (A, B) {
+    const BLANK: Self = (A::BLANK, B::BLANK);
+}
+
+impl Blank for Coeffs {
+    /// A section that passes the sound through.
+    const BLANK: Self = Coeffs {
+        b0: 1.0,
+        b1: 0.0,
+        b2: 0.0,
+        a1: 0.0,
+        a2: 0.0,
+    };
+}
+
+/// A list of at most `N` values kept inline rather than on the heap, so
+/// filter designs can be worked out on the audio thread (an `update`)
+/// without allocating. Reads as a slice. Pushing past `N` is a bug in the
+/// caller (the designs' sizes are bounded); it panics in debug builds and
+/// drops the value in release.
+#[derive(Debug, Clone, Copy)]
+pub struct Fixed<T: Blank, const N: usize> {
+    v: [T; N],
+    n: usize,
+}
+
+impl<T: Blank, const N: usize> Fixed<T, N> {
+    pub const fn new() -> Self {
+        Fixed { v: [T::BLANK; N], n: 0 }
+    }
+
+    /// Sorts in place, keeping equal values in their order (insertion
+    /// sort: no scratch space, and these lists are short).
+    pub fn sort_stable_by(&mut self, mut less: impl FnMut(&T, &T) -> bool) {
+        let s = &mut self.v[..self.n];
+        for i in 1..s.len() {
+            let mut j = i;
+            while j > 0 && less(&s[j], &s[j - 1]) {
+                s.swap(j, j - 1);
+                j -= 1;
+            }
+        }
+    }
+
+    pub fn push(&mut self, x: T) {
+        debug_assert!(self.n < N, "Fixed list full ({N})");
+        if self.n < N {
+            self.v[self.n] = x;
+            self.n += 1;
+        }
+    }
+}
+
+impl<T: Blank, const N: usize> Default for Fixed<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Blank, const N: usize> std::ops::Deref for Fixed<T, N> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.v[..self.n]
+    }
+}
+
+impl<T: Blank, const N: usize> FromIterator<T> for Fixed<T, N> {
+    fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Self {
+        let mut f = Self::new();
+        f.extend(it);
+        f
+    }
+}
+
+impl<T: Blank, const N: usize> Extend<T> for Fixed<T, N> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, it: I) {
+        for x in it {
+            self.push(x);
+        }
+    }
+}
+
+impl<T: Blank, const N: usize> IntoIterator for Fixed<T, N> {
+    type Item = T;
+    type IntoIter = std::iter::Take<std::array::IntoIter<T, N>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.v.into_iter().take(self.n)
+    }
+}
+
+impl<'a, T: Blank, const N: usize> IntoIterator for &'a Fixed<T, N> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 #[cfg(test)]

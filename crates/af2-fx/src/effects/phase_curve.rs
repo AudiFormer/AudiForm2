@@ -119,10 +119,12 @@ pub fn phase_curve_info() -> EffectInfo {
 }
 
 /// The curve's points in use, by frequency, as (Hz, degrees).
-pub fn points(p: &Params) -> Vec<(f64, f64)> {
+/// Kept inline (no allocation), as the curve is worked out again on the
+/// audio thread when a control moves.
+pub fn points(p: &Params) -> crate::biquad::Fixed<(f64, f64), MAX_POINTS> {
     let n = (p.get("points").round() as usize).clamp(2, MAX_POINTS);
     let limit = if p.index("range") == 1 { 360.0 } else { 180.0 };
-    let mut pts: Vec<(f64, f64)> = (0..n)
+    let mut pts: crate::biquad::Fixed<(f64, f64), MAX_POINTS> = (0..n)
         .map(|i| {
             (
                 p.get(FREQ_KEYS[i]).max(1.0),
@@ -130,7 +132,7 @@ pub fn points(p: &Params) -> Vec<(f64, f64)> {
             )
         })
         .collect();
-    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    pts.sort_stable_by(|a, b| a.0 < b.0);
     pts
 }
 

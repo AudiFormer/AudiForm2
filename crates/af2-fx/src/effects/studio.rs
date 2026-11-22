@@ -49,12 +49,15 @@ pub fn studio_info() -> EffectInfo {
 
 /// The engine's settings for these: its own keys, values passed through
 /// as they are.
+/// The controls Studio Reverb shares with the Reverb engine.
+const SHARED: [&str; 10] = [
+    "size", "decay", "early", "width", "high_cut", "low_cut", "damping", "diffusion", "dry", "wet",
+];
+
 fn engine_params(p: &Params) -> Params {
     let mut v = Params::resolve(&verb::verb_info(), &Default::default());
     v.set("kind", verb::STUDIO as f64);
-    for k in [
-        "size", "decay", "early", "width", "high_cut", "low_cut", "damping", "diffusion", "dry", "wet",
-    ] {
+    for k in SHARED {
         v.set(key(k), p.get(k));
     }
     v.set("predelay", 0.0);
@@ -80,12 +83,17 @@ fn key(k: &str) -> &'static str {
 
 pub struct StudioReverb {
     engine: Reverb,
+    /// The engine's settings, kept to be updated in place (a new set
+    /// would allocate on the audio thread).
+    ep: Params,
 }
 
 impl StudioReverb {
     pub fn new(p: &Params, rate: u32) -> Self {
+        let ep = engine_params(p);
         Self {
-            engine: Reverb::of_kind(&engine_params(p), rate, verb::STUDIO),
+            engine: Reverb::of_kind(&ep, rate, verb::STUDIO),
+            ep,
         }
     }
 }
@@ -100,7 +108,10 @@ impl Processor for StudioReverb {
     }
 
     fn update(&mut self, p: &Params) -> bool {
-        self.engine.update(&engine_params(p))
+        for k in SHARED {
+            self.ep.set(key(k), p.get(k));
+        }
+        self.engine.update(&self.ep)
     }
 }
 

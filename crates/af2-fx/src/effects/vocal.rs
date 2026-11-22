@@ -325,7 +325,12 @@ impl VoxStrip {
     }
 
     fn set(&mut self, p: &Params) {
-        self.p = p.clone();
+        self.p.assign_from(p);
+        self.apply(p);
+    }
+
+    /// Tunes every stage to `p` (without storing it).
+    fn apply(&mut self, p: &Params) {
         let rate = self.rate as u32;
         let r = self.rate;
         let nyq = f64::from(rate) / 2.0;
@@ -684,7 +689,9 @@ impl Processor for VoxStrip {
         self.air_env = 0.0;
         self.air_body_env = 0.0;
         self.air_duck = 1.0;
-        let p = self.p.clone();
+        // Taken out and put back rather than cloned: reset runs on the
+        // audio thread.
+        let p = std::mem::take(&mut self.p);
         // Rebuilding the filters clears them along with their settings.
         for b in self.low_cut.iter_mut().chain(self.ds_split.iter_mut()) {
             b.reset();
@@ -720,7 +727,8 @@ impl Processor for VoxStrip {
             l.clear();
         }
         self.out_env = 0.0;
-        self.set(&p);
+        self.apply(&p);
+        self.p = p;
     }
 
     fn update(&mut self, p: &Params) -> bool {

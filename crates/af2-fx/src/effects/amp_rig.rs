@@ -349,7 +349,10 @@ impl MicPath {
         for (s, c) in self.secs.iter_mut().zip(c) {
             s.set(c);
         }
-        let all: Vec<Coeffs> = cab.iter().chain(c.iter()).copied().collect();
+        // Inline, not a Vec: this runs on the audio thread when a control
+        // moves.
+        let all: crate::biquad::Fixed<Coeffs, { CAB_N + MIC_N }> =
+            cab.iter().chain(c.iter()).copied().collect();
         self.gain = 10f32.powf(-band_db(&all, rate) as f32 / 20.0);
         let r = f64::from(rate);
         let far = (dist / MAX_DIST_CM).clamp(0.0, 1.0);
