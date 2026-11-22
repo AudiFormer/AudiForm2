@@ -1309,6 +1309,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.updater.check(true);
                 ui.close_menu();
             }
+            crate::desktop_entry::menu_item(ui, st);
             if ui.button("About AudiForm 2").clicked() {
                 st.show_about = true;
                 ui.close_menu();
@@ -3094,6 +3095,7 @@ impl eframe::App for App {
         crate::synth_ui::window(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
         crate::updater::ui(ctx, &mut self.st);
+        crate::desktop_entry::ui(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);
         let th_now = self.st.theme.clone();
         self.shortcuts.show(ctx, &mut self.keymap, &th_now);

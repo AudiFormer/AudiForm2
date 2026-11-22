@@ -12,6 +12,7 @@ mod clip_ops;
 mod clip_lanes;
 mod clip_props;
 mod corners;
+mod desktop_entry;
 mod diagnostics;
 mod eq_editor;
 mod export;
