@@ -672,6 +672,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "wayland-backend",
+ "wayland-client",
  "winreg",
 ]
 

@@ -77,6 +77,7 @@ mod updater;
 mod visualizer;
 mod wave_channels;
 mod waveform;
+mod wayland_dnd;
 mod widgets;
 mod workspace;
 mod zoom;

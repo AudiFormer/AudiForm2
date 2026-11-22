@@ -195,6 +195,7 @@ impl App {
             crate::settings::firewall_follow(&mut st.prefs);
         }
         crate::hwcursor::install(cc);
+        crate::wayland_dnd::install(cc);
         crate::caustics::install(cc);
         crate::app_icon::install(cc);
         lay_colors(&mut st);
@@ -2696,6 +2697,7 @@ impl eframe::App for App {
             self.st.theme_changed = false;
         }
         crate::app_icon::frame();
+        crate::wayland_dnd::frame(ctx);
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files

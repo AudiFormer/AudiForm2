@@ -150,10 +150,11 @@ pub fn and_mask(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub use win::{alt_down, frame, install, system_pointer};
 
-/// Not Windows: the pointer comes from egui.
+/// Not Windows: the pointer comes from egui, or on Wayland, while files
+/// are dragged in, from the drag itself (`wayland_dnd`).
 #[cfg(not(all(windows, target_pointer_width = "64")))]
 pub fn system_pointer() -> Option<(f32, f32)> {
-    None
+    crate::wayland_dnd::pointer()
 }
 
 /// Not Windows: the modifier comes from egui.
