@@ -296,17 +296,17 @@ pub fn import_session(path: &Path) -> Result<af2_interop::Imported, String> {
             })
             .unwrap_or(false);
     let surrounds = if surround {
-        let behind = rfd::MessageDialog::new()
-            .set_title("5.1 session")
-            .set_description(
-                "Where were the surround speakers when this session was mixed?
+        let behind = crate::file_dialog::ask(
+            "5.1 session",
+            "Where were the surround speakers when this session was mixed?
 
 Yes: behind me (the usual placement)
 No: beside me",
-            )
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show();
-        if behind == rfd::MessageDialogResult::No {
+            &["Behind Me", "Beside Me"],
+            false,
+            false,
+        );
+        if behind == crate::file_dialog::Reply::No {
             Surrounds::Sides
         } else {
             Surrounds::Behind
@@ -797,26 +797,17 @@ pub enum Answer {
 }
 
 pub fn ask_save(what: &str) -> Answer {
-    let r = rfd::MessageDialog::new()
-        .set_title("AudiForm 2")
-        .set_level(rfd::MessageLevel::Warning)
-        .set_description(format!("Save changes to {what}?"))
-        .set_buttons(rfd::MessageButtons::YesNoCancel)
-        .show();
-    match r {
-        rfd::MessageDialogResult::Yes => Answer::Save,
-        rfd::MessageDialogResult::No => Answer::Discard,
-        _ => Answer::Cancel,
+    use crate::file_dialog::{ask, Reply};
+    let text = format!("Save changes to {what}?");
+    match ask("AudiForm 2", &text, &["Save", "Don't Save", "Cancel"], true, true) {
+        Reply::Yes => Answer::Save,
+        Reply::No => Answer::Discard,
+        Reply::Cancel => Answer::Cancel,
     }
 }
 
 fn ask_yes_no(text: &str) -> bool {
-    rfd::MessageDialog::new()
-        .set_title("AudiForm 2")
-        .set_description(text)
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show()
-        == rfd::MessageDialogResult::Yes
+    crate::file_dialog::ask("AudiForm 2", text, &[], false, false) == crate::file_dialog::Reply::Yes
 }
 
 pub fn templates_dir() -> PathBuf {
