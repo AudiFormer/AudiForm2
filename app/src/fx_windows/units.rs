@@ -354,10 +354,40 @@ fn mic_column(ui: &mut egui::Ui, th: &Theme, fx: &mut Fx, w: f32, which: &str) {
     });
 }
 
+/// The amp slot's summary, read again only when its data changes: the
+/// data holds the whole capture (often hundreds of KB of JSON), too much
+/// to parse every frame. The data is told apart by its length and ends.
+fn amp_summary(data: Option<&str>) -> af2_fx::effects::amp::Summary {
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(u64, af2_fx::effects::amp::Summary)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if let Some(d) = data {
+        let b = d.as_bytes();
+        b.len().hash(&mut h);
+        b[..b.len().min(4096)].hash(&mut h);
+        b[b.len().saturating_sub(4096)..].hash(&mut h);
+    }
+    let key = h.finish();
+    LAST.with(|l| {
+        let mut l = l.borrow_mut();
+        match &*l {
+            Some((k, s)) if *k == key => s.clone(),
+            _ => {
+                let s = af2_fx::effects::amp::summary(data);
+                *l = Some((key, s.clone()));
+                s
+            }
+        }
+    })
+}
+
 pub fn amp(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
     use af2_fx::effects::{amp, amp_rig};
     let th = tinted(&env.th, &AMP);
-    let sum = amp::summary(fx.data.as_deref());
+    let sum = amp_summary(fx.data.as_deref());
     let failed_id = env.key.with("amp-failed");
     let failed: Option<String> = ui.ctx().data(|d| d.get_temp(failed_id));
     with_theme(ui, &th, |ui| {

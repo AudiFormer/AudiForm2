@@ -412,7 +412,6 @@ fn slot_actions(
 /// The sixteen rows, as the leading editor lays them out: number, power,
 /// name, and a menu on every row (empty ones add an effect there).
 fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
-    let before = st.session.clone();
     let list: Vec<EffectSlot> = chain_ref(st, target).cloned().unwrap_or_default();
     let map = rows(&list);
     // (slot, to row), slot to remove, (row, effect id) to add, power flips.
@@ -657,13 +656,18 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
             moved = Some((*from, row));
         }
     }
+    // The session before this frame's edits, for undo. Taken only when
+    // something is edited: a session can carry megabytes of slot data
+    // (amp captures, impulse responses), too much to copy every frame.
+    let edited = toggled.is_some() || removed.is_some() || add_at.is_some() || moved.is_some();
+    let before = edited.then(|| st.session.clone());
     if let Some(i) = toggled {
         if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
             s.bypass = !s.bypass;
         }
-        if target != FILE {
+        if let (true, Some(b)) = (target != FILE, before.clone()) {
             st.live_slot(target, i);
-            st.commit_live("Bypass", before.clone());
+            st.commit_live("Bypass", b);
         }
         crate::plugins::show_bypassed(st, target, i);
     }
@@ -723,8 +727,8 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
         }
         st.rack_row = Some((target, row));
     }
-    if changed {
-        structural(st, target, "Effects rack", before);
+    if let (true, Some(b)) = (changed, before) {
+        structural(st, target, "Effects rack", b);
     }
 }
 
@@ -852,7 +856,6 @@ fn meter(ui: &mut egui::Ui, level: f32, th: &Theme, scale: bool) {
 /// The rack's input and output (dial and meter each), dry/wet mix, and
 /// the rack's power at the bottom left.
 fn rack_controls(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
-    let before = st.session.clone();
     let Some(mut r) = rack_of(st, target).copied() else {
         return;
     };
@@ -920,6 +923,8 @@ fn rack_controls(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
         }
     });
     if changed {
+        // For undo; taken only on a change (see `slots`).
+        let before = st.session.clone();
         if let Some(x) = rack_of(st, target) {
             *x = r;
         }
@@ -1012,18 +1017,7 @@ fn presets_dir() -> std::path::PathBuf {
 }
 
 fn preset_names() -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(presets_dir())
-        .map(|rd| {
-            rd.flatten()
-                .filter_map(|e| {
-                    let p = e.path();
-                    (p.extension().is_some_and(|x| x == "json"))
-                        .then(|| p.file_stem().map(|s| s.to_string_lossy().to_string()))
-                        .flatten()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut v = crate::dir_cache::json_stems(&presets_dir());
     v.sort_by(|a, b| crate::sessions::natural_cmp(a, b));
     v
 }
@@ -1052,6 +1046,7 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 for n in &names {
                     if ui.button(n).clicked() {
                         let _ = std::fs::remove_file(presets_dir().join(format!("{n}.json")));
+                        crate::dir_cache::forget(&presets_dir());
                         ui.close_menu();
                     }
                 }
@@ -1143,6 +1138,7 @@ fn presets_row(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                     if let Ok(s) = serde_json::to_string_pretty(&p) {
                         let _ =
                             std::fs::write(presets_dir().join(format!("{}.json", clean.trim())), s);
+                        crate::dir_cache::forget(&presets_dir());
                     }
                 }
                 keep = false;
@@ -1316,7 +1312,6 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
     let Some(slot) = chain_ref(st, target).and_then(|c| c.get(i)).cloned() else {
         return;
     };
-    let before = st.session.clone();
     let controls = crate::fx::controls(&slot.effect);
     let mut vals = slot.values.clone();
     vals.resize(controls.len(), 0.0);
@@ -1366,6 +1361,8 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
         released |= r.drag_stopped() || (r.changed() && !r.dragged());
     }
     if ch {
+        // For undo; taken only on a change (see `slots`).
+        let before = st.session.clone();
         if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
             s.values = vals;
         }

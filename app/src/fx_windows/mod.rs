@@ -456,18 +456,7 @@ fn presets_dir(id: &str) -> std::path::PathBuf {
 }
 
 fn preset_names(id: &str) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(presets_dir(id))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension()? != "json" {
-                return None;
-            }
-            Some(p.file_stem()?.to_string_lossy().into_owned())
-        })
-        .collect();
+    let mut v = crate::dir_cache::json_stems(&presets_dir(id));
     v.sort();
     v
 }
@@ -568,6 +557,7 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
             if let Ok(t) = serde_json::to_string_pretty(&p) {
                 let _ = std::fs::write(dir.join(format!("{clean}.json")), t);
             }
+            crate::dir_cache::forget(&dir);
         }
         if names.contains(&clean)
             && widgets::button(ui, "Delete", false)
@@ -575,6 +565,7 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
                 .clicked()
         {
             let _ = std::fs::remove_file(presets_dir(&fx.id).join(format!("{clean}.json")));
+            crate::dir_cache::forget(&presets_dir(&fx.id));
         }
     });
     ui.ctx().data_mut(|d| d.insert_temp(name_id, name));

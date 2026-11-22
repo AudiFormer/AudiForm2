@@ -494,7 +494,6 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             ui.label(RichText::new(format!("Silent: {e}")).color(c(th.text_dim)));
         }
     }
-    let before = st.session.clone();
     let mut db = sf.gain_db;
     let ch = ui
         .add(
@@ -503,7 +502,16 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                 .text("Level"),
         )
         .changed();
-    if ch {
+    // For undo; taken only on a change (a session can be megabytes).
+    if !ch {
+        // As `live_commit` with no change: a gesture ends on release.
+        if !ui.input(|i| i.pointer.any_down()) {
+            st.gesture = false;
+        }
+        return;
+    }
+    let before = st.session.clone();
+    {
         if let Some(x) = st.session.tracks[ti].soundfont.as_mut() {
             x.gain_db = db;
         }
