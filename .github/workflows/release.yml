@@ -14,12 +14,17 @@ on:
       tag:
         description: "Release tag to build and attach to (e.g. v2.1.0)"
         required: true
+      ref:
+        description: "Source to build, if not the tag itself (e.g. main for a build fix)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  SRC: ${{ inputs.ref || github.event.release.tag_name || inputs.tag }}
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -29,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.SRC }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: System libraries
@@ -68,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.SRC }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
