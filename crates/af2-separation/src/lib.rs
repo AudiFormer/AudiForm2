@@ -728,6 +728,9 @@ pub fn mode_label(m: &Model) -> &'static str {
         "Denoise" => "Clean and removed noise",
         _ if m.stems.len() > 2 => "Six stems: vocals, drums, bass, guitar, piano, other",
         "Instruments" => "Single instrument and the rest",
+        // Trained for a full instrumental and scored on it: a group of
+        // their own, so instrumental scores aren't ranked against vocal ones.
+        "Vocals" if m.target_name == "Instrumental" => "Fuller instrumentals (scored on the instrumental)",
         _ => "Vocals and instrumental",
     }
 }
@@ -1001,10 +1004,14 @@ mod tests {
         let c = test_catalog();
         let tab = |t: &str| by_mode(c.iter().filter(|m| m.category == t));
         let vocals = tab("Vocals");
-        assert_eq!(vocals.len(), 1);
+        assert_eq!(vocals.len(), 2);
         assert_eq!(vocals[0].0, "Vocals and instrumental");
         // Best score first.
         assert_eq!(vocals[0].1[0].id, "mel-roformer-deux");
+        // Instrumental-first models in a group of their own.
+        assert!(vocals[1].0.starts_with("Fuller instrumentals"));
+        assert_eq!(vocals[1].1.len(), 4);
+        assert!(vocals[1].1.iter().all(|m| m.target_name == "Instrumental"));
         let inst = tab("Instruments");
         let labels: Vec<_> = inst.iter().map(|g| g.0).collect();
         assert!(labels[0].starts_with("Six stems"));
@@ -1157,6 +1164,73 @@ mod tests {
         }
         eprintln!("separated with {}: {:?}", m.id, g.outputs);
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Tries catalogue models on a real recording with the installed engine:
+    /// `AF2_TRY_INPUT=song.mp3 AF2_TRY_MODELS=id1,id2 cargo test -p
+    /// af2-separation -- --ignored try_models --nocapture`. Each model's
+    /// results go to `AF2_TRY_OUT` (default: the temp folder), and their
+    /// levels and how well they add back up to the input are printed.
+    #[test]
+    #[ignore]
+    fn try_models_on_a_recording() {
+        let input = PathBuf::from(std::env::var("AF2_TRY_INPUT").expect("AF2_TRY_INPUT"));
+        let ids = std::env::var("AF2_TRY_MODELS").expect("AF2_TRY_MODELS");
+        let out_root = std::env::var_os("AF2_TRY_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("af2-try"));
+        let src = Arc::new(af2_io::decode_file(&input).unwrap());
+        let rms = |b: &AudioBuffer| {
+            let n: usize = b.channels.iter().map(Vec::len).sum();
+            (b.channels.iter().flatten().map(|s| (*s as f64).powi(2)).sum::<f64>() / n.max(1) as f64).sqrt()
+        };
+        let db = |x: f64| 20.0 * x.max(1e-12).log10();
+        let mut failed = Vec::new();
+        for id in ids.split(',').map(str::trim) {
+            let dirs = Dirs::detect();
+            let m = catalog(&dirs).into_iter().find(|m| m.id == id).expect(id);
+            let out = out_root.join(id);
+            let t = std::time::Instant::now();
+            let p = spawn(dirs, m.clone(), src.clone(), "song".into(), out, true, None, Arc::new(AtomicBool::new(false)));
+            while !p.lock().unwrap().done {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            let g = p.lock().unwrap();
+            if let Some(e) = &g.error {
+                eprintln!("{id}: FAILED: {e}");
+                failed.push(id.to_string());
+                continue;
+            }
+            let outs: Vec<AudioBuffer> = g.outputs.iter().map(|(_, f)| af2_io::decode_file(f).unwrap()).collect();
+            let finite = outs.iter().all(|b| b.channels.iter().flatten().all(|s| s.is_finite()));
+            // How far the results' sum is from the input, against the input.
+            let mut resid = 0.0f64;
+            let mut n = 0usize;
+            for (c, ch) in src.channels.iter().enumerate() {
+                for (i, s) in ch.iter().enumerate() {
+                    let sum: f32 = outs.iter().map(|b| b.channels[c.min(b.channels.len() - 1)].get(i).copied().unwrap_or(0.0)).sum();
+                    resid += ((sum - s) as f64).powi(2);
+                    n += 1;
+                }
+            }
+            let levels: Vec<String> = g
+                .outputs
+                .iter()
+                .zip(&outs)
+                .map(|((name, _), b)| format!("{name} {:.1} dB", db(rms(b))))
+                .collect();
+            eprintln!(
+                "{id}: {:.0} s, finite {finite}, input {:.1} dB, {}, sum off by {:.1} dB",
+                t.elapsed().as_secs_f32(),
+                db(rms(&src)),
+                levels.join(", "),
+                db((resid / n.max(1) as f64).sqrt()),
+            );
+            if !finite {
+                failed.push(id.to_string());
+            }
+        }
+        assert!(failed.is_empty(), "failed: {failed:?}");
     }
 
     #[test]
