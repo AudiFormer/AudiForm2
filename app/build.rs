@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Builds the icon (`assets/icon/audiform2.ico`) and version text into
 //! audiform2.exe on Windows. `embed-resource` finds the Windows SDK's
@@ -56,8 +56,8 @@ BEGIN
 END
 "#
     );
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("audiform27.rc");
-    std::fs::write(&out, rc).expect("write audiform27.rc");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("audiform2.rc");
+    std::fs::write(&out, rc).expect("write audiform2.rc");
     if let Err(e) = embed_resource::compile(&out, embed_resource::NONE).manifest_optional() {
         // A build without the icon still works; say why it has none.
         println!("cargo:warning=no exe icon: {e}");

@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) The Audiform2 contributors.
+
+//! Core types shared by every part of Audiform2: planar audio buffers,
+//! the multitrack session model, and a generic undo history.
+
+pub mod automation;
+pub mod buffer;
+mod edit_ops;
+pub mod history;
+pub mod midi;
+pub mod midi_live;
+pub mod noteops;
+pub mod plugin;
+pub mod quantize;
+pub mod session;
+pub mod space;
+pub mod synth_model;
+pub mod time;
+
+pub use buffer::{AudioBuffer, Range};
+pub use history::History;
+pub use session::{
+    Clip, ClipId, ClipProps, ClipStretch, EffectSlot, Marker, MediaId, MediaItem, Rack, Send,
+    Session, StretchKind, StretchMode, Track, TrackId, TrackKind,
+};

@@ -1,0 +1,18 @@
+[package]
+name = "af2-fx"
+description = "Audiform2 effects: amp model, tube, delay, reverbs, modulation, stereo tools, vox strip"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+
+[dependencies]
+af2-core = { path = "../af2-core" }
+af2-dsp = { path = "../af2-dsp" }
+af2-io = { path = "../af2-io" }
+realfft = "3.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+hound = "3.5"

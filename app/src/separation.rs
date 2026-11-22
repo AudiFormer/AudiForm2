@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The AI Stems panel (Audio Separation): the engine and the models to
 //! pick from, in Vocals, Instruments and Denoise tabs, each model with its
@@ -24,8 +24,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use af27_core::{AudioBuffer, ClipId, MediaId, Session};
-use af27_separation::{self as sep, Model, Shared};
+use af2_core::{AudioBuffer, ClipId, MediaId, Session};
+use af2_separation::{self as sep, Model, Shared};
 use egui::{Align2, RichText, Stroke};
 use serde::{Deserialize, Serialize};
 
@@ -95,7 +95,7 @@ enum EngineUpdate {
     Available,
 }
 
-/// Saved between runs, in `<data>/Audiform27/separation.json`.
+/// Saved between runs, in `<data>/Audiform2/separation.json`.
 #[derive(Serialize, Deserialize)]
 struct Prefs {
     tab: String,
@@ -257,7 +257,7 @@ pub fn add_separated_tracks(
         .iter()
         .map(|(_, path)| {
             let id = s.alloc_id();
-            s.media.push(af27_core::session::MediaItem {
+            s.media.push(af2_core::session::MediaItem {
                 id,
                 name: path
                     .file_name()
@@ -1048,7 +1048,7 @@ mod tests {
     fn separated_tracks_copy_the_track_under_it() {
         let mut s = Session::new("t", 48_000, 2);
         let mid = s.alloc_id();
-        s.media.push(af27_core::session::MediaItem {
+        s.media.push(af2_core::session::MediaItem {
             id: mid,
             name: "song.wav".into(),
             path: Some(PathBuf::from("song.wav")),
@@ -1061,7 +1061,7 @@ mod tests {
         let clip = s.add_clip(t0, mid, 2.0).unwrap();
         s.tracks[0].volume_db = -3.0;
         s.tracks[0].solo = true;
-        s.tracks[0].chain.push(af27_core::EffectSlot {
+        s.tracks[0].chain.push(af2_core::EffectSlot {
             position: None,
             sidechain: None,
             effect: "gain".into(),

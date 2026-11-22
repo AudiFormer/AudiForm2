@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! VST3 plug-ins in the app: the VST3 menus, plug-in slots' windows (the
 //! plug-in's own window and generic controls), bringing what plug-ins
@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 use egui::RichText;
 
-use af27_core::plugin::{is_plugin, new_inst, PluginData};
-use af27_core::{EffectSlot, Session};
-use af27_engine::MASTER;
-use af27_vst3::live::{Instance, Notice, Status};
-use af27_vst3::registry::ScanProgress;
-use af27_vst3::{manager, Found};
+use af2_core::plugin::{is_plugin, new_inst, PluginData};
+use af2_core::{EffectSlot, Session};
+use af2_engine::MASTER;
+use af2_vst3::live::{Instance, Notice, Status};
+use af2_vst3::registry::ScanProgress;
+use af2_vst3::{manager, Found};
 
 use crate::state::{data_dir, State};
 use crate::theme::{c, Theme};
@@ -49,6 +49,11 @@ thread_local! {
 /// Loads the plug-in list. Called once at start.
 pub fn init() {
     manager().open_registry(data_dir().join("plugins.json"));
+    // Puts the fixed plug-in host copy in place off the UI thread, so the
+    // first plug-in or scan does not wait for the copy.
+    std::thread::spawn(|| {
+        let _ = manager().host_exe();
+    });
 }
 
 /// Keeps the app window's handle, for plug-in windows to sit above it.
@@ -72,7 +77,7 @@ pub fn owner() -> u64 {
 // ------------------------------------------------------------ names
 
 fn cid(effect: &str) -> &str {
-    af27_vst3::cid_of(effect).unwrap_or("")
+    af2_vst3::cid_of(effect).unwrap_or("")
 }
 
 pub fn found(effect: &str) -> Option<Found> {
@@ -134,41 +139,106 @@ pub fn picker(ui: &mut egui::Ui) -> Option<String> {
     picked
 }
 
+/// The menu group a plug-in's own category goes in. Plug-ins name their
+/// categories many ways ("Dynamics - Multiband", "Spatial + Panner",
+/// "Channel Strip"); near-duplicates share one group so the menu stays
+/// short. Channel strips go with Effects, as Adobe Audition files them.
+pub fn menu_group(raw: &str) -> &'static str {
+    let s = raw.to_lowercase();
+    let has = |w: &[&str]| w.iter().any(|x| s.contains(x));
+    if has(&["dynamic", "drum", "compress", "limit", "gate", "transient"]) {
+        "Dynamics"
+    } else if has(&["spatial", "stereo", "sound field", "surround", "panner", "imag", "ambison"]) {
+        "Spatial and Stereo"
+    } else if has(&["channel strip", "effect"]) {
+        "Effects"
+    } else if has(&["eq", "filter"]) {
+        "EQ and Filter"
+    } else if has(&["distort", "guitar", "bass", "amp", "saturat"]) {
+        "Distortion and Amps"
+    } else if has(&["pitch", "time"]) {
+        "Pitch and Time"
+    } else if has(&["reverb"]) {
+        "Reverb"
+    } else if has(&["delay", "echo"]) {
+        "Delay"
+    } else if has(&["modulation", "chorus", "flanger", "phaser"]) {
+        "Modulation"
+    } else if has(&["restor", "noise", "repair"]) {
+        "Restoration"
+    } else if has(&["master"]) {
+        "Mastering"
+    } else if has(&["vocal", "voice"]) {
+        "Vocals"
+    } else if has(&["analy", "tool", "generator", "meter", "utility"]) {
+        "Tools and Analyzers"
+    } else {
+        "Other"
+    }
+}
+
+/// A menu list that scrolls instead of running off the bottom of the
+/// screen.
+pub fn tall_list<R>(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let h = (ui.ctx().screen_rect().height() - 80.0).max(160.0);
+    egui::ScrollArea::vertical()
+        .id_salt(salt)
+        .max_height(h)
+        .show(ui, add)
+        .inner
+}
+
 /// The inside of the VST3 menu.
 pub fn picker_items(ui: &mut egui::Ui) -> Option<String> {
     let mut picked = None;
-    let tree: BTreeMap<String, BTreeMap<String, Vec<(String, String)>>> = {
+    let tree: BTreeMap<&'static str, BTreeMap<String, Vec<(String, String)>>> = {
         let reg = manager().registry();
-        let mut t: BTreeMap<String, BTreeMap<String, Vec<(String, String)>>> = BTreeMap::new();
+        let mut t: BTreeMap<&'static str, BTreeMap<String, Vec<(String, String)>>> =
+            BTreeMap::new();
         for f in reg.effects() {
-            t.entry(f.category())
+            t.entry(menu_group(&f.category()))
                 .or_default()
                 .entry(f.maker())
                 .or_default()
                 .push((
-                    format!("{}{}", af27_vst3::PREFIX, f.info.cid),
+                    format!("{}{}", af2_vst3::PREFIX, f.info.cid),
                     f.info.name.clone(),
                 ));
+        }
+        for makers in t.values_mut() {
+            for list in makers.values_mut() {
+                list.sort_by_key(|(_, n)| n.to_lowercase());
+            }
         }
         t
     };
     if tree.is_empty() {
         ui.label("No VST3 plug-ins found yet.");
     }
-    for (cat, makers) in &tree {
-        ui.menu_button(cat, |ui| {
-            for (maker, list) in makers {
-                ui.menu_button(maker, |ui| {
-                    for (id, name) in list {
-                        if ui.button(name).clicked() {
-                            picked = Some(id.clone());
-                            ui.close_menu();
-                        }
+    tall_list(ui, "vst3-groups", |ui| {
+        for (cat, makers) in &tree {
+            ui.menu_button(*cat, |ui| {
+                tall_list(ui, ("vst3-makers", cat), |ui| {
+                    for (maker, list) in makers {
+                        ui.menu_button(maker, |ui| {
+                            tall_list(ui, ("vst3-list", cat, maker), |ui| {
+                                for (id, name) in list {
+                                    if ui.button(name).clicked() {
+                                        picked = Some(id.clone());
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        });
                     }
                 });
-            }
-        });
-    }
+            });
+        }
+    });
     ui.separator();
     if ui.button("Audio Plug-In Manager...").clicked() {
         open_manager();
@@ -278,6 +348,7 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
         {
             manager().restart(&slot.plugin_data().inst);
             st.session_version += 1;
+            st.rebuild_program();
         }
     }
     ui.horizontal(|ui| {
@@ -445,9 +516,9 @@ fn load_preset(st: &mut State, target: u16, i: usize, path: &std::path::Path) {
     let Some(slot) = slot_at(st, target, i) else {
         return;
     };
-    match af27_vst3::presets::read(path) {
-        Ok((pcid, blob)) if af27_vst3::presets::matches(&pcid, cid(&slot.effect)) => {
-            let b64 = af27_vst3::protocol::base64_encode(&blob);
+    match af2_vst3::presets::read(path) {
+        Ok((pcid, blob)) if af2_vst3::presets::matches(&pcid, cid(&slot.effect)) => {
+            let b64 = af2_vst3::protocol::base64_encode(&blob);
             let before = st.session.clone();
             edit_slot(st, target, i, |d| d.state = Some(b64.clone()));
             if target != crate::rack::FILE {
@@ -462,6 +533,55 @@ fn load_preset(st: &mut State, target: u16, i: usize, path: &std::path::Path) {
     }
 }
 
+/// A plug-in's `.vstpreset` files (read once, then kept).
+fn preset_list(f: &Found) -> Vec<PathBuf> {
+    let id = f.info.cid.clone();
+    UI.with(|u| {
+        u.borrow_mut()
+            .presets
+            .entry(id.clone())
+            .or_insert_with(|| af2_vst3::presets::list(&id))
+            .clone()
+    })
+}
+
+/// Asks for a `.vstpreset` to load, starting in the plug-in's folder.
+fn pick_preset(f: &Found) -> Option<PathBuf> {
+    let mut dlg =
+        crate::file_dialog::FileDialog::new().add_filter("VST3 preset", &["vstpreset"]);
+    if let Some(d) = af2_vst3::presets::user_folder(&f.maker(), &f.info.name) {
+        dlg = dlg.set_directory(d);
+    }
+    dlg.pick_file()
+}
+
+/// Saves a slot's plug-in settings as a `.vstpreset`, asking where.
+fn save_preset(st: &mut State, slot: &EffectSlot, f: &Found, inst: Option<&Arc<Instance>>) {
+    let state = inst
+        .and_then(|x| x.state_now())
+        .or_else(|| slot.plugin_data().state);
+    match state.and_then(|s| af2_vst3::protocol::base64_decode(&s)) {
+        Some(blob) => {
+            let mut dlg = crate::file_dialog::FileDialog::new()
+                .add_filter("VST3 preset", &["vstpreset"])
+                .set_file_name(format!("{}.vstpreset", f.info.name));
+            if let Some(d) = af2_vst3::presets::user_folder(&f.maker(), &f.info.name) {
+                let _ = std::fs::create_dir_all(&d);
+                dlg = dlg.set_directory(d);
+            }
+            if let Some(p) = dlg.save_file() {
+                match af2_vst3::presets::save(&p, &f.info.cid, &blob) {
+                    Ok(()) => {
+                        UI.with(|u| u.borrow_mut().presets.remove(&f.info.cid));
+                    }
+                    Err(e) => st.toast(format!("The preset could not be saved: {e}")),
+                }
+            }
+        }
+        None => st.toast("The plug-in has no settings to save yet."),
+    }
+}
+
 fn presets_row(
     ui: &mut egui::Ui,
     st: &mut State,
@@ -471,14 +591,7 @@ fn presets_row(
     f: &Found,
     inst: Option<&Arc<Instance>>,
 ) {
-    let id = f.info.cid.clone();
-    let list = UI.with(|u| {
-        u.borrow_mut()
-            .presets
-            .entry(id.clone())
-            .or_insert_with(|| af27_vst3::presets::list(&id))
-            .clone()
-    });
+    let list = preset_list(f);
     let mut load: Option<PathBuf> = None;
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt(("vst-preset", target, i))
@@ -499,44 +612,88 @@ fn presets_row(
                 }
             });
         if ui.small_button("Load...").clicked() {
-            let mut dlg = rfd::FileDialog::new().add_filter("VST3 preset", &["vstpreset"]);
-            if let Some(d) = af27_vst3::presets::user_folder(&f.maker(), &f.info.name) {
-                dlg = dlg.set_directory(d);
-            }
-            load = dlg.pick_file();
+            load = pick_preset(f);
         }
         if ui
             .small_button("Save...")
             .on_hover_text("Save the plug-in's settings as a .vstpreset")
             .clicked()
         {
-            let state = inst
-                .and_then(|x| x.state_now())
-                .or_else(|| slot.plugin_data().state);
-            match state.and_then(|s| af27_vst3::protocol::base64_decode(&s)) {
-                Some(blob) => {
-                    let mut dlg = rfd::FileDialog::new()
-                        .add_filter("VST3 preset", &["vstpreset"])
-                        .set_file_name(format!("{}.vstpreset", f.info.name));
-                    if let Some(d) = af27_vst3::presets::user_folder(&f.maker(), &f.info.name) {
-                        let _ = std::fs::create_dir_all(&d);
-                        dlg = dlg.set_directory(d);
-                    }
-                    if let Some(p) = dlg.save_file() {
-                        match af27_vst3::presets::save(&p, &f.info.cid, &blob) {
-                            Ok(()) => {
-                                UI.with(|u| u.borrow_mut().presets.remove(&id));
-                            }
-                            Err(e) => st.toast(format!("The preset could not be saved: {e}")),
-                        }
-                    }
-                }
-                None => st.toast("The plug-in has no settings to save yet."),
-            }
+            save_preset(st, slot, f, inst);
         }
     });
     if let Some(p) = load {
         load_preset(st, target, i, &p);
+    }
+}
+
+/// True when opening this slot opens the plug-in's own window and nothing
+/// else: it has a window and is not stopped. Otherwise the slot opens
+/// Audiform's window for it (generic controls, or why it is stopped).
+pub fn opens_own_window(st: &State, target: u16, i: usize) -> bool {
+    let Some(slot) = slot_at(st, target, i).filter(|s| is_plugin(&s.effect)) else {
+        return false;
+    };
+    if !found(&slot.effect).is_some_and(|f| f.info.has_editor) {
+        return false;
+    }
+    instance(st, &slot).is_some_and(|inst| !matches!(inst.status(), Status::Stopped(_)))
+}
+
+/// A plug-in slot's own items for its right-click and arrow menus:
+/// presets, and Audiform's controls window.
+pub fn slot_menu(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize) {
+    let Some(slot) = slot_at(st, target, i) else {
+        return;
+    };
+    let Some(f) = found(&slot.effect) else {
+        return;
+    };
+    let mut load: Option<PathBuf> = None;
+    ui.menu_button("Presets", |ui| {
+        let list = preset_list(&f);
+        if list.is_empty() {
+            ui.label("No presets found.");
+        }
+        tall_list(ui, ("vst-preset-menu", target, i), |ui| {
+            for p in &list {
+                let name = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if ui.button(name).clicked() {
+                    load = Some(p.clone());
+                    ui.close_menu();
+                }
+            }
+        });
+    });
+    if ui.button("Load Preset...").clicked() {
+        ui.close_menu();
+        load = pick_preset(&f);
+    }
+    if ui
+        .button("Save Preset...")
+        .on_hover_text("Save the plug-in's settings as a .vstpreset")
+        .clicked()
+    {
+        ui.close_menu();
+        let inst = manager().get(&slot.plugin_data().inst);
+        save_preset(st, &slot, &f, inst.as_ref());
+    }
+    if let Some(p) = load {
+        load_preset(st, target, i, &p);
+    }
+    if f.info.has_editor
+        && ui
+            .button("Generic Controls...")
+            .on_hover_text("Audiform's window for this plug-in: a control per parameter")
+            .clicked()
+    {
+        ui.close_menu();
+        if !st.fx_windows.contains(&(target, i)) {
+            st.fx_windows.push((target, i));
+        }
     }
 }
 
@@ -666,6 +823,7 @@ fn take_notices(st: &mut State) {
     }
     let at = slots_by_inst(st);
     let mut commit = false;
+    let mut rebuild = false;
     for (inst, n) in notices {
         let place = at.get(&inst).copied();
         // A MIDI track's instrument (only playback's copy reports edits).
@@ -687,7 +845,7 @@ fn take_notices(st: &mut State) {
                         begin_pending(st);
                     }
                     edit_slot(st, t, i, |d| d.set_param(id, value));
-                } else if let Some(ti) = instrument.filter(|_| !inst.ends_with(af27_vst3::live::KEYS)) {
+                } else if let Some(ti) = instrument.filter(|_| !inst.ends_with(af2_vst3::live::KEYS)) {
                     if by_user {
                         begin_pending(st);
                     }
@@ -701,7 +859,7 @@ fn take_notices(st: &mut State) {
                         commit = true;
                     }
                     edit_slot(st, t, i, |d| d.state = Some(s.clone()));
-                } else if let Some(ti) = instrument.filter(|_| !inst.ends_with(af27_vst3::live::KEYS)) {
+                } else if let Some(ti) = instrument.filter(|_| !inst.ends_with(af2_vst3::live::KEYS)) {
                     if by_user {
                         begin_pending(st);
                         commit = true;
@@ -746,8 +904,21 @@ fn take_notices(st: &mut State) {
                     st.toggle_play();
                 }
             }
-            Notice::Latency(_) | Notice::BeginEdit(_) | Notice::Started => {}
+            // A copy that finished starting (or changed its latency) gets
+            // a fresh build of the mix: the chain was built while it was
+            // starting, with the scan's latency, and the delay
+            // compensation follows the real one. A MIDI keyboard's copy
+            // plays outside the mix.
+            Notice::Started | Notice::Latency(_) => {
+                if !inst.ends_with(af2_vst3::live::KEYS) {
+                    rebuild = true;
+                }
+            }
+            Notice::BeginEdit(_) => {}
         }
+    }
+    if rebuild {
+        st.rebuild_program();
     }
     if commit {
         commit_pending(st);
@@ -836,7 +1007,7 @@ fn start_scan(all: bool) {
     };
     let exe = m.host_exe();
     std::thread::spawn(move || {
-        af27_vst3::registry::scan_into(m.registry_mutex(), &exe, bundles, &progress);
+        af2_vst3::registry::scan_into(m.registry_mutex(), &exe, bundles, &progress);
         let _ = m.save_registry();
     });
 }
@@ -890,7 +1061,7 @@ fn manager_ui(ui: &mut egui::Ui, st: &mut State, th: &Theme) {
     let mut reg_changed = false;
     {
         let mut reg = manager().registry();
-        for f in af27_vst3::registry::standard_folders() {
+        for f in af2_vst3::registry::standard_folders() {
             let mut on = !reg.skipped.contains(&f);
             if ui.checkbox(&mut on, f.display().to_string()).changed() {
                 reg.skipped.retain(|x| *x != f);
@@ -916,7 +1087,7 @@ fn manager_ui(ui: &mut egui::Ui, st: &mut State, th: &Theme) {
     }
     ui.horizontal(|ui| {
         if ui.button("Add Folder...").clicked() {
-            if let Some(p) = rfd::FileDialog::new().pick_folder() {
+            if let Some(p) = crate::file_dialog::FileDialog::new().pick_folder() {
                 let mut reg = manager().registry();
                 if !reg.folders.contains(&p) {
                     reg.folders.push(p);
@@ -1022,6 +1193,35 @@ fn manager_ui(ui: &mut egui::Ui, st: &mut State, th: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn near_duplicate_categories_share_a_menu_group() {
+        for c in ["Dynamics", "Dynamics - Multiband", "Drums"] {
+            assert_eq!(menu_group(c), "Dynamics", "{c}");
+        }
+        for c in ["Spatial", "Spatial + Panner", "Stereo", "Sound Field", "Surround"] {
+            assert_eq!(menu_group(c), "Spatial and Stereo", "{c}");
+        }
+        assert_eq!(menu_group("Channel Strip"), "Effects");
+        assert_eq!(menu_group("Effects"), "Effects");
+        assert_eq!(menu_group("EQ"), "EQ and Filter");
+        assert_eq!(menu_group("Filter"), "EQ and Filter");
+        assert_eq!(menu_group("Pitch Shift"), "Pitch and Time");
+        assert_eq!(menu_group("Time"), "Pitch and Time");
+        assert_eq!(menu_group("Analyzer"), "Tools and Analyzers");
+        assert_eq!(menu_group("Delay"), "Delay");
+        assert_eq!(menu_group("Reverb"), "Reverb");
+        // The user's 29 categories fit in far fewer groups.
+        let raw = [
+            "Analyzer", "Bass", "Channel Strip", "Delay", "Distortion", "Drums", "Dynamics",
+            "Dynamics - Multiband", "EQ", "Effects", "Filter", "Generator", "Guitar",
+            "Mastering", "Modulation", "OnlyARA", "Other", "Pitch Shift", "Restoration",
+            "Reverb", "Sound Field", "Spatial", "Spatial + Panner", "Stereo",
+            "StudioRack Local-DSPBased", "Surround", "Time", "Tools", "Vocals",
+        ];
+        let groups: HashSet<&str> = raw.iter().map(|c| menu_group(c)).collect();
+        assert!(groups.len() <= 14, "{groups:?}");
+    }
 
     #[test]
     fn copies_of_a_plug_in_slot_get_their_own_running_copy() {

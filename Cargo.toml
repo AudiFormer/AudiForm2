@@ -4,23 +4,23 @@ members = ["crates/*", "app"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "2.0.3"
+version = "2.1.0"
 edition = "2021"
-authors = ["The Audiform27 contributors"]
-repository = "https://github.com/nwh212/Audiform27"
+authors = ["The Audiform2 contributors"]
+repository = "https://github.com/AudiFormer/AudiForm2"
 rust-version = "1.80"
 
 [workspace.dependencies]
-af27-core = { path = "crates/af27-core" }
-af27-io = { path = "crates/af27-io" }
-af27-dsp = { path = "crates/af27-dsp" }
-af27-engine = { path = "crates/af27-engine" }
-af27-separation = { path = "crates/af27-separation" }
-audiform-separate-client = { path = "crates/af27-separation-client" }
-af27-interop = { path = "crates/af27-interop" }
-af27-dts = { path = "crates/af27-dts" }
-af27-osdecode = { path = "crates/af27-osdecode" }
-af27-space = { path = "crates/af27-space" }
+af2-core = { path = "crates/af2-core" }
+af2-io = { path = "crates/af2-io" }
+af2-dsp = { path = "crates/af2-dsp" }
+af2-engine = { path = "crates/af2-engine" }
+af2-separation = { path = "crates/af2-separation" }
+audiform-separate-client = { path = "crates/af2-separation-client" }
+af2-interop = { path = "crates/af2-interop" }
+af2-dts = { path = "crates/af2-dts" }
+af2-osdecode = { path = "crates/af2-osdecode" }
+af2-space = { path = "crates/af2-space" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.5.4", features = ["all"] }

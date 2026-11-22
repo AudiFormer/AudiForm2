@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Multitrack's right-click menus: on empty track space, on a clip
 //! (then the track's own items), and on a clip's fade handle.
 
-use af27_core::{ClipId, Send, TrackId, TrackKind};
+use af2_core::{ClipId, Send, TrackId, TrackKind};
 use egui::RichText;
 
 use crate::state::{Mode, State};
@@ -30,7 +30,7 @@ fn soon(ui: &mut egui::Ui, label: &str) {
 }
 
 /// One undoable edit from a menu item.
-fn edit(st: &mut State, label: &str, f: impl FnOnce(&mut af27_core::Session) -> bool) {
+fn edit(st: &mut State, label: &str, f: impl FnOnce(&mut af2_core::Session) -> bool) {
     let before = st.session.clone();
     if f(&mut st.session) {
         st.session_version += 1;
@@ -158,7 +158,7 @@ fn clip_items(ui: &mut egui::Ui, st: &mut State, clip: ClipId) {
         ui.close_menu();
     }
     ui.separator();
-    let toggle = |st: &mut State, label: &str, f: fn(&mut af27_core::Clip)| {
+    let toggle = |st: &mut State, label: &str, f: fn(&mut af2_core::Clip)| {
         edit(st, label, |s| {
             let Some((ti, ci)) = s.find_clip(clip) else {
                 return false;
@@ -316,7 +316,7 @@ fn add_track_items(ui: &mut egui::Ui, st: &mut State, at: Option<(usize, bool)>)
 }
 
 /// A track setting a menu item switches.
-type Flag = fn(&mut af27_core::Track) -> &mut bool;
+type Flag = fn(&mut af2_core::Track) -> &mut bool;
 
 fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize, below: bool) {
     let Some(t) = st.session.tracks.get(ti).cloned() else {
@@ -449,7 +449,7 @@ fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize, below: bool) {
         }
     }
     ui.menu_button("Automation", |ui| {
-        for m in af27_core::automation::AutomationMode::ALL {
+        for m in af2_core::automation::AutomationMode::ALL {
             if ui.radio(t.automation == m, m.label()).clicked() {
                 edit(st, "Automation mode", |s| {
                     s.track_mut(me).map(|t| t.automation = m).is_some()
@@ -648,8 +648,8 @@ fn empty_items(ui: &mut egui::Ui, st: &mut State, at: MenuAt) {
     ui.menu_button("Insert", |ui| {
         if ui.button("Files at Playhead...").clicked() {
             ui.close_menu();
-            if let Some(paths) = rfd::FileDialog::new()
-                .add_filter("Audio", af27_io::EXTENSIONS)
+            if let Some(paths) = crate::file_dialog::FileDialog::new()
+                .add_filter("Audio", af2_io::EXTENSIONS)
                 .pick_files()
             {
                 let track = at
@@ -670,8 +670,8 @@ fn empty_items(ui: &mut egui::Ui, st: &mut State, at: MenuAt) {
         }
         if ui.button("Files as Tracks...").clicked() {
             ui.close_menu();
-            if let Some(paths) = rfd::FileDialog::new()
-                .add_filter("Audio", af27_io::EXTENSIONS)
+            if let Some(paths) = crate::file_dialog::FileDialog::new()
+                .add_filter("Audio", af2_io::EXTENSIONS)
                 .pick_files()
             {
                 st.import_paths(paths, crate::sessions::Layout::AsTracks);
@@ -740,4 +740,124 @@ fn mixdown_new(st: &mut State, range: Option<(f64, f64)>) {
     let name = format!("{} Mixdown", st.session.name);
     st.add_doc(name, None, buf);
     st.mode = Mode::Waveform;
+}
+
+/// The menu bar's Multitrack menu, top part, laid out as Audiform 1 and
+/// Audition lay it out: Tracks, Insert Files, Mixdown, Bounce, Metronome,
+/// Clip Keyframe Editing, Track Visibility. The rest (playback, Spoken
+/// Word, export, clip edits) follows it in ui.rs.
+pub fn multitrack_menu_top(ui: &mut egui::Ui, st: &mut State) {
+    let sel = st.session_sel;
+    let sel_track = st.selected_track;
+    let has_session = !st.no_session() || !st.session.tracks.is_empty();
+    ui.menu_button("Tracks", |ui| {
+        add_track_items(ui, st, None);
+        ui.separator();
+        if ui
+            .add_enabled(sel_track.is_some(), egui::Button::new("Duplicate Selected Track"))
+            .on_disabled_hover_text("Click a track's header to select it first")
+            .clicked()
+        {
+            if let Some(t) = sel_track {
+                edit(st, "Duplicate track", |s| s.duplicate_track(t).is_some());
+            }
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(sel_track.is_some(), egui::Button::new("Delete Selected Track"))
+            .on_disabled_hover_text("Click a track's header to select it first")
+            .clicked()
+        {
+            if let Some(t) = sel_track {
+                edit(st, "Delete track", |s| s.delete_track(t));
+                st.selected_track = None;
+            }
+            ui.close_menu();
+        }
+        if ui.button("Delete Empty Tracks").clicked() {
+            edit(st, "Delete empty tracks", |s| s.delete_empty_tracks() > 0);
+            ui.close_menu();
+        }
+    });
+    if ui
+        .add_enabled(has_session, egui::Button::new("Insert Files..."))
+        .on_hover_text("Files onto the selected track (or the first) at the playhead")
+        .clicked()
+    {
+        ui.close_menu();
+        if let Some(paths) = crate::file_dialog::FileDialog::new()
+            .add_filter("Audio", af2_io::EXTENSIONS)
+            .pick_files()
+        {
+            let track = sel_track.or(st.session.tracks.first().map(|t| t.id));
+            let cursor = st.session_cursor;
+            st.import_paths(
+                paths,
+                crate::sessions::Layout::Drop {
+                    track,
+                    at: cursor,
+                    alt: false,
+                },
+            );
+        }
+    }
+    ui.separator();
+    ui.menu_button("Mixdown Session to New File", |ui| {
+        if ui.button("Entire Session").clicked() {
+            mixdown_new(st, None);
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(sel.is_some(), egui::Button::new("Time Selection"))
+            .on_disabled_hover_text("Drag across the ruler or lanes to select a time range first")
+            .clicked()
+        {
+            mixdown_new(st, sel);
+            ui.close_menu();
+        }
+    });
+    ui.menu_button("Bounce to New Track", |ui| {
+        if ui
+            .add_enabled(sel_track.is_some(), egui::Button::new("Selected Track"))
+            .on_disabled_hover_text("Click a track's header to select it first")
+            .clicked()
+        {
+            crate::export::bounce_track(st);
+            ui.close_menu();
+        }
+        soon(ui, "Time Selection");
+        soon(ui, "Selected Clips Only");
+    });
+    ui.separator();
+    ui.menu_button("Metronome", |ui| {
+        let mut m = st.session.tempo.metronome;
+        if ui.checkbox(&mut m, "Enable Metronome").changed() {
+            st.session.tempo.metronome = m;
+            st.live_metronome();
+        }
+        if ui.button("Tempo and Time Signature...").clicked() {
+            st.tempo_ui.open = true;
+            ui.close_menu();
+        }
+    });
+    ui.separator();
+    // Clip keyframes: every audio clip's volume and pan lines, to edit.
+    let mut keys = st.prefs.clip_lines;
+    if ui
+        .checkbox(&mut keys, "Enable Clip Keyframe Editing")
+        .on_hover_text("Show every audio clip's volume and pan lines, to drag their keyframes")
+        .changed()
+    {
+        st.prefs.clip_lines = keys;
+        st.prefs.save();
+    }
+    ui.separator();
+    ui.menu_button("Track Visibility", |ui| {
+        soon(ui, "Hide Selected Track");
+        soon(ui, "Show All Tracks");
+        ui.separator();
+        soon(ui, "Show Only Audio Tracks");
+        soon(ui, "Show Only Bus Tracks");
+        soon(ui, "Show Only Tracks with Clips");
+    });
 }

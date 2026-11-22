@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 // The graph editor's design and maths follow the Parametric EQ graph its
-// author (nwh212) designed for Audiform; rewritten here in Rust/egui.
+// author (AudiFormer) designed for Audiform; rewritten here in Rust/egui.
 
 //! The Parametric EQ's window: its response curve over the sound itself.
 //!
@@ -18,7 +18,7 @@
 
 use std::cell::RefCell;
 
-use af27_fx::effects::parametric_eq::{self as eq, Kind, BANDS, SLOPES, SLOPE_ORDER};
+use af2_fx::effects::parametric_eq::{self as eq, Kind, BANDS, SLOPES, SLOPE_ORDER};
 use egui::{pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, RichText, Sense, Shape, Stroke};
 
 use crate::rack::{chain_of, FILE};
@@ -178,7 +178,7 @@ const S_BOTTOM: f32 = -96.0;
 
 /// The settings being edited: the slot's values, by key.
 struct Values {
-    info: af27_fx::EffectInfo,
+    info: af2_fx::EffectInfo,
     vals: Vec<f32>,
     changed: bool,
     released: bool,
@@ -217,7 +217,7 @@ impl Values {
         }
     }
 
-    fn params(&self) -> af27_fx::Params {
+    fn params(&self) -> af2_fx::Params {
         let pairs: Vec<(String, f64)> = self
             .info
             .params
@@ -225,7 +225,7 @@ impl Values {
             .zip(&self.vals)
             .map(|(p, v)| (p.key.to_string(), *v as f64))
             .collect();
-        af27_fx::Params::from_pairs(&self.info, &pairs)
+        af2_fx::Params::from_pairs(&self.info, &pairs)
     }
 }
 
@@ -242,7 +242,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &Theme
     let Some(slot) = chain_of(st, target).and_then(|c| c.get(i)).cloned() else {
         return;
     };
-    let Some(info) = af27_fx::info(eq::ID) else {
+    let Some(info) = af2_fx::info(eq::ID) else {
         return;
     };
     let before = st.session.clone();

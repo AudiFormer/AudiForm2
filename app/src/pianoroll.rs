@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Piano Roll for one MIDI clip.
 //!
@@ -23,8 +23,10 @@
 //! or all of them when none are picked. Every gesture is one undo step.
 //!
 //! Getting around: wheel scrolls the keys, Shift+wheel scrolls time,
-//! Ctrl+wheel zooms time, Alt+wheel makes the keys taller or shorter, the
-//! middle button pans.
+//! Ctrl+wheel zooms time, Alt+wheel (or the wheel over the keyboard)
+//! makes the keys taller or shorter around the pointer, the middle button
+//! pans. The bar at the right edge shows the keys in view: drag its middle
+//! to scroll, either end to zoom, double-click to fit the clip's notes.
 
 use egui::{
     pos2, vec2, Align2, Color32, FontId, PointerButton, Rect, RichText, Rounding, Sense, Stroke,
@@ -32,13 +34,73 @@ use egui::{
 
 use crate::state::State;
 use crate::theme::{c, ca};
-use af27_core::midi::{note_name, MidiNote};
-use af27_core::noteops as ops;
-use af27_core::quantize::{Ends, Quantize};
+use af2_core::midi::{note_name, MidiNote};
+use af2_core::noteops as ops;
+use af2_core::quantize::{Ends, Quantize};
 
 const KEYS_W: f32 = 52.0;
-const LANE_H: f32 = 70.0;
+/// The lane under the roll: its height to start with, and its limits.
+pub const LANE_H: f32 = 110.0;
+const LANE_MIN: f32 = 40.0;
+const LANE_MAX: f32 = 600.0;
+/// The bar between the roll and the lane, dragged to resize the lane.
+const SPLIT_H: f32 = 7.0;
 const EDGE_PX: f32 = 5.0;
+/// Key height limits, in pixels.
+const ROW_MIN: f32 = 6.0;
+const ROW_MAX: f32 = 32.0;
+/// The keys' zoom bar at the roll's right edge.
+const KBAR_W: f32 = 12.0;
+
+/// The keys after `notches` of wheel over them (up: taller), keeping the
+/// key `py` points below the roll's top in place: (top, row).
+fn zoom_keys(top: f32, row: f32, py: f32, notches: f32) -> (f32, f32) {
+    let key = top - py / row;
+    let row2 = (row * 1.15f32.powf(notches)).clamp(ROW_MIN, ROW_MAX);
+    ((key + py / row2).clamp(12.0, 127.0), row2)
+}
+
+/// The keys in view on a roll `h` points tall, as the zoom bar's thumb
+/// shows them: (lowest, highest), on a scale of 0..128 keys.
+fn keys_in_view(top: f32, row: f32, h: f32) -> (f32, f32) {
+    (top + 1.0 - h / row, top + 1.0)
+}
+
+/// The keys showing `lo..hi` (or as near as the key height limits
+/// allow), centred, on a roll `h` points tall: (top, row).
+fn fit_keys(lo: f32, hi: f32, h: f32) -> (f32, f32) {
+    let span = (hi - lo).clamp(h / ROW_MAX, h / ROW_MIN);
+    let mid = (lo + hi) / 2.0;
+    ((mid + span / 2.0 - 1.0).clamp(12.0, 127.0), (h / span).clamp(ROW_MIN, ROW_MAX))
+}
+
+/// Which part of the keys' zoom bar is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyGrab {
+    /// The top end: the highest key follows, the lowest stays.
+    Top,
+    /// The bottom end: the lowest key follows, the highest stays.
+    Bottom,
+    /// The middle: scrolls.
+    Body,
+}
+
+/// The keys after dragging the zoom bar's `grab` by `dk` keys (up is
+/// positive), from a thumb of `lo0..hi0` keys on a roll `h` points tall:
+/// (top, row).
+fn drag_key_bar(grab: KeyGrab, lo0: f32, hi0: f32, dk: f32, h: f32) -> (f32, f32) {
+    let span0 = (hi0 - lo0).max(1e-3);
+    let fit = |span: f32| span.clamp(h / ROW_MAX, h / ROW_MIN);
+    let (hi, span) = match grab {
+        KeyGrab::Body => (hi0 + dk, span0),
+        KeyGrab::Top => {
+            let span = fit(hi0.min(128.0) + dk - lo0);
+            (lo0 + span, span)
+        }
+        KeyGrab::Bottom => (hi0, fit(hi0 - (lo0 + dk))),
+    };
+    ((hi - 1.0).clamp(12.0, 127.0), (h / span).clamp(ROW_MIN, ROW_MAX))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -57,15 +119,15 @@ pub enum Lane {
 
 /// A drawn controller value, kept to the controller's own steps: pedals
 /// up or down, pitch bend 16384 steps, others 128.
-fn shape_control(controller: u8, frac: f32) -> f32 {
+pub(crate) fn shape_control(controller: u8, frac: f32) -> f32 {
     let f = frac.clamp(0.0, 1.0);
-    if af27_core::midi::ControlEvent::is_switch(controller) {
+    if af2_core::midi::ControlEvent::is_switch(controller) {
         if f >= 0.5 {
             1.0
         } else {
             0.0
         }
-    } else if controller == af27_core::midi::PITCH_BEND {
+    } else if controller == af2_core::midi::PITCH_BEND {
         (f * 16383.0).round() / 16383.0
     } else {
         (f * 127.0).round() / 127.0
@@ -76,7 +138,7 @@ fn shape_control(controller: u8, frac: f32) -> f32 {
 /// `from`: moves in that span give way to the new one. A pedal move is
 /// kept only where the value changes.
 fn paint_control(
-    controls: &mut Vec<af27_core::midi::ControlEvent>,
+    controls: &mut Vec<af2_core::midi::ControlEvent>,
     controller: u8,
     channel: u8,
     from: f64,
@@ -99,10 +161,10 @@ fn paint_control(
         .filter(|e| e.controller == controller && e.channel == channel && e.at < b)
         .max_by(|x, y| x.at.total_cmp(&y.at))
         .map(|e| e.value);
-    if af27_core::midi::ControlEvent::is_switch(controller) && before == Some(value) {
+    if af2_core::midi::ControlEvent::is_switch(controller) && before == Some(value) {
         return;
     }
-    controls.push(af27_core::midi::ControlEvent {
+    controls.push(af2_core::midi::ControlEvent {
         at: b.max(0.0),
         controller,
         value,
@@ -119,6 +181,8 @@ pub enum PianoCmd {
     Paste,
     Delete,
     SelectAll,
+    /// A copy of the picked notes right after them (Ctrl+D).
+    Duplicate,
 }
 
 /// Grid steps, as in Audiform's piano roll.
@@ -211,16 +275,27 @@ pub struct PianoState {
     lane: Lane,
     grid: Grid,
     channel: u8,
+    /// The lane's height in pixels (drag the bar above it); saved in
+    /// Preferences as piano_lane_h.
+    lane_h: f32,
+    /// lane_h has been read from Preferences.
+    lane_loaded: bool,
+    /// The last click landed in the Piano Roll: its keys (Ctrl+C, X, V,
+    /// D, A, Delete) act on the notes even with the pointer elsewhere.
+    focused: bool,
     /// Pixels per beat.
     zoom: f32,
     /// Key height in pixels.
     row: f32,
+    /// The keys' zoom bar being dragged: the part held, the thumb's keys
+    /// (lowest, highest) and the pointer's height when it was pressed.
+    key_grab: Option<(KeyGrab, f32, f32, f32)>,
     /// First beat shown.
     scroll_x: f64,
     /// Highest pitch shown at the top.
     top: f32,
     drag: Option<NoteDrag>,
-    before: Option<af27_core::Session>,
+    before: Option<af2_core::Session>,
     /// The notes when the gesture began.
     orig: Vec<MidiNote>,
     /// Picked notes, by index.
@@ -228,13 +303,15 @@ pub struct PianoState {
     /// Picked before a Shift-box began.
     sel_base: Vec<usize>,
     box_now: Option<egui::Pos2>,
-    clip: Option<af27_core::ClipId>,
+    clip: Option<af2_core::ClipId>,
     last_len: f64,
     clipboard: Vec<MidiNote>,
     /// The last spot clicked, in beats from the clip start.
     click_at: f64,
     /// The pitch sounding from a press (note or key).
     held: Option<u8>,
+    /// Its MIDI channel (multi-part instruments sound it with that part).
+    held_ch: u8,
     /// A note added by a click sounds at least until this time (ui seconds).
     held_until: f64,
     show_tools: bool,
@@ -258,8 +335,12 @@ impl Default for PianoState {
             lane: Lane::Velocity,
             grid: Grid::Sixteenth,
             channel: 0,
+            lane_h: LANE_H,
+            lane_loaded: false,
+            focused: false,
             zoom: 80.0,
             row: 12.0,
+            key_grab: None,
             scroll_x: 0.0,
             top: 84.0,
             drag: None,
@@ -273,6 +354,7 @@ impl Default for PianoState {
             clipboard: Vec::new(),
             click_at: 0.0,
             held: None,
+            held_ch: 0,
             held_until: 0.0,
             show_tools: false,
             show_quantize: false,
@@ -296,6 +378,47 @@ pub fn channel_color(ch: u8) -> Color32 {
     Color32::from(rgb)
 }
 
+/// A note's colour in the roll: channel 1 has the track's own colour,
+/// the others their channel's.
+pub fn note_color(track: Color32, ch: u8) -> Color32 {
+    if ch == 0 {
+        track
+    } else {
+        channel_color(ch)
+    }
+}
+
+/// Grabbing note `i` to drag it: a picked note drags every picked note
+/// with it; an unpicked one is picked first (alone, or with Shift added
+/// to the others).
+fn pick_for_drag(sel: &mut Vec<usize>, i: usize, shift: bool) {
+    if !sel.contains(&i) {
+        if !shift {
+            sel.clear();
+        }
+        sel.push(i);
+    }
+}
+
+/// Where Duplicate puts the copy: after the picked notes (earliest start
+/// `first`, latest end `last_end`), a whole number of grid steps on.
+fn duplicate_at(first: f64, last_end: f64, step: f64) -> f64 {
+    let span = (last_end - first).max(1e-9);
+    if step > 1e-9 {
+        first + (span / step - 1e-6).ceil().max(1.0) * step
+    } else {
+        first + span
+    }
+}
+
+/// The lane's height: what was asked for, between LANE_MIN and LANE_MAX,
+/// leaving the roll above at least 80 points of a `total`-point panel.
+pub fn lane_height(want: f32, total: f32) -> f32 {
+    let want = if want.is_finite() { want } else { LANE_H };
+    let room = (total - SPLIT_H - 80.0).min(LANE_MAX).max(LANE_MIN);
+    want.clamp(LANE_MIN, room)
+}
+
 fn is_black(p: u8) -> bool {
     matches!(p % 12, 1 | 3 | 6 | 8 | 10)
 }
@@ -309,6 +432,109 @@ fn grid_combo(ui: &mut egui::Ui, id: &str, g: &mut Grid) {
                 ui.selectable_value(g, x, x.label());
             }
         });
+}
+
+/// A channel swatch: channel `ch`'s colour with its number on it.
+fn channel_swatch(p: &egui::Painter, r: Rect, track: Color32, ch: u8, strong: bool) {
+    p.rect_filled(r, Rounding::same(3.0), note_color(track, ch));
+    p.rect_stroke(r, Rounding::same(3.0), Stroke::new(1.0_f32, Color32::from_black_alpha(110)));
+    p.text(
+        r.center(),
+        Align2::CENTER_CENTER,
+        format!("{}", ch + 1),
+        FontId::proportional(9.5),
+        Color32::from_black_alpha(if strong { 240 } else { 190 }),
+    );
+}
+
+/// The id of the channel picker's list.
+fn channel_popup_id(ui: &egui::Ui) -> egui::Id {
+    ui.id().with("piano-channel-list")
+}
+
+/// The channel picker: closed, it shows the channel's colour and number;
+/// open, it lists all 16 with their colours. Returns a channel picked.
+fn channel_picker(
+    ui: &mut egui::Ui,
+    track: Color32,
+    current: u8,
+    th: &crate::theme::Theme,
+) -> Option<u8> {
+    let popup = channel_popup_id(ui);
+    let open = ui.memory(|m| m.is_popup_open(popup));
+    let (r, resp) = ui.allocate_exact_size(vec2(74.0, 20.0), Sense::click());
+    let vis = if open {
+        ui.visuals().widgets.open
+    } else {
+        *ui.style().interact(&resp)
+    };
+    let p = ui.painter();
+    p.rect(r, vis.rounding, vis.bg_fill, vis.bg_stroke);
+    let sw = Rect::from_min_size(r.min + vec2(3.0, 2.0), vec2(22.0, r.height() - 4.0));
+    channel_swatch(p, sw, track, current, true);
+    p.text(
+        pos2(sw.right() + 5.0, r.center().y),
+        Align2::LEFT_CENTER,
+        format!("Ch {}", current + 1),
+        FontId::proportional(11.0),
+        vis.text_color(),
+    );
+    p.text(
+        r.right_center() - vec2(5.0, 0.0),
+        Align2::RIGHT_CENTER,
+        "\u{25BE}",
+        FontId::proportional(10.0),
+        vis.text_color(),
+    );
+    let resp = resp.on_hover_text(format!(
+        "Channel {}{}: new notes go here; with notes picked, picking another moves them there. \
+         Multi-part instruments play each channel with its own sound.",
+        current + 1,
+        if current == 0 { " (the track colour)" } else { "" }
+    ));
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup));
+    }
+    let mut picked = None;
+    egui::popup_below_widget(
+        ui,
+        popup,
+        &resp,
+        egui::PopupCloseBehavior::CloseOnClick,
+        |ui| {
+            ui.set_min_width(170.0);
+            ui.spacing_mut().item_spacing.y = 1.0;
+            for ch in 0..16u8 {
+                let (row, rr) = ui.allocate_exact_size(vec2(170.0, 20.0), Sense::click());
+                let on = ch == current;
+                let p = ui.painter();
+                if rr.hovered() || on {
+                    p.rect_filled(
+                        row,
+                        Rounding::same(3.0),
+                        if rr.hovered() { ca(th.accent, 70) } else { ca(th.accent, 35) },
+                    );
+                }
+                let sw = Rect::from_min_size(row.min + vec2(3.0, 2.0), vec2(22.0, 16.0));
+                channel_swatch(p, sw, track, ch, on);
+                p.text(
+                    pos2(sw.right() + 6.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    if ch == 0 {
+                        "Channel 1 (track colour)".to_string()
+                    } else {
+                        format!("Channel {}", ch + 1)
+                    },
+                    FontId::proportional(11.0),
+                    c(th.text),
+                );
+                if rr.clicked() {
+                    picked = Some(ch);
+                }
+            }
+        },
+    );
+    picked
 }
 
 /// Applies an edit to the picked notes (or all) as one undo step.
@@ -336,7 +562,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ui.label(RichText::new("No MIDI clip open.").strong());
         ui.label(RichText::new("Double-click a MIDI clip in the Multitrack editor, or double-click an empty spot on a MIDI track to make one.").color(c(th.text_dim)));
         if ui.button("➕ New MIDI Track with a 4-bar Clip").clicked() {
-            let t = st.add_track_kind(af27_core::TrackKind::Midi);
+            let t = st.add_track_kind(af2_core::TrackKind::Midi);
             new_clip(st, t, 0.0);
         }
         return;
@@ -364,8 +590,16 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         run_cmd(st, ps, ti, ci, cmd, play_at);
     }
 
-    // Toolbar.
-    ui.horizontal_wrapped(|ui| {
+    // Toolbar: two rows of labelled groups. The first edits (tool, grid,
+    // clipboard, the Tools and Quantize rows, zoom); the second says what
+    // new notes get and what the lane under the roll shows.
+    let tc = st.session.tracks[ti].color;
+    let track_col = Color32::from_rgb(tc[0], tc[1], tc[2]);
+    let caption = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).small().color(c(th.text_dim)));
+    };
+    ui.spacing_mut().item_spacing.x = 6.0;
+    ui.horizontal(|ui| {
         let name = st.session.tracks[ti].midi[ci].name.clone();
         ui.label(
             RichText::new(format!("{} • {}", st.session.tracks[ti].name, name))
@@ -373,6 +607,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                 .color(c(th.accent)),
         );
         ui.separator();
+        caption(ui, "TOOL");
         ui.selectable_value(&mut ps.tool, Tool::Draw, "✏ Draw")
             .on_hover_text("Click empty space to add a note; keep the button down to move it");
         ui.selectable_value(&mut ps.tool, Tool::Select, "⬚ Select")
@@ -382,52 +617,8 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ui.selectable_value(&mut ps.tool, Tool::Erase, "⌫ Erase")
             .on_hover_text("Click or drag over notes to remove them");
         ui.separator();
-        ui.label("Grid");
+        caption(ui, "GRID");
         grid_combo(ui, "piano-grid", &mut ps.grid);
-        ui.label("Channel");
-        ui.add(
-            egui::DragValue::new(&mut ps.channel)
-                .range(0..=15)
-                .custom_formatter(|v, _| format!("{}", v as u8 + 1)),
-        );
-        let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-        ui.painter()
-            .rect_filled(r, Rounding::same(3.0), channel_color(ps.channel));
-        ui.separator();
-        ui.selectable_value(&mut ps.lane, Lane::Velocity, "Velocity");
-        ui.selectable_value(&mut ps.lane, Lane::Pan, "Pan");
-        {
-            use af27_core::midi::{ControlEvent, LANE_CONTROLLERS};
-            let used: Vec<u8> = st.session.tracks[ti].midi[ci]
-                .controls
-                .iter()
-                .map(|e| e.controller)
-                .collect();
-            let shown = match ps.lane {
-                Lane::Control(c) => ControlEvent::name(c),
-                _ => "Controller".to_string(),
-            };
-            let mut list: Vec<u8> = LANE_CONTROLLERS.to_vec();
-            for c in &used {
-                if !list.contains(c) {
-                    list.push(*c);
-                }
-            }
-            egui::ComboBox::from_id_salt("piano-ctl-lane")
-                .selected_text(shown)
-                .width(110.0)
-                .show_ui(ui, |ui| {
-                    for c in list {
-                        // A dot marks a controller the clip already uses.
-                        let mark = if used.contains(&c) { " •" } else { "" };
-                        ui.selectable_value(
-                            &mut ps.lane,
-                            Lane::Control(c),
-                            format!("{}{mark}", ControlEvent::name(c)),
-                        );
-                    }
-                });
-        }
         ui.separator();
         let picked = !ps.sel.is_empty();
         if ui.add_enabled(picked, egui::Button::new("Cut")).clicked() {
@@ -450,18 +641,74 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             .on_hover_text("Velocity, pan, channel and Humanize, on the picked notes or all");
         ui.toggle_value(&mut ps.show_quantize, "Quantize ▾")
             .on_hover_text("Pull notes to a grid, on the picked notes or all");
-        ui.separator();
-        ui.add(
-            crate::widgets::Slider::new(&mut ps.zoom, 20.0..=400.0)
-                .logarithmic(true)
-                .show_value(false)
-                .text("Zoom"),
-        );
-        if ui.small_button("−").on_hover_text("Shorter keys").clicked() {
-            ps.row = (ps.row - 2.0).max(6.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("+").on_hover_text("Taller keys").clicked() {
+                ps.row = (ps.row + 2.0).min(32.0);
+            }
+            if ui.small_button("−").on_hover_text("Shorter keys").clicked() {
+                ps.row = (ps.row - 2.0).max(6.0);
+            }
+            caption(ui, "KEYS");
+            ui.add_space(6.0);
+            ui.add(
+                crate::widgets::Slider::new(&mut ps.zoom, 20.0..=400.0)
+                    .logarithmic(true)
+                    .show_value(false),
+            )
+            .on_hover_text("Time zoom (Ctrl+wheel)");
+            caption(ui, "ZOOM");
+        });
+    });
+    ui.horizontal(|ui| {
+        caption(ui, "CHANNEL");
+        // A dropdown of the 16 MIDI channels, each in its notes' colour.
+        // Picking one sets where new notes go, and moves the picked notes
+        // there: instruments with several parts play each channel with
+        // its own.
+        if let Some(ch) = channel_picker(ui, track_col, ps.channel, &th) {
+            ps.channel = ch;
+            if !ps.sel.is_empty() {
+                let sel = ps.sel.clone();
+                apply(st, ti, ci, &sel, "Set channel", |ns, idx| {
+                    ops::set_channel(ns, idx, ch)
+                });
+            }
         }
-        if ui.small_button("+").on_hover_text("Taller keys").clicked() {
-            ps.row = (ps.row + 2.0).min(32.0);
+        ui.separator();
+        caption(ui, "LANE");
+        ui.selectable_value(&mut ps.lane, Lane::Velocity, "Velocity");
+        ui.selectable_value(&mut ps.lane, Lane::Pan, "Pan");
+        {
+            use af2_core::midi::{ControlEvent, LANE_CONTROLLERS};
+            let used: Vec<u8> = st.session.tracks[ti].midi[ci]
+                .controls
+                .iter()
+                .map(|e| e.controller)
+                .collect();
+            let shown = match ps.lane {
+                Lane::Control(c) => ControlEvent::name(c),
+                _ => "Controller…".to_string(),
+            };
+            let mut list: Vec<u8> = LANE_CONTROLLERS.to_vec();
+            for c in &used {
+                if !list.contains(c) {
+                    list.push(*c);
+                }
+            }
+            egui::ComboBox::from_id_salt("piano-ctl-lane")
+                .selected_text(shown)
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    for c in list {
+                        // A dot marks a controller the clip already uses.
+                        let mark = if used.contains(&c) { " •" } else { "" };
+                        ui.selectable_value(
+                            &mut ps.lane,
+                            Lane::Control(c),
+                            format!("{}{mark}", ControlEvent::name(c)),
+                        );
+                    }
+                });
         }
     });
     if ps.show_tools {
@@ -471,18 +718,81 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         quantize_row(ui, st, ps, ti, ci, bar_beats);
     }
 
+    // A click anywhere in the Piano Roll gives it the keys; one elsewhere
+    // takes them away.
+    if let Some(q) = ui.input(|i| {
+        if i.pointer.any_pressed() {
+            i.pointer.press_origin()
+        } else {
+            None
+        }
+    }) {
+        ps.focused = ui.max_rect().contains(q) && ui.clip_rect().contains(q);
+    }
+    if ps.focused {
+        st.piano_hover = true;
+    }
     let full = ui.available_rect_before_wrap();
     let (rect, resp) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
     if resp.hovered() || resp.dragged() {
         st.piano_hover = true;
     }
     let row_h = ps.row;
+    if !ps.lane_loaded {
+        ps.lane_loaded = true;
+        ps.lane_h = st.prefs.piano_lane_h;
+    }
+    // The lane keeps at least LANE_MIN, and the roll at least 80 points.
+    ps.lane_h = lane_height(ps.lane_h, rect.height());
     let grid_r = Rect::from_min_max(
         pos2(rect.left() + KEYS_W, rect.top()),
-        pos2(rect.right(), rect.bottom() - LANE_H - 4.0),
+        pos2(rect.right() - KBAR_W, rect.bottom() - ps.lane_h - SPLIT_H),
     );
     let keys_r = Rect::from_min_max(rect.min, pos2(grid_r.left(), grid_r.bottom()));
-    let lane_r = Rect::from_min_max(pos2(grid_r.left(), grid_r.bottom() + 4.0), rect.max);
+    let lane_r = Rect::from_min_max(
+        pos2(grid_r.left(), grid_r.bottom() + SPLIT_H),
+        pos2(grid_r.right(), rect.bottom()),
+    );
+    // The keys' zoom bar beside the roll.
+    let kbar_r = Rect::from_min_max(pos2(grid_r.right(), grid_r.top()), pos2(rect.right(), grid_r.bottom()));
+    let kbar = ui.interact(kbar_r, ui.id().with("piano-key-bar"), Sense::click_and_drag());
+    // The bar between them: drag it to make the lane taller or shorter
+    // (double-click: back to the usual height).
+    let split_r = Rect::from_min_max(
+        pos2(rect.left(), grid_r.bottom()),
+        pos2(rect.right(), lane_r.top()),
+    );
+    let split = ui
+        .interact(split_r, ui.id().with("piano-lane-split"), Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    if split.dragged() {
+        ps.lane_h -= split.drag_delta().y;
+    }
+    if split.double_clicked() {
+        ps.lane_h = LANE_H;
+    }
+    // Remembered for next time (the drawn height stays clamped to this
+    // panel; the saved one is what was asked for).
+    if split.drag_stopped() || split.double_clicked() {
+        let h = lane_height(ps.lane_h, f32::INFINITY);
+        if (st.prefs.piano_lane_h - h).abs() > 0.5 {
+            st.prefs.piano_lane_h = h;
+            st.prefs.save();
+        }
+    }
+    {
+        let p = ui.painter();
+        let hot = split.hovered() || split.dragged();
+        p.rect_filled(
+            split_r.shrink2(vec2(0.0, 1.0)),
+            Rounding::ZERO,
+            c(if hot { th.border } else { th.panel }),
+        );
+        let m = split_r.center();
+        for k in -2..=2 {
+            p.circle_filled(pos2(m.x + k as f32 * 5.0, m.y), 1.2, c(th.text_dim));
+        }
+    }
 
     // Scrolling and zoom.
     if let Some(h) = resp.hover_pos() {
@@ -502,14 +812,15 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             let anchor = ps.scroll_x + (px / ps.zoom) as f64;
             ps.zoom = (ps.zoom * 1.2f32.powf(notches)).clamp(20.0, 400.0);
             ps.scroll_x = (anchor - (px / ps.zoom) as f64).max(0.0);
-        } else if alt && (sc.y != 0.0 || sc.x != 0.0) {
-            // Keys taller or shorter, 2 px per notch, keeping the key
-            // under the pointer in place.
+        } else if (alt && (sc.y != 0.0 || sc.x != 0.0))
+            || (keys_r.contains(h) && !shift && sc.y != 0.0)
+        {
+            // Keys taller or shorter (Alt+wheel, or the wheel over the
+            // keyboard, as over the Multitrack's track headers), keeping
+            // the key under the pointer in place.
             let d = if sc.y != 0.0 { sc.y } else { sc.x };
             let py = h.y - grid_r.top();
-            let key = ps.top - py / ps.row;
-            ps.row = (ps.row + 2.0 * d / crate::zoom::NOTCH).clamp(6.0, 32.0);
-            ps.top = (key + py / ps.row).clamp(12.0, 127.0);
+            (ps.top, ps.row) = zoom_keys(ps.top, ps.row, py, d / crate::zoom::NOTCH);
         } else if shift || sc.x != 0.0 {
             let d = if shift { sc.y } else { sc.x };
             ps.scroll_x = (ps.scroll_x - d as f64 / ps.zoom as f64).clamp(0.0, clip_len.max(1.0));
@@ -522,6 +833,8 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ps.scroll_x = (ps.scroll_x - d.x as f64 / ps.zoom as f64).clamp(0.0, clip_len.max(1.0));
         ps.top = (ps.top + d.y / row_h).clamp(12.0, 127.0);
     }
+    key_bar(ui, st, ps, &kbar, kbar_r, grid_r.height(), ti, ci);
+    let row_h = ps.row;
     let (scroll_x, zoom, top) = (ps.scroll_x, ps.zoom, ps.top);
     let x_of = |b: f64| grid_r.left() + ((b - scroll_x) as f32) * zoom;
     let b_of = |x: f32| scroll_x + ((x - grid_r.left()) / zoom) as f64;
@@ -676,11 +989,11 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         if let Some(q) = ui.input(|i| i.pointer.interact_pos()) {
             if keys_r.contains(q) {
                 let pitch = p_of(q.y).clamp(0, 127) as u8;
-                hold(st, ps, ti, pitch, 100, 0.0);
+                hold(st, ps, ti, pitch, 100, 0.0, ps.channel);
             } else if grid_r.contains(q) && ps.tool != Tool::Erase {
                 if let Some((i, _, _)) = hit(q) {
                     let n = notes[i];
-                    hold(st, ps, ti, n.pitch, n.velocity, n.pan);
+                    hold(st, ps, ti, n.pitch, n.velocity, n.pan, n.channel);
                 } else if ps.tool == Tool::Draw && !shift {
                     // Draw: the note appears the moment the button goes
                     // down and sounds while held; moving the pointer moves it.
@@ -692,9 +1005,9 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                     ps.orig = st.session.tracks[ti].midi[ci].notes.clone();
                     let n = ps.orig[i];
                     if let Some(h) = ps.held.take() {
-                        st.audition_off(h);
+                        st.audition_off(h, ps.held_ch);
                     }
-                    hold(st, ps, ti, n.pitch, n.velocity, n.pan);
+                    hold(st, ps, ti, n.pitch, n.velocity, n.pan, n.channel);
                     ps.held_until = 0.0;
                     ps.drag = Some(NoteDrag::Move {
                         grabbed: i,
@@ -712,7 +1025,14 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ps.before = Some(st.session.clone());
         ps.drag = Some(NoteDrag::Erase);
     } else if resp.drag_started_by(PointerButton::Primary) && !ps.press_new {
-        if let Some(q) = resp.interact_pointer_pos() {
+        // Where the button went down decides what the drag does: by the
+        // time a drag is reported the pointer has moved a few pixels, off
+        // a short note's edge or the note itself.
+        if let Some(q) = ui
+            .input(|i| i.pointer.press_origin())
+            .filter(|q| resp.rect.contains(*q))
+            .or(resp.interact_pointer_pos())
+        {
             ps.before = Some(st.session.clone());
             ps.drag = if lane_r.contains(q) {
                 Some(match ps.lane {
@@ -729,12 +1049,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                 match (ps.tool, hit(q)) {
                     (Tool::Erase, _) => Some(NoteDrag::Erase),
                     (_, Some((i, left, right))) => {
-                        if !ps.sel.contains(&i) {
-                            if !shift {
-                                ps.sel.clear();
-                            }
-                            ps.sel.push(i);
-                        }
+                        pick_for_drag(&mut ps.sel, i, shift);
                         ps.orig = notes.clone();
                         Some(if left {
                             NoteDrag::ResizeStart {
@@ -773,7 +1088,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         ps.sel = vec![i];
                         ps.orig = st.session.tracks[ti].midi[ci].notes.clone();
                         let n = ps.orig[i];
-                        hold(st, ps, ti, n.pitch, n.velocity, n.pan);
+                        hold(st, ps, ti, n.pitch, n.velocity, n.pan, n.channel);
                         Some(NoteDrag::Move {
                             grabbed: i,
                             grab_beats: n.start,
@@ -821,9 +1136,9 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         if now.is_some() && now != ps.held {
                             let n = ns[grabbed];
                             if let Some(h) = ps.held {
-                                st.audition_off(h);
+                                st.audition_off(h, ps.held_ch);
                             }
-                            hold(st, ps, ti, n.pitch, n.velocity, n.pan);
+                            hold(st, ps, ti, n.pitch, n.velocity, n.pan, n.channel);
                         }
                     }
                 }
@@ -972,7 +1287,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                             ps.sel = vec![i];
                             let n = st.session.tracks[ti].midi[ci].notes[i];
                             if ps.held.is_none() {
-                                hold(st, ps, ti, n.pitch, n.velocity, n.pan);
+                                hold(st, ps, ti, n.pitch, n.velocity, n.pan, n.channel);
                                 ps.held_until = ui.input(|i| i.time) + 0.3;
                                 ui.ctx()
                                     .request_repaint_after(std::time::Duration::from_millis(320));
@@ -1002,7 +1317,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     let now = ui.input(|i| i.time);
     if released && ps.held.is_some() && now >= ps.held_until {
         if let Some(h) = ps.held.take() {
-            st.audition_off(h);
+            st.audition_off(h, ps.held_ch);
         }
     }
 
@@ -1013,7 +1328,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         if r.right() < grid_r.left() || r.left() > grid_r.right() {
             continue;
         }
-        let col = channel_color(n.channel);
+        let col = note_color(track_col, n.channel);
         let a = (90.0 + n.velocity as f32 * 1.3).min(255.0) as u8;
         let picked = ps.sel.contains(&i);
         gp.rect_filled(
@@ -1030,6 +1345,15 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                 Stroke::new(1.0_f32, Color32::from_black_alpha(120))
             },
         );
+        // The velocity, as a bar along the note's foot.
+        if r.height() >= 8.0 && r.width() > 6.0 {
+            let w = (r.width() - 4.0) * n.velocity as f32 / 127.0;
+            let foot = Rect::from_min_size(
+                pos2(r.left() + 2.0, r.bottom() - 3.5),
+                vec2(w.max(1.0), 2.0),
+            );
+            gp.rect_filled(foot, Rounding::same(1.0), Color32::from_black_alpha(110));
+        }
         if r.width() > 26.0 && row_h >= 9.0 {
             gp.text(
                 r.left_center() + vec2(3.0, 0.0),
@@ -1069,7 +1393,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         match ps.lane {
             Lane::Velocity => "Velocity".to_string(),
             Lane::Pan => "Pan".to_string(),
-            Lane::Control(c) => af27_core::midi::ControlEvent::name(c),
+            Lane::Control(c) => af2_core::midi::ControlEvent::name(c),
         },
         FontId::proportional(9.0),
         c(th.text_dim),
@@ -1084,7 +1408,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     }
     if let Lane::Control(controller) = ps.lane {
         // Stepped: each move holds until the next.
-        let mut moves: Vec<af27_core::midi::ControlEvent> = st.session.tracks[ti].midi[ci]
+        let mut moves: Vec<af2_core::midi::ControlEvent> = st.session.tracks[ti].midi[ci]
             .controls
             .iter()
             .filter(|e| e.controller == controller)
@@ -1095,7 +1419,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         for (k, e) in moves.iter().enumerate() {
             let x0 = x_of(e.at);
             let x1 = moves.get(k + 1).map_or(x_of(clip_len), |n| x_of(n.at));
-            let col = channel_color(e.channel);
+            let col = note_color(track_col, e.channel);
             let y = y_of_v(e.value);
             lp.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.5_f32, col));
             if let Some(n) = moves.get(k + 1) {
@@ -1117,7 +1441,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             lp.text(
                 lane_r.right_top() + vec2(-4.0, 2.0),
                 Align2::RIGHT_TOP,
-                af27_core::midi::ControlEvent::value_text(controller, e.value),
+                af2_core::midi::ControlEvent::value_text(controller, e.value),
                 FontId::proportional(9.0),
                 c(th.text_dim),
             );
@@ -1142,7 +1466,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         let col = if ps.sel.contains(&i) {
             Color32::WHITE
         } else {
-            channel_color(n.channel)
+            note_color(track_col, n.channel)
         };
         lp.line_segment([pos2(x, base), pos2(x, y)], Stroke::new(2.0_f32, col));
         lp.circle_filled(pos2(x, y), 3.0, col);
@@ -1170,6 +1494,122 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         FontId::proportional(9.0),
         c(th.text_dim),
     );
+}
+
+/// The keys' zoom bar at the roll's right edge (`bar`, beside a roll
+/// `h` points tall): its thumb is the keys in view. Drag the middle to
+/// scroll, an end to zoom (the other end stays), click off the thumb to
+/// jump there, double-click to fit the clip's notes; the wheel scrolls.
+#[allow(clippy::too_many_arguments)]
+fn key_bar(
+    ui: &egui::Ui,
+    st: &State,
+    ps: &mut PianoState,
+    resp: &egui::Response,
+    bar: Rect,
+    h: f32,
+    ti: usize,
+    ci: usize,
+) {
+    let th = &st.theme;
+    let bh = bar.height().max(1.0);
+    let y_of = |k: f32| bar.top() + (128.0 - k) / 128.0 * bh;
+    let k_of = |y: f32| 128.0 - (y - bar.top()) / bh * 128.0;
+    if resp.hovered() {
+        let sc = ui.input(|i| i.smooth_scroll_delta.y);
+        if sc != 0.0 {
+            ps.top = (ps.top + sc / ps.row).clamp(12.0, 127.0);
+        }
+    }
+    if resp.double_clicked() {
+        let notes = &st.session.tracks[ti].midi[ci].notes;
+        if notes.is_empty() {
+            ps.row = 12.0;
+        } else {
+            let lo = notes.iter().map(|n| n.pitch).min().unwrap_or(60) as f32 - 2.0;
+            let hi = notes.iter().map(|n| n.pitch).max().unwrap_or(60) as f32 + 3.0;
+            (ps.top, ps.row) = fit_keys(lo, hi, h);
+        }
+        ps.key_grab = None;
+        return;
+    }
+    let (lo, hi) = keys_in_view(ps.top, ps.row, h);
+    let (t, b) = (y_of(hi.min(128.0)), y_of(lo.max(0.0)));
+    if resp.drag_started() {
+        // Where the press began: a drag is only seen once the pointer has
+        // moved, by then maybe off a narrow end.
+        if let Some(p) = ui
+            .input(|i| i.pointer.press_origin())
+            .or(resp.interact_pointer_pos())
+        {
+            let grip = ((b - t) * 0.2).clamp(4.0, 10.0);
+            let grab = if (p.y - t).abs() < grip {
+                KeyGrab::Top
+            } else if (p.y - b).abs() < grip {
+                KeyGrab::Bottom
+            } else {
+                if p.y < t || p.y > b {
+                    // Off the thumb: centre it there, then drag it.
+                    let half = (hi - lo) / 2.0;
+                    ps.top = (k_of(p.y) + half - 1.0).clamp(12.0, 127.0);
+                }
+                KeyGrab::Body
+            };
+            let (lo, hi) = keys_in_view(ps.top, ps.row, h);
+            ps.key_grab = Some((grab, lo, hi, p.y));
+        }
+    } else if resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos().filter(|p| p.y < t || p.y > b) {
+            let half = (hi - lo) / 2.0;
+            ps.top = (k_of(p.y) + half - 1.0).clamp(12.0, 127.0);
+        }
+    }
+    if let (Some((grab, lo0, hi0, y0)), Some(p)) = (ps.key_grab, resp.interact_pointer_pos()) {
+        if resp.dragged() {
+            let dk = (y0 - p.y) / bh * 128.0;
+            (ps.top, ps.row) = drag_key_bar(grab, lo0, hi0, dk, h);
+        }
+    }
+    if resp.drag_stopped() {
+        ps.key_grab = None;
+    }
+    // Drawn with the keys as they now are.
+    let (lo, hi) = keys_in_view(ps.top, ps.row, h);
+    let thumb = Rect::from_min_max(
+        pos2(bar.left() + 2.0, y_of(hi.min(128.0))),
+        pos2(bar.right() - 2.0, y_of(lo.max(0.0)).max(y_of(hi.min(128.0)) + 8.0)),
+    );
+    let hot = resp.hovered() || resp.dragged();
+    let p = ui.painter_at(bar);
+    p.rect_filled(bar, Rounding::ZERO, c(th.panel));
+    // Each C as a tick, so the bar reads as the keyboard.
+    for oct in 0..=10 {
+        let y = y_of(oct as f32 * 12.0);
+        p.line_segment([pos2(bar.left() + 3.0, y), pos2(bar.right() - 3.0, y)], Stroke::new(1.0_f32, ca(th.border, 160)));
+    }
+    p.rect_filled(thumb, Rounding::same(3.0), ca(th.accent, if hot { 150 } else { 95 }));
+    // Grips at the ends: drag them to zoom.
+    for y in [thumb.top() + 3.0, thumb.bottom() - 3.0] {
+        p.line_segment(
+            [pos2(thumb.left() + 2.0, y), pos2(thumb.right() - 2.0, y)],
+            Stroke::new(1.5_f32, ca(th.text, if hot { 230 } else { 150 })),
+        );
+    }
+    if hot {
+        let near_end = resp.hover_pos().is_some_and(|q| {
+            let grip = (thumb.height() * 0.2).clamp(4.0, 10.0);
+            (q.y - thumb.top()).abs() < grip || (q.y - thumb.bottom()).abs() < grip
+        });
+        let held_end = matches!(ps.key_grab, Some((KeyGrab::Top | KeyGrab::Bottom, ..)));
+        if near_end || held_end {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+    }
+    if !resp.dragged() {
+        let _ = resp.clone().on_hover_text(
+            "The keys in view: drag the middle to scroll, an end to zoom; double-click to fit the notes",
+        );
+    }
 }
 
 /// Adds a note at `start` (beats in the clip) and `pitch`; returns its index.
@@ -1224,6 +1664,20 @@ fn run_cmd(st: &mut State, ps: &mut PianoState, ti: usize, ci: usize, cmd: Piano
                 ops::remove(ns, idx)
             });
         }
+        PianoCmd::Duplicate => {
+            if ps.sel.is_empty() {
+                return;
+            }
+            let notes = &st.session.tracks[ti].midi[ci].notes;
+            let picked = || ps.sel.iter().filter_map(|&i| notes.get(i));
+            let first = picked().map(|n| n.start).fold(f64::MAX, f64::min);
+            let last_end = picked().map(|n| n.start + n.length).fold(f64::MIN, f64::max);
+            let copied = ops::copy(notes, &ps.sel);
+            let clip_start = st.session.tracks[ti].midi[ci].start;
+            let bar_beats = st.session.tempo.seg_at_beat(clip_start).bar_beats();
+            let at = duplicate_at(first, last_end, ps.grid.beats(bar_beats));
+            paste_notes(st, ps, ti, ci, &copied, at, "Duplicate notes");
+        }
         PianoCmd::Paste => {
             if ps.clipboard.is_empty() {
                 return;
@@ -1234,10 +1688,28 @@ fn run_cmd(st: &mut State, ps: &mut PianoState, ti: usize, ci: usize, cmd: Piano
             } else {
                 ps.click_at
             };
-            let before = st.session.clone();
             let copied = ps.clipboard.clone();
+            paste_notes(st, ps, ti, ci, &copied, at, "Paste notes");
+        }
+    }
+}
+
+/// Adds `copied` at `at` (beats into the clip) as one undo step, picks
+/// them, and grows the clip to the next bar line when they run past it.
+fn paste_notes(
+    st: &mut State,
+    ps: &mut PianoState,
+    ti: usize,
+    ci: usize,
+    copied: &[MidiNote],
+    at: f64,
+    what: &str,
+) {
+    {
+            let clip_len = st.session.tracks[ti].midi[ci].length;
+            let before = st.session.clone();
             let clip_start = st.session.tracks[ti].midi[ci].start;
-            let new = ops::paste(&mut st.session.tracks[ti].midi[ci].notes, &copied, at);
+            let new = ops::paste(&mut st.session.tracks[ti].midi[ci].notes, copied, at);
             // Pasted past the end: the clip grows to the next bar line.
             let end = st.session.tracks[ti].midi[ci]
                 .notes
@@ -1261,8 +1733,7 @@ fn run_cmd(st: &mut State, ps: &mut PianoState, ti: usize, ci: usize, cmd: Piano
                     .iter()
                     .map(|n| n.start + n.length)
                     .fold(0.0, f64::max);
-            st.commit_session("Paste notes", before);
-        }
+            st.commit_session(what, before);
     }
 }
 
@@ -1441,7 +1912,7 @@ fn quantize_row(
 }
 
 /// Puts a new 4-bar MIDI clip on `track` at `beats` and opens it.
-pub fn new_clip(st: &mut State, track: af27_core::TrackId, beats: f64) {
+pub fn new_clip(st: &mut State, track: af2_core::TrackId, beats: f64) {
     let before = st.session.clone();
     let id = st.session.alloc_id();
     let start = beats.max(0.0);
@@ -1456,7 +1927,7 @@ pub fn new_clip(st: &mut State, track: af27_core::TrackId, beats: f64) {
         .sum::<usize>()
         + 1;
     if let Some(t) = st.session.track_mut(track) {
-        t.midi.push(af27_core::midi::MidiClip {
+        t.midi.push(af2_core::midi::MidiClip {
             id,
             name: format!("MIDI {n}"),
             start,
@@ -1479,7 +1950,88 @@ pub fn new_clip(st: &mut State, track: af27_core::TrackId, beats: f64) {
 
 #[cfg(test)]
 mod control_lane_tests {
-    use super::{paint_control, shape_control};
+    use super::{lane_height, paint_control, shape_control, LANE_H, LANE_MAX, LANE_MIN, SPLIT_H};
+
+    #[test]
+    fn dragging_a_picked_note_drags_every_picked_note() {
+        use super::pick_for_drag;
+        use af2_core::noteops::move_from;
+        let note = |start, pitch| af2_core::midi::MidiNote {
+            start,
+            length: 1.0,
+            pitch,
+            velocity: 100,
+            channel: 3,
+            pan: 0.0,
+        };
+        let orig = vec![note(0.0, 60), note(1.0, 64), note(2.0, 67)];
+        // Grabbing a picked note keeps the whole pick.
+        let mut sel = vec![0, 2];
+        pick_for_drag(&mut sel, 2, false);
+        assert_eq!(sel, vec![0, 2]);
+        let mut ns = orig.clone();
+        move_from(&mut ns, &orig, &sel, 1.5, -2);
+        assert_eq!(
+            ns.iter().map(|n| (n.start, n.pitch, n.channel)).collect::<Vec<_>>(),
+            vec![(1.5, 58, 3), (1.0, 64, 3), (3.5, 65, 3)]
+        );
+        // An unpicked one: alone, or added with Shift.
+        pick_for_drag(&mut sel, 1, false);
+        assert_eq!(sel, vec![1]);
+        pick_for_drag(&mut sel, 0, true);
+        assert_eq!(sel, vec![1, 0]);
+    }
+
+    #[test]
+    fn duplicate_lands_right_after_the_pick_on_the_grid() {
+        use super::duplicate_at;
+        // Notes 0..1.5 beats on a quarter grid: the copy starts at 2.
+        assert_eq!(duplicate_at(0.0, 1.5, 1.0), 2.0);
+        // Exactly a bar long: the next bar.
+        assert_eq!(duplicate_at(4.0, 8.0, 1.0), 8.0);
+        // Shorter than a step: one step on.
+        assert_eq!(duplicate_at(2.0, 2.25, 1.0), 3.0);
+        // No grid: straight after.
+        assert_eq!(duplicate_at(1.0, 1.75, 0.0), 1.75);
+    }
+
+    #[test]
+    fn the_lane_height_stays_within_its_limits() {
+        // A roomy panel: what was dragged to, within LANE_MIN..LANE_MAX.
+        assert_eq!(lane_height(200.0, 900.0), 200.0);
+        assert_eq!(lane_height(5.0, 900.0), LANE_MIN);
+        assert_eq!(lane_height(5000.0, 2000.0), LANE_MAX);
+        // The roll above keeps 80 points.
+        assert_eq!(lane_height(400.0, 300.0), 300.0 - SPLIT_H - 80.0);
+        // A tiny panel still shows the lane's minimum; junk falls back.
+        assert_eq!(lane_height(200.0, 50.0), LANE_MIN);
+        assert_eq!(lane_height(f32::NAN, 900.0), LANE_H);
+        // What gets saved: the clamp without a panel.
+        assert_eq!(lane_height(250.0, f32::INFINITY), 250.0);
+    }
+
+    #[test]
+    fn the_lane_height_and_velocity_curve_are_saved_with_the_prefs() {
+        let mut p = crate::settings::Prefs::default();
+        assert_eq!(p.piano_lane_h, LANE_H);
+        use af2_core::midi_live::VelocityMap;
+        p.piano_lane_h = 260.0;
+        p.midi_velocity_map = VelocityMap::preset("S-curve").unwrap();
+        let back: crate::settings::Prefs =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.piano_lane_h, 260.0);
+        assert_eq!(back.midi_velocity_map, p.midi_velocity_map);
+        // Older prefs files without them get the defaults.
+        let old: crate::settings::Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.piano_lane_h, LANE_H);
+        assert_eq!(old.midi_velocity_map, VelocityMap::linear());
+        // A file from before the map: its single curve becomes the map.
+        let mut older: crate::settings::Prefs =
+            serde_json::from_str(r#"{"midi_velocity_curve":0.6}"#).unwrap();
+        older.carry_old_velocity_curve();
+        assert_eq!(older.midi_velocity_map, VelocityMap::preset("Soft").unwrap());
+        assert_eq!(older.midi_velocity_curve, 0.0);
+    }
 
     #[test]
     fn controller_values_keep_their_steps() {
@@ -1512,10 +2064,161 @@ mod control_lane_tests {
 
 /// Sounds `pitch` as the held note, stopping whatever was held before (a
 /// note left sounding by a missed release would otherwise stay on).
-fn hold(st: &mut State, ps: &mut PianoState, ti: usize, pitch: u8, velocity: u8, pan: f32) {
+fn hold(
+    st: &mut State,
+    ps: &mut PianoState,
+    ti: usize,
+    pitch: u8,
+    velocity: u8,
+    pan: f32,
+    channel: u8,
+) {
     if let Some(h) = ps.held.take() {
-        st.audition_off(h);
+        st.audition_off(h, ps.held_ch);
     }
-    st.audition_on(ti, pitch, velocity, pan);
+    st.audition_on(ti, pitch, velocity, pan, channel);
     ps.held = Some(pitch);
+    ps.held_ch = channel;
+}
+
+#[cfg(test)]
+mod key_zoom_tests {
+    use super::*;
+    use egui::{Event, PointerButton};
+
+    #[test]
+    fn wheel_zoom_keeps_the_key_under_the_pointer() {
+        let (top, row) = zoom_keys(84.0, 12.0, 120.0, 1.0);
+        assert!(row > 12.0 && row <= ROW_MAX);
+        // The key 120 points down stays 120 points down.
+        assert!(((84.0 - 120.0 / 12.0) - (top - 120.0 / row)).abs() < 1e-4);
+        // Limits hold.
+        assert_eq!(zoom_keys(84.0, 30.0, 0.0, 10.0).1, ROW_MAX);
+        assert_eq!(zoom_keys(84.0, 7.0, 0.0, -10.0).1, ROW_MIN);
+    }
+
+    #[test]
+    fn the_key_bar_scrolls_from_its_middle_and_zooms_from_its_ends() {
+        let h = 480.0;
+        let (lo, hi) = keys_in_view(84.0, 12.0, h);
+        assert_eq!((lo, hi), (45.0, 85.0));
+        // Middle up 10 keys: scrolls, same height.
+        assert_eq!(drag_key_bar(KeyGrab::Body, lo, hi, 10.0, h), (94.0, 12.0));
+        // Top end up 20 keys: 60 keys in view, the bottom stays.
+        let (top, row) = drag_key_bar(KeyGrab::Top, lo, hi, 20.0, h);
+        assert_eq!(row, 8.0);
+        assert_eq!(keys_in_view(top, row, h), (45.0, 105.0));
+        // Bottom end up 20 keys: 20 keys in view, the top stays.
+        let (top, row) = drag_key_bar(KeyGrab::Bottom, lo, hi, 20.0, h);
+        assert_eq!((top, row), (84.0, 24.0));
+        // Never past the key height limits.
+        assert_eq!(drag_key_bar(KeyGrab::Bottom, lo, hi, 39.0, h).1, ROW_MAX);
+        assert_eq!(drag_key_bar(KeyGrab::Top, lo, hi, 500.0, h).1, ROW_MIN);
+        // Fitting: the notes' span, centred.
+        let (top, row) = fit_keys(48.0, 72.0, h);
+        assert_eq!(row, 20.0);
+        assert_eq!(keys_in_view(top, row, h), (48.0, 72.0));
+    }
+
+    fn piano_state() -> (State, PianoState) {
+        let mut st = State::new();
+        let t = st.add_track_kind(af2_core::TrackKind::Midi);
+        new_clip(&mut st, t, 0.0);
+        let ps = PianoState { rng: ops::Rng::new(1), ..PianoState::default() };
+        (st, ps)
+    }
+
+    fn run(ctx: &egui::Context, events: Vec<Event>, f: &mut dyn FnMut(&mut egui::Ui)) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| f(ui));
+        });
+    }
+
+    #[test]
+    fn the_wheel_over_the_keys_makes_them_taller() {
+        let (mut st, mut ps) = piano_state();
+        let ctx = egui::Context::default();
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        let row0 = ps.row;
+        let top0 = ps.top;
+        let at = pos2(20.0, 300.0);
+        run(&ctx, vec![Event::PointerMoved(at)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(
+            &ctx,
+            vec![Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: vec2(0.0, 2.0),
+                modifiers: Default::default(),
+            }],
+            &mut |ui| panel(ui, &mut st, &mut ps),
+        );
+        for _ in 0..30 {
+            run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        }
+        assert!(ps.row > row0, "taller keys: {} -> {}", row0, ps.row);
+        assert_ne!(ps.top, top0, "around the pointer, not the top");
+        // Over the roll itself the wheel still scrolls.
+        let (row1, top1) = (ps.row, ps.top);
+        run(&ctx, vec![Event::PointerMoved(pos2(600.0, 300.0))], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(
+            &ctx,
+            vec![Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: vec2(0.0, -2.0),
+                modifiers: Default::default(),
+            }],
+            &mut |ui| panel(ui, &mut st, &mut ps),
+        );
+        for _ in 0..30 {
+            run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        }
+        assert_eq!(ps.row, row1);
+        assert!(ps.top < top1);
+    }
+
+    #[test]
+    fn the_channel_dropdown_lists_every_channel_and_picks_one() {
+        let ctx = egui::Context::default();
+        let th = crate::theme::Theme::default();
+        let mut picked = None;
+        let mut popup = egui::Id::NULL;
+        let show = |events, current: u8, picked: &mut Option<u8>, popup: &mut egui::Id| {
+            run(&ctx, events, &mut |ui| {
+                *popup = channel_popup_id(ui);
+                if let Some(ch) = channel_picker(ui, Color32::RED, current, &th) {
+                    *picked = Some(ch);
+                }
+            });
+        };
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        show(vec![], 2, &mut picked, &mut popup);
+        let button = pos2(30.0, 10.0);
+        show(vec![Event::PointerMoved(button), press(button, true)], 2, &mut picked, &mut popup);
+        show(vec![press(button, false)], 2, &mut picked, &mut popup);
+        show(vec![], 2, &mut picked, &mut popup);
+        assert!(ctx.memory(|m| m.is_popup_open(popup)), "the list opens");
+        // Below the button: 16 rows of 20 points, a point apart.
+        let area = ctx.memory(|m| m.area_rect(popup)).expect("the list is shown");
+        assert!(area.top() >= 19.0);
+        assert!(area.height() >= 16.0 * 20.0);
+        let margin = egui::Frame::popup(&ctx.style()).total_margin();
+        let row9 = pos2(area.left() + margin.left + 60.0, area.top() + margin.top + 9.0 * 21.0 + 10.0);
+        show(vec![Event::PointerMoved(row9), press(row9, true)], 2, &mut picked, &mut popup);
+        show(vec![press(row9, false)], 2, &mut picked, &mut popup);
+        assert_eq!(picked, Some(9), "channel 10 picked");
+        show(vec![], 9, &mut picked, &mut popup);
+        assert!(!ctx.memory(|m| m.is_popup_open(popup)), "and the list closes");
+    }
 }

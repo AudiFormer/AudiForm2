@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Workspaces: ready-made arrangements of the dockable panels.
 //!
-//! The Default follows the arrangement long-time users of the leading
-//! commercial editor and of Audiform expect: a left column running the
-//! full height (Files, then the effect rack, then History), the Editor in
-//! the centre with the Mixer behind it, a right column of analysis panels,
-//! and the Levels meter along the bottom under the centre and right with
-//! the selection and view times at its right end. The others rearrange the
-//! same panels for a job. Every workspace can be changed by dragging; the
+//! Music is the one the app starts with (there is no separate Default): a
+//! left column running the full height (Files, then the effect rack, then
+//! History), the Editor in the centre with the Mixer and Piano Roll behind
+//! it, a right column of analysis panels, and the Levels meter along the
+//! bottom with the selection and view times at its right end. The others
+//! rearrange the same panels for a job. Every workspace can be changed by dragging; the
 //! changes are kept until Window > Workspace > Reset.
 
 use egui_dock::{DockState, NodeIndex};
@@ -18,7 +17,6 @@ use crate::ui::Tab;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
-    Default,
     Music,
     Mixing,
     FocusedEdit,
@@ -27,8 +25,7 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 6] = [
-        Workspace::Default,
+    pub const ALL: [Workspace; 5] = [
         Workspace::Music,
         Workspace::Mixing,
         Workspace::FocusedEdit,
@@ -38,7 +35,6 @@ impl Workspace {
 
     pub fn name(self) -> &'static str {
         match self {
-            Workspace::Default => "Default",
             Workspace::Music => "Music",
             Workspace::Mixing => "Mixing",
             Workspace::FocusedEdit => "Focused Edit",
@@ -49,8 +45,7 @@ impl Workspace {
 
     pub fn about(self) -> &'static str {
         match self {
-            Workspace::Default => "Files, effect rack and History on the left; Editor and Mixer in the middle; analysis on the right; Levels and the selection times along the bottom",
-            Workspace::Music => "Tracks in the middle; effects and History on the left; Phase Wheel, Visualizer and Spectrum together on the right, with 3D Space and AI Stems each in their own panel below",
+            Workspace::Music => "Editor, Mixer and Piano Roll in the middle; files, effects and History on the left; Phase Wheel, Visualizer and Spectrum together on the right, with 3D Space and AI Stems below; Levels along the bottom",
             Workspace::Mixing => "The Mixer up front with tall meters; files and markers on the left; the track Inspector on the right",
             Workspace::FocusedEdit => "As much room as possible for the timeline: files on the left, levels below",
             Workspace::Mastering => "Loudness statistics, spectrum and Phase Wheel on the right; the effect rack on the left",
@@ -61,7 +56,6 @@ impl Workspace {
     /// For the saved setting.
     pub fn key(self) -> &'static str {
         match self {
-            Workspace::Default => "default",
             Workspace::Music => "music",
             Workspace::Mixing => "mixing",
             Workspace::FocusedEdit => "focused-edit",
@@ -74,16 +68,19 @@ impl Workspace {
     /// saved from the old one is set aside for the new.
     pub fn version(self) -> u32 {
         match self {
-            Workspace::Music => 4,
+            // 5: the Piano Roll sits with the Editor and Mixer.
+            Workspace::Music => 5,
             _ => 3,
         }
     }
 
+    /// The saved setting's workspace; the old "default" (and anything
+    /// unknown) is Music now.
     pub fn from_key(k: &str) -> Workspace {
         Workspace::ALL
             .into_iter()
             .find(|w| w.key() == k.trim())
-            .unwrap_or(Workspace::Default)
+            .unwrap_or(Workspace::Music)
     }
 
     /// The arrangement, built as the window is: the left column first so
@@ -95,7 +92,7 @@ impl Workspace {
             // The project lead's arrangement: files, effects and history
             // down the left; the scopes, then 3D Space and AI Stems down the
             // right; Levels and Range along the bottom.
-            Workspace::Default | Workspace::Music => {
+            Workspace::Music => {
                 let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.215, vec![Files, Markers]);
@@ -167,7 +164,8 @@ mod tests {
             assert!(d.find_tab(&Tab::Levels).is_some(), "{}", w.name());
             assert_eq!(Workspace::from_key(w.key()), w);
         }
-        assert_eq!(Workspace::from_key("nope"), Workspace::Default);
+        assert_eq!(Workspace::from_key("nope"), Workspace::Music);
+        assert_eq!(Workspace::from_key("default"), Workspace::Music);
     }
 
     #[test]
@@ -190,8 +188,11 @@ mod tests {
     }
 
     #[test]
-    fn the_default_shows_every_main_panel() {
-        let d = Workspace::Default.build();
+    fn music_shows_every_main_panel_and_the_piano_roll_beside_the_editor() {
+        let d = Workspace::Music.build();
+        let node = |t: Tab| d.find_tab(&t).map(|(s, n, _)| (s, n)).unwrap();
+        assert_eq!(node(Tab::PianoRoll), node(Tab::Editor));
+        assert_eq!(node(Tab::Mixer), node(Tab::Editor));
         for t in [
             Tab::Files,
             Tab::Markers,

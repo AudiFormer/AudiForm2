@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Multitrack tools for spoken word, under Multitrack > Spoken Word:
 //!
@@ -17,9 +17,9 @@
 
 use std::sync::Arc;
 
-use af27_core::automation::{Lane, LanePoint, LaneTarget};
-use af27_core::{AudioBuffer, MediaId, Session, Track, TrackId, TrackKind};
-use af27_dsp::loudness::LiveLoudness;
+use af2_core::automation::{Lane, LanePoint, LaneTarget};
+use af2_core::{AudioBuffer, MediaId, Session, Track, TrackId, TrackKind};
+use af2_dsp::loudness::LiveLoudness;
 use egui::RichText;
 
 use crate::state::State;
@@ -227,7 +227,7 @@ pub fn write_duck(track: &mut Track, dip: &[(f64, f64)], from: f64, to: f64) {
     };
     let lane = &mut track.lanes[idx];
     let had: Vec<LanePoint> = lane.points.clone();
-    let base = |t: f64| af27_core::automation::value_at(&had, t).unwrap_or(0.0);
+    let base = |t: f64| af2_core::automation::value_at(&had, t).unwrap_or(0.0);
     let mut times: Vec<f64> = dip.iter().map(|p| p.0).collect();
     times.extend(had.iter().map(|p| p.time).filter(|t| (from..=to).contains(t)));
     times.push(from);
@@ -238,7 +238,7 @@ pub fn write_duck(track: &mut Track, dip: &[(f64, f64)], from: f64, to: f64) {
         .into_iter()
         .map(|t| LanePoint {
             time: t,
-            value: (base(t) + curve_at(dip, t)).max(af27_core::automation::SILENT_DB - 0.1),
+            value: (base(t) + curve_at(dip, t)).max(af2_core::automation::SILENT_DB - 0.1),
             curve: Default::default(),
         })
         .collect();
@@ -303,7 +303,7 @@ pub fn strip_silence(
     set: &StripSettings,
 ) -> usize {
     let rate = session.rate;
-    let rule = af27_dsp::repair::SilenceRule {
+    let rule = af2_dsp::repair::SilenceRule {
         quiet_db: set.quiet_db,
         min_quiet: (set.min_quiet / WIN).round().max(1.0) as usize,
         sound_db: set.sound_db,
@@ -318,7 +318,7 @@ pub fn strip_silence(
             let mut one = track.clone();
             one.clips = vec![clip.clone()];
             let lv = dry_levels(&one, media, rate, clip.start, clip.end());
-            let gaps = af27_dsp::repair::find_silences(&lv, rule);
+            let gaps = af2_dsp::repair::find_silences(&lv, rule);
             // Right to left, so the clip keeps its id on the left.
             for g in gaps.iter().rev() {
                 let a = clip.start + g.start as f64 * WIN;
@@ -445,7 +445,7 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
             ui.label(RichText::new(format!(
                 "Over {} ({}).",
                 if st.session_sel.is_some_and(|(x, y)| y - x > 1e-3) { "the time selection" } else { "the whole session" },
-                af27_core::time::format_time(b - a)
+                af2_core::time::format_time(b - a)
             )).size(10.0).color(c(th.text_dim)));
             if ui.add_enabled(!d.voices.is_empty() && !d.ducked.is_empty(), egui::Button::new("Duck")).clicked() {
                 run = true;
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn dry_levels_follow_the_clips() {
         let mut t = Session::new("t", 48_000, 1).tracks[0].clone();
-        t.clips.push(af27_core::Clip {
+        t.clips.push(af2_core::Clip {
             props: Default::default(),
             id: 1,
             media: 7,
@@ -719,7 +719,7 @@ mod tests {
         v.extend(vec![0.3; 48_000]);
         let buf = Arc::new(AudioBuffer { rate: 48_000, channels: vec![v] });
         let tid = s.tracks[0].id;
-        s.tracks[0].clips.push(af27_core::Clip {
+        s.tracks[0].clips.push(af2_core::Clip {
             props: Default::default(),
             id: 900,
             media: 7,

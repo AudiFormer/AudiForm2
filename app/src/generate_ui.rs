@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Effects > Generate > Noise and Tones: AudiForm 2's own generator
 //! windows, drawn from the theme (vertical faders, dials and value boxes;
@@ -23,8 +23,8 @@ use std::path::PathBuf;
 use egui::{pos2, vec2, Align2, FontId, Pos2, RichText, Sense, Stroke};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use af27_core::AudioBuffer;
-use af27_dsp::generate as gen;
+use af2_core::AudioBuffer;
+use af2_dsp::generate as gen;
 
 use crate::fx_windows::layout;
 use crate::graph::{self, Plot};
@@ -543,7 +543,7 @@ fn channel_names(n: usize) -> Vec<String> {
     match n {
         1 => vec!["Mono".into()],
         2 => vec!["L".into(), "R".into()],
-        _ => af27_dsp::wide::labels(n),
+        _ => af2_dsp::wide::labels(n),
     }
 }
 
@@ -552,7 +552,7 @@ fn channel_names(n: usize) -> Vec<String> {
 fn preview(st: &mut State, buf: AudioBuffer) {
     let len = buf.duration_secs();
     if let Some(eng) = &mut st.engine {
-        eng.set_program(af27_engine::buffer_program(std::sync::Arc::new(buf)));
+        eng.set_program(af2_engine::buffer_program(std::sync::Arc::new(buf)));
         eng.play(0.0, None, false, len);
     }
     st.session_version += 1;
@@ -579,8 +579,8 @@ pub fn place_generated(
         st.current = Some(id);
     }
     let Some(d) = st.doc_mut() else { return };
-    let mut g = af27_dsp::resample::remix(
-        &af27_dsp::resample::resample(&buf, d.buf.rate),
+    let mut g = af2_dsp::resample::remix(
+        &af2_dsp::resample::resample(&buf, d.buf.rate),
         d.buf.num_channels(),
     );
     let rate = d.buf.rate as f64;

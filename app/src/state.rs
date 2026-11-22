@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Everything the app knows that is not drawing: open files, the
 //! multitrack session, undo histories, the transport and background jobs.
@@ -11,10 +11,10 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use af27_core::session::{Marker, MediaItem};
-use af27_core::{AudioBuffer, History, MediaId, Range, Session};
-use af27_dsp::{Effect, Peaks};
-use af27_engine::Engine;
+use af2_core::session::{Marker, MediaItem};
+use af2_core::{AudioBuffer, History, MediaId, Range, Session};
+use af2_dsp::{Effect, Peaks};
+use af2_engine::Engine;
 
 use crate::theme::Theme;
 
@@ -74,12 +74,16 @@ pub struct Doc {
     /// The spectral selection (time x frequency shapes).
     pub spec_sel: crate::spectral_select::SpecSel,
     /// Tags and the markers/chapters found in the file when it was opened.
-    pub info: af27_io::meta::FileInfo,
+    pub info: af2_io::meta::FileInfo,
     /// Made with New Audio File at this bit depth (Save As starts there).
     pub new_bits: Option<u16>,
     /// Which channels are switched on in the Waveform editor (heard and
     /// edited). A view setting: never saved into the file.
     pub chans: crate::wave_channels::ChannelSet,
+    /// The WAV speaker mask of the file's channels when it is known
+    /// (Spatialize to Surround sets it). Only used while it names as many
+    /// channels as the file has.
+    pub channel_mask: Option<u32>,
 }
 
 impl Doc {
@@ -89,6 +93,7 @@ impl Doc {
         let chans = crate::wave_channels::ChannelSet::all(buf.num_channels());
         Doc {
             chans,
+            channel_mask: None,
             id,
             name,
             path,
@@ -111,6 +116,13 @@ impl Doc {
 
     pub fn duration(&self) -> f64 {
         self.buf.duration_secs()
+    }
+
+    /// [`Doc::channel_mask`] when it fits the channels the file has now.
+    pub fn speaker_mask(&self) -> Option<u32> {
+        let n = self.buf.num_channels();
+        self.channel_mask
+            .filter(|m| n > 2 && m.count_ones() as usize == n)
     }
 
     pub fn frames_of(&self, (a, b): (f64, f64)) -> Range {
@@ -187,9 +199,9 @@ pub enum Job {
     /// the path it was opened from.
     Load {
         path: PathBuf,
-        rx: Receiver<(PathBuf, Result<af27_io::Opened, String>)>,
+        rx: Receiver<(PathBuf, Result<af2_io::Opened, String>)>,
         /// Put it on this track at this time when done.
-        place: Option<(af27_core::TrackId, f64)>,
+        place: Option<(af2_core::TrackId, f64)>,
         /// The import batch and slot it belongs to.
         batch: Option<(u64, usize)>,
     },
@@ -224,8 +236,12 @@ pub struct State {
     pub session_view: View,
     pub session_sel: Option<(f64, f64)>,
     pub session_cursor: f64,
-    pub selected_clip: Option<af27_core::ClipId>,
-    pub selected_track: Option<af27_core::TrackId>,
+    pub selected_clip: Option<af2_core::ClipId>,
+    /// Every selected clip, while there are several (see `clip_ops`).
+    pub clip_sel: Vec<af2_core::ClipId>,
+    /// Clips copied in the Multitrack editor.
+    pub clip_board: Option<crate::clip_ops::ClipBoard>,
+    pub selected_track: Option<af2_core::TrackId>,
     /// Session media id to open document.
     pub media_docs: HashMap<MediaId, DocId>,
 
@@ -233,7 +249,7 @@ pub struct State {
     pub engine_error: Option<String>,
     /// Waits between attempts to open the audio device again after it
     /// went away or would not open.
-    pub audio_retry: af27_engine::health::Backoff,
+    pub audio_retry: af2_engine::health::Backoff,
     program_key: (Mode, DocId, u64, u64, u64),
     /// The session the playing mix was built from, less what does not
     /// change the sound (see `audio_view`).
@@ -254,7 +270,7 @@ pub struct State {
     /// MIDI input for armed MIDI tracks (see `midi_in`).
     pub midi: crate::midi_in::MidiIn,
     /// The MIDI track whose built-in synth's settings window is open.
-    pub synth_editor: Option<af27_core::TrackId>,
+    pub synth_editor: Option<af2_core::TrackId>,
     /// A new selection taking over the loop while playing.
     loop_watch: crate::transport::Settle,
     /// Seconds of held Left/Right since playback last skipped along.
@@ -269,6 +285,12 @@ pub struct State {
     pub meter: (f32, f32),
     /// The main meter's ballistics (peak, RMS, hold lines, clip latches).
     pub levels: crate::meters::Stereo,
+    /// A surround file in the Waveform editor: one meter per channel,
+    /// before the fold (empty otherwise).
+    pub src_levels: Vec<crate::meters::Channel>,
+    /// How long the output has sat at full scale while monitoring an
+    /// input (feedback guard), seconds.
+    pub howl_secs: f32,
     /// When the meters last moved on, for their per-second fall.
     meter_at: Option<Instant>,
     /// Motion and music state for the HUD chrome.
@@ -292,7 +314,7 @@ pub struct State {
     pub effect: Effect,
     pub effect_values: HashMap<Effect, Vec<f32>>,
     pub separation: crate::separation::SeparationUi,
-    pub sep_dirs: af27_separation::Dirs,
+    pub sep_dirs: af2_separation::Dirs,
     pub generate: crate::generate_ui::GenerateUi,
 
     pub theme: Theme,
@@ -303,7 +325,7 @@ pub struct State {
     pub themes: Vec<Theme>,
     pub theme_changed: bool,
     pub toasts: Vec<Toast>,
-    pub stats: Option<(String, af27_dsp::loudness::Stats)>,
+    pub stats: Option<(String, af2_dsp::loudness::Stats)>,
     /// The Diagnostics panel (scan and repair).
     pub diag: crate::diagnostics::Diagnostics,
     /// The Loudness panel's live meter.
@@ -311,17 +333,27 @@ pub struct State {
     /// Auto Duck and Speaker Balance (Multitrack > Spoken Word).
     pub podcast: crate::podcast_tools::Dialogs,
     /// The kind new markers get (Markers panel).
-    pub marker_kind: af27_core::session::MarkerKind,
+    pub marker_kind: af2_core::session::MarkerKind,
     /// Capture Noise Print / Reduce Noise with Print.
     pub noise_print: crate::noise_print::NoisePrintUi,
+    pub spatialize: crate::spatialize_ui::SpatializeUi,
     pub tool: Tool,
     pub show_about: bool,
+    /// Updates: the background check and its window.
+    pub updater: crate::updater::Updater,
+    /// The check at start has been made (once a run).
+    pub update_checked: bool,
+    /// An available update's window has been shown once this run.
+    pub update_shown: bool,
     pub last_autosave: Instant,
     pub recording_target: Option<RecordTarget>,
+    /// Takes being written to disk in the background: (file, its path,
+    /// the result when done).
+    pub take_saves: Vec<(DocId, PathBuf, std::sync::mpsc::Receiver<Result<(), String>>)>,
     /// Where recordings come from, per track.
     pub rec_inputs: crate::record_input::RecordInputs,
     /// The MIDI clip open in the Piano Roll.
-    pub piano_clip: Option<af27_core::ClipId>,
+    pub piano_clip: Option<af2_core::ClipId>,
     pub phase: crate::phasewheel::PhasePrefs,
     /// The Visualizer panel: its choices and its picture.
     pub viz: crate::visualizer::Visualizer,
@@ -334,8 +366,8 @@ pub struct State {
     /// Effect windows open: (rack, slot).
     pub fx_windows: Vec<(u16, usize)>,
     /// The Waveform editor's rack (applied to the file).
-    pub file_chain: Vec<af27_core::EffectSlot>,
-    pub file_rack: af27_core::Rack,
+    pub file_chain: Vec<af2_core::EffectSlot>,
+    pub file_rack: af2_core::Rack,
     /// Track or master rack in the Effects panel.
     pub rack_tab: crate::rack::RackTab,
     /// A rack preset being named.
@@ -351,11 +383,11 @@ pub struct State {
     pub rack_row: Option<(u16, usize)>,
     /// Each track's rack meters (from the mix the engine plays), and the
     /// levels shown (falling back slowly).
-    pub rack_meters: Vec<std::sync::Arc<af27_engine::mix::RackMeter>>,
+    pub rack_meters: Vec<std::sync::Arc<af2_engine::mix::RackMeter>>,
     /// Each clip rack's meters in the playing mix.
-    pub clip_meters: HashMap<af27_core::ClipId, std::sync::Arc<af27_engine::mix::RackMeter>>,
+    pub clip_meters: HashMap<af2_core::ClipId, std::sync::Arc<af2_engine::mix::RackMeter>>,
     /// Which clip each clip-rack target names (see `rack::clip_target`).
-    pub clip_targets: std::cell::RefCell<Vec<af27_core::ClipId>>,
+    pub clip_targets: std::cell::RefCell<Vec<af2_core::ClipId>>,
     /// Each rack's shown levels and when they were last moved on.
     pub rack_shown: HashMap<u16, (f32, f32, Instant)>,
     /// Each track's rack input and output peaks this frame, falling back
@@ -372,7 +404,7 @@ pub struct State {
     /// Bring the Piano Roll to the front.
     pub want_piano: bool,
     /// The Audiform document the session was opened from (or last saved
-    /// as), so saving keeps everything Audiform27 does not use.
+    /// as), so saving keeps everything Audiform2 does not use.
     pub session_base: Option<serde_json::Value>,
     /// The Audiform effect picked in the Effects panel, and its settings.
     pub fx_pick: Option<String>,
@@ -396,6 +428,10 @@ pub struct State {
     pub session_amp: f32,
     /// Brush Select and Spot Repair brush diameter, in pixels.
     pub brush_px: f32,
+    /// Harmonic selection: which copies of each spectral selection shape
+    /// are taken, at whole multiples of its frequency (bit k: the kth;
+    /// bit 1 the shape as drawn). See `spectral_select::HarmSet`.
+    pub harmonics: crate::spectral_select::HarmSet,
     /// The waveform's share of the Waveform editor's height when the
     /// spectrum shows (the divider between them).
     pub spec_split: f32,
@@ -411,6 +447,9 @@ pub struct State {
     /// The pointer is over the Piano Roll: Cut, Copy, Paste, Delete and
     /// Select All go to its notes.
     pub piano_hover: bool,
+    /// The last click was in the Files panel: Delete closes its picked
+    /// files.
+    pub files_focus: bool,
     pub piano_cmd: Option<crate::pianoroll::PianoCmd>,
     /// What the engine's audition plays through (a track and its settings).
     pub audition_key: Option<String>,
@@ -450,8 +489,10 @@ impl Tool {
 
 #[derive(Debug, Clone, Copy)]
 pub enum RecordTarget {
-    NewFile,
-    Track(af27_core::TrackId, f64),
+    /// Into the file open in the Waveform editor, from this many seconds
+    /// (an empty file takes the whole take).
+    File(DocId, f64),
+    Track(af2_core::TrackId, f64),
 }
 
 fn hues_path(theme: &str) -> std::path::PathBuf {
@@ -469,7 +510,13 @@ pub fn load_hues(name: &str) -> Option<crate::theme::Hues> {
 
 impl State {
     /// Shows theme `t` with the user's saved hues for it.
+    /// The System theme is read from the desktop here.
     pub fn set_theme(&mut self, t: Theme) {
+        self.show_theme(crate::theme::resolve(t));
+    }
+
+    /// Shows theme `t` as it is (with the user's saved hues for it).
+    pub fn show_theme(&mut self, t: Theme) {
         self.hues = load_hues(&t.name);
         self.theme = match &self.hues {
             Some(h) => t.with_hues(h),
@@ -501,14 +548,16 @@ impl State {
     }
 }
 
+/// The app's data folder, `<data>/Audiform2` (moved there from
+/// `<data>/Audiform2` the first time it is asked for).
 pub fn data_dir() -> PathBuf {
-    af27_separation::data_root().join("Audiform27")
+    af2_separation::app_dir()
 }
 
 impl State {
     pub fn new() -> State {
-        af27_engine::health::set_log_path(data_dir().join("audio.log"));
-        af27_engine::health::install_panic_log();
+        af2_engine::health::set_log_path(data_dir().join("audio.log"));
+        af2_engine::health::install_panic_log();
         let audio = crate::settings::Prefs::load().audio.choice();
         let (engine, engine_error) = match Engine::open(&audio) {
             Ok(e) => (Some(e), None),
@@ -516,11 +565,14 @@ impl State {
         };
         let themes = crate::theme::load_all(&crate::theme::user_dir());
         let saved_theme = std::fs::read_to_string(data_dir().join("theme.txt")).unwrap_or_default();
-        let theme_base = themes
-            .iter()
-            .find(|t| t.name == saved_theme.trim())
-            .cloned()
-            .unwrap_or_default();
+        // The System theme reads the desktop only when it is the one shown.
+        let theme_base = crate::theme::resolve(
+            themes
+                .iter()
+                .find(|t| t.name == saved_theme.trim())
+                .cloned()
+                .unwrap_or_default(),
+        );
         let hues = load_hues(&theme_base.name);
         let theme = match &hues {
             Some(h) => theme_base.with_hues(h),
@@ -546,6 +598,8 @@ impl State {
             session_sel: None,
             session_cursor: 0.0,
             selected_clip: None,
+            clip_sel: Vec::new(),
+            clip_board: None,
             selected_track: None,
             media_docs: HashMap::new(),
             engine,
@@ -581,6 +635,8 @@ impl State {
                 .unwrap_or(0),
             visuals_lite: false,
             levels: Default::default(),
+            src_levels: Vec::new(),
+            howl_secs: 0.0,
             meter_at: None,
             clipboard: None,
             export: Default::default(),
@@ -588,7 +644,7 @@ impl State {
             effect: Effect::Amplify,
             effect_values: HashMap::new(),
             separation: crate::separation::SeparationUi::load(),
-            sep_dirs: af27_separation::Dirs::detect(),
+            sep_dirs: af2_separation::Dirs::detect(),
             generate: crate::generate_ui::GenerateUi::default(),
             theme,
             theme_base,
@@ -602,10 +658,15 @@ impl State {
             podcast: Default::default(),
             marker_kind: Default::default(),
             noise_print: Default::default(),
+            spatialize: Default::default(),
             tool: Tool::Move,
             show_about: false,
+            updater: Default::default(),
+            update_checked: false,
+            update_shown: false,
             last_autosave: Instant::now(),
             recording_target: None,
+            take_saves: Vec::new(),
             rec_inputs: Default::default(),
             piano_clip: None,
             phase: crate::phasewheel::PhasePrefs::load(),
@@ -646,11 +707,13 @@ impl State {
             session_amp: 1.0,
             tempo_ui: Default::default(),
             piano_hover: false,
+            files_focus: false,
             piano_cmd: None,
             audition_key: None,
             gesture_before: None,
             height_commit: Default::default(),
             brush_px: 24.0,
+            harmonics: crate::spectral_select::HARM_OFF,
             spec_split: 0.5,
             spec_colors: None,
             spectral_job: None,
@@ -704,7 +767,17 @@ impl State {
     pub fn add_doc(&mut self, name: String, path: Option<PathBuf>, buf: AudioBuffer) -> DocId {
         let id = self.next_doc;
         self.next_doc += 1;
-        self.docs.push(Doc::new(id, name, path, buf));
+        let mut d = Doc::new(id, name, path, buf);
+        // A surround WAV's own speaker mask (so 5.1.2 is not taken for 7.1).
+        if d.buf.num_channels() > 2 {
+            if let Some(p) = &d.path {
+                d.channel_mask = af2_io::export::wav::inspect(p)
+                    .ok()
+                    .and_then(|i| i.channel_mask)
+                    .filter(|m| *m != 0);
+            }
+        }
+        self.docs.push(d);
         id
     }
 
@@ -726,7 +799,7 @@ impl State {
     }
 
     /// Decodes a file in the background; it opens when ready.
-    pub fn load_file(&mut self, path: PathBuf, place: Option<(af27_core::TrackId, f64)>) {
+    pub fn load_file(&mut self, path: PathBuf, place: Option<(af2_core::TrackId, f64)>) {
         if let Some(d) = self.docs.iter().find(|d| d.path.as_deref() == Some(&path)) {
             let id = d.id;
             if let Some((track, at)) = place {
@@ -742,7 +815,7 @@ impl State {
             // A few files decode at once: a big session's dozens of files
             // all at once ran slower and left the memory scattered.
             let _turn = decode_turn();
-            let _ = tx.send((p.clone(), af27_io::open_file(&p)));
+            let _ = tx.send((p.clone(), af2_io::open_file(&p)));
         });
         self.jobs.push(Job::Load {
             path,
@@ -768,7 +841,7 @@ impl State {
                 Some(Err(e)) => (p.clone(), Some(e)),
                 None => (p.clone(), None),
             };
-            let r = af27_io::open_file(&from);
+            let r = af2_io::open_file(&from);
             // A failed copy still opens the original; say so.
             let r = match (r, note) {
                 (Ok(o), Some(e)) => {
@@ -823,7 +896,7 @@ impl State {
                     if let Some(n) = opened.notice() {
                         self.toast(format!("{name}: {n}."));
                     }
-                    let af27_io::Opened { buf, info, .. } = opened;
+                    let af2_io::Opened { buf, info, .. } = opened;
                     let id = self.add_doc(name, Some(path.clone()), buf);
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == id) {
                         d.markers = file_markers(&info, d.duration());
@@ -924,7 +997,7 @@ impl State {
         Some(id)
     }
 
-    pub fn place_doc(&mut self, doc: DocId, track: af27_core::TrackId, at: f64) {
+    pub fn place_doc(&mut self, doc: DocId, track: af2_core::TrackId, at: f64) {
         let before = self.session.clone();
         if let Some(m) = self.media_for_doc(doc) {
             if let Some(c) = self.session.add_clip(track, m, at) {
@@ -988,7 +1061,7 @@ impl State {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let result = if ext == "af27" {
+        let result = if ext == "af2" || ext == "af27" {
             std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
                 .and_then(|t| Session::from_json(&t))
@@ -1000,7 +1073,7 @@ impl State {
             Ok((session, notices, base)) => {
                 self.park_front();
                 self.session = session;
-                self.session_base = if ext == "af27" || ext == "sesx" {
+                self.session_base = if ext == "af2" || ext == "af27" || ext == "sesx" {
                     None
                 } else {
                     base
@@ -1009,7 +1082,7 @@ impl State {
                 // Audiform sessions save back to themselves; a .sesx import
                 // asks for a name on first save.
                 self.session_path =
-                    matches!(ext.as_str(), "af27" | "audfrm" | "altaudio").then(|| {
+                    matches!(ext.as_str(), "af2" | "af27" | "audfrm" | "altaudio").then(|| {
                         if ext == "altaudio" {
                             path.with_extension("audfrm")
                         } else {
@@ -1042,8 +1115,8 @@ impl State {
     }
 
     /// Saves the session. `.audfrm` (the default) is Audiform's own format,
-    /// written losslessly over what was opened; `.af27` is a plain dump of
-    /// Audiform27's model.
+    /// written losslessly over what was opened; `.af2` is a plain dump of
+    /// Audiform2's model.
     ///
     /// Before writing: unsaved Waveform edits to files the session uses are
     /// kept, files that came in this run are copied into the session
@@ -1052,9 +1125,9 @@ impl State {
     pub fn save_session_to(&mut self, path: PathBuf) {
         self.keep_playhead();
         crate::plugins::capture_all(self);
-        let is_af27 = path
+        let is_dump = path
             .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("af27"));
+            .is_some_and(|e| e.eq_ignore_ascii_case("af2") || e.eq_ignore_ascii_case("af27"));
         // Save As, or the first save, names the session after its file.
         let new_file = !self
             .session_path
@@ -1073,10 +1146,10 @@ impl State {
                 self.error(format!("Could not back up the session first: {e}"));
             }
         }
-        let result = if is_af27 {
+        let result = if is_dump {
             std::fs::write(&path, self.session.to_json()).map_err(|e| e.to_string())
         } else {
-            af27_interop::audfrm::save(&mut self.session, self.session_base.as_ref(), &path).map(
+            af2_interop::audfrm::save(&mut self.session, self.session_base.as_ref(), &path).map(
                 |doc| {
                     self.session_base = Some(doc);
                 },
@@ -1156,6 +1229,14 @@ impl State {
     }
 
     /// Hands the audio thread a fresh program when what would play changed.
+    /// Builds the playing program afresh on the next sync even though
+    /// the session looks the same (a plug-in finished starting with
+    /// another latency than its scan said, or a stopped one restarts).
+    pub fn rebuild_program(&mut self) {
+        self.program_key.4 = !self.program_key.4;
+        self.program_session = None;
+    }
+
     pub fn sync_program(&mut self) {
         use crate::spectral_select::Audition;
         let audition = match self.mode {
@@ -1176,7 +1257,11 @@ impl State {
                 + (self.prerender.version << 32),
             // Channels switched off in the Waveform editor are silent.
             // and a spectral selection plays its sounds alone.
-            self.doc().map_or(0, |d| d.chans.on_mask()) ^ heard.rotate_left(20),
+            // (and surround files on headphones or folded, a change of
+            // which plays again).
+            self.doc().map_or(0, |d| d.chans.on_mask())
+                ^ heard.rotate_left(20)
+                ^ ((self.surround_play() as u64) << 60),
         );
         if key == self.program_key {
             return;
@@ -1217,27 +1302,32 @@ impl State {
         let program = match self.mode {
             Mode::Waveform => match self.doc() {
                 Some(_) if !matches!(audition, Audition::None) => {
-                    af27_engine::buffer_program(match audition {
+                    af2_engine::buffer_program(match audition {
                         Audition::Ready(b, _) => b,
                         // Rendering (a moment): silence, not the whole file.
                         _ => Arc::new(AudioBuffer::new(self.session.rate, 2, 0)),
                     })
                 }
-                Some(d) => af27_engine::buffer_program(
+                // A surround file is heard around the head on headphones
+                // (Preferences > Playback), else folded to stereo.
+                Some(d) => af2_engine::buffer_program_for(
                     d.chans
                         .audible(&d.buf)
                         .map_or_else(|| d.buf.clone(), Arc::new),
+                    d.speaker_mask(),
+                    self.surround_play(),
+                    self.engine.as_ref().map_or(d.buf.rate, |e| e.rate),
                 ),
                 // No file open: nothing plays (not the file just closed).
                 None => {
-                    af27_engine::buffer_program(Arc::new(AudioBuffer::new(self.session.rate, 2, 0)))
+                    af2_engine::buffer_program(Arc::new(AudioBuffer::new(self.session.rate, 2, 0)))
                 }
             },
             Mode::Multitrack => {
                 let rate = self.engine.as_ref().map_or(self.session.rate, |e| e.rate);
                 let heard = self.heard_session();
-                let p = af27_engine::mix_program(&heard, &|m| self.heard_media(m), rate);
-                if let af27_engine::Program::Mix(m) = &p {
+                let p = af2_engine::mix_program(&heard, &|m| self.heard_media(m), rate);
+                if let af2_engine::Program::Mix(m) = &p {
                     self.rack_meters = m.tracks.iter().map(|t| t.meter.clone()).collect();
                     self.clip_meters = m.clip_meters().into_iter().collect();
                 }
@@ -1411,14 +1501,15 @@ impl State {
     /// Held Left (`dir` -1) or Right (1) for `dt` seconds: stopped, the
     /// playhead glides silently at 4x; playing, playback skips along.
     pub fn scrub_arrows(&mut self, dir: f64, dt: f64) {
-        use crate::transport::{scrub_jump, SCRUB_SPEED, SCRUB_STEP};
+        use crate::transport::{scrub_jump, scrub_step, SCRUB_SPEED};
         if self.is_recording() {
             return;
         }
         if self.transport_playing() {
             self.scrub_clock += dt;
-            if self.scrub_clock >= SCRUB_STEP {
-                self.scrub_clock -= SCRUB_STEP;
+            let step = scrub_step(dir);
+            if self.scrub_clock >= step {
+                self.scrub_clock = (self.scrub_clock - step).min(step);
                 let pos = self.position();
                 self.jump_to(pos + scrub_jump(dir));
             }
@@ -1459,7 +1550,7 @@ impl State {
         // The old stream closes (on silence) before the new one opens: an
         // ASIO driver serves one set of buffers.
         self.engine = None;
-        match af27_engine::Engine::open(&self.prefs.audio.choice()) {
+        match af2_engine::Engine::open(&self.prefs.audio.choice()) {
             Ok(e) => {
                 if let Some(n) = &e.note {
                     let n = n.clone();
@@ -1511,7 +1602,8 @@ impl State {
         }
         let layout = match self.mode {
             Mode::Multitrack => self.session.space,
-            Mode::Waveform => None,
+            // A surround file straight to the speaker outputs.
+            Mode::Waveform => self.surround_layout(),
         };
         if let Some(e) = &mut self.engine {
             e.set_layout(layout);
@@ -1520,7 +1612,61 @@ impl State {
         self.rec_inputs.follow_driver(asio);
     }
 
+    /// The surround file open in the Waveform editor (more than two
+    /// channels): its speaker layout.
+    pub fn surround_file_layout(&self) -> Option<af2_space::SpaceLayout> {
+        let d = self.doc()?;
+        let n = d.buf.num_channels();
+        (n > 2).then(|| af2_engine::file_layout(n, d.speaker_mask()))
+    }
+
+    /// Whether the open surround file could go straight to the speaker
+    /// outputs on this device.
+    pub fn surround_direct_fits(&self) -> bool {
+        match (self.surround_file_layout(), &self.engine) {
+            (Some(l), Some(e)) => e.speakers_fit(l),
+            _ => false,
+        }
+    }
+
+    /// How the open surround file plays now (Auto resolved).
+    pub fn surround_play(&self) -> af2_engine::SurroundPlay {
+        use crate::settings::SurroundMode as M;
+        use af2_engine::SurroundPlay as P;
+        match self.prefs.surround_play {
+            M::Auto if self.surround_direct_fits() => P::Direct,
+            M::Auto | M::Headphones => P::Headphones,
+            M::Fold => P::Fold,
+            M::Speakers => P::Speakers,
+            M::Direct => P::Direct,
+        }
+    }
+
+    /// The layout the engine routes to the speaker outputs in the
+    /// Waveform editor: the surround file's, when it goes out direct.
+    fn surround_layout(&self) -> Option<af2_space::SpaceLayout> {
+        (self.surround_play() == af2_engine::SurroundPlay::Direct && self.surround_direct_fits())
+            .then(|| self.surround_file_layout())
+            .flatten()
+    }
+
     pub fn tick(&mut self) {
+        // The feedback guard tripped last frame: monitoring stops.
+        if self.howl_secs >= HOWL_SECS {
+            self.howl_secs = 0.0;
+            let before = self.session.clone();
+            for t in &mut self.session.tracks {
+                t.monitor = false;
+            }
+            self.commit_live("Monitor Input Off (feedback)", before);
+            self.error(
+                "Feedback: the input was howling, so monitoring is off. Move the \
+                 headphones away from the microphone or turn them down, then turn \
+                 monitoring on again."
+                    .to_string(),
+            );
+        }
+        crate::record_input::poll_saves(self);
         let now = Instant::now();
         if std::env::var_os("AF2_MEMLOG").is_some() {
             thread_local!(static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
@@ -1538,7 +1684,7 @@ impl State {
                     self.docs.len(),
                     held as f64 / 1048576.0,
                     self.jobs.len(),
-                    af27_engine::stretch::cache_bytes().0 as f64 / 1048576.0,
+                    af2_engine::stretch::cache_bytes().0 as f64 / 1048576.0,
                     self.session.tracks.iter().filter(|t| t.prerender).count(),
                     self.prerender_bytes() as f64 / 1048576.0
                 );
@@ -1575,6 +1721,7 @@ impl State {
                 t1.elapsed().as_secs_f64() * 1e3
             );
         }
+        crate::record_input::sync_monitor(self);
         if let Some(e) = &mut self.engine {
             e.collect();
             for text in e.take_recording_errors() {
@@ -1598,6 +1745,26 @@ impl State {
             };
             self.levels.step((l, r), ms, meter_dt, &self.prefs.meters);
             self.meter = self.levels.peaks();
+            // Feedback guard: monitoring an input while the output sits
+            // at full scale for half a second is a howl; monitoring stops.
+            let monitoring = self.session.tracks.iter().any(|t| t.monitor && t.armed);
+            // (It is acted on at the start of the next tick.)
+            self.howl_secs = howl_step(self.howl_secs, monitoring, l.max(r), meter_dt);
+            // A surround file: each channel before the fold.
+            let src = e.take_source_peaks();
+            let n = match self.mode {
+                Mode::Waveform if !e.is_recording() => self
+                    .doc()
+                    .map_or(0, |d| d.buf.num_channels())
+                    .min(af2_engine::MAX_SPEAKERS),
+                _ => 0,
+            };
+            let n = if n > 2 { n } else { 0 };
+            self.src_levels.resize_with(n, Default::default);
+            for (k, ch) in self.src_levels.iter_mut().enumerate() {
+                let pk = src.get(k).copied().unwrap_or(0.0);
+                ch.step(pk, None, meter_dt, &self.prefs.meters);
+            }
         }
         if self.transport_live && !self.is_playing() {
             // The audio thread reached the end (or the selection's end).
@@ -1741,20 +1908,29 @@ impl State {
             .session
             .tracks
             .iter()
-            .any(|t| t.armed && t.kind == af27_core::TrackKind::Audio);
+            .any(|t| t.armed && t.kind == af2_core::TrackKind::Audio);
         if self.mode == Mode::Multitrack && self.midi_armed() && !audio_armed {
             self.midi_record_start();
             self.play();
             return;
         }
         let target = match self.mode {
-            Mode::Waveform => RecordTarget::NewFile,
+            // Into the open file at the playhead (File > New Audio File
+            // makes one to record into); a new file when none is open.
+            Mode::Waveform => match self.doc() {
+                Some(d) => RecordTarget::File(d.id, self.cursor()),
+                // No file yet: ask for its format, then record into it.
+                None => {
+                    crate::new_dialogs::open_new_file_to_record(self);
+                    return;
+                }
+            },
             Mode::Multitrack => {
                 let armed = self
                     .session
                     .tracks
                     .iter()
-                    .find(|t| t.armed && t.kind != af27_core::TrackKind::Midi)
+                    .find(|t| t.armed && t.kind != af2_core::TrackKind::Midi)
                     .map(|t| t.id);
                 match armed.or(self.selected_track) {
                     Some(t) => RecordTarget::Track(t, self.session_cursor),
@@ -1840,6 +2016,10 @@ impl State {
     }
 
     pub fn edit_copy(&mut self) {
+        if self.mode == Mode::Multitrack {
+            crate::clip_ops::copy(self);
+            return;
+        }
         if let Some(d) = self.doc() {
             if d.sel.is_some() {
                 // Only the channels switched on.
@@ -1875,22 +2055,30 @@ impl State {
     }
 
     pub fn edit_cut(&mut self) {
+        if self.mode == Mode::Multitrack {
+            crate::clip_ops::cut(self);
+            return;
+        }
         self.edit_copy();
         self.edit_delete("Cut");
     }
 
     pub fn edit_paste(&mut self) {
+        if self.mode == Mode::Multitrack {
+            crate::clip_ops::paste(self);
+            return;
+        }
         let Some(clip) = self.clipboard.clone() else {
             return;
         };
         let Some(d) = self.doc_mut() else { return };
-        let mut c = af27_dsp::resample::resample(&clip, d.buf.rate);
+        let mut c = af2_dsp::resample::resample(&clip, d.buf.rate);
         if d.chans.some_off() {
             // Over the channels switched on, from the selection's start
             // (or the cursor); the others keep their audio.
             let on = d.chans.on().len();
             if c.num_channels() != 1 {
-                c = af27_dsp::resample::remix(&c, on);
+                c = af2_dsp::resample::remix(&c, on);
             }
             let at = match d.sel {
                 Some(_) => d.target().start,
@@ -1903,7 +2091,7 @@ impl State {
             d.sel = Some((at as f64 / rate, (at + c.frames()) as f64 / rate));
             return;
         }
-        c = af27_dsp::resample::remix(&c, d.buf.num_channels());
+        c = af2_dsp::resample::remix(&c, d.buf.num_channels());
         let mut b = (*d.buf).clone();
         let at = match d.sel {
             Some(_) => {
@@ -1949,8 +2137,8 @@ impl State {
             self.current = Some(id);
         }
         let d = self.doc_mut().unwrap();
-        let c = af27_dsp::resample::remix(
-            &af27_dsp::resample::resample(&buf, d.buf.rate),
+        let c = af2_dsp::resample::remix(
+            &af2_dsp::resample::resample(&buf, d.buf.rate),
             d.buf.num_channels(),
         );
         let mut b = (*d.buf).clone();
@@ -2027,7 +2215,7 @@ impl State {
     pub fn add_marker_at(&mut self, t: f64) {
         let kind = self.marker_kind.clone();
         let base = match kind {
-            af27_core::session::MarkerKind::Cue => "Marker".to_string(),
+            af2_core::session::MarkerKind::Cue => "Marker".to_string(),
             ref k => k.label().to_string(),
         };
         match self.mode {
@@ -2088,6 +2276,10 @@ impl State {
     }
 
     pub fn delete_clip(&mut self) {
+        if crate::clip_ops::selected(self).len() > 1 {
+            crate::clip_ops::delete_selected(self, "Delete clips");
+            return;
+        }
         if let Some(c) = self.selected_clip.take() {
             let before = self.session.clone();
             if self.session.remove_clip(c).is_some() {
@@ -2136,14 +2328,14 @@ impl State {
         let Some(t) = self.session.tracks.get(ti) else {
             return;
         };
-        let fader = af27_core::session::fader_gain(t.volume_db);
+        let fader = af2_core::session::fader_gain(t.volume_db);
         let pan = t.pan;
         let sends: Vec<(f32, f32, bool)> = t
             .sends
             .iter()
             .filter(|s| self.session.track_index(s.bus).is_some())
             .map(|s| {
-                let level = af27_core::time::db_to_gain(s.level_db.clamp(-96.0, 12.0));
+                let level = af2_core::time::db_to_gain(s.level_db.clamp(-96.0, 12.0));
                 (level, s.pan, s.enabled)
             })
             .collect();
@@ -2160,7 +2352,7 @@ impl State {
     }
 
     pub fn live_master(&mut self) {
-        let g = af27_core::time::db_to_gain(self.session.master_db);
+        let g = af2_core::time::db_to_gain(self.session.master_db);
         let s = &self.session;
         let (pan, mono, invert) = (s.master_pan, s.master_mono, s.master_invert);
         if let Some(e) = &mut self.engine {
@@ -2171,11 +2363,11 @@ impl State {
 
     /// The effect chain for a track index, or the master chain for MASTER,
     /// or a clip's (see `rack::clip_target`).
-    pub fn chain_mut(&mut self, track: u16) -> Option<&mut Vec<af27_core::EffectSlot>> {
+    pub fn chain_mut(&mut self, track: u16) -> Option<&mut Vec<af2_core::EffectSlot>> {
         if crate::rack::is_clip(track) {
             return crate::rack::clip_mut(self, track).map(|c| &mut c.props.chain);
         }
-        if track == af27_engine::MASTER {
+        if track == af2_engine::MASTER {
             Some(&mut self.session.master_chain)
         } else {
             self.session
@@ -2188,7 +2380,7 @@ impl State {
     /// A rack's input and output levels to show (linear), falling back
     /// slowly between peaks. The master's output is the main meter.
     pub fn rack_levels(&mut self, target: u16) -> (f32, f32) {
-        let fresh = if target == af27_engine::MASTER {
+        let fresh = if target == af2_engine::MASTER {
             (
                 self.meter.0.max(self.meter.1),
                 self.meter.0.max(self.meter.1),
@@ -2225,7 +2417,7 @@ impl State {
             }
             return;
         }
-        let rack = if track == af27_engine::MASTER {
+        let rack = if track == af2_engine::MASTER {
             Some(self.session.master_rack)
         } else {
             self.session.tracks.get(track as usize).map(|t| t.rack)
@@ -2292,7 +2484,7 @@ impl State {
     }
 
     /// What the audition was built from (track, instrument, font).
-    fn audition_key(t: &af27_core::Track) -> String {
+    fn audition_key(t: &af2_core::Track) -> String {
         format!(
             "{}|{:?}|{:?}",
             t.id,
@@ -2326,11 +2518,11 @@ impl State {
             return false;
         };
         let a = match &t.soundfont {
-            Some(sf) => match af27_engine::soundfont::Audition::font(sf, e.rate) {
+            Some(sf) => match af2_engine::soundfont::Audition::font(sf, e.rate) {
                 Ok(a) => a,
                 Err(_) => return false,
             },
-            None => af27_engine::soundfont::Audition::synth(t.instrument, e.rate),
+            None => af2_engine::soundfont::Audition::synth(t.instrument, e.rate),
         };
         e.set_audition(a);
         self.audition_key = Some(key);
@@ -2338,9 +2530,10 @@ impl State {
     }
 
     /// Starts a note on track `ti`'s instrument (the piano roll).
-    pub fn audition_on(&mut self, ti: usize, pitch: u8, velocity: u8, pan: f32) {
-        // A VST3 instrument plays it through the keys player.
-        if crate::instruments::audition_on(self, ti, pitch, velocity) {
+    pub fn audition_on(&mut self, ti: usize, pitch: u8, velocity: u8, pan: f32, channel: u8) {
+        // A VST3 instrument plays it through the keys player, on the
+        // note's MIDI channel.
+        if crate::instruments::audition_on(self, ti, pitch, velocity, channel) {
             return;
         }
         if self.audition_for(ti) {
@@ -2350,8 +2543,8 @@ impl State {
         }
     }
 
-    pub fn audition_off(&mut self, pitch: u8) {
-        crate::instruments::audition_off(self, pitch);
+    pub fn audition_off(&mut self, pitch: u8, channel: u8) {
+        crate::instruments::audition_off(self, pitch, channel);
         if let Some(e) = &mut self.engine {
             e.note_off(pitch);
         }
@@ -2364,7 +2557,7 @@ impl State {
         }
     }
 
-    pub fn add_track_kind(&mut self, kind: af27_core::TrackKind) -> af27_core::TrackId {
+    pub fn add_track_kind(&mut self, kind: af2_core::TrackKind) -> af2_core::TrackId {
         let before = self.session.clone();
         let id = self.session.add_track_of(kind);
         let n = self.session.tracks.len() - 1;
@@ -2380,11 +2573,11 @@ impl State {
     /// (3D sessions, `bed`) one channel per speaker.
     pub fn render_mix(&self, from: f64, to: f64, bed: bool) -> AudioBuffer {
         let heard = self.heard_session();
-        let program = af27_engine::mix_program(&heard, &|m| self.heard_media(m), self.session.rate);
+        let program = af2_engine::mix_program(&heard, &|m| self.heard_media(m), self.session.rate);
         if bed {
-            af27_engine::render_bed(program, self.session.rate, from, to)
+            af2_engine::render_bed(program, self.session.rate, from, to)
         } else {
-            af27_engine::render(program, self.session.rate, from, to)
+            af2_engine::render(program, self.session.rate, from, to)
         }
     }
 
@@ -2392,7 +2585,7 @@ impl State {
     /// while stopped, the audio just before the playhead (cached).
     pub fn scope_frames(&mut self, n: usize) -> (Vec<[f32; 2]>, u32) {
         if self.is_playing() {
-            return (af27_engine::scope::latest(n), af27_engine::scope::rate());
+            return (af2_engine::scope::latest(n), af2_engine::scope::rate());
         }
         let t = self.cursor();
         let key = (
@@ -2461,8 +2654,8 @@ impl State {
     /// stopped-playback scopes, VST3 plug-ins left out.
     fn start_scope_job(&mut self, key: (u64, u64, i64), t: f64, n: usize, rate: u32) {
         let mut session = self.session.clone();
-        let keep = |c: &mut Vec<af27_core::EffectSlot>| {
-            c.retain(|s| !af27_core::plugin::is_plugin(&s.effect))
+        let keep = |c: &mut Vec<af2_core::EffectSlot>| {
+            c.retain(|s| !af2_core::plugin::is_plugin(&s.effect))
         };
         for tr in &mut session.tracks {
             keep(&mut tr.chain);
@@ -2478,8 +2671,8 @@ impl State {
         std::thread::spawn(move || {
             let span = n as f64 / rate as f64;
             let from = (t - span).max(0.0);
-            let program = af27_engine::mix_program(&session, &|m| media.get(&m).cloned(), rate);
-            let b = af27_engine::render(program, rate, from, from + span);
+            let program = af2_engine::mix_program(&session, &|m| media.get(&m).cloned(), rate);
+            let b = af2_engine::render(program, rate, from, from + span);
             let frames: Vec<[f32; 2]> = (0..n.min(b.frames()))
                 .map(|i| {
                     [
@@ -2505,7 +2698,7 @@ impl State {
 
 /// The markers and chapters read from a file, as document markers
 /// (ranges keep their length, clipped to the file; chapters stay chapters).
-fn file_markers(info: &af27_io::meta::FileInfo, dur: f64) -> Vec<Marker> {
+fn file_markers(info: &af2_io::meta::FileInfo, dur: f64) -> Vec<Marker> {
     let mut out: Vec<Marker> = info
         .markers
         .iter()
@@ -2516,9 +2709,9 @@ fn file_markers(info: &af27_io::meta::FileInfo, dur: f64) -> Vec<Marker> {
             length: m.length.min((dur - m.time).max(0.0)),
             ext_id: None,
             kind: match m.kind {
-                af27_io::meta::MarkerKind::Cue => af27_core::session::MarkerKind::Cue,
-                af27_io::meta::MarkerKind::Range => af27_core::session::MarkerKind::Range,
-                af27_io::meta::MarkerKind::Chapter => af27_core::session::MarkerKind::Chapter,
+                af2_io::meta::MarkerKind::Cue => af2_core::session::MarkerKind::Cue,
+                af2_io::meta::MarkerKind::Range => af2_core::session::MarkerKind::Range,
+                af2_io::meta::MarkerKind::Chapter => af2_core::session::MarkerKind::Chapter,
             },
         })
         .collect();
@@ -2580,4 +2773,40 @@ fn decode_turn() -> impl Drop {
     }
     *busy += 1;
     Turn(gate)
+}
+
+/// How long a howl must last before monitoring is stopped, seconds.
+pub const HOWL_SECS: f32 = 0.5;
+
+/// The feedback guard's clock: grows while an input is monitored and the
+/// output peak sits at full scale, falls back twice as fast otherwise.
+pub fn howl_step(secs: f32, monitoring: bool, peak: f32, dt: f32) -> f32 {
+    if monitoring && peak >= 0.97 {
+        secs + dt
+    } else {
+        (secs - 2.0 * dt).max(0.0)
+    }
+}
+
+#[cfg(test)]
+mod howl_tests {
+    use super::*;
+
+    #[test]
+    fn a_sustained_full_scale_howl_trips_the_guard_but_peaks_do_not() {
+        // Half a second at full scale while monitoring: trips.
+        let mut s = 0.0;
+        for _ in 0..32 {
+            s = howl_step(s, true, 1.0, 1.0 / 60.0);
+        }
+        assert!(s >= HOWL_SECS);
+        // Loud drum hits (a frame at full scale now and then) never add up.
+        let mut s = 0.0;
+        for k in 0..600 {
+            s = howl_step(s, true, if k % 6 == 0 { 1.0 } else { 0.5 }, 1.0 / 60.0);
+        }
+        assert!(s < HOWL_SECS);
+        // Not monitoring: full-scale playback is not a howl.
+        assert_eq!(howl_step(0.0, false, 1.0, 1.0), 0.0);
+    }
 }

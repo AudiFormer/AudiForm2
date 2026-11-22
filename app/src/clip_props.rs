@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Properties panel: the selected clip in folding sections. Info
 //! (start, end and duration, which can be typed or dragged, and the
@@ -13,8 +13,8 @@
 
 use egui::{vec2, RichText};
 
-use af27_core::session::{usual_channel_map, ChannelSend};
-use af27_core::{StretchKind, StretchMode};
+use af2_core::session::{usual_channel_map, ChannelSend};
+use af2_core::{StretchKind, StretchMode};
 
 use crate::state::State;
 use crate::theme::{c, Theme};
@@ -151,7 +151,7 @@ fn format_of(path: &std::path::Path) -> String {
     if let Some(s) = cache.lock().ok().and_then(|m| m.get(path).cloned()) {
         return s;
     }
-    let s = af27_io::meta::describe_format(path);
+    let s = af2_io::meta::describe_format(path);
     if let Ok(mut m) = cache.lock() {
         m.insert(path.to_path_buf(), s.clone());
     }
@@ -531,7 +531,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
 fn source_channels(
     ui: &mut egui::Ui,
     th: &Theme,
-    c2: &mut af27_core::Clip,
+    c2: &mut af2_core::Clip,
     channels: usize,
     live_drag: &mut bool,
     done: &mut bool,
@@ -668,7 +668,7 @@ fn source_channels(
 
 /// The Properties panel for the MIDI clip at track `ti`, clip `ci`.
 fn midi_panel(ui: &mut egui::Ui, st: &mut State, ti: usize, ci: usize) {
-    use af27_core::midi::{ClipTiming, MIDI_PITCH_MAX, MIDI_STRETCH_MAX, MIDI_STRETCH_MIN};
+    use af2_core::midi::{ClipTiming, MIDI_PITCH_MAX, MIDI_STRETCH_MAX, MIDI_STRETCH_MIN};
     let th = st.theme.clone();
     let before = st.session.clone();
     let tempo = st.session.tempo.clone();

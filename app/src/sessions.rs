@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Sessions and bringing files into them.
 //!
@@ -30,7 +30,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use af27_core::{ClipId, History, MediaId, Session, TrackId, TrackKind};
+use af2_core::{ClipId, History, MediaId, Session, TrackId, TrackKind};
 use serde::{Deserialize, Serialize};
 
 use crate::state::{data_dir, DocId, Mode, State, View};
@@ -255,7 +255,7 @@ pub fn expand_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
             .to_ascii_lowercase();
         if is_session_ext(&ext) {
             sessions.push(p.to_path_buf());
-        } else if af27_io::EXTENSIONS.contains(&ext.as_str())
+        } else if af2_io::EXTENSIONS.contains(&ext.as_str())
             && !audio.iter().any(|a| same_path(a, p))
         {
             audio.push(p.to_path_buf());
@@ -276,21 +276,21 @@ pub fn expand_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
 }
 
 pub fn is_session_ext(ext: &str) -> bool {
-    ext.eq_ignore_ascii_case("af27") || af27_interop::is_session_ext(ext)
+    ext.eq_ignore_ascii_case("af2") || ext.eq_ignore_ascii_case("af27") || af2_interop::is_session_ext(ext)
 }
 
 /// Opens another app's or Audiform's session file. A 5.1 `.sesx` first
 /// asks where its surround speakers were, so directions come across
 /// right in 3D Space.
-pub fn import_session(path: &Path) -> Result<af27_interop::Imported, String> {
-    use af27_interop::sesx::Surrounds;
+pub fn import_session(path: &Path) -> Result<af2_interop::Imported, String> {
+    use af2_interop::sesx::Surrounds;
     let is_sesx = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("sesx"));
     let surround = is_sesx
         && std::fs::read(path)
             .map(|b| {
-                af27_interop::sesx::is_surround(&af27_interop::sesx::decode(
+                af2_interop::sesx::is_surround(&af2_interop::sesx::decode(
                     &b[..b.len().min(16_384)],
                 ))
             })
@@ -314,7 +314,7 @@ No: beside me",
     } else {
         Surrounds::Behind
     };
-    af27_interop::import_with(path, surrounds)
+    af2_interop::import_with(path, surrounds)
 }
 
 fn file_name(p: &Path) -> String {
@@ -751,7 +751,7 @@ fn write_autosave(
     // Relative media paths are kept as they are from the session's own
     // file, not from the recovery folder.
     let home = path.and_then(Path::parent);
-    if af27_interop::audfrm::save_relative_to(session, base, &f, home).is_ok() {
+    if af2_interop::audfrm::save_relative_to(session, base, &f, home).is_ok() {
         let note = AutosaveNote {
             key,
             name: session.name.clone(),
@@ -1026,7 +1026,7 @@ impl State {
     pub fn new_session(&mut self, template: Option<&Path>) {
         let made = match template {
             None => None,
-            Some(t) => match af27_interop::import(t) {
+            Some(t) => match af2_interop::import(t) {
                 Ok(i) => Some(i),
                 Err(e) => {
                     self.error(e);
@@ -1125,10 +1125,10 @@ impl State {
         let path = match (&self.session_path, save_as) {
             (Some(p), false) => Some(p.clone()),
             _ => {
-                let mut d = rfd::FileDialog::new()
+                let mut d = crate::file_dialog::FileDialog::new()
                     .set_file_name(format!("{}.audfrm", self.session.name))
                     .add_filter("Audiform session", &["audfrm"])
-                    .add_filter("AudiForm 2 model dump", &["af27"]);
+                    .add_filter("AudiForm 2 model dump", &["af2", "af27"]);
                 if let Some(dir) = self.session_path.as_ref().and_then(|p| p.parent()) {
                     d = d.set_directory(dir);
                 }
@@ -1202,7 +1202,7 @@ impl State {
     pub fn save_template(&mut self) {
         let dir = templates_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let Some(path) = rfd::FileDialog::new()
+        let Some(path) = crate::file_dialog::FileDialog::new()
             .set_directory(&dir)
             .set_file_name(format!("{}.audfrm", self.session.name))
             .add_filter("Session template", &["audfrm"])
@@ -1211,7 +1211,7 @@ impl State {
             return;
         };
         let mut s = self.session.clone();
-        match af27_interop::audfrm::save(&mut s, self.session_base.as_ref(), &path) {
+        match af2_interop::audfrm::save(&mut s, self.session_base.as_ref(), &path) {
             Ok(_) => self.toast(format!(
                 "Saved the template {}",
                 path.file_stem().unwrap_or_default().to_string_lossy()
@@ -1757,7 +1757,7 @@ impl State {
             .and_then(Path::parent)
             .or_else(|| r.file.parent())
             .unwrap_or(Path::new("."));
-        match af27_interop::audfrm::import(&text, dir) {
+        match af2_interop::audfrm::import(&text, dir) {
             Ok(i) => {
                 self.park_front();
                 self.session = i.session;
@@ -1880,7 +1880,7 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                         .selected_text(format!("{} Hz", d.rate))
                         .show_ui(ui, |ui| {
                             for r in [
-                                22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+                                22_050, 32_000, 44_100, 48_000, 64_000, 88_200, 96_000, 176_400, 192_000,
                             ] {
                                 ui.selectable_value(&mut d.rate, r, format!("{r} Hz"));
                             }
@@ -1905,7 +1905,7 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                         ("Clips", clips.to_string()),
                         ("Files used", used.len().to_string()),
                         ("Markers", s.markers.len().to_string()),
-                        ("Length", af27_core::time::format_time(s.duration())),
+                        ("Length", af2_core::time::format_time(s.duration())),
                     ] {
                         ui.label(k);
                         ui.label(v);

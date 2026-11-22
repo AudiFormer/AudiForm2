@@ -1,7 +1,7 @@
 # Feature parity checklist
 
 This tracks what a mature professional audio editor offers and where
-Audiform27 stands. It is compiled from public descriptions of the leading
+Audiform2 stands. It is compiled from public descriptions of the leading
 commercial editor's 2025–2026 feature set, rewritten in our own words, with
 our own feature names.
 

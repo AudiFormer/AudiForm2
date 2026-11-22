@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Delay and Echo faceplate, after the lead's Audiform Delay window
 //! (DelayPanel.svelte), driving `af.echo`. Across the top, the kind tabs
@@ -24,7 +24,7 @@
 
 use egui::{vec2, Align2, FontId, Rect, Rounding, Sense, Stroke};
 
-use af27_fx::effects::echo::{ANALOG, BBD, BEATS, NOTES, SIMPLE, TAPE};
+use af2_fx::effects::echo::{ANALOG, BBD, BEATS, NOTES, SIMPLE, TAPE};
 
 use super::layout::{self, GAP, GAP_S, HERO, KNOB, SIDE};
 use super::{parts, space, Env, Fx};

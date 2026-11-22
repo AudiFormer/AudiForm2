@@ -1,0 +1,14 @@
+[package]
+name = "af2-space"
+description = "Audiform2 3D Space: speaker layouts, room panning and binaural listening"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+
+[dependencies]
+af2-core.workspace = true
+realfft = "3.4"
+
+[dev-dependencies]
+af2-dsp.workspace = true

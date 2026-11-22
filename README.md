@@ -5,12 +5,12 @@
 > **⚠️ Highly experimental.** AudiForm 2 is an early alpha. Expect bugs,
 > missing pieces and changes between builds. Keep backups of sessions you
 > care about. **Please report any problem you hit** through
-> [GitHub Issues](https://github.com/nwh212/AudiForm2/issues). Say what you
+> [GitHub Issues](https://github.com/AudiFormer/AudiForm2/issues). Say what you
 > did, what you expected and what happened, and attach the session or a
 > screenshot if you can. Every report helps.
 
 A fast, themeable audio editor written entirely in Rust. It's the sequel to
-[Audiform](https://github.com/nwh212/Audiform), rebuilt from scratch.
+[Audiform](https://github.com/AudiFormer/Audiform), rebuilt from scratch.
 
 AudiForm 2 covers the full editing workflow:
 - a destructive **Waveform editor** with a spectral display
@@ -18,14 +18,14 @@ AudiForm 2 covers the full editing workflow:
 - a dockable panel layout
 - effects, analysis and local AI stem separation
 
-(Working name until 2026-11-19: Audiform27. The crates, the `.af27` and
-`.af27theme` extensions and the settings folder keep that name so nothing
+(Working name until 2026-11-19: Audiform2. The crates, the `.af2` and
+`.af2theme` extensions and the settings folder keep that name so nothing
 saved is lost.)
 
 ## Download
 
 Windows builds are on the
-[Releases](https://github.com/nwh212/AudiForm2/releases) page. They're
+[Releases](https://github.com/AudiFormer/AudiForm2/releases) page. They're
 marked as pre-releases while AudiForm 2 is in alpha.
 
 ## Build and run
@@ -84,7 +84,7 @@ cargo build --release -p audiform2 --features asio
 | Read | Notes |
 | --- | --- |
 | WAV, BWF, RF64, AIFF/AIFC, FLAC, MP3, MP2, Ogg Vorbis, Opus, AAC/M4A/MP4, CAF, MKV/WebM audio | Every channel is kept |
-| DTS in WAV (DTS music CDs) and raw `.dts` | Decoded to 5.1 / 6.1 by `af27-dts` |
+| DTS in WAV (DTS music CDs) and raw `.dts` | Decoded to 5.1 / 6.1 by `af2-dts` |
 | `.mogg` | Unencrypted multitrack Ogg, any number of channels; encrypted files are refused |
 | Dolby Digital (AC-3), Dolby Digital Plus (E-AC-3), HE-AAC, AC-4 | Through Windows' own decoders (AC-4 needs Dolby's decoder installed). Dolby Atmos music opens as its 5.1 or 7.1 bed, which carries the whole mix; the height objects need Dolby's renderer |
 | Anything else ffmpeg reads | If you have ffmpeg installed (on the PATH, or named by `AF2_FFMPEG`), files nothing else opens go through it, on any system. AudiForm 2 never downloads or ships it |
@@ -93,7 +93,7 @@ cargo build --release -p audiform2 --features asio
 | --- | --- |
 | `.audfrm` / `.altaudio` | **The session format.** Read and written losslessly, so sessions go back and forth between Audiform and AudiForm 2. Anything AudiForm 2 doesn't use is saved back untouched. |
 | `.sesx` | Imports tracks, clips, fades, clip and track effects, I/O, automation and plug-in automation. Built-in effects are mapped to AudiForm 2's own. Also exports. See `docs/af2/project-files.md` |
-| `.af27` | A plain dump of AudiForm 2's own model |
+| `.af2` | A plain dump of AudiForm 2's own model |
 
 ## Themes
 
@@ -103,9 +103,9 @@ Built-in themes:
 - Mall Pastel '95 (Day and Night)
 - **Studio Lite**: a flat, lightweight theme for weaker machines
 
-To add your own, put `.af27theme` JSON files in `%APPDATA%\Audiform27\themes\`
-(Windows) or `~/.local/share/Audiform27/themes/` (Linux). Then pick one
-from **View > Theme**. See `docs/themes/Ice Cave.af27theme`.
+To add your own, put `.af2theme` JSON files in `%APPDATA%\Audiform2\themes\`
+(Windows) or `~/.local/share/Audiform2/themes/` (Linux). Then pick one
+from **View > Theme**. See `docs/themes/Ice Cave.af2theme`.
 
 ## Performance
 
@@ -124,7 +124,7 @@ The UI draws with wgpu, and falls back to OpenGL where wgpu can't start.
 ## Reporting problems
 
 AudiForm 2 is experimental, so reports matter. Open an issue at
-<https://github.com/nwh212/AudiForm2/issues> with:
+<https://github.com/AudiFormer/AudiForm2/issues> with:
 - the build (Help > About)
 - your Windows version and audio device or driver
 - the steps that cause the problem, and what happened versus what you expected
@@ -134,7 +134,7 @@ AudiForm 2 is experimental, so reports matter. Open an issue at
 
 AudiForm 2 is free software under the **GNU General Public License,
 version 3 or later** (`LICENSE`, full text in `COPYING`).
-`crates/af27-dts` is **LGPL-2.1-or-later**, because its decoder is a Rust
+`crates/af2-dts` is **LGPL-2.1-or-later**, because its decoder is a Rust
 port of FFmpeg's DTS decoder.
 
 AudiForm 2 is written clean-room. It takes behaviour from Audiform 1, never

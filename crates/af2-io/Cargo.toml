@@ -1,0 +1,23 @@
+[package]
+name = "af2-io"
+description = "Audiform2 audio file reading and writing"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+
+[dependencies]
+af2-core.workspace = true
+symphonia.workspace = true
+hound.workspace = true
+af2-dts.workspace = true
+af2-osdecode.workspace = true
+af2-dsp.workspace = true
+serde.workspace = true
+# Apache-2.0, pure Rust FLAC encoder.
+flacenc = { version = "0.5.1", default-features = false }
+ogg = "0.9"
+lofty = "0.25"
+id3 = "1.17"
+metaflac = "0.2"
+opus-pure = "0.2.3"

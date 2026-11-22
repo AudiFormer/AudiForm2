@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The process's memory, for benchmarks and `AF2_MEMLOG=1` (prints it
 //! every two seconds with what is loaded).

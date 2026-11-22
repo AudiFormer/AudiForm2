@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! MIDI input: armed MIDI tracks listen to one input or all of them, what
 //! is played is heard through the first armed track's instrument (on the
@@ -14,9 +14,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use af27_core::midi_live::{KeyEvent, Keys, Take};
-use af27_core::{TrackId, TrackKind};
-use af27_engine::LiveNote;
+use af2_core::midi_live::{curve_event, KeyEvent, Keys, Take};
+use af2_core::{TrackId, TrackKind};
+use af2_engine::LiveNote;
 
 use crate::state::State;
 
@@ -42,7 +42,9 @@ struct Shared {
     /// VST3 instruments (crate::instruments): the monitored track plays
     /// one, through the engine's keys player and this sender.
     keys_on: bool,
-    keys: Option<rtrb::Producer<af27_dsp::instrument::NoteEvent>>,
+    keys: Option<rtrb::Producer<af2_dsp::instrument::NoteEvent>>,
+    /// Preferences > Multitrack > MIDI's note on velocity mapping.
+    velocity: af2_core::midi_live::VelocityMap,
 }
 
 impl Shared {
@@ -56,6 +58,7 @@ impl Shared {
             capture,
             keys_on,
             keys,
+            velocity,
         } = self;
         for r in routes.iter_mut() {
             if r.input.as_deref().is_some_and(|p| p != port) {
@@ -63,6 +66,11 @@ impl Shared {
             }
             events.clear();
             r.keys.feed(msg, &mut events);
+            // What is heard and what is recorded both go through the
+            // velocity curve.
+            for e in events.iter_mut() {
+                *e = curve_event(*e, velocity);
+            }
             for e in &events {
                 // A VST3 instrument plays it (crate::instruments).
                 if *monitor == Some(r.track) && *keys_on {
@@ -277,6 +285,9 @@ impl State {
                 s.keys = fresh_keys;
             }
             s.keys_on = keys_on;
+            if s.velocity != self.prefs.midi_velocity_map {
+                s.velocity = self.prefs.midi_velocity_map.clone();
+            }
             let old_monitor = s.monitor;
             s.monitor = monitor.map(|m| m.1);
             if old_monitor != s.monitor {

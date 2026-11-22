@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Settings window (Edit > Preferences...) and the Keyboard Shortcuts
 //! window. Settings shows a list of pages on the left and the chosen
@@ -71,6 +71,14 @@ pub struct Prefs {
     pub snap_ruler: bool,
     /// Scroll the view along with the playhead while playing.
     pub follow_playhead: bool,
+    /// The Waveform editor shows the time under the mouse beside it, in
+    /// the ruler's format.
+    pub hover_time: bool,
+    /// ...and, over the spectrum, the frequency under it.
+    pub hover_freq: bool,
+    /// How the Waveform editor plays a file of more than two channels
+    /// (also the button on the transport).
+    pub surround_play: SurroundMode,
     pub autosave: bool,
     pub autosave_minutes: u32,
     /// Each save first copies the previous file into Backups.
@@ -86,10 +94,16 @@ pub struct Prefs {
     pub copy_on_save: bool,
     /// Bring the Effects panel up when an effect is picked from the menu.
     pub show_effects_on_pick: bool,
+    /// Text in the desktop's own UI font (KDE, GNOME, Windows, macOS)
+    /// instead of the theme's.
+    pub system_font: bool,
     pub colors: ColorOverrides,
     pub audio: AudioPrefs,
     /// What the Multitrack's track headers show.
     pub header_view: crate::track_views::HeaderView,
+    /// The Multitrack's track headers' width in points (drag the line
+    /// between headers and lanes).
+    pub header_w: f32,
     /// Stretch handles on clip corners.
     pub stretch_handles: bool,
     /// Every audio clip shows its volume and pan lines.
@@ -101,7 +115,7 @@ pub struct Prefs {
     /// the opposite way.
     pub link_crossfades: bool,
     /// The metronome's sound and level (kept here, not in sessions).
-    pub metronome: af27_core::midi::MetronomeSettings,
+    pub metronome: af2_core::midi::MetronomeSettings,
     /// What New Audio File and New Multitrack Session start with.
     pub new_file: crate::new_dialogs::NewFileDefaults,
     pub new_session: crate::new_dialogs::NewSessionDefaults,
@@ -121,6 +135,18 @@ pub struct Prefs {
     /// The MIDI input played on armed MIDI tracks is heard through their
     /// instrument.
     pub midi_monitor: bool,
+    /// The old single velocity curve (-1 hard .. 1 soft); read from older
+    /// prefs files into midi_velocity_map, then 0.
+    pub midi_velocity_curve: f32,
+    /// What a MIDI keyboard's touch plays: Preferences > Multitrack > MIDI's
+    /// note on velocity mapping.
+    pub midi_velocity_map: af2_core::midi_live::VelocityMap,
+    /// Look for a newer release a few seconds after start.
+    pub check_updates: bool,
+    /// A release the user chose to skip (its version), not offered again.
+    pub skip_update_version: String,
+    /// The Piano Roll's lane height in pixels (dragged on the bar above it).
+    pub piano_lane_h: f32,
     /// The level meters' range, response, hold, type and clip lights.
     pub meters: crate::meters::MeterPrefs,
 }
@@ -130,7 +156,7 @@ pub struct Prefs {
 #[serde(default)]
 pub struct AudioPrefs {
     /// The system's own driver, or ASIO.
-    pub host: af27_engine::HostKind,
+    pub host: af2_engine::HostKind,
     /// The ASIO driver (None: the best guess among those installed).
     pub asio_driver: Option<String>,
     /// Play through this device (None: the system default). System
@@ -143,12 +169,12 @@ pub struct AudioPrefs {
     /// Sample rate to run the device at (None: the device's own).
     pub rate: Option<u32>,
     /// Which outputs the stereo mix and 3D speakers play on.
-    pub map: af27_engine::OutputMap,
+    pub map: af2_engine::OutputMap,
 }
 
 impl AudioPrefs {
-    pub fn choice(&self) -> af27_engine::DeviceChoice {
-        af27_engine::DeviceChoice {
+    pub fn choice(&self) -> af2_engine::DeviceChoice {
+        af2_engine::DeviceChoice {
             host: self.host,
             asio_driver: self.asio_driver.clone(),
             output: self.output.clone(),
@@ -162,12 +188,12 @@ impl AudioPrefs {
 
 /// What a device listing is for: the driver, the ASIO driver, and the
 /// output whose rates and buffer sizes are shown.
-type ScanKey = (af27_engine::HostKind, Option<String>, Option<String>);
+type ScanKey = (af2_engine::HostKind, Option<String>, Option<String>);
 
 fn scan_key(a: &AudioPrefs) -> ScanKey {
     match a.host {
-        af27_engine::HostKind::System => (a.host, None, a.output.clone()),
-        af27_engine::HostKind::Asio => (a.host, a.asio_driver.clone(), None),
+        af2_engine::HostKind::System => (a.host, None, a.output.clone()),
+        af2_engine::HostKind::Asio => (a.host, a.asio_driver.clone(), None),
     }
 }
 
@@ -177,20 +203,20 @@ fn scan_key(a: &AudioPrefs) -> ScanKey {
 #[derive(Clone)]
 struct Scan {
     key: ScanKey,
-    list: af27_engine::DeviceList,
+    list: af2_engine::DeviceList,
     /// The newest listing came back empty for the same driver (one busy
     /// for a moment, or just restarted); this is the last one that had
     /// devices.
     stale: bool,
 }
 
-fn has_devices(l: &af27_engine::DeviceList) -> bool {
+fn has_devices(l: &af2_engine::DeviceList) -> bool {
     !l.outputs.is_empty() || !l.inputs.is_empty()
 }
 
 /// A new listing, keeping the previous one's devices when the new one is
 /// empty for the same driver.
-fn merge_scan(prev: Option<&Scan>, key: ScanKey, list: af27_engine::DeviceList) -> Scan {
+fn merge_scan(prev: Option<&Scan>, key: ScanKey, list: af2_engine::DeviceList) -> Scan {
     match prev {
         Some(p)
             if p.key.0 == key.0
@@ -222,6 +248,61 @@ enum PageAct {
     ImportAf1,
 }
 
+/// How a file of more than two channels plays in the Waveform editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SurroundMode {
+    /// Straight to the speaker outputs when Channel Routing has them set
+    /// up and the device has enough; else headphones.
+    #[default]
+    Auto,
+    /// Plain stereo fold-down: no spatial processing.
+    Fold,
+    /// Binaural, for headphones.
+    Headphones,
+    /// Binaural for a pair of bookshelf speakers or monitors (crosstalk
+    /// cancelled).
+    Speakers,
+    /// Each channel to its own device output.
+    Direct,
+}
+
+impl SurroundMode {
+    pub const ALL: [SurroundMode; 5] = [
+        SurroundMode::Auto,
+        SurroundMode::Fold,
+        SurroundMode::Headphones,
+        SurroundMode::Speakers,
+        SurroundMode::Direct,
+    ];
+
+    /// Short, for the transport button.
+    pub fn label(self) -> &'static str {
+        match self {
+            SurroundMode::Auto => "Auto",
+            SurroundMode::Fold => "Stereo fold",
+            SurroundMode::Headphones => "Headphones",
+            SurroundMode::Speakers => "Speakers",
+            SurroundMode::Direct => "Direct outs",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            SurroundMode::Auto => {
+                "Auto: to your speaker outputs when Channel Routing has them, else headphones"
+            }
+            SurroundMode::Fold => "Stereo fold-down: plain stereo, no spatial processing",
+            SurroundMode::Headphones => "Headphones: every channel placed around your head (binaural)",
+            SurroundMode::Speakers => {
+                "Bookshelf speakers / monitors: binaural with crosstalk cancelled"
+            }
+            SurroundMode::Direct => {
+                "Direct outputs: each channel to its own output (Channel Routing)"
+            }
+        }
+    }
+}
+
 impl Default for Prefs {
     fn default() -> Prefs {
         Prefs {
@@ -231,6 +312,9 @@ impl Default for Prefs {
             time_format: crate::transport::TimeFormat::MinSec,
             snap_ruler: true,
             follow_playhead: true,
+            hover_time: true,
+            hover_freq: true,
+            surround_play: SurroundMode::Auto,
             autosave: true,
             autosave_minutes: 2,
             backups: true,
@@ -239,9 +323,11 @@ impl Default for Prefs {
             media_folder: "Audio".into(),
             copy_on_save: true,
             show_effects_on_pick: true,
+            system_font: false,
             colors: ColorOverrides::default(),
             audio: AudioPrefs::default(),
             header_view: Default::default(),
+            header_w: 210.0,
             stretch_handles: false,
             clip_lines: true,
             auto_crossfade: true,
@@ -255,6 +341,11 @@ impl Default for Prefs {
             firewall_paths: Vec::new(),
             solo_exclusive: false,
             midi_monitor: true,
+            midi_velocity_curve: 0.0,
+            midi_velocity_map: Default::default(),
+            check_updates: true,
+            skip_update_version: String::new(),
+            piano_lane_h: crate::pianoroll::LANE_H,
             meters: Default::default(),
         }
     }
@@ -266,13 +357,30 @@ impl Prefs {
     }
 
     pub fn load() -> Prefs {
-        std::fs::read_to_string(Prefs::path())
+        let mut p: Prefs = std::fs::read_to_string(Prefs::path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        p.carry_old_velocity_curve();
+        crate::skin::set_system_font(p.system_font);
+        p
+    }
+
+    /// A velocity curve set before the velocity map existed becomes the
+    /// map (one bent stretch, the same values).
+    pub fn carry_old_velocity_curve(&mut self) {
+        if self.midi_velocity_curve.abs() > 1e-3
+            && self.midi_velocity_map == af2_core::midi_live::VelocityMap::linear()
+        {
+            self.midi_velocity_map =
+                af2_core::midi_live::VelocityMap::from_curve(self.midi_velocity_curve);
+        }
+        self.midi_velocity_curve = 0.0;
+        self.midi_velocity_map.tidy();
     }
 
     pub fn save(&self) {
+        crate::skin::set_system_font(self.system_font);
         let _ = std::fs::create_dir_all(data_dir());
         if let Ok(s) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(Prefs::path(), s);
@@ -335,7 +443,7 @@ struct Draft {
     workspace: Workspace,
     devices: Option<Scan>,
     /// The layout Channel Routing shows speakers for.
-    routing_layout: Option<af27_core::space::SpaceLayout>,
+    routing_layout: Option<af2_core::space::SpaceLayout>,
     act: Option<PageAct>,
 }
 
@@ -374,6 +482,7 @@ impl Draft {
                 self.intro = base.is_none_or(|t| t.intro);
                 self.realistic = base.is_none_or(|t| t.realistic);
                 self.prefs.colors = d.colors;
+                self.prefs.system_font = d.system_font;
             }
             "Autosave" => {
                 self.prefs.autosave = d.autosave;
@@ -434,6 +543,7 @@ impl Draft {
         prefs.time_format = st.prefs.time_format;
         prefs.snap_ruler = st.prefs.snap_ruler;
         prefs.header_view = st.prefs.header_view;
+        prefs.header_w = st.prefs.header_w;
         prefs.stretch_handles = st.prefs.stretch_handles;
         prefs.clip_lines = st.prefs.clip_lines;
         prefs.metronome = st.prefs.metronome;
@@ -601,8 +711,15 @@ impl SettingsUi {
 fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
     match name {
         "General" => {
+            group(ui, th, "Updates", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.check_updates,
+                    "Check for a newer version when AudiForm 2 starts",
+                );
+                note(ui, th, "Only GitHub's list of releases is asked; nothing about you or your work is sent. Help > Check for Updates looks any time.");
+            });
             group(ui, th, "Windows network prompts", |ui| {
-                note(ui, th, "Windows asks \"Allow access to the network?\" when a program listens for connections. In AudiForm 2 that is usually a plug-in checking its licence, since plug-ins run inside AudiForm 2's plug-in host. A firewall rule for AudiForm 2 stops the question for good, on every kind of network. Windows asks for your permission to add it, once now and once for each new copy of AudiForm 2 (a new test build, say).");
+                note(ui, th, "Windows asks \"Allow access to the network?\" when a program listens for connections. In AudiForm 2 that is usually a plug-in checking its licence, since plug-ins run inside AudiForm 2's plug-in host. A firewall rule for AudiForm 2 stops the question for good, on every kind of network. Plug-ins run from one fixed copy of the plug-in host, so the rule (or your answer to Windows' own question) covers every build of AudiForm 2, and Windows asks for permission to add it only once.");
                 ui.horizontal(|ui| {
                     if ui
                         .button("Allow network access")
@@ -791,6 +908,8 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     &mut d.prefs.midi_monitor,
                     "Hear what you play on armed MIDI tracks through their instrument",
                 );
+                ui.add_space(6.0);
+                velocity_map_ui(ui, th, &mut d.prefs.midi_velocity_map);
             });
         }
         "Clips" => {
@@ -887,6 +1006,15 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     "Follow the playhead: the view scrolls along when it reaches the edge",
                 );
             });
+            group(ui, th, "Beside the mouse (Waveform editor)", |ui| {
+                ui.checkbox(&mut d.prefs.hover_time, "The time under the mouse, as the ruler shows time");
+                ui.checkbox(&mut d.prefs.hover_freq, "Over the spectrum, the frequency under the mouse");
+            });
+            group(ui, th, "Surround files (Waveform editor)", |ui| {
+                for m in SurroundMode::ALL {
+                    ui.radio_value(&mut d.prefs.surround_play, m, m.describe());
+                }
+            });
         }
         _ => {
             if coming(name).is_empty() {
@@ -905,7 +1033,7 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
 /// playing is not loaded just to list it (a process can hold one driver):
 /// it is listed once Apply has switched to it.
 fn ensure_scan(d: &mut Draft, st: &State, force: bool) -> Scan {
-    use af27_engine::HostKind;
+    use af2_engine::HostKind;
     let key = scan_key(&d.prefs.audio);
     let fresh = d.devices.as_ref().is_some_and(|s| s.key == key);
     if force || !fresh {
@@ -916,17 +1044,17 @@ fn ensure_scan(d: &mut Draft, st: &State, force: bool) -> Scan {
             .map(|e| e.device.clone());
         let wanted = (key.0 == HostKind::Asio)
             .then(|| {
-                af27_engine::devices::pick_driver(
-                    &af27_engine::devices::asio_drivers(),
+                af2_engine::devices::pick_driver(
+                    &af2_engine::devices::asio_drivers(),
                     key.1.as_deref(),
                 )
             })
             .flatten();
         let list = match (busy_with, wanted) {
-            (Some(open), Some(w)) if open != w => af27_engine::DeviceList {
+            (Some(open), Some(w)) if open != w => af2_engine::DeviceList {
                 host: HostKind::Asio,
                 driver: format!("ASIO ({w})"),
-                asio_drivers: af27_engine::devices::asio_drivers(),
+                asio_drivers: af2_engine::devices::asio_drivers(),
                 asio_driver: Some(w.clone()),
                 error: Some(format!(
                     "{open} is in use. Press Apply to switch to {w}; its inputs and outputs \
@@ -934,7 +1062,7 @@ fn ensure_scan(d: &mut Draft, st: &State, force: bool) -> Scan {
                 )),
                 ..Default::default()
             },
-            _ => af27_engine::devices::list(key.0, key.1.as_deref(), key.2.as_deref()),
+            _ => af2_engine::devices::list(key.0, key.1.as_deref(), key.2.as_deref()),
         };
         d.devices = Some(merge_scan(d.devices.as_ref(), key, list));
     }
@@ -956,6 +1084,11 @@ fn firewall_programs(before: &[String]) -> Vec<String> {
             v.push(p);
         }
     };
+    // Where plug-ins really run: the fixed host copy (see af2-vst3's
+    // `stable`), the same path for every build.
+    if let Some(h) = af2_vst3::stable::stable_host_path() {
+        add(h.display().to_string());
+    }
     if let Ok(exe) = std::env::current_exe() {
         add(exe.display().to_string());
         if let Some(dir) = exe.parent() {
@@ -1020,7 +1153,10 @@ fn firewall_rule(allow: bool, before: &[String]) -> Vec<String> {
 /// plug-ins do not bring the network question back.
 pub fn firewall_follow(prefs: &mut Prefs) {
     let Some(allow) = prefs.firewall else { return };
-    let Ok(exe) = std::env::current_exe() else {
+    // Plug-ins run from the fixed host copy; once the rule covers it, a
+    // new build needs no new rule (and no new permission prompt).
+    let Some(exe) = af2_vst3::stable::stable_host_path().or_else(|| std::env::current_exe().ok())
+    else {
         return;
     };
     let exe = exe.display().to_string();
@@ -1038,7 +1174,7 @@ pub fn firewall_follow(prefs: &mut Prefs) {
 /// Settings > Audio Devices: the driver, what plays and records, the
 /// sample rate and buffer, what is open now, and the audio log.
 fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
-    use af27_engine::HostKind;
+    use af2_engine::HostKind;
     let scan = ensure_scan(d, st, false);
     let list = &scan.list;
     let a = &mut d.prefs.audio;
@@ -1049,7 +1185,7 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                 id: &str,
                 label: &str,
                 cur: &mut Option<String>,
-                all: &[af27_engine::DeviceInfo],
+                all: &[af2_engine::DeviceInfo],
                 default: &Option<String>,
                 dir: &str| {
         let dflt = format!(
@@ -1077,12 +1213,12 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
     };
     let mut refresh = false;
     group(ui, th, "Audio hardware", |ui| {
-        let system = format!("System ({})", af27_engine::driver_name());
+        let system = format!("System ({})", af2_engine::driver_name());
         ui.horizontal(|ui| {
             row(ui, "Driver");
             let shown = match a.host {
                 HostKind::System => system.clone(),
-                HostKind::Asio if af27_engine::ASIO_BUILT => "ASIO".to_string(),
+                HostKind::Asio if af2_engine::ASIO_BUILT => "ASIO".to_string(),
                 HostKind::Asio => "ASIO (not in this build)".to_string(),
             };
             egui::ComboBox::from_id_salt("settings-driver")
@@ -1090,18 +1226,18 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                 .width(380.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut a.host, HostKind::System, system.as_str());
-                    if af27_engine::ASIO_BUILT {
+                    if af2_engine::ASIO_BUILT {
                         ui.selectable_value(&mut a.host, HostKind::Asio, "ASIO");
                     } else {
                         ui.add_enabled(
                             false,
                             egui::SelectableLabel::new(false, "ASIO (not in this build)"),
                         )
-                        .on_disabled_hover_text(af27_engine::devices::NO_ASIO);
+                        .on_disabled_hover_text(af2_engine::devices::NO_ASIO);
                     }
                 });
         });
-        if !af27_engine::ASIO_BUILT {
+        if !af2_engine::ASIO_BUILT {
             let names = &list.asio_drivers;
             if !names.is_empty() {
                 note(
@@ -1111,7 +1247,7 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                         "ASIO drivers on this computer: {}. This build of AudiForm 2 was made \
                          without ASIO, so it plays and records through {} instead.",
                         names.join(", "),
-                        af27_engine::driver_name()
+                        af2_engine::driver_name()
                     ),
                 );
             }
@@ -1119,7 +1255,7 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
         if a.host == HostKind::Asio {
             ui.horizontal(|ui| {
                 row(ui, "ASIO driver");
-                let guess = af27_engine::devices::pick_driver(&list.asio_drivers, None);
+                let guess = af2_engine::devices::pick_driver(&list.asio_drivers, None);
                 let auto = format!(
                     "Automatic ({})",
                     guess.unwrap_or_else(|| "none installed".into())
@@ -1206,14 +1342,14 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                 .width(160.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut a.buffer, None, "Driver's own");
-                    for n in af27_engine::devices::buffer_choices(list.buffer_range) {
+                    for n in af2_engine::devices::buffer_choices(list.buffer_range) {
                         ui.selectable_value(&mut a.buffer, Some(n), format!("{n} samples"));
                     }
                 });
             let rate = a.rate.or(st.engine.as_ref().map(|e| e.rate)).or(list.rate);
             if let (Some(n), Some(r)) = (a.buffer, rate) {
                 ui.label(
-                    RichText::new(format!("{:.1} ms", af27_engine::devices::latency_ms(n, r)))
+                    RichText::new(format!("{:.1} ms", af2_engine::devices::latency_ms(n, r)))
                         .color(c(th.text_dim)),
                 );
             }
@@ -1267,7 +1403,7 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                 let real = e.real_buffer().map_or(String::new(), |n| {
                     format!(
                         "; the device asks for {n} ({:.1} ms)",
-                        af27_engine::devices::latency_ms(n, e.rate)
+                        af2_engine::devices::latency_ms(n, e.rate)
                     )
                 });
                 info(ui, th, "Buffer", &format!("{asked}{real}"));
@@ -1296,7 +1432,7 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
         }
     });
     group(ui, th, "Audio log", |ui| {
-        let p = af27_engine::health::log_path().unwrap_or_else(|| data_dir().join("audio.log"));
+        let p = af2_engine::health::log_path().unwrap_or_else(|| data_dir().join("audio.log"));
         ui.label(RichText::new(p.display().to_string()).monospace());
         note(ui, th, "Each stream opened (driver, device, rate, channels, buffer), device errors and restarts are written here. Attach it when reporting an audio problem.");
         if ui.button("Copy Path").clicked() {
@@ -1308,13 +1444,13 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
 /// Settings > Channel Routing: which device outputs the stereo mix plays
 /// on, and where each speaker of a 3D Space session goes.
 fn channel_routing(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
-    use af27_core::space::SpaceLayout;
+    use af2_core::space::SpaceLayout;
     let scan = ensure_scan(d, st, false);
     let a = &d.prefs.audio;
     // Outputs the device offers: the chosen output's widest config.
     let listed = match a.host {
-        af27_engine::HostKind::Asio => scan.list.outputs.first(),
-        af27_engine::HostKind::System => a
+        af2_engine::HostKind::Asio => scan.list.outputs.first(),
+        af2_engine::HostKind::System => a
             .output
             .as_deref()
             .and_then(|n| scan.list.output(n))
@@ -1397,7 +1533,7 @@ fn channel_routing(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                     ui.label(RichText::new("(this session's)").color(c(th.text_dim)));
                 }
             });
-            let names: Vec<&str> = af27_space::speakers(layout)
+            let names: Vec<&str> = af2_space::speakers(layout)
                 .iter()
                 .map(|s| s.name)
                 .collect();
@@ -1468,18 +1604,29 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
             .selected_text(shown)
             .width(240.0)
             .show_ui(ui, |ui| {
-                for t in &st.themes {
-                    if t.hidden && t.name != d.theme {
+                for (head, idx) in crate::theme::grouped(&st.themes) {
+                    let shown: Vec<&crate::theme::Theme> = idx
+                        .into_iter()
+                        .map(|i| &st.themes[i])
+                        .filter(|t| !t.hidden || t.name == d.theme)
+                        .collect();
+                    if shown.is_empty() {
                         continue;
                     }
-                    let label = if t.hidden { "Secret Theme" } else { &t.name };
-                    ui.selectable_value(&mut d.theme, t.name.clone(), label);
+                    if let Some(h) = head {
+                        ui.separator();
+                        ui.label(RichText::new(h).small().color(c(th.text_dim)));
+                    }
+                    for t in shown {
+                        let label = if t.hidden { "Secret Theme" } else { &t.name };
+                        ui.selectable_value(&mut d.theme, t.name.clone(), label);
+                    }
                 }
             });
         ui.horizontal(|ui| {
             if ui
                 .button("Open Themes Folder")
-                .on_hover_text("Put .af27theme files here to add them to the list")
+                .on_hover_text("Put .af2theme files here to add them to the list")
                 .clicked()
             {
                 let dir = crate::theme::user_dir();
@@ -1490,7 +1637,7 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
                 d.act = Some(PageAct::ReloadThemes);
             }
         });
-        note(ui, th, "Your own themes: .af27theme files in the themes folder join this list. A file with the same name as a built-in theme replaces it.");
+        note(ui, th, "Your own themes: .af2theme files in the themes folder join this list. A file with the same name as a built-in theme replaces it.");
         if d.theme != before {
             // A new theme brings its own saved hues and looks.
             d.hues = crate::state::load_hues(&d.theme);
@@ -1595,6 +1742,22 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
         if d.visuals == 0 && st.visuals_lite {
             note(ui, th, "Auto chose Lite for this device.");
         }
+    });
+    group(ui, th, "Font", |ui| {
+        ui.checkbox(
+            &mut d.prefs.system_font,
+            "Use my desktop's font",
+        );
+        let name = crate::skin::system_font_name();
+        note(
+            ui,
+            th,
+            &match name {
+                Some(n) => format!("Your desktop's font is {n}. Off: each theme's own font."),
+                None => "Your desktop's font could not be found, so the theme's own is used."
+                    .to_string(),
+            },
+        );
     });
     group(ui, th, "Start-up and surfaces", |ui| {
         ui.checkbox(
@@ -1893,7 +2056,7 @@ fn waiting(ui: &mut egui::Ui, th: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use af27_engine::{DeviceInfo, DeviceList, HostKind};
+    use af2_engine::{DeviceInfo, DeviceList, HostKind};
 
     fn listing(outs: &[&str]) -> DeviceList {
         DeviceList {
@@ -1955,11 +2118,229 @@ mod tests {
         let a: AudioPrefs = serde_json::from_str(old).unwrap();
         assert_eq!(a.host, HostKind::System);
         assert_eq!(a.buffer, Some(256));
-        assert_eq!(a.map, af27_engine::OutputMap::default());
+        assert_eq!(a.map, af2_engine::OutputMap::default());
         let back: AudioPrefs = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back, a);
         let c = a.choice();
         assert_eq!(c.output.as_deref(), Some("Speakers"));
         assert_eq!(c.rate, None);
     }
+}
+
+/// What a drag on the velocity map editor holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum VelGrab {
+    Point(usize),
+    /// The tension handle of the stretch from this point to the next.
+    Tension(usize),
+}
+
+/// Preferences > Multitrack > MIDI's note on velocity mapping: presets,
+/// and the map drawn as touch (left to right) against the velocity played
+/// (up). Drag a point to move it (the end points only up and down); drag
+/// the hollow handle in a stretch up or down to bend it (double-click it:
+/// straight again); double-click empty space for a new point; right-click
+/// a point to remove it.
+fn velocity_map_ui(
+    ui: &mut egui::Ui,
+    th: &crate::theme::Theme,
+    map: &mut af2_core::midi_live::VelocityMap,
+) {
+    use crate::theme::c;
+    use af2_core::midi_live::{VelPoint, VelocityMap, VELOCITY_PRESETS};
+    use egui::{pos2, vec2, Align2, FontId, Rounding, Sense, Stroke};
+    map.tidy();
+    ui.label("Note on velocity mapping (what your keyboard's touch plays)");
+    note(
+        ui,
+        th,
+        "For keyboards with odd velocities. Applies to what you hear and what is recorded.",
+    );
+    ui.horizontal_wrapped(|ui| {
+        let now = map.preset_name();
+        for name in VELOCITY_PRESETS {
+            let tip = match name {
+                "Linear" => "As played",
+                "Soft" => "Light touches already play loud",
+                "Hard" => "A firm touch for loud notes",
+                "S-curve" => "Quiet and loud harder to reach, the middle spread out",
+                "Narrow" => "For keyboards that only send about 25 to 100: that span plays the whole range",
+                _ => "Every key plays at one velocity, however hard you play",
+            };
+            if ui.selectable_label(now == Some(name), name).on_hover_text(tip).clicked() {
+                if let Some(m) = VelocityMap::preset(name) {
+                    *map = m;
+                }
+            }
+        }
+        if ui.button("Reset").on_hover_text("Back to linear").clicked() {
+            *map = VelocityMap::linear();
+        }
+    });
+    if let Some(mut v) = map.fixed_velocity() {
+        ui.horizontal(|ui| {
+            ui.label("Fixed velocity");
+            if ui.add(egui::Slider::new(&mut v, 1..=127)).changed() {
+                *map = VelocityMap::fixed(v);
+            }
+        });
+    }
+
+    let (r, resp) = ui.allocate_exact_size(vec2(280.0, 190.0), Sense::click_and_drag());
+    let inner = r.shrink(10.0);
+    let to_px = |x: f32, y: f32| {
+        pos2(inner.left() + x * inner.width(), inner.bottom() - y * inner.height())
+    };
+    let from_px = |q: egui::Pos2| {
+        (
+            ((q.x - inner.left()) / inner.width()).clamp(0.0, 1.0),
+            ((inner.bottom() - q.y) / inner.height()).clamp(0.0, 1.0),
+        )
+    };
+    // Where each stretch's tension handle sits: half way across, on the curve.
+    let handle = |map: &VelocityMap, k: usize| {
+        let (a, b) = (map.points[k], map.points[k + 1]);
+        let x = (a.x + b.x) * 0.5;
+        to_px(x, map.apply(x))
+    };
+    let near = |map: &VelocityMap, q: egui::Pos2| -> Option<VelGrab> {
+        let reach = 9.0;
+        let pt = map
+            .points
+            .iter()
+            .enumerate()
+            .map(|(k, p)| (k, to_px(p.x, p.y).distance(q)))
+            .filter(|(_, d)| *d <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((k, _)) = pt {
+            return Some(VelGrab::Point(k));
+        }
+        (0..map.points.len() - 1)
+            .map(|k| (k, handle(map, k).distance(q)))
+            .filter(|(_, d)| *d <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(k, _)| VelGrab::Tension(k))
+    };
+
+    let grab_id = resp.id.with("vel-grab");
+    if resp.drag_started() {
+        let at = ui.input(|i| i.pointer.press_origin());
+        let g = at.and_then(|q| near(map, q));
+        ui.data_mut(|d| d.insert_temp(grab_id, g));
+    }
+    let grab: Option<VelGrab> = ui.data(|d| d.get_temp(grab_id)).flatten();
+    if resp.dragged() {
+        if let (Some(g), Some(q)) = (grab, resp.interact_pointer_pos()) {
+            let (x, y) = from_px(q);
+            let n = map.points.len();
+            match g {
+                VelGrab::Point(k) if k < n => {
+                    map.points[k].y = y;
+                    if k > 0 && k + 1 < n {
+                        let lo = map.points[k - 1].x + 0.01;
+                        let hi = map.points[k + 1].x - 0.01;
+                        map.points[k].x = x.clamp(lo, hi.max(lo));
+                    }
+                }
+                VelGrab::Tension(k) if k + 1 < n => {
+                    // Up bends the stretch up, whichever way it runs.
+                    let dir = if map.points[k + 1].y >= map.points[k].y { 1.0 } else { -1.0 };
+                    let t = &mut map.points[k].tension;
+                    *t = (*t - dir * resp.drag_delta().y / 50.0).clamp(-1.0, 1.0);
+                }
+                _ => {}
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        ui.data_mut(|d| d.remove::<Option<VelGrab>>(grab_id));
+    }
+    if let Some(q) = resp.interact_pointer_pos().or(resp.hover_pos()) {
+        if resp.double_clicked() {
+            match near(map, q) {
+                Some(VelGrab::Tension(k)) => map.points[k].tension = 0.0,
+                Some(VelGrab::Point(_)) => {}
+                None => {
+                    let (x, y) = from_px(q);
+                    if x > 0.005 && x < 0.995 && map.points.iter().all(|p| (p.x - x).abs() > 0.01) {
+                        map.points.push(VelPoint { x, y, tension: 0.0 });
+                        map.tidy();
+                    }
+                }
+            }
+        }
+        if resp.secondary_clicked() {
+            if let Some(VelGrab::Point(k)) = near(map, q) {
+                if k > 0 && k + 1 < map.points.len() {
+                    map.points.remove(k);
+                }
+            }
+        }
+    }
+
+    // Drawing.
+    let p = ui.painter_at(r);
+    p.rect_filled(r, Rounding::same(3.0), c(th.panel));
+    p.rect_stroke(r, Rounding::same(3.0), Stroke::new(1.0_f32, c(th.border)));
+    for k in 0..=4 {
+        let f = k as f32 / 4.0;
+        let faint = Stroke::new(1.0_f32, c(th.border).gamma_multiply(0.5));
+        p.line_segment([to_px(f, 0.0), to_px(f, 1.0)], faint);
+        p.line_segment([to_px(0.0, f), to_px(1.0, f)], faint);
+    }
+    p.line_segment(
+        [to_px(0.0, 0.0), to_px(1.0, 1.0)],
+        Stroke::new(1.0_f32, c(th.border)),
+    );
+    let pts: Vec<egui::Pos2> = (0..=120)
+        .map(|k| {
+            let x = k as f32 / 120.0;
+            to_px(x, map.apply(x))
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, c(th.accent))));
+    let hover = resp.hover_pos().and_then(|q| near(map, q));
+    for k in 0..map.points.len() - 1 {
+        let hot = hover == Some(VelGrab::Tension(k)) || grab == Some(VelGrab::Tension(k));
+        p.circle_stroke(
+            handle(map, k),
+            if hot { 5.0 } else { 3.5 },
+            Stroke::new(1.5_f32, c(th.accent)),
+        );
+    }
+    for (k, pt) in map.points.iter().enumerate() {
+        let hot = hover == Some(VelGrab::Point(k)) || grab == Some(VelGrab::Point(k));
+        p.circle_filled(to_px(pt.x, pt.y), if hot { 6.0 } else { 4.5 }, c(th.accent));
+        p.circle_stroke(to_px(pt.x, pt.y), if hot { 6.0 } else { 4.5 }, Stroke::new(1.0_f32, c(th.text)));
+    }
+    p.text(
+        inner.left_top(),
+        Align2::LEFT_TOP,
+        "played",
+        FontId::proportional(9.0),
+        c(th.text_dim),
+    );
+    p.text(
+        inner.right_bottom(),
+        Align2::RIGHT_BOTTOM,
+        "touch",
+        FontId::proportional(9.0),
+        c(th.text_dim),
+    );
+    if hover.is_some() || grab.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    // The readout: what the touch under the pointer plays.
+    let readout = resp.hover_pos().or(resp.interact_pointer_pos()).map(|q| {
+        let touch = (from_px(q).0 * 127.0).round() as u8;
+        format!("touch {touch} → {}", map.apply_midi(touch))
+    });
+    ui.label(
+        egui::RichText::new(readout.unwrap_or_else(|| {
+            "Drag points · drag a hollow handle to bend · double-click to add · right-click to remove"
+                .to_string()
+        }))
+        .small()
+        .color(c(th.text_dim)),
+    );
 }

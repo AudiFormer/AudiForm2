@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The tempo map in the interface: Multitrack > Tempo and Time
 //! Signature... (the start and every change, immediate or gradual; add,
@@ -13,7 +13,7 @@ use egui::{pos2, Align2, FontId, Rect, RichText, Sense, Stroke};
 
 use crate::state::State;
 use crate::theme::{c, ca};
-use af27_core::midi::{Tempo, BEAT_UNITS, BPM_MAX, BPM_MIN};
+use af2_core::midi::{Tempo, BEAT_UNITS, BPM_MAX, BPM_MIN};
 
 /// Tempo window state.
 #[derive(Default)]
@@ -21,7 +21,7 @@ pub struct TempoUi {
     pub open: bool,
     /// An imported `.mid` waiting for an answer: replace the session's
     /// tempo map with the file's?
-    pub pending: Option<(PathBuf, af27_interop::smf::SmfImport)>,
+    pub pending: Option<(PathBuf, af2_interop::smf::SmfImport)>,
     /// Add Gradual Change's start and end bars as shown (from 1); 0 until
     /// first set from the playhead.
     pub ramp_from: u32,
@@ -32,11 +32,11 @@ pub struct TempoUi {
     pub hot: Option<usize>,
     /// A ruler marker being dragged: the change, whether it is a glide's
     /// start handle, and the session before the drag.
-    drag: Option<(usize, bool, Box<af27_core::Session>)>,
+    drag: Option<(usize, bool, Box<af2_core::Session>)>,
 }
 
 /// One undo step per gesture, and the mix rebuilt to the new map.
-fn tempo_commit(st: &mut State, ui: &egui::Ui, before: &af27_core::Session, changed: bool) {
+fn tempo_commit(st: &mut State, ui: &egui::Ui, before: &af2_core::Session, changed: bool) {
     let down = ui.input(|i| i.pointer.any_down());
     if changed {
         st.session.tempo.normalize();
@@ -312,7 +312,7 @@ pub fn window(ctx: &egui::Context, st: &mut State) {
                         }
                         changed |= value_fields(ui, &mut st.session.tempo, idx, "win");
                         ui.label(
-                            RichText::new(secs.map_or("-".into(), af27_core::time::format_time))
+                            RichText::new(secs.map_or("-".into(), af2_core::time::format_time))
                                 .monospace()
                                 .color(c(th.text_dim)),
                         );
@@ -773,7 +773,7 @@ pub fn replace_prompt(ctx: &egui::Context, st: &mut State) {
 pub fn import_midi(st: &mut State, path: PathBuf) {
     let imp = match std::fs::read(&path)
         .map_err(|e| format!("Could not open {}: {e}", path.display()))
-        .and_then(|b| af27_interop::smf::read(&b))
+        .and_then(|b| af2_interop::smf::read(&b))
     {
         Ok(i) => i,
         Err(e) => {
@@ -797,11 +797,11 @@ pub fn import_midi(st: &mut State, path: PathBuf) {
 fn finish_import(
     st: &mut State,
     path: &std::path::Path,
-    imp: &af27_interop::smf::SmfImport,
+    imp: &af2_interop::smf::SmfImport,
     replace: bool,
 ) {
     let before = st.session.clone();
-    let ids = af27_interop::smf::add_to_session(&mut st.session, imp, replace);
+    let ids = af2_interop::smf::add_to_session(&mut st.session, imp, replace);
     let n = st.session.tracks.len();
     for (k, id) in ids.iter().enumerate() {
         let colors = &st.theme.track_colors;
@@ -833,12 +833,12 @@ pub fn export_midi(st: &mut State, path: PathBuf) {
         .session
         .tracks
         .iter()
-        .any(|t| t.kind == af27_core::TrackKind::Midi)
+        .any(|t| t.kind == af2_core::TrackKind::Midi)
     {
         st.error("The session has no MIDI tracks to export.");
         return;
     }
-    match af27_interop::smf::write(&st.session)
+    match af2_interop::smf::write(&st.session)
         .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
     {
         Ok(()) => st.toast(format!("Exported {}", path.display())),

@@ -4,7 +4,7 @@ What AudiForm 2 reads from, and writes back to, other project files. The
 longer background guide (Audiform 1's own design, the `.sesx` structure,
 the history of each mapping) is the project lead's `af2-notes/project-files.md`;
 this page is the current state of AudiForm 2's code
-(`crates/af27-interop`).
+(`crates/af2-interop`).
 
 Legend: **yes** carries over; **est.** carries over as an estimate (the
 other program's knob scale was inferred from real sessions, not from a
@@ -25,14 +25,14 @@ lead's sessions, `real_sessions_round_trip_exactly`).
 | Clip effect envelopes (effect parameters) | yes | yes |
 | Clip effects rack (built-in effects AudiForm 2 has, VST3 slots with `params` and `plugin_state`), rack power, input/output gain, mix | yes | yes |
 | Audiform effects AudiForm 2 lacks (e.g. Dynamics) | kept (silent slot, in place) | kept |
-| AudiForm 2-only effects | written as `af27.<id>` slots (Audiform keeps but skips them), with their `data` (impulse file, kept `.sesx` component) | yes |
+| AudiForm 2-only effects | written as `af2.<id>` slots (Audiform keeps but skips them), with their `data` (impulse file, kept `.sesx` component) | yes |
 | Clip Source Channels (`channel_mix.sends`, clip "input") | yes | yes |
 | Clip stretch, pitch, reverse, invert, lock, colour | yes | yes |
 | Looped clips | played once (notice) | kept |
 | Clip group, audio type, invert channel | kept | kept |
 | Track volume, pan, mute, solo, mono, polarity, solo safe, height, colour | yes | yes |
 | Track automation: volume, pan, effect parameters, plug-in controls (`p<id>`) | yes | yes |
-| Mute and send automation (from a `.sesx`) | yes, from `af27_lanes` | yes, as `af27_lanes` (Audiform has no such envelopes) |
+| Mute and send automation (from a `.sesx`) | yes, from `af2_lanes` | yes, as `af2_lanes` (Audiform has no such envelopes) |
 | Track and bus effects racks, sidechain keys | yes | yes |
 | Track output (master or bus), sends (level, pan, pre/post, on) | yes | yes |
 | Track hardware input (`input`) | yes (`Track.input`) | yes |

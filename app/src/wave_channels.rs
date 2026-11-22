@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Which channels of the open file are switched on in the Waveform
 //! editor. Click a channel's name at the right of its lane to switch it
@@ -8,7 +8,7 @@
 //! pass it by. It is a view setting of the open file, never saved into
 //! the audio.
 
-use af27_core::{AudioBuffer, Range};
+use af2_core::{AudioBuffer, Range};
 
 /// Channels past this many are always on (no layout comes near it).
 pub const MAX_SWITCHED: usize = 64;

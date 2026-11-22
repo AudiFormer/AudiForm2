@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Pieces the effect faces share: the faceplate and its modules, the
 //! needle meter, level bars, the dynamics transfer graph and the

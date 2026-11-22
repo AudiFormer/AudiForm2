@@ -22,7 +22,7 @@ release:
   so anyone can fetch the same files from Steinberg and rebuild.
 - Keep the credit "ASIO is a trademark and software of Steinberg Media
   Technologies GmbH." The About box shows it in builds with the feature
-  (`af27_engine::ASIO_CREDIT`); use the name ASIO only to say what is
+  (`af2_engine::ASIO_CREDIT`); use the name ASIO only to say what is
   supported, and never the ASIO logo.
 - Add `asio-sys` (Apache-2.0, part of the cpal project, compatible with
   GPLv3) and the ASIO SDK (GPLv3 option) to `ATTRIBUTION.md`; `asio-sys`
@@ -50,7 +50,7 @@ Then:
 cargo build --release -p audiform2 --features asio
 ```
 
-The `asio` feature of the app turns on `af27-engine/asio`, which turns on
+The `asio` feature of the app turns on `af2-engine/asio`, which turns on
 cpal's `asio` feature and the `asio-sys` crate. Nothing else changes: the
 same code paths compile with the feature off (`ASIO_BUILT` is false and
 the ASIO choice is greyed out).

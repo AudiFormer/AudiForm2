@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Phase Curve's graph editor, after the lead's Audiform window:
 //! frequency across (logarithmic or linear, 20 Hz to 20 kHz), the phase
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use egui::{pos2, vec2, Pos2, RichText, Sense};
 
-use af27_fx::effects::phase_curve::{curve_at, FREQ_KEYS, MAX_POINTS, PHASE_KEYS};
+use af2_fx::effects::phase_curve::{curve_at, FREQ_KEYS, MAX_POINTS, PHASE_KEYS};
 
 use super::{layout, Env, Fx};
 use crate::graph::{self, Plot};

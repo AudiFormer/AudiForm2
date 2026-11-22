@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
-//! One view of every effect a chain can hold: Audiform27's built-in
-//! effects (`af27-dsp`) and the ported Audiform effects (`af27-fx`), plus
-//! the adapter that runs an `af27-fx` processor inside a live chain.
+//! One view of every effect a chain can hold: Audiform2's built-in
+//! effects (`af2-dsp`) and the ported Audiform effects (`af2-fx`), plus
+//! the adapter that runs an `af2-fx` processor inside a live chain.
 
-use af27_core::EffectSlot;
-use af27_dsp::live::Live;
+use af2_core::EffectSlot;
+use af2_dsp::live::Live;
 
 /// One control as the Inspector draws it.
 pub struct Control {
@@ -46,7 +46,7 @@ pub fn catalog() -> Vec<(String, Vec<(String, String)>)> {
         }
     }
     // Live built-ins the menu keeps at its top level (Invert...).
-    let rest: Vec<(String, String)> = af27_dsp::Effect::all()
+    let rest: Vec<(String, String)> = af2_dsp::Effect::all()
         .into_iter()
         .filter(|e| e.realtime() && !crate::fx_menu::RETIRED.contains(e))
         .filter(|e| !placed.contains(e.id()))
@@ -62,17 +62,17 @@ pub fn catalog() -> Vec<(String, Vec<(String, String)>)> {
 }
 
 pub fn name(id: &str) -> String {
-    if af27_core::plugin::is_plugin(id) {
+    if af2_core::plugin::is_plugin(id) {
         return crate::plugins::name(id);
     }
-    if let Some(e) = af27_dsp::Effect::from_id(id) {
+    if let Some(e) = af2_dsp::Effect::from_id(id) {
         return e.name().to_string();
     }
-    af27_fx::info(id).map_or_else(|| id.to_string(), |i| i.name.to_string())
+    af2_fx::info(id).map_or_else(|| id.to_string(), |i| i.name.to_string())
 }
 
 pub fn controls(id: &str) -> Vec<Control> {
-    if let Some(e) = af27_dsp::Effect::from_id(id) {
+    if let Some(e) = af2_dsp::Effect::from_id(id) {
         return e
             .params()
             .iter()
@@ -90,7 +90,7 @@ pub fn controls(id: &str) -> Vec<Control> {
             })
             .collect();
     }
-    af27_fx::info(id).map_or_else(Vec::new, |i| {
+    af2_fx::info(id).map_or_else(Vec::new, |i| {
         i.params
             .iter()
             .map(|p| Control {
@@ -113,34 +113,34 @@ pub fn defaults(id: &str) -> Vec<f32> {
     controls(id).iter().map(|c| c.default).collect()
 }
 
-fn params_for(id: &str, values: &[f32]) -> Option<af27_fx::Params> {
-    let info = af27_fx::info(id)?;
+fn params_for(id: &str, values: &[f32]) -> Option<af2_fx::Params> {
+    let info = af2_fx::info(id)?;
     let pairs: Vec<(String, f64)> = info
         .params
         .iter()
         .zip(values)
         .map(|(p, v)| (p.key.to_string(), *v as f64))
         .collect();
-    Some(af27_fx::Params::from_pairs(&info, &pairs))
+    Some(af2_fx::Params::from_pairs(&info, &pairs))
 }
 
-/// An `af27-fx` processor (interleaved stereo) inside a live chain.
+/// An `af2-fx` processor (interleaved stereo) inside a live chain.
 struct FxLive {
-    p: Box<dyn af27_fx::Processor>,
+    p: Box<dyn af2_fx::Processor>,
     buf: Vec<f32>,
     /// The sidechain key, interleaved (empty for effects without one).
     key: Vec<f32>,
-    info: af27_fx::EffectInfo,
+    info: af2_fx::EffectInfo,
     /// The current values, every key present, so a new setting replaces
     /// a value in place and never allocates on the audio thread.
-    params: af27_fx::Params,
+    params: af2_fx::Params,
 }
 
 /// Takes new values into `params` (in place) and hands them to `p`.
 fn take(
-    p: &mut dyn af27_fx::Processor,
-    info: &af27_fx::EffectInfo,
-    params: &mut af27_fx::Params,
+    p: &mut dyn af2_fx::Processor,
+    info: &af2_fx::EffectInfo,
+    params: &mut af2_fx::Params,
     vals: &[f32],
 ) {
     for (c, v) in info.params.iter().zip(vals) {
@@ -217,35 +217,35 @@ impl Live for FxLive {
 }
 
 fn factory(slot: &EffectSlot, rate: u32) -> Option<Box<dyn Live>> {
-    if af27_core::plugin::is_plugin(&slot.effect) {
-        return af27_vst3::build_live(slot, rate);
+    if af2_core::plugin::is_plugin(&slot.effect) {
+        return af2_vst3::build_live(slot, rate);
     }
-    let info = af27_fx::info(&slot.effect)?;
+    let info = af2_fx::info(&slot.effect)?;
     let params = params_for(&slot.effect, &slot.values)?;
-    let p = af27_fx::build_with(&slot.effect, rate, &params, slot.data.as_deref(), None)?;
+    let p = af2_fx::build_with(&slot.effect, rate, &params, slot.data.as_deref(), None)?;
     let key = if info.sidechain {
-        vec![0.0; af27_engine::BLOCK * 2]
+        vec![0.0; af2_engine::BLOCK * 2]
     } else {
         Vec::new()
     };
     Some(Box::new(FxLive {
         p,
-        buf: vec![0.0; af27_engine::BLOCK * 2],
+        buf: vec![0.0; af2_engine::BLOCK * 2],
         key,
         info,
         params,
     }))
 }
 
-/// An `af27-fx` effect's own form on a speaker bed (the Reverb, the
+/// An `af2-fx` effect's own form on a speaker bed (the Reverb, the
 /// Convolution Reverb, Modulation): interleaved frames of every channel.
 struct FxWide {
-    p: Box<dyn af27_fx::Processor>,
-    info: af27_fx::EffectInfo,
-    params: af27_fx::Params,
+    p: Box<dyn af2_fx::Processor>,
+    info: af2_fx::EffectInfo,
+    params: af2_fx::Params,
 }
 
-impl af27_dsp::wide::Wide for FxWide {
+impl af2_dsp::wide::Wide for FxWide {
     fn process(&mut self, buf: &mut [f32]) {
         self.p.process(buf);
     }
@@ -268,19 +268,19 @@ fn wide_factory(
     rate: u32,
     names: &[String],
     _block: usize,
-) -> Option<Box<dyn af27_dsp::wide::Wide>> {
-    let info = af27_fx::info(&slot.effect)?;
+) -> Option<Box<dyn af2_dsp::wide::Wide>> {
+    let info = af2_fx::info(&slot.effect)?;
     let params = params_for(&slot.effect, &slot.values)?;
-    let p = af27_fx::build_wide(&slot.effect, rate, &params, slot.data.as_deref(), names)?;
+    let p = af2_fx::build_wide(&slot.effect, rate, &params, slot.data.as_deref(), names)?;
     Some(Box::new(FxWide { p, info, params }))
 }
 
 /// Lets every chain build the ported Audiform effects, on stereo and on
 /// a speaker bed, and MIDI tracks play VST3 instruments.
 pub fn register() {
-    af27_dsp::live::register_factory(factory);
-    af27_dsp::wide::register_wide_factory(wide_factory);
-    af27_dsp::instrument::register_instrument_factory(af27_vst3::build_instrument);
+    af2_dsp::live::register_factory(factory);
+    af2_dsp::wide::register_wide_factory(wide_factory);
+    af2_dsp::instrument::register_instrument_factory(af2_vst3::build_instrument);
 }
 
 /// Whether an effect can be keyed by another track or bus (a sidechain),
@@ -288,32 +288,32 @@ pub fn register() {
 /// For the Inspector's sidechain picker.
 #[allow(dead_code)]
 pub fn takes_key(effect_id: &str) -> bool {
-    if af27_core::plugin::is_plugin(effect_id) {
+    if af2_core::plugin::is_plugin(effect_id) {
         return crate::plugins::takes_key(effect_id);
     }
-    af27_dsp::Effect::from_id(effect_id).is_some_and(|e| e.takes_key())
-        || af27_fx::takes_sidechain(effect_id)
+    af2_dsp::Effect::from_id(effect_id).is_some_and(|e| e.takes_key())
+        || af2_fx::takes_sidechain(effect_id)
 }
 
 /// Whether an effect takes new settings while playing; others are rebuilt
 /// when a drag ends.
 pub fn is_fx(id: &str) -> bool {
-    af27_fx::info(id).is_some()
+    af2_fx::info(id).is_some()
 }
 
 /// Runs a slot over a whole buffer (Waveform editor Apply). A file of
 /// more than two channels is processed on every channel by its speaker
 /// (pairs by name, lone speakers alone, the LFE left alone by delays and
 /// tone shapers, Width and the mixer on L and R only; see
-/// `af27_dsp::wide`).
+/// `af2_dsp::wide`).
 pub fn process_offline(
     slot: &EffectSlot,
-    input: &af27_core::AudioBuffer,
-) -> Option<af27_core::AudioBuffer> {
+    input: &af2_core::AudioBuffer,
+) -> Option<af2_core::AudioBuffer> {
     if input.num_channels() > 2 {
-        return af27_dsp::wide::process_buffer(slot, input, af27_engine::BLOCK);
+        return af2_dsp::wide::process_buffer(slot, input, af2_engine::BLOCK);
     }
-    let mut p = af27_dsp::live::build_slot(slot, input.rate)?;
+    let mut p = af2_dsp::live::build_slot(slot, input.rate)?;
     // Plug-ins start a copy of their own that waits for every block.
     p.set_offline(true);
     let mut out = input.clone();
@@ -331,8 +331,8 @@ pub fn process_offline(
         l.resize(frames + lat, 0.0);
         r.resize(frames + lat, 0.0);
         for (x, y) in l
-            .chunks_mut(af27_engine::BLOCK)
-            .zip(r.chunks_mut(af27_engine::BLOCK))
+            .chunks_mut(af2_engine::BLOCK)
+            .zip(r.chunks_mut(af2_engine::BLOCK))
         {
             p.process(x, y);
         }
@@ -342,7 +342,7 @@ pub fn process_offline(
         }
         c += 2;
         if c < n {
-            p = af27_dsp::live::build_slot(slot, input.rate)?;
+            p = af2_dsp::live::build_slot(slot, input.rate)?;
             p.set_offline(true);
         }
     }
@@ -365,9 +365,9 @@ mod tests {
         }
     }
 
-    fn noise(frames: usize, ch: usize) -> af27_core::AudioBuffer {
+    fn noise(frames: usize, ch: usize) -> af2_core::AudioBuffer {
         let mut seed = 1u32;
-        let mut b = af27_core::AudioBuffer::new(48_000, ch, frames);
+        let mut b = af2_core::AudioBuffer::new(48_000, ch, frames);
         for c in &mut b.channels {
             for s in c.iter_mut() {
                 seed ^= seed << 13;
@@ -384,17 +384,17 @@ mod tests {
     #[test]
     fn every_effect_runs_finite_on_a_7_1_4_bed() {
         register();
-        let names = af27_dsp::wide::labels(12);
+        let names = af2_dsp::wide::labels(12);
         let input = noise(4800, 12);
         let inter = input.to_interleaved();
         let mut count = 0;
         for (_, list) in catalog() {
             for (id, _) in list {
                 let s = slot(&id);
-                let mut w = af27_dsp::wide::build_wide(&s, 48_000, &names, af27_engine::BLOCK)
+                let mut w = af2_dsp::wide::build_wide(&s, 48_000, &names, af2_engine::BLOCK)
                     .unwrap_or_else(|| panic!("{id} has a multichannel form"));
                 let mut b = inter.clone();
-                for c in b.chunks_mut(af27_engine::BLOCK * 12) {
+                for c in b.chunks_mut(af2_engine::BLOCK * 12) {
                     w.process(c);
                 }
                 assert!(b.iter().all(|v| v.is_finite()), "{id} stays finite");
@@ -420,19 +420,19 @@ mod tests {
             "compressor",
             "limiter",
             "noise-gate",
-            af27_fx::effects::tube::OPTO,
+            af2_fx::effects::tube::OPTO,
         ] {
             assert!(takes_key(id), "{id}");
         }
-        for id in ["echo", "amplify", af27_fx::effects::verb::ID, "nope"] {
+        for id in ["echo", "amplify", af2_fx::effects::verb::ID, "nope"] {
             assert!(!takes_key(id), "{id}");
         }
-        let mut s = slot(af27_fx::effects::tube::OPTO);
+        let mut s = slot(af2_fx::effects::tube::OPTO);
         s.values[4] = 0.0; // no tube color
         let quiet = vec![0.02f32; 9600];
         let loud = vec![0.9f32; 9600];
         let run = |key: &[f32]| {
-            let mut p = af27_dsp::live::build_slot(&s, 48_000).unwrap();
+            let mut p = af2_dsp::live::build_slot(&s, 48_000).unwrap();
             assert!(p.takes_key());
             let (mut l, mut r) = (quiet.clone(), quiet.clone());
             for (i, (a, b)) in l.chunks_mut(4096).zip(r.chunks_mut(4096)).enumerate() {
@@ -449,25 +449,25 @@ mod tests {
         register();
         let input = noise(4800, 6);
         // The Tube Preamp (a tone shaper) works on every speaker but the LFE.
-        let out = process_offline(&slot(af27_fx::effects::tube::PREAMP), &input).unwrap();
+        let out = process_offline(&slot(af2_fx::effects::tube::PREAMP), &input).unwrap();
         for c in 0..6 {
             let same = out.channels[c] == input.channels[c];
             assert_eq!(same, c == 3, "channel {c}");
         }
         // Stereo Width stays on L and R.
-        let mut s = slot(af27_fx::effects::width::WIDTH);
+        let mut s = slot(af2_fx::effects::width::WIDTH);
         s.values = vec![0.0; s.values.len()];
         let out = process_offline(&s, &input).unwrap();
         for c in 2..6 {
             assert_eq!(out.channels[c], input.channels[c], "channel {c}");
         }
         // The Reverb fills the room but leaves the LFE alone.
-        let out = process_offline(&slot(af27_fx::effects::verb::ID), &input).unwrap();
+        let out = process_offline(&slot(af2_fx::effects::verb::ID), &input).unwrap();
         assert_eq!(out.channels[3], input.channels[3]);
         assert_ne!(out.channels[4], input.channels[4]);
         // Mono: run as one side fed to both.
         let mono = noise(4800, 1);
-        let out = process_offline(&slot(af27_fx::effects::tube::PREAMP), &mono).unwrap();
+        let out = process_offline(&slot(af2_fx::effects::tube::PREAMP), &mono).unwrap();
         assert_eq!(out.num_channels(), 1);
         assert!(out.channels[0].iter().all(|v| v.is_finite()));
         assert_ne!(out.channels[0], mono.channels[0]);
@@ -482,12 +482,12 @@ mod tests {
             let input = noise(9600, n);
             for id in [
                 "echo",
-                af27_fx::effects::echo::ID,
+                af2_fx::effects::echo::ID,
                 "reverb",
-                af27_fx::effects::verb::ID,
-                af27_fx::effects::reverb::ID,
-                af27_fx::effects::phase_curve::ID,
-                af27_fx::effects::modulation::ID,
+                af2_fx::effects::verb::ID,
+                af2_fx::effects::reverb::ID,
+                af2_fx::effects::phase_curve::ID,
+                af2_fx::effects::modulation::ID,
             ] {
                 let out = process_offline(&slot(id), &input).unwrap();
                 assert_eq!(out.num_channels(), n, "{id} on {n}");

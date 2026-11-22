@@ -15,9 +15,9 @@ You should have received a copy of the GNU General Public License along
 with this program (the file COPYING). If not, see
 <https://www.gnu.org/licenses/>.
 
-Exception: the files under crates/af27-dts/ are licensed under the GNU
+Exception: the files under crates/af2-dts/ are licensed under the GNU
 Lesser General Public License, version 2.1 or later (see
-crates/af27-dts/LICENSE-LGPL-2.1), which is compatible with this licence.
+crates/af2-dts/LICENSE-LGPL-2.1), which is compatible with this licence.
 
 Third-party works used by AudiForm 2 and their licences are listed in
 ATTRIBUTION.md.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Tube Master's window: a hardware-style panel with one row of large
 //! stepped knobs (the circuit every channel runs), a lit needle meter
@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 
 use egui::{pos2, vec2, Color32, FontId, Galley, Pos2, Rect, Rounding, Sense, Shape, Stroke};
 
-use af27_fx::effects::tube_master::{self as tm, TubeReading};
+use af2_fx::effects::tube_master::{self as tm, TubeReading};
 
 use crate::fx_windows::layout::{GAP, GAP_L, GAP_S, PAD};
 use crate::rack::{chain_of, FILE};
@@ -884,7 +884,7 @@ fn channel_names(r: &TubeReading, n: usize) -> Vec<String> {
     if r.ms && n == 2 {
         return vec!["M".into(), "S".into()];
     }
-    af27_dsp::wide::labels(n)
+    af2_dsp::wide::labels(n)
 }
 
 /// Draws Tube Master's panel for a slot. False (drawing nothing) when

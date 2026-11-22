@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Shared drawing for the small graphs in effect and generator windows:
 //! a recessed plot area, a log (or linear) frequency axis with its grid

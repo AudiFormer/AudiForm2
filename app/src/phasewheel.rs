@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 // Ported from Audiform's Phase Wheel panel (PhaseWheelPanel.svelte and
-// colors.ts), designed and calibrated by its author (nwh212) and
+// colors.ts), designed and calibrated by its author (AudiFormer) and
 // relicensed here by them. Drawing, sizes, opacities and colours match
 // the original canvas.
 
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::{data_dir, State};
 use crate::theme::{c, Rgb};
-use af27_dsp::phase::{analyse, Bin, Signal, RATES, SIZES};
+use af2_dsp::phase::{analyse, Bin, Signal, RATES, SIZES};
 
 pub const PHASE_LOW: Rgb = [0xff, 0x2a, 0x2a];
 pub const PHASE_HIGH: Rgb = [0xe0, 0x2a, 0xff];
@@ -430,15 +430,6 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, cache: &mut WheelCache) {
         font,
         lab,
     );
-    if !playing {
-        p.text(
-            wheel_rect.left_top() + vec2(4.0, 2.0),
-            Align2::LEFT_TOP,
-            "Stopped: the audio at the playhead.",
-            FontId::proportional(10.0),
-            c(th.text_dim),
-        );
-    }
     let resp = resp
         .on_hover_text("Right-click for the colors and to show or hide the readouts and settings");
     resp.context_menu(|ui| {

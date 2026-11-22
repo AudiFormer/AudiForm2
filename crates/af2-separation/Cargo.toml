@@ -1,0 +1,16 @@
+[package]
+name = "af2-separation"
+description = "Audiform2 AI stem separation: talks to the separation engine"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+
+[dependencies]
+af2-core.workspace = true
+af2-io.workspace = true
+af2-dsp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+audiform-separate-client.workspace = true

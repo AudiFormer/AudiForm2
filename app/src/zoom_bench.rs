@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! A frame-time bench for zooming and scrolling a large session, run by
 //! hand: `cargo test --release -p audiform2 zoom_bench -- --ignored
@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use af27_core::AudioBuffer;
+use af2_core::AudioBuffer;
 
 use crate::state::{Mode, State, View};
 
@@ -113,7 +113,7 @@ fn report(name: &str, mut ms: Vec<f64>) {
 }
 
 /// `AF2_BENCH_WRITE=<folder>`: writes the bench session (four WAV files
-/// and `bench32.af27`) there, to open in the app.
+/// and `bench32.af2`) there, to open in the app.
 #[test]
 #[ignore]
 fn zoom_bench_write_session() {
@@ -125,10 +125,10 @@ fn zoom_bench_write_session() {
     for (k, m) in st.session.media.iter_mut().enumerate() {
         let path = dir.join(format!("bench{k}.wav"));
         let buf = synth(180.0, k as u32 + 1);
-        af27_io::write_wav(&path, &buf, af27_io::WavFormat::Pcm16).unwrap();
+        af2_io::write_wav(&path, &buf, af2_io::WavFormat::Pcm16).unwrap();
         m.path = Some(path);
     }
-    std::fs::write(dir.join("bench32.af27"), st.session.to_json()).unwrap();
+    std::fs::write(dir.join("bench32.af2"), st.session.to_json()).unwrap();
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn real_session_bench() {
         return;
     };
     let t = Instant::now();
-    let imported = af27_interop::import(&path).expect("import");
+    let imported = af2_interop::import(&path).expect("import");
     eprintln!("import: {:.2} s", t.elapsed().as_secs_f64());
     let mut st = State::new();
     st.mode = Mode::Multitrack;
@@ -213,19 +213,19 @@ fn real_session_bench() {
     if std::env::var_os("AF2_BENCH_PLUGINS").is_none() {
         for tr in &mut st.session.tracks {
             tr.chain
-                .retain(|s| !af27_core::plugin::is_plugin(&s.effect));
+                .retain(|s| !af2_core::plugin::is_plugin(&s.effect));
             for c in &mut tr.clips {
                 c.props
                     .chain
-                    .retain(|s| !af27_core::plugin::is_plugin(&s.effect));
+                    .retain(|s| !af2_core::plugin::is_plugin(&s.effect));
             }
         }
         st.session
             .master_chain
-            .retain(|s| !af27_core::plugin::is_plugin(&s.effect));
+            .retain(|s| !af2_core::plugin::is_plugin(&s.effect));
     }
     let t = Instant::now();
-    let media: Vec<(af27_core::MediaId, std::path::PathBuf)> = st
+    let media: Vec<(af2_core::MediaId, std::path::PathBuf)> = st
         .session
         .media
         .iter()
@@ -233,7 +233,7 @@ fn real_session_bench() {
         .collect();
     let mut missing = 0;
     for (id, p) in media {
-        match af27_io::decode_file(&p) {
+        match af2_io::decode_file(&p) {
             Ok(buf) => {
                 let d = st.add_doc(
                     p.file_name().unwrap().to_string_lossy().to_string(),
@@ -310,25 +310,25 @@ fn real_session_bench() {
     // as the audio thread runs it.
     let rate = 48_000u32;
     let t = Instant::now();
-    let program = af27_engine::mix_program(&st.session, &|m| st.media_buffer(m), rate);
+    let program = af2_engine::mix_program(&st.session, &|m| st.media_buffer(m), rate);
     eprintln!(
         "mix build: {:.1} ms; private {:.0} MB",
         t.elapsed().as_secs_f64() * 1e3,
         crate::memstat::private_mb()
     );
-    while af27_engine::stretch::pending() > 0 {
+    while af2_engine::stretch::pending() > 0 {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     eprintln!(
         "stretched clips ready: {:.0} MB held; private {:.0} MB",
-        af27_engine::stretch::cache_bytes().0 as f64 / 1048576.0,
+        af2_engine::stretch::cache_bytes().0 as f64 / 1048576.0,
         crate::memstat::private_mb()
     );
     for _ in 0..5 {
         frame(&ctx, &mut st, &mut caches);
     }
     eprintln!("drawn with stretched clips: private {:.0} MB", crate::memstat::private_mb());
-    let af27_engine::Program::Mix(mut mix) = program else {
+    let af2_engine::Program::Mix(mut mix) = program else {
         panic!("not a mix")
     };
     let start = st.session.duration() / 3.0;

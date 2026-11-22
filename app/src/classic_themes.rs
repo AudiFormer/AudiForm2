@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The themes of Audiform 1, remade for AudiForm 2's theme engine.
 //!
@@ -9,7 +9,7 @@
 //! glass panels, rather than Audiform's style sheets. Generated from those
 //! files; edit freely.
 
-use crate::theme::Theme;
+use crate::theme::{Rgb, Theme};
 
 impl Theme {
     /// Every Audiform 1 theme, in its menu order. Hidden ones are listed
@@ -29,10 +29,95 @@ impl Theme {
         ]
     }
 
+    /// The desktop's own colours (KDE Plasma's colour scheme, GNOME's,
+    /// Windows' or macOS's light or dark mode and accent) on Studio Lite's
+    /// flat, still panels, in the desktop's font. Reads the desktop: only
+    /// when the System theme is shown (`theme::resolve`), never for the
+    /// theme list.
+    pub fn system() -> Theme {
+        Theme::system_from(&crate::system_look::colors())
+    }
+
+    /// The System theme's entry in the theme list, before the desktop has
+    /// been asked.
+    pub fn system_placeholder() -> Theme {
+        Theme::system_from(&crate::system_look::DesktopColors::default())
+    }
+
+    pub fn system_from(d: &crate::system_look::DesktopColors) -> Theme {
+        use crate::system_look::luminance;
+        let mix = |a: Rgb, b: Rgb, t: f32| -> Rgb {
+            let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+            [m(a[0], b[0]), m(a[1], b[1]), m(a[2], b[2])]
+        };
+        let dark = d.dark.or(d.window.map(|w| luminance(w) < 0.18)).unwrap_or(true);
+        let window = d
+            .window
+            .unwrap_or(if dark { [32, 35, 38] } else { [239, 240, 241] });
+        let view = d.view.unwrap_or(if dark { mix(window, [0, 0, 0], 0.25) } else { [252, 252, 252] });
+        let text = d
+            .window_text
+            .unwrap_or(if dark { [232, 232, 232] } else { [32, 33, 36] });
+        let text_dim = d.dim_text.unwrap_or(mix(text, window, 0.42));
+        // The accent is also text and lines; `guard` below keeps it (and
+        // everything else) readable on these panels, hue unchanged.
+        let accent = d.accent.unwrap_or([61, 174, 233]);
+        let (h, s, v) = crate::theme::to_hsv(accent);
+        // The desktop's second accent, or a warm colour opposite the
+        // accent, for keys.
+        let accent_alt = d
+            .accent_alt
+            .unwrap_or_else(|| crate::theme::from_hsv((h + 150.0) % 360.0, s.max(0.55), v.max(0.8)));
+        let raised = d.button.unwrap_or(mix(window, text, if dark { 0.08 } else { 0.05 }));
+        let (wave_peak, wave_centre) = if dark {
+            (mix(accent, view, 0.35), mix(accent, [255, 255, 255], 0.25))
+        } else {
+            (mix(accent, [0, 0, 0], 0.25), accent)
+        };
+        let background = d
+            .background
+            .unwrap_or(mix(window, if dark { [0, 0, 0] } else { [90, 90, 90] }, 0.12));
+        let lite = Theme::studio_lite();
+        let mut t = Theme {
+            name: crate::theme::SYSTEM_NAME.into(),
+            author: crate::theme::SYSTEM_AUTHOR.into(),
+            dark,
+            background,
+            panel: window,
+            panel_raised: raised,
+            border: mix(window, text, if dark { 0.16 } else { 0.22 }),
+            text,
+            text_dim,
+            accent,
+            accent_alt,
+            wave_peak,
+            wave_centre,
+            wave_background: view,
+            grid: mix(view, d.view_text.unwrap_or(text), if dark { 0.09 } else { 0.1 }),
+            selection: d.selection.unwrap_or(accent),
+            selection_alpha: if dark { 60 } else { 70 },
+            playhead: d.negative.unwrap_or(if dark { [235, 80, 80] } else { [205, 40, 40] }),
+            marker: d.neutral.unwrap_or(accent_alt),
+            meter_low: d.positive.unwrap_or(lite.meter_low),
+            meter_mid: d.neutral.unwrap_or(lite.meter_mid),
+            meter_high: d.negative.unwrap_or(lite.meter_high),
+            backdrop_top: background,
+            backdrop_bottom: background,
+            grid_glow: accent,
+            phase_low: Some(accent),
+            phase_high: Some(mix(accent, [255, 255, 255], 0.6)),
+            font: "system".into(),
+            ..lite
+        };
+        crate::system_look::guard(&mut t);
+        t
+    }
+
     /// Flat charcoal panels, a green waveform and blue highlights, like
     /// the plain dark look of a classic studio editor. Nothing moves and
-    /// nothing is layered: no pictures, glass, glow, grid, vignette or
-    /// intro, so it draws the least of any theme (for weaker computers).
+    /// nothing is layered: no pictures, glass, glow, grid or vignette, so
+    /// it draws the least of any theme (for weaker computers). It keeps
+    /// the plain boot splash: a couple of seconds, then nothing extra.
     pub fn studio_lite() -> Theme {
         Theme {
             name: "Studio Lite".into(),
@@ -96,16 +181,24 @@ impl Theme {
             dark: true,
             pixel: false,
             brackets: false,
-            intro: false,
+            intro: true,
             hidden: false,
             realistic: false,
             grid_style: "none".into(),
             picture: "".into(),
+            // Kept plain, whatever Analog's own chrome is.
+            chrome: "".into(),
+            clock: None,
+            bevel: None,
+            button_on: None,
+            tab_active: None,
+            font: "".into(),
             ..Theme::analog()
         }
     }
 
-    /// A walnut and brushed metal studio desk.
+    /// A walnut and brushed metal studio desk, with backlit plastic
+    /// push-buttons (the `backlit` chrome, see `backlit.rs`).
     pub fn analog() -> Theme {
         Theme {
             name: "Analog".into(),
@@ -193,7 +286,7 @@ impl Theme {
             bevel: None,
             checker: None,
             clock: None,
-            chrome: "".into(),
+            chrome: "backlit".into(),
             font: "".into(),
         }
     }

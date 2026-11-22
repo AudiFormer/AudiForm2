@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Pre-render: a track's clips through its effects, rendered ahead.
 //!
@@ -17,8 +17,8 @@
 //! reuses its render from the cache folder.
 //!
 //! Renders play from disk: each is kept in the cache folder as 24-bit
-//! FLAC in chunks (`af27_io::chunked`, stored 24 dB down so peaks over
-//! full scale survive) and streamed by `af27_engine::disk`, with only its
+//! FLAC in chunks (`af2_io::chunked`, stored 24 dB down so peaks over
+//! full scale survive) and streamed by `af2_engine::disk`, with only its
 //! first moments and the few seconds around the playhead in memory.
 //!
 //! Ported from Audiform's pre-render (the project lead's own work there).
@@ -29,10 +29,11 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use af27_core::automation::LaneTarget;
-use af27_core::{AudioBuffer, Clip, ClipId, MediaId, MediaItem, Session, TrackId, TrackKind};
+use af2_core::automation::LaneTarget;
+use af2_core::{AudioBuffer, Clip, ClipId, MediaId, MediaItem, Session, TrackId, TrackKind};
 
 use crate::state::State;
 
@@ -49,12 +50,12 @@ const CHUNK: usize = 65_536;
 pub struct Ready {
     pub frames: usize,
     pub stand_in: Arc<AudioBuffer>,
-    pub stream: Arc<af27_engine::disk::DiskStream>,
+    pub stream: Arc<af2_engine::disk::DiskStream>,
 }
 
 /// Opens a render's cache file for streaming.
 fn open_render(path: &Path) -> Result<Ready, String> {
-    let c = af27_io::chunked::Chunked::open(path)?;
+    let c = af2_io::chunked::Chunked::open(path)?;
     let (rate, channels, frames, chunk) = (c.rate, c.channels, c.frames, c.chunk);
     let mut file: Option<std::fs::File> = None;
     let load = Box::new(move |k: usize| {
@@ -63,10 +64,10 @@ fn open_render(path: &Path) -> Result<Ready, String> {
         }
         c.read(file.as_mut()?, k).ok()
     });
-    let stream = af27_engine::disk::DiskStream::open(rate, channels, frames, chunk, load)?;
+    let stream = af2_engine::disk::DiskStream::open(rate, channels, frames, chunk, load)?;
     Ok(Ready {
         frames,
-        stand_in: af27_engine::disk::stand_in(&stream),
+        stand_in: af2_engine::disk::stand_in(&stream),
         stream,
     })
 }
@@ -76,6 +77,8 @@ fn open_render(path: &Path) -> Result<Ready, String> {
 struct Entry {
     /// The fingerprint being rendered now, if any.
     rendering: Option<u64>,
+    /// How far that render is, in thousandths.
+    progress: Arc<AtomicU32>,
     /// A finished render and its fingerprint.
     ready: Option<(u64, Ready)>,
     /// The fingerprint of the track as it is now (None: it cannot be
@@ -117,6 +120,26 @@ pub enum Status {
     /// On, but nothing to play yet (audio loading, or it cannot be
     /// rendered alone).
     Waiting,
+}
+
+/// The colour a pre-render state shows in: green rendered, amber
+/// rendering, grey waiting. None when pre-render is off.
+pub fn status_rgb(s: Option<Status>) -> Option<[u8; 3]> {
+    s.map(|s| match s {
+        Status::Ready => [90, 210, 120],
+        Status::Rendering => [240, 175, 55],
+        Status::Waiting => [170, 170, 170],
+    })
+}
+
+/// What a pre-render state is called on a label: "Rendered",
+/// "Rendering…", "Pre-render waiting".
+pub fn status_label(s: Status) -> &'static str {
+    match s {
+        Status::Ready => "Rendered",
+        Status::Rendering => "Rendering\u{2026}",
+        Status::Waiting => "Pre-render waiting",
+    }
 }
 
 impl Status {
@@ -304,6 +327,14 @@ impl State {
         self.media_buffer(m)
     }
 
+    /// How far a pre-rendered track's render is (0 to 1), while it is
+    /// being rendered.
+    pub fn prerender_progress(&self, id: TrackId) -> Option<f32> {
+        let e = self.prerender.entries.get(&id)?;
+        e.rendering?;
+        Some(e.progress.load(Ordering::Relaxed) as f32 / 1000.0)
+    }
+
     /// Picks up finished renders and starts one for each pre-rendered
     /// track whose sound changed. Cheap when nothing changed.
     pub fn prerender_poll(&mut self) {
@@ -389,6 +420,8 @@ impl State {
                 }
             }
             e.rendering = Some(key);
+            e.progress = Arc::new(AtomicU32::new(0));
+            let progress = e.progress.clone();
             let job = alone(&self.session, id);
             let media: HashMap<MediaId, Arc<AudioBuffer>> = job
                 .media
@@ -397,7 +430,7 @@ impl State {
                 .collect();
             let tx = self.prerender.tx.clone();
             std::thread::spawn(move || {
-                let done = render(&job, &media, &path);
+                let done = render(&job, &media, &path, &progress);
                 prune(&cache_dir());
                 let _ = tx.send((id, key, done));
             });
@@ -459,12 +492,22 @@ fn render(
     job: &Session,
     media: &HashMap<MediaId, Arc<AudioBuffer>>,
     path: &Path,
+    progress: &AtomicU32,
 ) -> Result<Ready, String> {
     let rate = job.rate;
-    let program = af27_engine::mix_program(job, &|m| media.get(&m).cloned(), rate);
+    let program = af2_engine::mix_program(job, &|m| media.get(&m).cloned(), rate);
     let to = job.duration() + TAIL;
-    let buf = af27_engine::render(program, rate, 0.0, to);
-    af27_io::chunked::write(path, &buf, CHUNK)?;
+    let total = ((to * rate as f64).round() as usize).max(1);
+    let mut inter = Vec::with_capacity(total * 2);
+    af2_engine::render_each(program, rate, 0.0, to, false, |b| {
+        inter.extend_from_slice(b);
+        let done = (inter.len() / 2) as u64 * 1000 / total as u64;
+        progress.store(done.min(999) as u32, Ordering::Relaxed);
+        true
+    });
+    let buf = AudioBuffer::from_interleaved(rate, 2, &inter);
+    drop(inter);
+    af2_io::chunked::write(path, &buf, CHUNK)?;
     drop(buf);
     open_render(path)
 }
@@ -541,7 +584,7 @@ mod tests {
         let key = fingerprint(&st.session, id, &|_| None).unwrap();
         let dir = std::env::temp_dir().join(format!("af2-pr-test-{}", std::process::id()));
         let path = dir.join("r.afr");
-        af27_io::chunked::write(&path, &AudioBuffer::new(48_000, 2, 96_000), CHUNK).unwrap();
+        af2_io::chunked::write(&path, &AudioBuffer::new(48_000, 2, 96_000), CHUNK).unwrap();
         let ready = open_render(&path).unwrap();
         st.prerender.entries.insert(
             id,
@@ -549,6 +592,7 @@ mod tests {
                 rendering: None,
                 ready: Some((key, ready)),
                 now: Some(key),
+                ..Default::default()
             },
         );
         let h = st.heard_session();
@@ -562,13 +606,69 @@ mod tests {
         assert!(h.media.iter().any(|x| x.id == m));
         // The mix gets a stand-in for the stream that plays it from disk.
         let stand_in = st.heard_media(m).unwrap();
-        let stream = af27_engine::disk::stream_for(&stand_in).expect("streamed");
+        let stream = af2_engine::disk::stream_for(&stand_in).expect("streamed");
         assert_eq!(stream.frames, 96_000);
         assert_eq!(st.prerender_status(id), Some(Status::Ready));
         // A change to the sound: the live track plays again.
         drop(h);
         st.prerender.entries.get_mut(&id).unwrap().now = Some(key ^ 1);
         assert!(matches!(st.heard_session(), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_render_shows_progress_then_rendered_until_the_track_changes() {
+        let mut st = State::new();
+        let mut b = AudioBuffer::new(48_000, 1, 24_000);
+        for (i, x) in b.channels[0].iter_mut().enumerate() {
+            *x = (i as f32 * 0.05).sin() * 0.3;
+        }
+        let doc = st.add_doc("pr.wav".into(), None, b);
+        let m = st.media_for_doc(doc).unwrap();
+        let id = st.session.tracks[0].id;
+        // A start of its own each run, so no earlier run's render is in
+        // the cache folder to be found ready at once.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        st.session.add_clip(id, m, 0.25 + nanos as f64 * 1e-10).unwrap();
+        st.session.track_mut(id).unwrap().prerender = true;
+        st.session_version += 1;
+        let wait = |st: &mut State| {
+            for _ in 0..1000 {
+                st.prerender_poll();
+                if st.prerender_status(id) == Some(Status::Ready) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("never rendered");
+        };
+        st.prerender_poll();
+        let s = st.prerender_status(id);
+        assert!(matches!(s, Some(Status::Rendering) | Some(Status::Ready)), "{s:?}");
+        if s == Some(Status::Rendering) {
+            let f = st.prerender_progress(id).expect("progress while rendering");
+            assert!((0.0..=1.0).contains(&f));
+        }
+        wait(&mut st);
+        assert_eq!(st.prerender_progress(id), None, "no progress once rendered");
+        // A change to what the track sounds like takes "rendered" away.
+        st.session
+            .track_mut(id)
+            .unwrap()
+            .chain
+            .push(crate::rack::new_slot("amplify"));
+        st.session_version += 1;
+        st.prerender_poll();
+        assert_ne!(st.prerender_status(id), Some(Status::Ready));
+        wait(&mut st);
+        // Off: no state at all.
+        st.session.track_mut(id).unwrap().prerender = false;
+        st.session_version += 1;
+        st.prerender_poll();
+        assert_eq!(st.prerender_status(id), None);
+        assert_eq!(st.prerender_progress(id), None);
     }
 
     #[test]

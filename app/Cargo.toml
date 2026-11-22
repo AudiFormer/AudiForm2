@@ -1,6 +1,6 @@
 [package]
 name = "audiform2"
-description = "Audiform27: a fast, themeable, all-Rust audio editor"
+description = "Audiform2: a fast, themeable, all-Rust audio editor"
 version.workspace = true
 edition.workspace = true
 license = "GPL-3.0-or-later"
@@ -11,15 +11,15 @@ name = "audiform2"
 path = "src/main.rs"
 
 [dependencies]
-af27-core.workspace = true
-af27-io.workspace = true
-af27-dsp.workspace = true
-af27-engine.workspace = true
-af27-separation.workspace = true
-af27-interop.workspace = true
-af27-fx = { path = "../crates/af27-fx" }
-af27-vst3 = { path = "../crates/af27-vst3" }
-af27-space.workspace = true
+af2-core.workspace = true
+af2-io.workspace = true
+af2-dsp.workspace = true
+af2-engine.workspace = true
+af2-separation.workspace = true
+af2-interop.workspace = true
+af2-fx = { path = "../crates/af2-fx" }
+af2-vst3 = { path = "../crates/af2-vst3" }
+af2-space.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 eframe.workspace = true
@@ -33,6 +33,18 @@ egui_dock = { version = "0.14", features = ["serde"] }
 midir = "0.10.4"
 rtrb.workspace = true
 
+# The System theme follows the desktop on the XDG Settings portal. All
+# three are already in the tree through rfd (MIT / Apache-2.0).
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+futures-util = { version = "0.3", default-features = false }
+pollster = "0.4"
+
+# The System theme reads Windows' light or dark mode and accent from the
+# registry (MIT; already in the tree through embed-resource).
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
 [target.'cfg(windows)'.build-dependencies]
 # Builds the icon into the exe (MIT/Apache-2.0).
 embed-resource = "3"
@@ -43,4 +55,4 @@ naga = { version = "22", features = ["wgsl-in"] }
 
 [features]
 # ASIO on Windows (off by default): see docs/asio.md.
-asio = ["af27-engine/asio"]
+asio = ["af2-engine/asio"]

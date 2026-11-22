@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The effect windows' own faces, keyed by effect id. The rack's effect
 //! window calls [`custom`]; an effect with a panel of its own in
@@ -13,8 +13,9 @@
 //! controls), the Phase Curve graph, the Reverb and Convolution Reverb
 //! faceplates, the Delay faceplate (driving AudiForm 2's Echo), the
 //! Delay and Echo faceplate (`delay.rs`, Audiform's Delay window with its
-//! kinds, tempo and ping-pong, driving `af.echo`) and the
-//! Opto Leveler / Tube Preamp and Vox Strip panels. The Compressor,
+//! kinds, tempo and ping-pong, driving `af.echo`), the Opto Leveler /
+//! Tube Preamp and Vox Strip panels, and the Band EQ (`band_eq.rs`,
+//! Audiform's Band EQ window driving `af.band_eq`). The Compressor,
 //! Limiter, Noise Gate and De-Esser units are AudiForm 2's own.
 //!
 //! Every face is laid out on the grid in [`layout`]: one margin and gap
@@ -26,16 +27,24 @@
 //! few dozen points, and the windows ask for frames only while sound
 //! plays (for the meters) or a needle is still settling.
 
+mod band_eq;
+mod center;
 mod delay;
 mod dynamics;
+mod filters;
 pub mod layout;
+mod mixer;
+mod modulation;
 mod parts;
 mod phase;
 mod space;
+mod studio;
+mod units;
+mod width;
 
 use egui::RichText;
 
-use af27_core::EffectSlot;
+use af2_core::EffectSlot;
 
 use crate::rack::{chain_of, FILE};
 use crate::state::State;
@@ -52,8 +61,10 @@ pub const PANELS: &[(&str, Panel)] = &[
     ("limiter", dynamics::limiter),
     ("noise-gate", dynamics::gate),
     ("de-esser", dynamics::deesser),
-    ("af.opto_leveler", dynamics::opto),
-    ("af.tube_preamp", dynamics::preamp),
+    ("af.opto_leveler", units::opto),
+    ("af.tube_preamp", units::preamp),
+    ("af.amp_model", units::amp),
+    ("af.limiter", units::limiter),
     ("af.vox_strip", dynamics::vox),
     ("af.reverb", space::verb),
     ("af.convolution_reverb", space::convolution),
@@ -61,6 +72,16 @@ pub const PANELS: &[(&str, Panel)] = &[
     ("echo", space::echo),
     ("af.echo", delay::panel),
     ("af.phase_curve", phase::panel),
+    ("af.stereo_width", width::panel),
+    ("af.studio_reverb", studio::panel),
+    ("af.band_eq", band_eq::panel),
+    ("af.modulation", modulation::panel),
+    ("af.center_extractor", center::panel),
+    ("af.channel_mixer", mixer::panel),
+    ("af.curve_eq", filters::curve_eq),
+    ("af.precision_filter", filters::precision),
+    ("af.notch", filters::notch),
+    ("af.hum_cut", filters::hum),
 ];
 
 /// One control of the effect being drawn.
@@ -81,7 +102,7 @@ pub struct Ctl {
 }
 
 fn ctls(id: &str) -> Vec<Ctl> {
-    let keys: Vec<String> = af27_fx::info(id).map_or_else(Vec::new, |i| {
+    let keys: Vec<String> = af2_fx::info(id).map_or_else(Vec::new, |i| {
         i.params.iter().map(|p| p.key.to_string()).collect()
     });
     crate::fx::controls(id)
@@ -288,7 +309,7 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
     let Some(slot) = slot_at(st, target, i) else {
         return false;
     };
-    if af27_core::plugin::is_plugin(&slot.effect) {
+    if af2_core::plugin::is_plugin(&slot.effect) {
         return false;
     }
     let ctls = ctls(&slot.effect);
@@ -453,7 +474,17 @@ struct Preset {
     values: std::collections::BTreeMap<String, f32>,
 }
 
-/// The effect's presets: Default, the saved ones, and Save / Delete.
+/// The presets an effect comes with (listed under Default).
+fn factory_presets(id: &str) -> &'static [af2_fx::effects::amp::FactoryPreset] {
+    if id == af2_fx::effects::amp::AMP {
+        af2_fx::effects::amp::PRESETS
+    } else {
+        &[]
+    }
+}
+
+/// The effect's presets: Default, the built-in ones, the saved ones, and
+/// Save / Delete.
 fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
     let name_id = fx.uid.with("preset-name");
     let mut name: String = ui.ctx().data(|d| d.get_temp(name_id)).unwrap_or_default();
@@ -471,6 +502,21 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
                         fx.set(&key, d);
                     }
                     name.clear();
+                }
+                // The presets that come with the effect: the defaults with
+                // their own settings on top.
+                for (n, set) in factory_presets(&fx.id) {
+                    if ui.selectable_label(false, *n).clicked() {
+                        for k in 0..fx.ctls.len() {
+                            let key = fx.ctls[k].key.clone();
+                            let d = fx.ctls[k].default;
+                            fx.set(&key, d);
+                        }
+                        for (k, v) in *set {
+                            fx.set(k, *v);
+                        }
+                        name.clear();
+                    }
                 }
                 for n in &names {
                     if ui.selectable_label(*n == name, n).clicked() {
@@ -800,8 +846,10 @@ mod tests {
             .flat_map(|(_, l)| l.into_iter().map(|(id, _)| id))
             .collect();
         for (id, _) in PANELS {
-            // The built-in Echo is no longer offered but still opens.
-            let kept = af27_dsp::Effect::from_id(id).is_some();
+            // The built-in Echo is no longer offered but still opens, as do
+            // the Audiform effects kept for sessions but not offered.
+            let kept = af2_dsp::Effect::from_id(id).is_some()
+                || (crate::fx_menu::HIDDEN_FX.contains(id) && af2_fx::info(id).is_some());
             assert!(kept || all.iter().any(|a| a == id), "{id} is not an effect");
         }
         // Keys used by the panels resolve.
@@ -912,12 +960,13 @@ mod tests {
                 assert!(!dynamics::style_icon(m, s).is_empty(), "no icon for {s}");
             }
         }
-        // The Reverb's tabs are its kinds, in order, then Impulse Response.
+        // The Reverb's tabs are its kinds (each on the tab of its name),
+        // plus Impulse Response.
         let kinds = ctls(space::REVERB_ID);
         let kinds = &kinds.iter().find(|c| c.key == "kind").unwrap().choices;
-        assert_eq!(kinds.len(), space::IMPULSE);
+        assert_eq!(kinds.len() + 1, space::TABS.len());
         for (k, n) in kinds.iter().enumerate() {
-            assert_eq!(space::TABS[k], n);
+            assert_eq!(space::TABS[space::tab_of(k)], n);
         }
         f(
             "af.phase_curve",
@@ -935,7 +984,7 @@ mod tests {
 
     #[test]
     fn a_panel_can_switch_the_slot_to_another_effect_in_one_undo_step() {
-        use af27_core::session::{Session, TrackKind};
+        use af2_core::session::{Session, TrackKind};
         let mut st = State::new();
         st.mode = crate::state::Mode::Multitrack;
         let mut s = Session::new("s", 48_000, 0);

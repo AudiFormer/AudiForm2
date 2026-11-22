@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 // Ported from Audiform's Visualizer (the project lead's own work).
 
 //! Visualizer: moving pictures that follow what is playing. Pick a look
@@ -59,6 +59,9 @@ pub struct Analysis {
     pub time: f64,
     /// Seconds since the last picture.
     pub dt: f32,
+    /// The mouse over the picture, in its pixels, and whether a button is
+    /// held (Ragdoll can be grabbed).
+    pub pointer: Option<(f32, f32, bool)>,
 }
 
 impl Analysis {
@@ -149,6 +152,7 @@ impl Analyser {
             beat,
             time: self.time,
             dt,
+            pointer: None,
         }
     }
 }
@@ -178,7 +182,7 @@ impl Spectrum {
     pub fn bands(&mut self, frames: &[[f32; 2]], rate: u32, out: &mut [f32]) {
         let n = Self::SIZE;
         if self.win.len() != n {
-            self.win = af27_dsp::fft::hann(n);
+            self.win = af2_dsp::fft::hann(n);
             self.norm = 2.0 / self.win.iter().sum::<f64>();
             self.re = vec![0.0; n];
             self.im = vec![0.0; n];
@@ -200,7 +204,7 @@ impl Spectrum {
             self.re[k] = s * self.win[k];
             self.im[k] = 0.0;
         }
-        af27_dsp::fft::fft(&mut self.re, &mut self.im, false);
+        af2_dsp::fft::fft(&mut self.re, &mut self.im, false);
         let half = n / 2;
         for b in 0..half {
             self.re[b] = self.re[b].hypot(self.im[b]) * self.norm;
@@ -368,9 +372,13 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     scheme: Scheme,
-    /// The theme scheme's ends in HSL, hue of `high` lifted above `low`.
+    /// The theme scheme's ends in HSL, `high`'s hue moved to the near
+    /// side of `low`'s (so the blend takes the short way round).
     lo: [f32; 3],
     hi: [f32; 3],
+    /// What the looks draw on: the built-in navy, or (Theme colors) the
+    /// theme's own (see [`Palette::with_backdrop`]).
+    pub back: [f32; 3],
 }
 
 impl Palette {
@@ -379,10 +387,50 @@ impl Palette {
     pub fn new(scheme: Scheme, low: Option<Rgb>, high: Option<Rgb>) -> Palette {
         let lo = rgb_to_hsl(low.unwrap_or(DEFAULT_LOW));
         let mut hi = rgb_to_hsl(high.unwrap_or(DEFAULT_HIGH));
-        if hi[0] < lo[0] {
+        if hi[0] - lo[0] > 180.0 {
+            hi[0] -= 360.0;
+        } else if lo[0] - hi[0] > 180.0 {
             hi[0] += 360.0;
         }
-        Palette { scheme, lo, hi }
+        Palette {
+            scheme,
+            lo,
+            hi,
+            back: BACKDROP,
+        }
+    }
+
+    /// The theme's colours for Theme colors: its accent and second accent
+    /// (what the theme looks like, rather than its Phase scope's pair), on
+    /// its waveform background. `low`/`high`, the user's own Phase colours
+    /// when they chose some, come first.
+    pub fn for_theme(scheme: Scheme, low: Option<Rgb>, high: Option<Rgb>, th: &crate::theme::Theme) -> Palette {
+        if scheme != Scheme::Theme {
+            return Palette::new(scheme, low, high);
+        }
+        let lo = low.unwrap_or(th.accent);
+        let hi = high.unwrap_or(th.accent_alt);
+        Palette::new(scheme, Some(lo), Some(hi)).with_backdrop(th.wave_background)
+    }
+
+    /// Draws on `bg`. The looks glow, so a light background gives way to
+    /// a deep shade of its own hue.
+    pub fn with_backdrop(mut self, bg: Rgb) -> Palette {
+        let [h, s, l] = rgb_to_hsl(bg);
+        self.back = if l <= 0.3 {
+            [bg[0] as f32, bg[1] as f32, bg[2] as f32]
+        } else {
+            hsl_to_rgb(h, (s * 0.7).min(0.45), 0.11)
+        };
+        self
+    }
+
+    /// The backdrop moved `k` of the way toward its opposite (light on a
+    /// dark backdrop): floors, walls and rooms a step off the background.
+    pub fn step(&self, k: f32) -> [f32; 3] {
+        let b = self.back;
+        let to = if b[0] + b[1] + b[2] < 384.0 { 255.0 } else { 0.0 };
+        [b[0] + (to - b[0]) * k, b[1] + (to - b[1]) * k, b[2] + (to - b[2]) * k]
     }
 
     pub fn at(&self, t: f32) -> [f32; 3] {
@@ -448,6 +496,8 @@ pub struct Canvas {
     lut: Vec<f32>,
     /// Bilinear tables for showing a Field.
     xs: Vec<(usize, usize, f32)>,
+    /// What a cleared or fading canvas tends to (the palette's backdrop).
+    back: Option<[f32; 3]>,
 }
 
 impl Canvas {
@@ -456,7 +506,7 @@ impl Canvas {
         self.w = w;
         self.h = h;
         self.px.clear();
-        self.px.resize(w * h, BACKDROP);
+        self.px.resize(w * h, self.back.unwrap_or(BACKDROP));
         self.mask.clear();
         self.glow.clear();
     }
@@ -473,11 +523,8 @@ impl Canvas {
     /// Fades what is on the canvas toward the backdrop, leaving trails; 1 clears it.
     pub fn fade(&mut self, amount: f32) {
         let k = 1.0 - amount;
-        let add = [
-            BACKDROP[0] * amount,
-            BACKDROP[1] * amount,
-            BACKDROP[2] * amount,
-        ];
+        let b = self.back.unwrap_or(BACKDROP);
+        let add = [b[0] * amount, b[1] * amount, b[2] * amount];
         for p in &mut self.px {
             p[0] = p[0] * k + add[0];
             p[1] = p[1] * k + add[1];
@@ -832,6 +879,9 @@ impl Lcg {
     }
 }
 
+#[path = "viz_ragdoll.rs"]
+mod ragdoll;
+
 trait Visual {
     fn draw(&mut self, cv: &mut Canvas, a: &Analysis, pal: &Palette);
 }
@@ -846,10 +896,11 @@ pub enum Look {
     Stars,
     Radial,
     Dancer,
+    Ragdoll,
 }
 
 /// In the order the list shows them.
-pub const LOOKS: [Look; 8] = [
+pub const LOOKS: [Look; 9] = [
     Look::Lava,
     Look::Bars,
     Look::Waves,
@@ -858,6 +909,7 @@ pub const LOOKS: [Look; 8] = [
     Look::Stars,
     Look::Radial,
     Look::Dancer,
+    Look::Ragdoll,
 ];
 
 impl Look {
@@ -871,6 +923,7 @@ impl Look {
             Look::Stars => "stars",
             Look::Radial => "radial",
             Look::Dancer => "dancer",
+            Look::Ragdoll => "ragdoll",
         }
     }
     pub fn name(self) -> &'static str {
@@ -883,6 +936,7 @@ impl Look {
             Look::Stars => "Starfield",
             Look::Radial => "Radial",
             Look::Dancer => "TV Dancer",
+            Look::Ragdoll => "Ragdoll",
         }
     }
     /// The look with this id, or the first.
@@ -899,6 +953,7 @@ impl Look {
             Look::Stars => Box::new(Stars::default()),
             Look::Radial => Box::new(Radial::default()),
             Look::Dancer => Box::new(Dancer::default()),
+            Look::Ragdoll => Box::new(ragdoll::Ragdoll::default()),
         }
     }
 }
@@ -1043,7 +1098,7 @@ struct Bars {
 impl Visual for Bars {
     fn draw(&mut self, cv: &mut Canvas, a: &Analysis, pal: &Palette) {
         let (w, h) = (cv.w as f32, cv.h as f32);
-        cv.fill_rect(0.0, 0.0, w, h, BACKDROP, 1.0);
+        cv.fill_rect(0.0, 0.0, w, h, pal.back, 1.0);
         let n = ((w / 9.0).floor() as usize).clamp(12, 64);
         if self.caps.len() < n {
             self.caps.resize(n, 0.0);
@@ -1478,8 +1533,8 @@ impl Visual for Dancer {
         let (w, h) = (cv.w as f32, cv.h as f32);
         let dt = a.dt.clamp(0.0, 0.1);
         // The room behind the set.
-        cv.fill_rect(0.0, 0.0, w, h, [24.0, 22.0, 30.0], 1.0);
-        cv.fill_rect(0.0, h * 0.8, w, h * 0.2, [34.0, 30.0, 40.0], 1.0);
+        cv.fill_rect(0.0, 0.0, w, h, pal.step(0.06), 1.0);
+        cv.fill_rect(0.0, h * 0.8, w, h * 0.2, pal.step(0.11), 1.0);
 
         // The television.
         let tv_w = (w * 0.86).min(h * 1.15);
@@ -1548,9 +1603,11 @@ impl Visual for Dancer {
         let float = (a.time as f32 * 0.9).sin() * u * 0.25 + p.dip * u * 0.35;
         let cx = sx + sw / 2.0 + p.lean * u * 2.0;
         let hip_y = sy + sh * 0.62 + float;
+        // The palette's colour, lightened evenly (no tint of its own), so
+        // Theme colors gives him the theme's hue.
         let skin = {
             let t = pal.css(0.35);
-            [t[0] * 0.55 + 90.0, t[1] * 0.55 + 110.0, t[2] * 0.55 + 80.0]
+            [t[0] * 0.7 + 60.0, t[1] * 0.7 + 60.0, t[2] * 0.7 + 60.0]
         };
         let shade = [skin[0] * 0.72, skin[1] * 0.72, skin[2] * 0.72];
         let limb = u * 0.32;
@@ -1759,6 +1816,7 @@ impl Visualizer {
         if self.visual.as_ref().map(|v| v.0) != Some(look) {
             self.visual = Some((look, look.create()));
         }
+        self.canvas.back = Some(pal.back);
         if let Some((_, v)) = &mut self.visual {
             v.draw(&mut self.canvas, a, pal);
         }
@@ -1777,55 +1835,128 @@ pub fn show(ui: &mut egui::Ui, st: &mut State) {
 fn panel(ui: &mut egui::Ui, st: &mut State, v: &mut Visualizer) {
     let dim = c(st.theme.text_dim);
     let before = v.prefs.clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Look").color(dim));
-        let cur = Look::by_id(&v.prefs.preset);
-        egui::ComboBox::from_id_salt("viz-look")
-            .selected_text(cur.name())
-            .show_ui(ui, |ui| {
-                for l in LOOKS {
-                    if ui.selectable_label(cur == l, l.name()).clicked() {
-                        v.prefs.preset = l.id().to_string();
+    // Only as wide as the card shows, inside the window: the panel can be
+    // handed more width than is visible (when the dock is wider than the
+    // window), and then the controls overflow and the picture is cut off.
+    let shown = ui.max_rect().intersect(ui.clip_rect()).intersect(ui.ctx().screen_rect());
+    if shown.width() > 0.0 {
+        ui.set_max_width(shown.width());
+    }
+    // The controls, packed into rows by hand (egui's wrapping cannot see
+    // a label and its control as one): each label stays with its control,
+    // and a new row starts when the next pair would not fit.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_w = |ui: &egui::Ui, t: &str| {
+        ui.fonts(|f| f.layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x)
+    };
+    let gap = ui.spacing().item_spacing.x;
+    let widths = [
+        text_w(ui, "Look") + gap + 110.0 + 24.0,
+        text_w(ui, "Colors") + gap + 110.0 + 24.0,
+        text_w(ui, "Reaction") + gap + 80.0 + 12.0,
+        text_w(ui, "Pictures a second") + gap + 48.0 + 24.0,
+        text_w(ui, "Change every 30 seconds") + 28.0,
+    ];
+    let room = ui.available_width();
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut used = 0.0;
+    for (k, w) in widths.iter().enumerate() {
+        let need = if used > 0.0 { used + gap * 3.0 + w } else { *w };
+        if used > 0.0 && need > room {
+            rows.push(Vec::new());
+            used = *w;
+        } else {
+            used = need;
+        }
+        if let Some(r) = rows.last_mut() {
+            r.push(k);
+        }
+    }
+    for row in rows {
+        ui.horizontal(|ui| {
+            for (n, k) in row.into_iter().enumerate() {
+                if n > 0 {
+                    ui.add_space(gap * 2.0);
+                }
+                match k {
+                    0 => {
+                        ui.label(RichText::new("Look").color(dim));
+                        let cur = Look::by_id(&v.prefs.preset);
+                        egui::ComboBox::from_id_salt("viz-look")
+                            .selected_text(cur.name())
+                            .width(110.0)
+                            .show_ui(ui, |ui| {
+                                for l in LOOKS {
+                                    if ui.selectable_label(cur == l, l.name()).clicked() {
+                                        v.prefs.preset = l.id().to_string();
+                                    }
+                                }
+                            });
+                    }
+                    1 => {
+                        ui.label(RichText::new("Colors").color(dim));
+                        egui::ComboBox::from_id_salt("viz-colors")
+                            .selected_text(v.prefs.scheme.label())
+                            .width(110.0)
+                            .show_ui(ui, |ui| {
+                                for (s, label) in SCHEMES {
+                                    ui.selectable_value(&mut v.prefs.scheme, s, label);
+                                }
+                            });
+                    }
+                    2 => {
+                        ui.label(RichText::new("Reaction").color(dim))
+                            .on_hover_text("How strongly the picture reacts to the sound.");
+                        ui.spacing_mut().slider_width = 80.0;
+                        ui.add(
+                            crate::widgets::Slider::new(&mut v.prefs.sens, 0.4..=2.5)
+                                .step_by(0.1)
+                                .show_value(false),
+                        );
+                    }
+                    3 => {
+                        ui.label(RichText::new("Pictures a second").color(dim))
+                            .on_hover_text("15 and 30 are lighter on slower computers.");
+                        egui::ComboBox::from_id_salt("viz-fps")
+                            .selected_text(v.prefs.fps.to_string())
+                            .width(48.0)
+                            .show_ui(ui, |ui| {
+                                for f in FPS {
+                                    ui.selectable_value(&mut v.prefs.fps, f, f.to_string());
+                                }
+                            });
+                    }
+                    _ => {
+                        ui.checkbox(&mut v.prefs.auto, "Change every 30 seconds");
                     }
                 }
-            });
-        ui.label(RichText::new("Colors").color(dim));
-        egui::ComboBox::from_id_salt("viz-colors")
-            .selected_text(v.prefs.scheme.label())
-            .show_ui(ui, |ui| {
-                for (s, label) in SCHEMES {
-                    ui.selectable_value(&mut v.prefs.scheme, s, label);
-                }
-            });
-        ui.label(RichText::new("Reaction").color(dim))
-            .on_hover_text("How strongly the picture reacts to the sound.");
-        ui.scope(|ui| {
-            ui.spacing_mut().slider_width = 80.0;
-            ui.add(
-                crate::widgets::Slider::new(&mut v.prefs.sens, 0.4..=2.5)
-                    .step_by(0.1)
-                    .show_value(false),
-            );
+            }
         });
-        ui.label(RichText::new("Pictures a second").color(dim))
-            .on_hover_text("15 and 30 are lighter on slower computers.");
-        egui::ComboBox::from_id_salt("viz-fps")
-            .selected_text(v.prefs.fps.to_string())
-            .width(48.0)
-            .show_ui(ui, |ui| {
-                for f in FPS {
-                    ui.selectable_value(&mut v.prefs.fps, f, f.to_string());
-                }
-            });
-        ui.checkbox(&mut v.prefs.auto, "Change every 30 seconds");
-    });
+    }
     if v.prefs != before {
         v.prefs.save();
     }
 
-    let avail = ui.available_rect_before_wrap();
-    let (rect, _) = ui.allocate_exact_size(avail.size(), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, AREA);
+    // The controls above can be wider than the panel; the picture is only
+    // as wide as what is shown, so it stays centred.
+    let avail = ui
+        .available_rect_before_wrap()
+        .intersect(ui.clip_rect())
+        .intersect(ui.ctx().screen_rect());
+    if !avail.is_positive() {
+        return;
+    }
+    let (rect, resp) = ui.allocate_exact_size(avail.size(), Sense::click_and_drag());
+    let area = Palette::for_theme(v.prefs.scheme, None, None, &st.theme).back;
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        if area == BACKDROP {
+            AREA
+        } else {
+            Color32::from_rgb(area[0] as u8, area[1] as u8, area[2] as u8)
+        },
+    );
     let dpr = ui.ctx().pixels_per_point().min(1.5);
     let (mut w, mut h) = (
         (rect.width() * dpr).floor().max(0.0) as usize,
@@ -1855,20 +1986,24 @@ fn panel(ui: &mut egui::Ui, st: &mut State, v: &mut Visualizer) {
         st.scope_spectrum(&mut v.spectrum, &mut v.db);
         let playing = st.is_playing();
         let look = Look::by_id(&v.prefs.preset);
-        let a = v
+        let mut a = v
             .analyser
             .feed(&v.db, v.prefs.sens, dt, if playing { 1.0 } else { CALM });
+        let held = resp.is_pointer_button_down_on() || resp.dragged();
+        a.pointer = resp.hover_pos().or(resp.interact_pointer_pos()).map(|p| {
+            (
+                (p.x - rect.left()) * w as f32 / rect.width(),
+                (p.y - rect.top()) * h as f32 / rect.height(),
+                held,
+            )
+        });
         if v.prefs.auto && now.duration_since(v.switched) > AUTO {
             v.switched = now;
             let i = LOOKS.iter().position(|l| *l == look).unwrap_or(0);
             v.prefs.preset = LOOKS[(i + 1) % LOOKS.len()].id().to_string();
             v.prefs.save();
         }
-        let pal = Palette::new(
-            v.prefs.scheme,
-            st.phase.low.or(st.theme.phase_low),
-            st.phase.high.or(st.theme.phase_high),
-        );
+        let pal = Palette::for_theme(v.prefs.scheme, st.phase.low, st.phase.high, &st.theme);
         v.render(look, w, h, &a, &pal);
         let img = v.canvas.image();
         match &mut v.tex {
@@ -1888,6 +2023,13 @@ fn panel(ui: &mut egui::Ui, st: &mut State, v: &mut Visualizer) {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+    }
+    if Look::by_id(&v.prefs.preset) == Look::Ragdoll && (resp.hovered() || resp.dragged()) {
+        ui.ctx().set_cursor_icon(if resp.dragged() {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
     }
     let next = v
         .last
@@ -1978,6 +2120,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn theme_colors_come_from_the_theme() {
+        // Its accent and second accent (not its Phase scope's pair), on its
+        // waveform background (a light one deepened, keeping its hue).
+        let mut th = crate::theme::Theme::studio_lite();
+        th.phase_low = Some([255, 0, 0]);
+        th.phase_high = Some([255, 0, 255]);
+        let pal = Palette::for_theme(Scheme::Theme, None, None, &th);
+        let lo = pal.at(0.0);
+        let hi = pal.at(0.5);
+        for k in 0..3 {
+            assert!((lo[k] - th.accent[k] as f32).abs() < 1.5, "{lo:?}");
+            assert!((hi[k] - th.accent_alt[k] as f32).abs() < 1.5, "{hi:?}");
+        }
+        let wb = th.wave_background;
+        assert_eq!(pal.back, [wb[0] as f32, wb[1] as f32, wb[2] as f32]);
+        th.wave_background = [235, 230, 245];
+        let light = Palette::for_theme(Scheme::Theme, None, None, &th);
+        assert!(light.back.iter().all(|v| *v < 60.0), "{:?}", light.back);
+        // The user's own Phase colours come first; other schemes keep their own.
+        let own = Palette::for_theme(Scheme::Theme, Some([0, 0, 255]), Some([0, 255, 0]), &th);
+        assert!((own.at(0.0)[2] - 255.0).abs() < 1.5);
+        assert_eq!(Palette::for_theme(Scheme::Fire, None, None, &th).back, BACKDROP);
     }
 
     #[test]

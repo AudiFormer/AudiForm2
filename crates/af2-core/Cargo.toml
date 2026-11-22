@@ -1,0 +1,11 @@
+[package]
+name = "af2-core"
+description = "Audiform2 core: audio buffers, sessions, undo history"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

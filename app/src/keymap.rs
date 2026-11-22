@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The keyboard shortcuts: every command a key can run, its default keys,
 //! and the user's own map (saved as `keymap.json` in the data folder).
@@ -30,6 +30,7 @@ pub enum Cmd {
     KeyboardShortcuts,
     Preferences,
     SplitAtPlayhead,
+    DuplicateClips,
     Invert,
     Reverse,
     Silence,
@@ -80,6 +81,7 @@ impl Cmd {
         Cmd::KeyboardShortcuts,
         Cmd::Preferences,
         Cmd::SplitAtPlayhead,
+        Cmd::DuplicateClips,
         Cmd::Invert,
         Cmd::Reverse,
         Cmd::Silence,
@@ -130,6 +132,7 @@ impl Cmd {
             Cmd::KeyboardShortcuts => "Keyboard Shortcuts...",
             Cmd::Preferences => "Settings...",
             Cmd::SplitAtPlayhead => "Split at Playhead",
+            Cmd::DuplicateClips => "Duplicate Selected Clips",
             Cmd::Invert => "Invert",
             Cmd::Reverse => "Reverse",
             Cmd::Silence => "Silence",
@@ -183,7 +186,7 @@ impl Cmd {
             | Cmd::ClearSelection
             | Cmd::KeyboardShortcuts
             | Cmd::Preferences => "Edit",
-            Cmd::SplitAtPlayhead | Cmd::BounceTrack => "Multitrack",
+            Cmd::SplitAtPlayhead | Cmd::DuplicateClips | Cmd::BounceTrack => "Multitrack",
             Cmd::Invert
             | Cmd::Reverse
             | Cmd::Silence
@@ -248,6 +251,7 @@ impl Cmd {
                 ..p(K::K)
             }],
             Cmd::SplitAtPlayhead => vec![c(K::K)],
+            Cmd::DuplicateClips => vec![c(K::D)],
             Cmd::AutoHeal => vec![c(K::U)],
             Cmd::PlayStop => vec![p(K::Space)],
             Cmd::Record => vec![Binding {
@@ -468,7 +472,6 @@ impl Keymap {
     }
 
     /// The command a key runs.
-    #[cfg(test)]
     pub fn lookup(&self, b: Binding) -> Option<Cmd> {
         self.binds
             .iter()
@@ -546,6 +549,32 @@ impl Keymap {
                     out.push(c);
                 }
             }
+            // egui hands Ctrl+X / C / V over as Cut / Copy / Paste events,
+            // never as key presses: they run what those keys are bound to.
+            if typing {
+                return;
+            }
+            let mut found = Vec::new();
+            i.events.retain(|e| {
+                let key = match e {
+                    egui::Event::Cut => Key::X,
+                    egui::Event::Copy => Key::C,
+                    egui::Event::Paste(_) => Key::V,
+                    _ => return true,
+                };
+                match self.lookup(Binding::ctrl(key)) {
+                    Some(c) => {
+                        found.push(c);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            for c in found {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
         });
         out
     }
@@ -554,6 +583,28 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_and_paste_events_run_what_ctrl_c_and_v_are_bound_to() {
+        let ctx = egui::Context::default();
+        let run = |typing: bool, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            ctx.begin_frame(raw);
+            let out = Keymap::default().pressed(&ctx, typing);
+            let _ = ctx.end_frame();
+            out
+        };
+        let got = run(
+            false,
+            vec![egui::Event::Copy, egui::Event::Cut, egui::Event::Paste("x".into())],
+        );
+        assert_eq!(got, vec![Cmd::Copy, Cmd::Cut, Cmd::Paste]);
+        // A text field being typed in keeps them.
+        assert!(run(true, vec![egui::Event::Copy]).is_empty());
+    }
 
     #[test]
     fn the_defaults_have_no_conflicts() {

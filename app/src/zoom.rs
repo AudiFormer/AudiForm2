@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Zoom rules shared by the Waveform editor, its spectral display and the
 //! Multitrack: the user's zoom preferences, the wheel's step and anchor,
@@ -286,6 +286,8 @@ pub enum Region {
     WaveRuler,
     /// Waveform editor: the spectrum's frequency scale.
     FreqScale,
+    /// Waveform editor: the spectrum's picture.
+    Spectrum,
 }
 
 /// Where a time zoom keeps its place.
@@ -432,6 +434,20 @@ pub fn wheel_action(r: Region, m: WheelMods, sideways: bool, wheel_zooms: bool) 
         Region::FreqScale => {
             if sideways && !m.ctrl {
                 A::None
+            } else {
+                A::ZoomFreq
+            }
+        }
+        // The plain wheel zooms the frequencies around the one under the
+        // pointer, by as much as the wheel moved; time stays on Ctrl
+        // (zoom) and Shift or sideways (scroll), as over the waveform.
+        Region::Spectrum => {
+            if m.ctrl {
+                zoom_set
+            } else if m.alt {
+                A::ZoomAmp
+            } else if m.shift || sideways {
+                A::ScrollTime
             } else {
                 A::ZoomFreq
             }
@@ -707,107 +723,166 @@ impl Default for SpecView {
     }
 }
 
-/// The offset (Hz) of the log warp `ln(f + c)` for each scale step; a
-/// big offset is nearly linear, a small one nearly logarithmic (and keeps
-/// 0 Hz on the scale). Step 0 is exactly linear.
-fn warp_offset(step: u8) -> f64 {
-    match step {
-        0 => f64::INFINITY,
-        1 => 4000.0,
-        2 => 800.0,
-        3 => 150.0,
-        _ => 20.0,
-    }
-}
-
-fn warp(f: f64, step: u8) -> f64 {
-    let c = warp_offset(step);
-    if c.is_infinite() {
-        f
-    } else {
-        (f + c).ln()
-    }
-}
-
-fn unwarp(g: f64, step: u8) -> f64 {
-    let c = warp_offset(step);
-    if c.is_infinite() {
-        g
-    } else {
-        g.exp() - c
-    }
-}
+/// The lowest frequency the bend toward logarithmic measures from (a log
+/// scale cannot reach 0 Hz), as in Audiform 1.
+const LOG_FLOOR: f64 = 10.0;
+/// Where a logarithmic view (half way or more) starts when not zoomed.
+pub const LOG_MIN_HZ: f64 = 30.0;
 
 impl SpecView {
+    /// How far the scale bends toward logarithmic, 0 to 1.
+    fn bend(&self) -> f64 {
+        self.log_step.min(LOG_STEPS) as f64 / LOG_STEPS as f64
+    }
+
+    /// Half way to logarithmic or more: zooming works in ratios (pitch),
+    /// and the unzoomed view starts at [`LOG_MIN_HZ`].
+    fn pitchy(&self) -> bool {
+        self.bend() >= 0.5
+    }
+
+    /// The lowest frequency the unzoomed view shows.
+    fn floor(&self) -> f64 {
+        if self.pitchy() {
+            LOG_MIN_HZ
+        } else {
+            0.0
+        }
+    }
+
     /// The range shown for a file whose Nyquist frequency is `ny`.
     pub fn bounds(&self, ny: f64) -> (f64, f64) {
         let ny = ny.max(MIN_SPAN_HZ);
         match self.range {
-            None => (0.0, ny),
+            None => (self.floor().min(ny - MIN_SPAN_HZ).max(0.0), ny),
             Some((lo, hi)) => clamp_range(lo, hi, ny),
         }
     }
 
+    /// The curve: (start, top, a). Frequency at height t (0..1) is
+    /// `start + (top - start) * expm1(a t) / expm1(a)`, bending from
+    /// straight (a = 0) to logarithmic by degrees, each step moving the
+    /// middle of the view by a similar number of octaves (Audiform 1's
+    /// scale).
+    fn curve(&self, ny: f64) -> (f64, f64, f64) {
+        let (lo, hi) = self.bounds(ny);
+        let k = self.bend();
+        let l0 = lo.max(LOG_FLOOR);
+        let top = hi.max(l0 + 1.0);
+        let a = k * (top / l0).ln();
+        let start = lo + (l0 - lo) * k;
+        (start, top, a)
+    }
+
     /// Where `f` sits on the scale: 0 at the bottom, 1 at the top.
     pub fn pos(&self, f: f64, ny: f64) -> f64 {
-        let (lo, hi) = self.bounds(ny);
-        let (a, b) = (warp(lo, self.log_step), warp(hi, self.log_step));
-        (warp(f.max(0.0), self.log_step) - a) / (b - a)
+        let (start, top, a) = self.curve(ny);
+        let lin = (f - start) / (top - start);
+        if a < 1e-6 {
+            return lin;
+        }
+        let x = 1.0 + lin * a.exp_m1();
+        if x <= 1e-12 {
+            // Below the curve's reach (under the log floor).
+            return lin.min(-1e-3);
+        }
+        x.ln() / a
     }
 
     /// The frequency at `pos` (0 bottom, 1 top).
     pub fn freq_at(&self, pos: f64, ny: f64) -> f64 {
-        let (lo, hi) = self.bounds(ny);
-        let (a, b) = (warp(lo, self.log_step), warp(hi, self.log_step));
-        unwarp(a + (b - a) * pos, self.log_step)
+        let (start, top, a) = self.curve(ny);
+        if a < 1e-6 {
+            return start + (top - start) * pos;
+        }
+        start + (top - start) * (a * pos).exp_m1() / a.exp_m1()
     }
 
     /// Zooms the frequencies by `factor` (below 1 zooms in), keeping
-    /// `anchor_hz` at its place on the scale, within 0 Hz..`ny` and never
-    /// narrower than [`MIN_SPAN_HZ`].
+    /// `anchor_hz` at its place, within 0 Hz..`ny` and never narrower than
+    /// [`MIN_SPAN_HZ`]. On a scale half way to logarithmic or more it zooms
+    /// in ratios, as Audiform 1 does; otherwise evenly in Hertz.
     pub fn zoom(&mut self, factor: f64, anchor_hz: f64, ny: f64) {
         let ny = ny.max(MIN_SPAN_HZ);
         let (lo, hi) = self.bounds(ny);
-        let s = self.log_step;
-        let anchor_hz = anchor_hz.clamp(lo, hi);
-        let (a, b, g) = (warp(lo, s), warp(hi, s), warp(anchor_hz, s));
+        let at = anchor_hz.clamp(lo, hi);
         let factor = factor.max(1e-6);
-        let mut nlo = unwarp(g - (g - a) * factor, s);
-        let mut nhi = unwarp(g + (b - g) * factor, s);
-        if nhi - nlo < MIN_SPAN_HZ {
-            // Too narrow: the narrowest span, around the anchor, at the
-            // anchor's share of the old range.
-            let frac = if hi > lo {
-                (anchor_hz - lo) / (hi - lo)
-            } else {
-                0.5
-            };
-            nlo = anchor_hz - MIN_SPAN_HZ * frac;
-            nhi = nlo + MIN_SPAN_HZ;
+        let (mut nlo, mut nhi);
+        if self.pitchy() {
+            let l0 = lo.max(LOG_FLOOR);
+            let a = at.max(l0);
+            nlo = a * (l0 / a).powf(factor);
+            nhi = a * (hi / a).powf(factor);
+            if lo < LOG_FLOOR && factor >= 1.0 {
+                nlo = nlo.min(lo);
+            }
+        } else {
+            nlo = at - (at - lo) * factor;
+            nhi = at + (hi - at) * factor;
         }
-        let (nlo, nhi) = clamp_range(nlo, nhi, ny);
-        self.range = if nlo <= 0.0 && nhi >= ny {
+        if nhi - nlo < MIN_SPAN_HZ {
+            let mid = ((nlo + nhi) / 2.0).clamp(MIN_SPAN_HZ / 2.0, ny - MIN_SPAN_HZ / 2.0);
+            nlo = mid - MIN_SPAN_HZ / 2.0;
+            nhi = mid + MIN_SPAN_HZ / 2.0;
+        }
+        // Audiform 1's amounts, then slid (same width in Hz) so the anchor
+        // stays exactly where it was on screen: on a part-way bent scale
+        // the plain amounts let it drift.
+        if nlo > 0.0 && nhi < ny && nhi > nlo {
+            let target = self.pos(at, ny);
+            let width = nhi - nlo;
+            let window = |x: f64| SpecView {
+                range: Some((nlo + x * width, nhi + x * width)),
+                ..*self
+            };
+            let (mut a, mut b) = (-1.0f64, 1.0f64);
+            for _ in 0..80 {
+                let x = (a + b) / 2.0;
+                if window(x).pos(at, ny) > target {
+                    a = x;
+                } else {
+                    b = x;
+                }
+            }
+            if let Some((l, h)) = window((a + b) / 2.0).range {
+                if l >= 0.0 && h <= ny && h - l >= MIN_SPAN_HZ - 1e-9 {
+                    nlo = l;
+                    nhi = h;
+                }
+            }
+        }
+        let floor = self.floor();
+        let nlo = nlo.max(floor.min(nlo)).max(0.0);
+        let nhi = nhi.min(ny);
+        // Zoomed all the way out: the whole range again.
+        self.range = if nlo <= floor + 1.0 && nhi >= ny - 1.0 {
             None
         } else {
-            Some((nlo, nhi))
+            Some(clamp_range(nlo, nhi, ny))
         };
     }
 
     /// Drags the scale: `d` is the pointer's movement as a share of the
     /// scale's height (down is positive and brings higher frequencies in,
-    /// as if pulling the scale). Only a zoomed view moves; it stops at
-    /// 0 Hz and at Nyquist, keeping its size on the scale.
+    /// as if pulling the scale). Only a zoomed view moves; it stops at the
+    /// bottom of the scale and at Nyquist, keeping its size on the scale.
     pub fn pan(&mut self, d: f64, ny: f64) {
         let Some(_) = self.range else { return };
         let ny = ny.max(MIN_SPAN_HZ);
-        let (lo, hi) = self.bounds(ny);
-        let s = self.log_step;
-        let (a, b) = (warp(lo, s), warp(hi, s));
-        let (floor, top) = (warp(0.0, s), warp(ny, s));
-        let shift = ((b - a) * d).clamp(floor - a, top - b);
-        let (nlo, nhi) = (unwarp(a + shift, s), unwarp(b + shift, s));
-        let (nlo, nhi) = clamp_range(nlo, nhi, ny);
-        self.range = Some((nlo, nhi));
+        let floor = self.floor();
+        let (nlo, nhi) = (self.freq_at(d, ny), self.freq_at(1.0 + d, ny));
+        let (nlo, nhi) = if nlo < floor {
+            // At the bottom: the same height on the scale from the floor.
+            let mut v = *self;
+            v.range = Some((floor, floor + (nhi - nlo)));
+            let span = v.freq_at(1.0, ny);
+            (floor, span)
+        } else if nhi > ny {
+            (nlo + (ny - nhi), ny)
+        } else {
+            (nlo, nhi)
+        };
+        self.range = Some(clamp_range(nlo, nhi, ny));
     }
 
     /// Whether the scale can be dragged (the view is zoomed in).
@@ -815,10 +890,11 @@ impl SpecView {
         self.range.is_some()
     }
 
-    /// Zoom In / Zoom Out from the menu: around the middle of the scale.
-    pub fn zoom_step(&mut self, zoom_in: bool, ny: f64) {
-        let mid = self.freq_at(0.5, ny);
-        self.zoom(if zoom_in { 0.5 } else { 2.0 }, mid, ny);
+    /// Zoom In / Zoom Out from the menu: around `at` Hz (where the menu
+    /// was opened), else the middle of the scale.
+    pub fn zoom_step(&mut self, zoom_in: bool, at: Option<f64>, ny: f64) {
+        let at = at.unwrap_or_else(|| self.freq_at(0.5, ny));
+        self.zoom(if zoom_in { 0.5 } else { 2.0 }, at, ny);
     }
 
     pub fn reset_zoom(&mut self) {
@@ -827,10 +903,21 @@ impl SpecView {
 
     pub fn more_log(&mut self) {
         self.log_step = (self.log_step + 1).min(LOG_STEPS);
+        self.settle_floor();
     }
 
     pub fn more_linear(&mut self) {
         self.log_step = self.log_step.saturating_sub(1);
+        self.settle_floor();
+    }
+
+    /// A zoomed view below the new floor starts at it.
+    fn settle_floor(&mut self) {
+        if let Some((lo, hi)) = self.range {
+            if self.pitchy() && lo < LOG_MIN_HZ {
+                self.range = Some((LOG_MIN_HZ, hi.max(LOG_MIN_HZ + MIN_SPAN_HZ)));
+            }
+        }
     }
 
     pub fn finer(&mut self) {
@@ -841,64 +928,82 @@ impl SpecView {
         self.fft = (self.fft / 2).max(FFT_MIN);
     }
 
-    /// Scale labels for a scale `px` pixels tall: (frequency, label),
-    /// at least `gap` pixels apart.
+    /// Scale labels for a scale `px` pixels tall: (frequency, label), at
+    /// least `gap` pixels apart, chosen as Audiform 1 chooses them.
     pub fn ticks(&self, ny: f64, px: f32, gap: f32) -> Vec<(f64, String)> {
         let (lo, hi) = self.bounds(ny);
-        let mut cands: Vec<(f64, String)> = Vec::new();
+        let y_of = |f: f64| (self.pos(f, ny) as f32) * px;
         if self.notes {
-            // Every semitone; the filter keeps what fits, C first.
+            // Every C, or every note once there is room, kept apart.
             let first = (hz_to_midi(lo.max(8.0))).ceil() as i32;
             let last = (hz_to_midi(hi.max(8.0))).floor() as i32;
-            let mut cs = Vec::new();
-            let mut rest = Vec::new();
+            let semitone = if last > first {
+                (y_of(midi_to_hz(first as f64 + 1.0)) - y_of(midi_to_hz(first as f64))).abs()
+            } else {
+                0.0
+            };
+            let every = semitone >= 14.0;
+            let mut kept: Vec<(f64, String, f32)> = Vec::new();
             for m in first..=last.min(first + 400) {
+                if !every && m.rem_euclid(12) != 0 {
+                    continue;
+                }
                 let f = midi_to_hz(m as f64);
-                if m.rem_euclid(12) == 0 {
-                    cs.push((f, note_name(m)));
-                } else {
-                    rest.push((f, note_name(m)));
+                let y = y_of(f);
+                if (0.0..=px).contains(&y) && kept.iter().all(|k| (k.2 - y).abs() >= 14.0) {
+                    kept.push((f, note_name(m), y));
                 }
             }
-            cands.extend(cs);
-            cands.extend(rest);
-        } else {
-            // 1-2-5 decades (for the log end of the scale) and an even
-            // step across the range (for the linear end).
-            let mut dec = Vec::new();
-            let mut p = 10.0;
-            while p <= hi * 1.001 {
-                for m in [1.0, 2.0, 5.0] {
-                    let f = p * m;
-                    if f >= lo && f <= hi {
-                        dec.push(f);
-                    }
-                }
-                p *= 10.0;
-            }
-            let step = nice_step((hi - lo) / 8.0);
-            let mut lin = Vec::new();
+            return kept.into_iter().map(|(f, l, _)| (f, l)).collect();
+        }
+        let mut kept: Vec<(f64, f32)> = Vec::new();
+        if self.log_step == 0 {
+            // A straight scale: evenly stepped marks.
+            let span = hi - lo;
+            let want = ((px / (gap * 2.0)).floor() as f64).max(2.0);
+            let raw = span / want;
+            let p = 10f64.powf(raw.log10().floor());
+            let step = [1.0, 2.0, 5.0, 10.0].iter().map(|m| m * p).find(|s| *s >= raw).unwrap_or(raw);
             let mut f = (lo / step).ceil() * step;
-            while f <= hi && lin.len() < 200 {
-                lin.push(f);
+            while f <= hi && kept.len() < 400 {
+                let fr = (f * 1000.0).round() / 1000.0;
+                let y = y_of(fr);
+                if fr > lo && fr < hi && kept.last().is_none_or(|k| (k.1 - y).abs() >= gap) {
+                    kept.push((fr, y));
+                }
                 f += step;
             }
-            for f in dec.into_iter().chain(lin) {
-                cands.push((f, hz_label(f)));
+        } else {
+            // Bent or log: round steps from coarse to fine, each adding the
+            // marks that still fit, only where the whole step fits so the
+            // marks stay evenly stepped.
+            let span = hi - lo;
+            let mut e = hi.max(1.0).log10().ceil() as i32;
+            while e >= -2 {
+                for m in [5.0, 2.0, 1.0] {
+                    let step = m * 10f64.powi(e);
+                    if step > hi || span / step > 4000.0 {
+                        continue;
+                    }
+                    let mut i = (lo / step).floor() + 1.0;
+                    while i * step < hi {
+                        let f = (i * step * 1000.0).round() / 1000.0;
+                        i += 1.0;
+                        if f <= lo || kept.iter().any(|k| k.0 == f) {
+                            continue;
+                        }
+                        let y = y_of(f);
+                        let room = (y_of(f - step) - y).abs().min((y - y_of(f + step)).abs());
+                        if room >= gap && kept.iter().all(|k| (k.1 - y).abs() >= gap) {
+                            kept.push((f, y));
+                        }
+                    }
+                }
+                e -= 1;
             }
+            kept.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
-        let mut kept: Vec<(f64, String, f32)> = Vec::new();
-        for (f, label) in cands {
-            let y = self.pos(f, ny) as f32 * px;
-            if !(0.0..=px).contains(&y) {
-                continue;
-            }
-            if kept.iter().all(|k| (k.2 - y).abs() >= gap) {
-                kept.push((f, label, y));
-            }
-        }
-        kept.sort_by(|a, b| a.0.total_cmp(&b.0));
-        kept.into_iter().map(|(f, l, _)| (f, l)).collect()
+        kept.into_iter().map(|(f, _)| (f, hz_label(f))).collect()
     }
 }
 
@@ -927,29 +1032,31 @@ pub fn clamp_range(lo: f64, hi: f64, ny: f64) -> (f64, f64) {
     (lo.max(0.0), hi.min(ny))
 }
 
-fn nice_step(x: f64) -> f64 {
-    let x = x.max(1e-3);
-    let p = 10f64.powf(x.log10().floor());
-    for m in [1.0, 2.0, 5.0, 10.0] {
-        if p * m >= x {
-            return p * m;
-        }
-    }
-    p * 10.0
-}
 
 pub fn hz_label(f: f64) -> String {
-    if f >= 1000.0 {
-        let k = f / 1000.0;
-        if (k - k.round()).abs() < 1e-6 {
-            format!("{}k", k.round())
+    // As Audiform 1 writes them: "1.25k", "12k", "500", "62.5".
+    let trim = |s: String| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
         } else {
-            format!("{:.1}k", k)
+            s
         }
-    } else if (f - f.round()).abs() < 1e-6 {
-        format!("{}", f.round())
+    };
+    if f >= 1000.0 {
+        format!("{}k", trim(format!("{:.2}", f / 1000.0)))
+    } else if f < 100.0 {
+        trim(format!("{:.1}", f))
     } else {
-        format!("{:.1}", f)
+        format!("{:.0}", f)
+    }
+}
+
+/// A frequency read out beside the mouse: "440 Hz", "1.25 kHz".
+pub fn hz_readout(f: f64) -> String {
+    if f >= 1000.0 {
+        format!("{:.2} kHz", f / 1000.0)
+    } else {
+        format!("{:.0} Hz", f)
     }
 }
 
@@ -971,6 +1078,26 @@ pub fn note_name(m: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wheel_over_the_spectrum_zooms_frequency() {
+        let m = |ctrl, shift, alt| WheelMods { ctrl, shift, alt };
+        let plain = m(false, false, false);
+        assert_eq!(wheel_action(Region::Spectrum, plain, false, true), WheelAction::ZoomFreq);
+        assert_eq!(wheel_action(Region::Spectrum, plain, false, false), WheelAction::ZoomFreq);
+        assert!(matches!(wheel_action(Region::Spectrum, m(true, false, false), false, true), WheelAction::ZoomTime(_)));
+        assert_eq!(wheel_action(Region::Spectrum, m(false, true, false), false, true), WheelAction::ScrollTime);
+        assert_eq!(wheel_action(Region::Spectrum, plain, true, true), WheelAction::ScrollTime);
+        // By as much as the wheel moved: half a notch zooms half as far
+        // (in ratio), the frequency under the pointer stays put.
+        let (one, half) = (freq_wheel_factor(1.0), freq_wheel_factor(0.5));
+        assert!((half * half - one).abs() < 1e-12 && one < 1.0);
+        let ny = 24_000.0;
+        let mut s = SpecView::default();
+        let before = s.pos(2_000.0, ny);
+        s.zoom(freq_wheel_factor(0.5), 2_000.0, ny);
+        assert!((s.pos(2_000.0, ny) - before).abs() < 1e-9 && s.zoomed());
+    }
 
     #[test]
     fn wheel_steps_by_the_percent_setting() {
@@ -1489,10 +1616,10 @@ mod tests {
             range: Some((200.0, 800.0)),
             ..SpecView::default()
         };
-        let span = warp(800.0, LOG_STEPS) - warp(200.0, LOG_STEPS);
+        // Fully logarithmic: 200 to 800 Hz is two octaves, and stays two.
         s.pan(0.25, ny);
         let (lo, hi) = s.bounds(ny);
-        assert!(((warp(hi, LOG_STEPS) - warp(lo, LOG_STEPS)) - span).abs() < 1e-9);
-        assert!(lo > 200.0);
+        assert!((hi / lo - 4.0).abs() < 1e-6, "{lo} {hi}");
+        assert!((lo - 200.0 * 2f64.sqrt()).abs() < 1e-6, "a quarter of the view is half an octave");
     }
 }

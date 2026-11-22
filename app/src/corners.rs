@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Four-corner (and T) dragging: where a vertical divider between panels
 //! meets a horizontal one, grabbing the meeting point moves both at once,
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn the_default_workspace_has_meeting_points() {
-        let mut d = crate::workspace::Workspace::Default.build();
+        let mut d = crate::workspace::Workspace::Music.build();
         // Lay it out so the split rects are real.
         let ctx = egui::Context::default();
         let _ = ctx.run(Default::default(), |ctx| {

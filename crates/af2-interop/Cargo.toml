@@ -1,0 +1,17 @@
+[package]
+name = "af2-interop"
+description = "Audiform2 project import: .sesx multitrack sessions and Audiform .audfrm / .altaudio"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+
+[dependencies]
+af2-core.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+roxmltree = "0.20"
+af2-dsp = { path = "../af2-dsp" }
+af2-fx = { path = "../af2-fx" }
+midly = { version = "0.5.3", default-features = false, features = ["std"] }
+hound.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }

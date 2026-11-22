@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (c) The Audiform27 contributors.
+# Copyright (c) The Audiform2 contributors.
 """Builds the AudiForm 2 app icon from the logo mark's geometry.
 
 Every size is drawn on its own pixel grid (not shrunk from the 256), as

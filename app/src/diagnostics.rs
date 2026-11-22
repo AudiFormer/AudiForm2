@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Diagnostics: scan the file in the Waveform editor (or its selection)
 //! for long pauses, clicks, clipped peaks or the parts with sound, review
@@ -8,11 +8,11 @@
 //! peaks, or drop range markers. Every fix is one undoable edit.
 //!
 //! The finders are the ones the Click Repair and Clip Repair effects use
-//! (`af27_dsp::repair`), so the scan finds what the effects would fix.
+//! (`af2_dsp::repair`), so the scan finds what the effects would fix.
 
-use af27_core::time::format_time;
-use af27_core::{AudioBuffer, Marker};
-use af27_dsp::repair::{self, SilenceRule, Span};
+use af2_core::time::format_time;
+use af2_core::{AudioBuffer, Marker};
+use af2_dsp::repair::{self, SilenceRule, Span};
 use egui::RichText;
 
 use crate::state::{DocId, Mode, State};
@@ -277,7 +277,7 @@ pub fn fix(buf: &AudioBuffer, kind: Kind, set: &Settings, items: &[(f64, f64)], 
                 time: *a,
                 length: *l,
                 ext_id: None,
-                kind: af27_core::session::MarkerKind::Range,
+                kind: af2_core::session::MarkerKind::Range,
             })
             .collect()
     };
@@ -350,7 +350,7 @@ pub fn fix(buf: &AudioBuffer, kind: Kind, set: &Settings, items: &[(f64, f64)], 
                         ch[s - x + i] = out_side * (1.0 - t) + in_side * t;
                     }
                 }
-                b.cut(af27_core::Range::new(s, e));
+                b.cut(af2_core::Range::new(s, e));
                 removed.push((cut_a, (e - s) as f64 / rate));
             }
             removed.reverse();

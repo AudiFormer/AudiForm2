@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Caustics: the moving light on the floor of shallow water, drawn over a
 //! still picture without a single animation frame. Two cellular (Voronoi)
-//! patterns, one aqua and one gold, drift slowly in different directions;
-//! only the edges of their cells are lit, and where the edges of both
-//! patterns cross a bright highlight appears. The cells' points also sway
-//! a little, so the net of light bends and breaks up as it moves.
+//! patterns drift slowly in different directions; only the edges of their
+//! cells are lit. The cells' points also sway a little, so the net of light
+//! bends and breaks up as it moves.
+//!
+//! The light is heat-mapped, as on a real pool floor where refracted sun
+//! focuses: each line, each junction where three cells meet, and each place
+//! where the two nets cross adds to one summed intensity, and that sum is
+//! coloured through a ramp built from the theme (deep blue from `accent`,
+//! then `accent`, then a pale mix of `accent_alt` and the highlight, then
+//! near white). A lone thin line stays dim and cool; where lines crowd or
+//! cross it glows brighter and warmer.
 //!
 //! On wgpu the whole thing is one full-screen triangle and a small shader
 //! (a paint callback): the edges come from the distance to the nearest and
@@ -14,7 +21,13 @@
 //! cheap copy runs on the CPU at a fraction of the window's resolution,
 //! built a few rows a frame (under a millisecond) and stretched over it.
 //!
-//! Light is added to what is beneath, as everywhere in the HUD.
+//! Masked as in pixel-art water: a lone line on its own is masked away,
+//! so only the pools where lines cross and gather show; the light comes in
+//! a few hard steps and in chunky pixels; and on wgpu it is laid over the
+//! picture by multiplying (light x what is beneath, added), so it lands on
+//! the bright, shallow parts of the water and fades over the dark, deep
+//! ones, following the picture. The CPU copy can only add, so it skips
+//! that last part.
 
 use std::num::NonZeroU64;
 
@@ -87,31 +100,71 @@ fn point(cx: i32, cy: i32, seed: u32, phase: f32) -> vec2<f32> {
     );
 }
 
-// F2 - F1: zero on a cell's edge, growing towards its middle.
-fn edge(p: vec2<f32>, seed: u32, phase: f32) -> f32 {
+// (F2 - F1, F3 - F1): the first is zero on a cell's edge, growing towards
+// its middle; the second is zero only where three cells meet.
+fn edge(p: vec2<f32>, seed: u32, phase: f32) -> vec2<f32> {
     let ip = floor(p);
     let fp = p - ip;
     let ix = i32(ip.x);
     let iy = i32(ip.y);
     var d1 = 8.0;
     var d2 = 8.0;
+    var d3 = 8.0;
     for (var j = -1; j <= 1; j++) {
         for (var i = -1; i <= 1; i++) {
             let r = vec2<f32>(f32(i), f32(j)) + point(ix + i, iy + j, seed, phase) - fp;
             let d = dot(r, r);
             if (d < d1) {
+                d3 = d2;
                 d2 = d1;
                 d1 = d;
             } else if (d < d2) {
+                d3 = d2;
                 d2 = d;
+            } else if (d < d3) {
+                d3 = d;
             }
         }
     }
-    return sqrt(d2) - sqrt(d1);
+    let s1 = sqrt(d1);
+    return vec2<f32>(sqrt(d2) - s1, sqrt(d3) - s1);
 }
 
 fn line(e: f32, fw: f32) -> f32 {
     return 1.0 - smoothstep(0.5 * fw, 1.5 * fw, e) + 0.25 / (1.0 + e * e * 250.0);
+}
+
+fn junction(e3: f32) -> f32 {
+    return 1.0 / (1.0 + e3 * e3 * 110.0);
+}
+
+// The summed light: each net's lines and junctions, and the crossings.
+fn energy(la: f32, lb: f32, ja: f32, jb: f32) -> f32 {
+    let cross = smoothstep(0.15, 0.55, la * lb);
+    return 0.42 * la + 0.38 * lb + 0.7 * (ja + jb) + 0.7 * cross;
+}
+
+// The mask: lone lines (summed light under about 0.6) drop out; what
+// is left comes in four hard steps, as in pixel-art water.
+fn masked(e: f32) -> f32 {
+    let m = max(e - 0.6, 0.0) * 1.8;
+    return floor(m * 4.0 + 0.5) / 4.0;
+}
+
+// The heat ramp: off, deep blue, accent, pale warm, near white.
+fn ramp(e: f32) -> vec3<f32> {
+    let deep = u.col_a.rgb * vec3<f32>(0.35, 0.55, 1.0) * 0.55;
+    let mid = u.col_a.rgb * 0.8;
+    let warm = mix(u.col_b.rgb, u.col_hi.rgb, 0.4);
+    let hot = mix(u.col_hi.rgb, vec3<f32>(1.0), 0.5) * 1.15;
+    if (e < 0.35) {
+        return deep * (e / 0.35);
+    } else if (e < 0.75) {
+        return mix(deep, mid, (e - 0.35) / 0.4);
+    } else if (e < 1.2) {
+        return mix(mid, warm, (e - 0.75) / 0.45);
+    }
+    return mix(warm, hot, min((e - 1.2) / 0.8, 1.0));
 }
 
 @fragment
@@ -136,10 +189,8 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let px_pts = select(1.0 / u.ppp, u.pixel, u.pixel > 0.0);
     let fa = 2.0 * px_pts / 85.0;
     let fb = 2.0 * px_pts / 62.0;
-    let la = line(ea, fa);
-    let lb = line(eb, fb);
-    let hi = smoothstep(0.15, 0.55, la * lb);
-    var c = (u.col_a.rgb * la * 0.45 + u.col_b.rgb * lb * 0.40 + u.col_hi.rgb * hi) * u.strength;
+    let e = masked(energy(line(ea.x, fa), line(eb.x, fb), junction(ea.y), junction(eb.y)));
+    var c = ramp(e) * u.strength;
     c = min(c, vec3<f32>(1.0));
     if (u.srgb > 0.5) {
         c = pow(c, vec3<f32>(2.2));
@@ -197,12 +248,19 @@ impl Layer {
     }
 
     /// F2 - F1 at (x, y) in cells: 0 on an edge, larger inside a cell.
+    #[cfg(test)]
     pub fn edge(&self, x: f32, y: f32) -> f32 {
+        self.edges(x, y)[0]
+    }
+
+    /// (F2 - F1, F3 - F1) at (x, y) in cells: the second is 0 only where
+    /// three cells meet (a junction of the net).
+    pub fn edges(&self, x: f32, y: f32) -> [f32; 2] {
         let (fx0, fy0) = (x.floor(), y.floor());
         let (fx, fy) = (x - fx0, y - fy0);
         let (ix, iy) = (fx0 as i32, fy0 as i32);
         let n = self.n;
-        let (mut d1, mut d2) = (8.0_f32, 8.0_f32);
+        let (mut d1, mut d2, mut d3) = (8.0_f32, 8.0_f32, 8.0_f32);
         for j in -1..=1 {
             let cy = (iy + j).rem_euclid(n);
             for i in -1..=1 {
@@ -212,14 +270,19 @@ impl Layer {
                 let ry = j as f32 + o[1] - fy;
                 let d = rx * rx + ry * ry;
                 if d < d1 {
+                    d3 = d2;
                     d2 = d1;
                     d1 = d;
                 } else if d < d2 {
+                    d3 = d2;
                     d2 = d;
+                } else if d < d3 {
+                    d3 = d;
                 }
             }
         }
-        d2.sqrt() - d1.sqrt()
+        let s1 = d1.sqrt();
+        [d2.sqrt() - s1, d3.sqrt() - s1]
     }
 }
 
@@ -234,19 +297,75 @@ fn line(e: f32, fw: f32) -> f32 {
     1.0 - smoothstep(0.5 * fw, 1.5 * fw, e) + 0.25 / (1.0 + e * e * 250.0)
 }
 
-/// The light at one point from the two nets' line strengths, 0..1 per
-/// channel before `strength`.
+/// A junction's glow at F3 - F1 = `e3`: where three cells meet, lines
+/// converge and the light pools.
+fn junction(e3: f32) -> f32 {
+    1.0 / (1.0 + e3 * e3 * 110.0)
+}
+
+/// The summed light at one point (the heat): each net's line strength
+/// `la`/`lb`, its junction glow `ja`/`jb`, and a boost where the nets cross.
+/// Additive, so wherever lines crowd the sum climbs.
+fn energy(la: f32, lb: f32, ja: f32, jb: f32) -> f32 {
+    let cross = smoothstep(0.15, 0.55, la * lb);
+    0.42 * la + 0.38 * lb + 0.7 * (ja + jb) + 0.7 * cross
+}
+
+/// The mask (as the shader's `masked`): lone lines drop out, the rest in
+/// four hard steps.
+fn masked(e: f32) -> f32 {
+    let m = (e - 0.6).max(0.0) * 1.8;
+    (m * 4.0 + 0.5).floor() / 4.0
+}
+
+fn mix3(x: [f32; 3], y: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        x[0] + (y[0] - x[0]) * t,
+        x[1] + (y[1] - x[1]) * t,
+        x[2] + (y[2] - x[2]) * t,
+    ]
+}
+
+/// The heat ramp from summed light `e` to colour, from the theme's two
+/// colours: off, deep blue, `a`, a pale warm mix of `b` and the highlight,
+/// then near white (as the shader's `ramp`).
+fn ramp(e: f32, a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    let h = rgbf(HIGHLIGHT);
+    let deep = [a[0] * 0.35 * 0.55, a[1] * 0.55 * 0.55, a[2] * 0.55];
+    let mid = [a[0] * 0.8, a[1] * 0.8, a[2] * 0.8];
+    let warm = mix3(b, h, 0.4);
+    let hot = mix3(h, [1.0; 3], 0.5).map(|v| v * 1.15);
+    if e < 0.35 {
+        deep.map(|v| v * (e / 0.35).max(0.0))
+    } else if e < 0.75 {
+        mix3(deep, mid, (e - 0.35) / 0.4)
+    } else if e < 1.2 {
+        mix3(mid, warm, (e - 0.75) / 0.45)
+    } else {
+        mix3(warm, hot, ((e - 1.2) / 0.8).min(1.0))
+    }
+}
+
+/// The light at one point from the two nets' line strengths and junction
+/// glows, 0..1 per channel.
 /// `cover` (0..1) dims lines drawn wider than they are (the CPU copy's
 /// coarse pixels) to the light a fine line would give; 1 on the GPU.
-fn shade(la: f32, lb: f32, a: [f32; 3], b: [f32; 3], strength: f32, cover: f32) -> [f32; 3] {
-    let hi = smoothstep(0.15, 0.55, la * lb);
-    let h = rgbf(HIGHLIGHT);
-    let mut c = [0.0; 3];
-    for k in 0..3 {
-        c[k] = (((a[k] * la * 0.45 + b[k] * lb * 0.40) * cover + h[k] * hi * cover) * strength)
-            .min(1.0);
-    }
-    c
+#[allow(clippy::too_many_arguments)]
+fn shade(
+    la: f32,
+    lb: f32,
+    ja: f32,
+    jb: f32,
+    a: [f32; 3],
+    b: [f32; 3],
+    strength: f32,
+    cover: f32,
+) -> [f32; 3] {
+    let e = masked(energy(la, lb, ja, jb));
+    // Coarse pixels widen lines, so they are dimmed to a fine line's light;
+    // the pools where light gathers are broader, so they keep more of theirs.
+    let k = (cover * (1.0 + 2.0 * smoothstep(0.75, 1.6, e))).min(1.0);
+    ramp(e, a, b).map(|v| (v * k * strength).min(1.0))
 }
 
 fn rgbf(c: Rgb) -> [f32; 3] {
@@ -349,11 +468,13 @@ fn render_rows(job: &Job, rows: std::ops::Range<usize>, out: &mut Vec<Color32>) 
         for (x, wy) in warp_y.iter().enumerate() {
             let qx = (x as f32 + 0.5) * step[0];
             let (px, py) = (qx + wx, qy + wy);
-            let ea = layers[0].edge(px / SCALE[0] + off[0][0], py / SCALE[0] + off[0][1]);
-            let eb = layers[1].edge(px / SCALE[1] + off[1][0], py / SCALE[1] + off[1][1]);
+            let ea = layers[0].edges(px / SCALE[0] + off[0][0], py / SCALE[0] + off[0][1]);
+            let eb = layers[1].edges(px / SCALE[1] + off[1][0], py / SCALE[1] + off[1][1]);
             let c = shade(
-                line(ea, fw[0]),
-                line(eb, fw[1]),
+                line(ea[0], fw[0]),
+                line(eb[0], fw[1]),
+                junction(ea[1]),
+                junction(eb[1]),
                 ca,
                 cb,
                 job.strength,
@@ -405,7 +526,7 @@ struct Gpu {
 }
 
 fn gpu_id() -> egui::Id {
-    egui::Id::new("af27-caustics-gpu")
+    egui::Id::new("af2-caustics-gpu")
 }
 
 /// Builds the shader once, at start, when the renderer is wgpu.
@@ -426,11 +547,11 @@ pub fn install(cc: &eframe::CreationContext) {
 fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<Gpu> {
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("af27 caustics"),
+        label: Some("af2 caustics"),
         source: wgpu::ShaderSource::Wgsl(SHADER.into()),
     });
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("af27 caustics"),
+        label: Some("af2 caustics"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -443,12 +564,12 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<Gpu> {
         }],
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("af27 caustics"),
+        label: Some("af2 caustics"),
         bind_group_layouts: &[&bgl],
         push_constant_ranges: &[],
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("af27 caustics"),
+        label: Some("af2 caustics"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -462,7 +583,20 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<Gpu> {
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                // dst + src x dst: the light takes the picture's own
+                // brightness, so dark, deep water stays dark.
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Dst,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Zero,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -474,13 +608,13 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<Gpu> {
     });
     let stride = (device.limits().min_uniform_buffer_offset_alignment as u64).max(256);
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("af27 caustics"),
+        label: Some("af2 caustics"),
         size: stride * SLOTS,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("af27 caustics"),
+        label: Some("af2 caustics"),
         layout: &bgl,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
@@ -580,15 +714,17 @@ pub fn paint(p: &Painter, rect: Rect, th: &Theme, time: f32, strength: f32, slot
     let ctx = p.ctx();
     let gpu = ctx.data(|d| d.get_temp::<bool>(gpu_id())).unwrap_or(false);
     let slot = slot.min(SLOTS as u32 - 1);
-    // Chunky pixels only when the theme asks for them.
-    let chunk = if th.pixel { 4.0 } else { 0.0 };
+    // Chunky pixels always: finer than the pixel themes' own.
+    let chunk = if th.pixel { 4.0 } else { 3.0 };
     if gpu {
         let ppp = ctx.pixels_per_point();
+        // Multiplied by the picture beneath, the light needs to be stronger
+        // to read as brightly on the bright, shallow parts.
         let uniforms = pack(
             [rect.min.x * ppp, rect.min.y * ppp],
             ppp,
             time,
-            strength,
+            (strength * 2.6).min(4.0),
             chunk,
             false,
             th.accent,
@@ -603,12 +739,12 @@ pub fn paint(p: &Painter, rect: Rect, th: &Theme, time: f32, strength: f32, slot
 
     // OpenGL: an image at a fraction of the window's resolution, built a
     // few rows a frame and stretched over the window.
-    let id = egui::Id::new(("af27-caustics-cpu", slot));
+    let id = egui::Id::new(("af2-caustics-cpu", slot));
     let cell: CpuSlot = ctx.data_mut(|d| d.get_temp_mut_or_default::<CpuSlot>(id).clone());
     let Ok(mut st) = cell.lock() else {
         return;
     };
-    let size = if th.pixel {
+    let size = if chunk > 0.0 {
         let s = chunk.max(3.0);
         [
             ((rect.width() / s).ceil() as usize).max(1),
@@ -651,7 +787,7 @@ pub fn paint(p: &Painter, rect: Rect, th: &Theme, time: f32, strength: f32, slot
             match &mut st.tex {
                 Some(t) => t.set(image, TextureOptions::LINEAR),
                 None => {
-                    st.tex = Some(ctx.load_texture("af27-caustics", image, TextureOptions::LINEAR))
+                    st.tex = Some(ctx.load_texture("af2-caustics", image, TextureOptions::LINEAR))
                 }
             }
             st.shown = Some(job);
@@ -727,18 +863,50 @@ mod tests {
     }
 
     #[test]
-    fn highlight_only_where_both_nets_meet() {
-        let (a, b) = ([0.3, 0.8, 0.9], [0.8, 0.9, 0.3]);
-        let both = shade(line(0.0, 0.01), line(0.0, 0.01), a, b, 1.0, 1.0);
-        let one = shade(line(0.0, 0.01), line(0.5, 0.01), a, b, 1.0, 1.0);
-        let none = shade(line(0.5, 0.01), line(0.5, 0.01), a, b, 1.0, 1.0);
-        assert!(both[1] > 0.9);
-        assert!(one[1] < 0.6);
-        assert!(none.iter().all(|v| *v < 0.01));
-        assert_eq!(
-            shade(line(0.0, 0.01), line(0.0, 0.01), a, b, 0.0, 1.0),
-            [0.0; 3]
-        );
+    fn overlaps_glow_hotter_and_warmer() {
+        let (a, b) = ([0.3, 0.82, 0.89], [0.85, 0.91, 0.29]);
+        let (on, off) = (line(0.0, 0.01), line(0.5, 0.01));
+        let (j_on, j_off) = (junction(0.0), junction(1.0));
+        let s = |la, lb, ja, jb| shade(la, lb, ja, jb, a, b, 1.0, 1.0);
+        let none = s(off, off, j_off, j_off);
+        let one = s(on, off, j_off, j_off);
+        let meet = s(on, off, j_on, j_off);
+        let cross = s(on, on, j_off, j_off);
+        let hottest = s(on, on, j_on, j_on);
+        let sum = |c: [f32; 3]| c.iter().sum::<f32>();
+        // Nothing and a lone line are masked away (pixel-art water)...
+        assert!(none.iter().all(|v| *v < 0.03), "{none:?}");
+        assert!(one.iter().all(|v| *v < 0.03), "{one:?}");
+        // ...where lines converge it shows, and crossings are warm.
+        assert!(sum(meet) > 0.3, "{meet:?}");
+        assert!(sum(cross) > sum(meet), "{cross:?} {meet:?}");
+        assert!(cross[0] > 0.6 && cross[0] > one[0] * 3.0, "{cross:?}");
+        assert!(hottest.iter().all(|v| *v > 0.9), "{hottest:?}");
+        // Junctions glow only near where three cells meet.
+        assert!(j_off < 0.02);
+        assert_eq!(shade(on, on, j_on, j_on, a, b, 0.0, 1.0), [0.0; 3]);
+        // The ramp only climbs.
+        let mut last = 0.0;
+        for k in 0..=40 {
+            let v = sum(ramp(k as f32 * 0.06, a, b));
+            assert!(v >= last - 1e-4, "{k}");
+            last = v;
+        }
+    }
+
+    #[test]
+    fn junctions_are_where_three_cells_meet() {
+        let l = Layer::new(8, 3, 0.4);
+        let mut seen = 0;
+        for k in 0..20000 {
+            let (x, y) = (k as f32 * 0.00377 % 8.0, k as f32 * 0.00611 % 8.0);
+            let [e2, e3] = l.edges(x, y);
+            assert!(e3 >= e2 - 1e-5, "{x},{y}");
+            if e3 < 0.03 {
+                seen += 1;
+            }
+        }
+        assert!(seen > 0);
     }
 
     #[test]
@@ -837,5 +1005,23 @@ mod tests {
         assert!(!json.contains("caustics"));
         let back: Theme = serde_json::from_str(&json).unwrap();
         assert_eq!(back.caustics, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+
+    #[test]
+    fn the_mask_drops_lone_lines_and_steps_the_rest() {
+        // A lone line's light (about 0.42 plus its halo) is gone.
+        assert_eq!(masked(0.45), 0.0);
+        assert_eq!(masked(0.6), 0.0);
+        // Above it, only four steps a unit.
+        for k in 0..60 {
+            let m = masked(0.6 + k as f32 * 0.05);
+            assert!((m * 4.0 - (m * 4.0).round()).abs() < 1e-5, "{m}");
+        }
+        assert!(masked(1.6) > masked(1.0));
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Splash screens that belong to a theme (`Theme::splash`), shown in place
 //! of the standard boot sequence: a vaporwave sunset for the Mall themes
@@ -497,4 +497,205 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
             (pos, Pos2::new(u, v), tint)
         });
     }
+}
+
+// ------------------------------------------------------- Letter pop
+
+/// The letter pictures of a `pop:<name>` splash: `<name>-1.png`,
+/// `<name>-2.png`, ... up to the first missing one. Each picture is the
+/// whole wordmark's size with its letter alone on it, so laid over each
+/// other they make the word.
+fn pop_letters(prefix: &str) -> Vec<String> {
+    (1..=24)
+        .map(|i| format!("{prefix}-{i}.png"))
+        .take_while(|n| crate::pictures::bytes(n).is_some())
+        .collect()
+}
+
+/// Where a letter sits on its picture (0..1 across and down): the middle
+/// of what it covers, found once from the picture's opaque pixels.
+fn letter_centre(name: &str) -> Pos2 {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CENTRES: OnceLock<Mutex<HashMap<String, Pos2>>> = OnceLock::new();
+    let Ok(mut map) = CENTRES.get_or_init(Default::default).lock() else {
+        return Pos2::new(0.5, 0.5);
+    };
+    *map.entry(name.to_string()).or_insert_with(|| {
+        let img = crate::pictures::bytes(name)
+            .and_then(|b| image::load_from_memory(b).ok())
+            .map(|i| i.to_rgba8());
+        let Some(img) = img else { return Pos2::new(0.5, 0.5) };
+        let (w, hh) = img.dimensions();
+        let (mut x0, mut y0, mut x1, mut y1) = (w, hh, 0, 0);
+        for (x, y, px) in img.enumerate_pixels() {
+            if px[3] > 200 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+        if x1 < x0 {
+            return Pos2::new(0.5, 0.5);
+        }
+        Pos2::new(
+            (x0 + x1) as f32 / 2.0 / w as f32,
+            (y0 + y1) as f32 / 2.0 / hh as f32,
+        )
+    })
+}
+
+/// Its size through a pop: from nothing up past full size, back under it,
+/// and settling (a bubble blown up), over `d` seconds.
+fn pop_scale(s: f32, d: f32) -> f32 {
+    if s <= 0.0 {
+        return 0.0;
+    }
+    let x = (s / d).min(1.0);
+    if x >= 1.0 {
+        return 1.0;
+    }
+    // A damped spring from 0 to 1.
+    1.0 - (-6.5 * x).exp() * (x * 10.5).cos() * (1.0 - x).powf(0.3)
+}
+
+/// A splash that blows up a theme's lettering one letter at a time
+/// (`splash: "pop:<name>"`, letters in `<name>-1.png`... beside the theme)
+/// over its backdrop picture, each with a little bubble-burst ring.
+pub fn pop(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32, prefix: &str) {
+    let a = fade;
+    p.rect_filled(screen, 0.0, rgba(th.backdrop_bottom, a));
+    let ppp = p.ctx().pixels_per_point();
+    // The theme's picture, covering the window and creeping closer.
+    if let Some(tex) = crate::pictures::texture(p.ctx(), &th.picture, screen.width() * ppp) {
+        let [tw, tht] = tex.size_vec2().into();
+        let (ra, pa) = (screen.width() / screen.height().max(1.0), tw / tht.max(1.0));
+        let zoom = 1.0 / (1.0 + 0.04 * ease(t / LEN));
+        let (mut uw, mut vh) = if ra > pa { (1.0, pa / ra) } else { (ra / pa, 1.0) };
+        uw *= zoom;
+        vh *= zoom;
+        let uv = Rect::from_center_size(Pos2::new(0.5, 0.5), Vec2::new(uw, vh));
+        p.image(tex.id(), screen, uv, Color32::from_white_alpha((a * 255.0) as u8));
+        p.rect_filled(screen, 0.0, rgba(th.backdrop_top, 0.35 * a));
+    }
+    let letters = pop_letters(prefix);
+    let Some(first) = letters
+        .first()
+        .and_then(|n| crate::pictures::texture(p.ctx(), n, f32::MAX))
+    else {
+        return;
+    };
+    let [lw, lh] = first.size_vec2().into();
+    let w = (screen.width() * 0.62).min(screen.height() * 0.78 * lw / lh.max(1.0));
+    let word = Rect::from_center_size(screen.center(), Vec2::new(w, w * lh / lw.max(1.0)));
+    let (start, step, dur) = (0.25, 0.12, 0.55);
+    for (i, name) in letters.iter().enumerate() {
+        let s = t - start - step * i as f32;
+        let k = pop_scale(s, dur);
+        if k <= 0.0 {
+            continue;
+        }
+        let Some(tex) = crate::pictures::texture(p.ctx(), name, f32::MAX) else {
+            continue;
+        };
+        let c = letter_centre(name);
+        let pivot = Pos2::new(
+            word.left() + c.x * word.width(),
+            word.top() + c.y * word.height(),
+        );
+        let r = Rect::from_min_max(
+            pivot + (word.min - pivot) * k,
+            pivot + (word.max - pivot) * k,
+        );
+        let alpha = (s / 0.08).clamp(0.0, 1.0) * a;
+        p.image(tex.id(), r, FULL, Color32::from_white_alpha((alpha * 255.0) as u8));
+        // The bubble bursting: specks fly out and fade.
+        let burst = s / 0.35;
+        if (0.0..1.0).contains(&burst) {
+            let rad = word.height() * (0.06 + 0.22 * ease(burst));
+            for j in 0..6 {
+                let ang = j as f32 / 6.0 * std::f32::consts::TAU + h(i as u32 * 7 + j) * 0.8;
+                let d = rad * (1.15 + 0.25 * h(i as u32 * 13 + j));
+                p.circle_filled(
+                    pivot + Vec2::new(ang.cos(), ang.sin()) * d,
+                    2.5 * (1.0 - burst),
+                    rgba(th.accent, (1.0 - burst) * a),
+                );
+            }
+        }
+    }
+    // Once the word is whole, a shine sweeps across it.
+    let whole = start + step * (letters.len() as f32 - 1.0) + dur;
+    // An even sweep from wholly off the left edge to wholly off the right.
+    let k = (t - whole + 0.1) / 0.9;
+    if (0.0..1.0).contains(&k) {
+        if let Some(tex) = white_word(p.ctx(), &letters) {
+            shine(p, tex.id(), word, -0.4 + k * 1.8, a);
+        }
+    }
+}
+
+/// The letters together, all white (their own shapes), for the shine.
+fn white_word(ctx: &egui::Context, letters: &[String]) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new(("af2-pop-white", letters.first()?.clone()));
+    if let Some(t) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
+        return t;
+    }
+    let mut out: Option<image::RgbaImage> = None;
+    for name in letters {
+        let Some(img) = crate::pictures::bytes(name).and_then(|b| image::load_from_memory(b).ok()) else {
+            continue;
+        };
+        // Half size is plenty for a soft shine.
+        let img = img
+            .resize(img.width() / 2, img.height() / 2, image::imageops::FilterType::Triangle)
+            .to_rgba8();
+        let o = out.get_or_insert_with(|| image::RgbaImage::new(img.width(), img.height()));
+        if o.dimensions() != img.dimensions() {
+            continue;
+        }
+        for (dst, src) in o.pixels_mut().zip(img.pixels()) {
+            dst.0 = [255, 255, 255, dst.0[3].max(src.0[3])];
+        }
+    }
+    let tex = out.map(|o| {
+        let size = [o.width() as usize, o.height() as usize];
+        ctx.load_texture(
+            "pop-white",
+            egui::ColorImage::from_rgba_unmultiplied(size, o.as_raw()),
+            egui::TextureOptions::LINEAR,
+        )
+    });
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    tex
+}
+
+/// A soft, slanted band of light at `pos` (0 left .. 1 right) over the
+/// white word `tex` laid on `r`: only the letters catch it.
+fn shine(p: &Painter, tex: egui::TextureId, r: Rect, pos: f32, a: f32) {
+    let (nx, ny) = (64u32, 16u32);
+    let mut m = Mesh::with_texture(tex);
+    for j in 0..=ny {
+        for i in 0..=nx {
+            let (u, v) = (i as f32 / nx as f32, j as f32 / ny as f32);
+            // Slanted: the band leans forward toward the top.
+            let d = (u + (1.0 - v) * 0.35 - 0.175 - pos) / 0.09;
+            let glow = (-d * d).exp() * 0.38 * a;
+            m.vertices.push(egui::epaint::Vertex {
+                pos: Pos2::new(r.left() + u * r.width(), r.top() + v * r.height()),
+                uv: Pos2::new(u, v),
+                color: Color32::from_white_alpha((glow * 255.0) as u8),
+            });
+        }
+    }
+    let w = nx + 1;
+    for j in 0..ny {
+        for i in 0..nx {
+            let k = j * w + i;
+            m.add_triangle(k, k + 1, k + w + 1);
+            m.add_triangle(k, k + w + 1, k + w);
+        }
+    }
+    p.add(Shape::mesh(m));
 }

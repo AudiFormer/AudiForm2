@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -8,12 +8,14 @@ mod app_icon;
 mod caustics;
 mod chapters;
 mod classic_themes;
+mod clip_ops;
 mod clip_lanes;
 mod clip_props;
 mod corners;
 mod diagnostics;
 mod eq_editor;
 mod export;
+mod file_dialog;
 mod files_panel;
 mod fx;
 mod fx_menu;
@@ -30,10 +32,12 @@ mod loudness_meter;
 mod memstat;
 mod meters;
 mod midi_in;
+mod midi_lanes;
 mod mixing;
 mod multitrack;
 mod new_dialogs;
 mod noise_print;
+mod spatialize_ui;
 mod overlap;
 mod overview;
 mod panels;
@@ -54,10 +58,12 @@ mod separation;
 mod sessions;
 mod settings;
 mod skin;
+mod system_look;
 mod space;
 mod space_export;
 mod spectral_select;
 mod splash;
+mod backlit;
 mod synth_ui;
 mod state;
 mod tempo;
@@ -66,6 +72,7 @@ mod track_views;
 mod transport;
 mod tube_master_ui;
 mod ui;
+mod updater;
 mod visualizer;
 mod wave_channels;
 mod waveform;
@@ -75,13 +82,16 @@ mod zoom;
 mod zoom_bench;
 
 fn main() -> eframe::Result<()> {
-    // Started again as a VST3 plug-in host or scanner (see af27-vst3).
+    // Started again as a VST3 plug-in host or scanner (see af2-vst3).
     let args: Vec<String> = std::env::args_os()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    if let Some(code) = af27_vst3::main_with_args(&args) {
-        af27_vst3::exit_now(code);
+    if let Some(code) = af2_vst3::main_with_args(&args) {
+        af2_vst3::exit_now(code);
     }
+    // Settings from before 2.0.4 move from <data>/Audiform2 to
+    // <data>/Audiform2 before anything reads or writes them.
+    let _ = state::data_dir();
     fx::register();
     plugins::init();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
@@ -135,7 +145,7 @@ fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Re
         ..Default::default()
     };
     eframe::run_native(
-        "Audiform27",
+        "Audiform2",
         options,
         Box::new(move |cc| Ok(Box::new(ui::App::new(cc, files)))),
     )

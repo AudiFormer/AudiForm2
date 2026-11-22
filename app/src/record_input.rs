@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Where recordings come from: the microphone, everything the computer
 //! plays, or chosen applications, per track.
@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use af27_core::TrackId;
-use af27_engine::{
+use af2_core::{AudioBuffer, TrackId};
+use af2_engine::{
     AudioApp, CaptureSupport, DeviceInfo, InputPick, OutputDevice, RecordSource, Take,
 };
 use egui::{RichText, Ui};
@@ -65,7 +65,7 @@ fn prefs_path() -> std::path::PathBuf {
 
 impl RecordInputs {
     pub fn load() -> RecordInputs {
-        let support = af27_engine::capture::support();
+        let support = af2_engine::capture::support();
         let saved = std::fs::read_to_string(prefs_path()).unwrap_or_default();
         let default = match saved.trim() {
             "system" if support.loopback => RecordSource::SystemExceptSelf,
@@ -120,10 +120,10 @@ impl RecordInputs {
         let spawned = std::thread::Builder::new()
             .name("af2-list-sources".into())
             .spawn(move || {
-                let apps = af27_engine::capture::list_audio_apps();
-                let outs = af27_engine::capture::list_output_devices();
+                let apps = af2_engine::capture::list_audio_apps();
+                let outs = af2_engine::capture::list_output_devices();
                 let ins =
-                    af27_engine::devices::list(af27_engine::HostKind::System, None, None).inputs;
+                    af2_engine::devices::list(af2_engine::HostKind::System, None, None).inputs;
                 let _ = tx.send((apps, outs, ins));
             });
         match spawned {
@@ -211,12 +211,40 @@ pub fn take_name(n: usize, source: &RecordSource) -> String {
     }
 }
 
+/// The tracks to hear live: in the Multitrack, every audio track with its
+/// monitor button on that is armed, each with the input it records from.
+pub fn monitor_lanes(st: &State) -> Vec<af2_engine::MonitorLane> {
+    if st.mode != Mode::Multitrack {
+        return Vec::new();
+    }
+    st.session
+        .tracks
+        .iter()
+        .filter(|t| t.monitor && t.armed && t.kind == af2_core::TrackKind::Audio)
+        .map(|t| af2_engine::MonitorLane {
+            track: t.id,
+            source: st.rec_inputs.source_for(t.id).clone(),
+        })
+        .collect()
+}
+
+/// Every frame: hands the engine the tracks to monitor (it opens and
+/// closes inputs only when they change) and shows why one can't be heard.
+pub fn sync_monitor(st: &mut State) {
+    let lanes = monitor_lanes(st);
+    let Some(e) = &mut st.engine else { return };
+    e.set_monitor(lanes);
+    if let Some(note) = e.take_monitor_note() {
+        st.error(note);
+    }
+}
+
 /// Picks the sources to open for `target` and remembers which tracks get
 /// which take.
 pub fn begin(st: &mut State, target: RecordTarget) -> Vec<RecordSource> {
     let inputs = &mut st.rec_inputs;
     match target {
-        RecordTarget::NewFile => {
+        RecordTarget::File(..) => {
             inputs.plan = vec![Vec::new()];
             vec![inputs.default.clone()]
         }
@@ -238,8 +266,123 @@ pub fn begin(st: &mut State, target: RecordTarget) -> Vec<RecordSource> {
     }
 }
 
+/// `buf` with `channels` channels at `rate`: resampled, and channels
+/// shared out (mono to every channel, several averaged into mono, the rest
+/// taken in order with the last repeated).
+pub fn fit_take(buf: AudioBuffer, rate: u32, channels: usize) -> AudioBuffer {
+    let mut buf = if buf.rate != rate && rate > 0 && buf.frames() > 0 {
+        af2_dsp::resample::resample(&buf, rate)
+    } else {
+        buf
+    };
+    let have = buf.num_channels();
+    let channels = channels.max(1);
+    if have == channels || have == 0 {
+        return buf;
+    }
+    let frames = buf.frames();
+    let chans: Vec<Vec<f32>> = if channels == 1 {
+        let mut m = vec![0.0f32; frames];
+        for c in &buf.channels {
+            for (o, s) in m.iter_mut().zip(c) {
+                *o += s / have as f32;
+            }
+        }
+        vec![m]
+    } else {
+        (0..channels).map(|k| buf.channels[k.min(have - 1)].clone()).collect()
+    };
+    buf.channels = chans;
+    buf
+}
+
+/// The first take into the open file `doc` from `at` seconds: an empty
+/// file takes it whole, otherwise it records over what is there and runs
+/// on past the end. One undo step.
+fn take_into_file(st: &mut State, doc: crate::state::DocId, at: f64, take: AudioBuffer) -> bool {
+    let Some(d) = st.docs.iter_mut().find(|d| d.id == doc) else {
+        return false;
+    };
+    let rate = d.buf.rate;
+    let channels = d.buf.num_channels();
+    let take = fit_take(take, rate, channels);
+    if d.buf.frames() == 0 {
+        d.set_buffer("Record", take);
+    } else {
+        let start = ((at.max(0.0) * rate as f64).round() as usize).min(d.buf.frames());
+        let mut b = (*d.buf).clone();
+        let end = start + take.frames();
+        for (c, src) in b.channels.iter_mut().zip(&take.channels) {
+            if c.len() < end {
+                c.resize(end, 0.0);
+            }
+            c[start..end].copy_from_slice(src);
+        }
+        d.set_buffer("Record", b);
+    }
+    st.current = Some(doc);
+    st.mode = Mode::Waveform;
+    true
+}
+
+/// Writes a take's file in the background: the take is open and playable
+/// at once, its file name appears when the write is done (a long take used
+/// to freeze the window while it was encoded).
+fn save_in_background(st: &mut State, doc: crate::state::DocId, path: std::path::PathBuf, bits: u16) {
+    let Some(buf) = st.docs.iter().find(|d| d.id == doc).map(|d| d.buf.clone()) else {
+        return;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = path.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::new_dialogs::write_lossless(&p, &buf, bits));
+    });
+    st.take_saves.push((doc, path, rx));
+}
+
+/// Takes whose files finished writing: the file takes its path.
+pub fn poll_saves(st: &mut State) {
+    if st.take_saves.is_empty() {
+        return;
+    }
+    let mut left = Vec::new();
+    for (doc, path, rx) in std::mem::take(&mut st.take_saves) {
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                if let Some(d) = st.docs.iter_mut().find(|d| d.id == doc) {
+                    if d.path.is_none() {
+                        d.path = Some(path);
+                    }
+                }
+            }
+            Ok(Err(e)) => st.error(format!("The recording could not be saved: {e}")),
+            Err(std::sync::mpsc::TryRecvError::Empty) => left.push((doc, path, rx)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                st.error("The recording could not be saved.".to_string());
+            }
+        }
+    }
+    st.take_saves = left;
+}
+
 /// Saves each take, opens it, and places it on its tracks.
 pub fn finish(st: &mut State, takes: Vec<Take>, target: Option<RecordTarget>) {
+    let mut takes = takes;
+    // Into the open file: the first take goes there (the rest, from other
+    // inputs, open as files of their own).
+    if let Some(RecordTarget::File(doc, at)) = target {
+        if !takes.is_empty() {
+            let first = takes.remove(0);
+            if let Some(n) = &first.note {
+                st.toast(format!("{}: {n}", first.source.label()));
+            }
+            if take_into_file(st, doc, at, first.buf) {
+                if takes.is_empty() {
+                    return;
+                }
+            }
+        }
+    }
     let plan = std::mem::take(&mut st.rec_inputs.plan);
     let dir = data_dir().join("recordings");
     let _ = std::fs::create_dir_all(&dir);
@@ -255,7 +398,7 @@ pub fn finish(st: &mut State, takes: Vec<Take>, target: Option<RecordTarget>) {
         let mut buf = take.buf;
         let to_track = matches!(target, Some(RecordTarget::Track(..)));
         if to_track && buf.rate != st.session.rate && st.session.rate > 0 && buf.frames() > 0 {
-            buf = af27_dsp::resample::resample(&buf, st.session.rate);
+            buf = af2_dsp::resample::resample(&buf, st.session.rate);
         }
         let n = st.docs.len() + 1;
         let suffix = if i == 0 {
@@ -266,8 +409,8 @@ pub fn finish(st: &mut State, takes: Vec<Take>, target: Option<RecordTarget>) {
         let ext = crate::new_dialogs::lossless_ext(&buf);
         let path = dir.join(format!("Recording {stamp}{suffix}.{ext}"));
         let bits = if to_track { st.session.bit_depth } else { 24 };
-        let saved = crate::new_dialogs::write_lossless(&path, &buf, bits).is_ok();
-        let id = st.add_doc(take_name(n, &take.source), saved.then_some(path), buf);
+        let id = st.add_doc(take_name(n, &take.source), None, buf);
+        save_in_background(st, id, path, bits);
         first_doc.get_or_insert(id);
         if let Some(RecordTarget::Track(_, at)) = target {
             for &t in plan.get(i).map(Vec::as_slice).unwrap_or(&[]) {
@@ -358,7 +501,7 @@ fn source_menu(
             ui.label(RichText::new(text).weak());
         }
         for d in &devices {
-            let picks = af27_engine::routing::input_choices(d.channels);
+            let picks = af2_engine::routing::input_choices(d.channels);
             let text = format!("{} ({} in)", d.name, d.channels);
             ui.menu_button(text, |ui| {
                 for channels in picks {
@@ -509,7 +652,7 @@ pub fn default_input(ui: &mut Ui, inputs: &mut RecordInputs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use af27_core::AudioBuffer;
+    use af2_core::AudioBuffer;
 
     fn app(pid: u32, name: &str, active: bool) -> RecordSource {
         RecordSource::App(AudioApp {
@@ -576,9 +719,166 @@ mod tests {
             rate: 44_100,
             channels: vec![vec![0.0; 441], vec![0.0; 441]],
         };
-        let r = af27_dsp::resample::resample(&b, 48_000);
+        let r = af2_dsp::resample::resample(&b, 48_000);
         assert_eq!(r.rate, 48_000);
         assert_eq!(r.num_channels(), 2);
         assert!((r.frames() as i64 - 480).abs() <= 1);
+    }
+}
+
+#[cfg(test)]
+mod into_file_tests {
+    use super::*;
+
+    fn tone(rate: u32, ch: usize, frames: usize, v: f32) -> AudioBuffer {
+        let mut b = AudioBuffer::new(rate, ch, frames);
+        for c in &mut b.channels {
+            c.fill(v);
+        }
+        b
+    }
+
+    #[test]
+    fn armed_audio_tracks_with_monitor_on_are_heard_in_the_multitrack_only() {
+        let mut st = State::new();
+        st.mode = Mode::Multitrack;
+        let a = st.session.add_track_of(af2_core::TrackKind::Audio);
+        let b = st.session.add_track_of(af2_core::TrackKind::Audio);
+        let m = st.session.add_track_of(af2_core::TrackKind::Midi);
+        for id in [a, b, m] {
+            let t = st.session.track_mut(id).unwrap();
+            t.monitor = true;
+            t.armed = id != b;
+        }
+        let pick = af2_engine::InputPick {
+            device: Some("SSL 2+ ASIO".into()),
+            channels: vec![0],
+        };
+        st.rec_inputs.per_track.insert(a, RecordSource::Channels(pick.clone()));
+        let lanes = monitor_lanes(&st);
+        // b waits for its arm; MIDI tracks don't take audio in.
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].track, a);
+        assert_eq!(lanes[0].source, RecordSource::Channels(pick));
+        st.session.track_mut(a).unwrap().monitor = false;
+        assert!(monitor_lanes(&st).is_empty());
+        st.session.track_mut(a).unwrap().monitor = true;
+        st.mode = Mode::Waveform;
+        assert!(monitor_lanes(&st).is_empty());
+    }
+
+    #[test]
+    fn record_with_no_file_asks_for_its_format_first() {
+        let mut st = State::new();
+        st.mode = Mode::Waveform;
+        st.start_recording();
+        assert!(!st.is_recording(), "nothing records before the file is made");
+        assert!(st.new_file_ui.as_ref().is_some_and(|d| d.record_after), "the New Audio File dialog, to record");
+    }
+
+    #[test]
+    fn a_four_input_take_gives_a_stereo_file_its_first_two_inputs() {
+        let mut take = tone(48_000, 4, 100, 0.0);
+        for (k, c) in take.channels.iter_mut().enumerate() {
+            c.fill(k as f32 + 1.0);
+        }
+        let fitted = fit_take(take, 48_000, 2);
+        assert_eq!(fitted.num_channels(), 2);
+        assert_eq!((fitted.channels[0][5], fitted.channels[1][5]), (1.0, 2.0));
+    }
+
+    #[test]
+    fn takes_are_fitted_to_the_file() {
+        let up = fit_take(tone(48_000, 1, 480, 0.5), 48_000, 2);
+        assert_eq!(up.num_channels(), 2);
+        assert!(up.channels.iter().all(|c| c.iter().all(|&s| s == 0.5)), "mono to both sides");
+        let mut st = tone(48_000, 2, 480, 0.0);
+        st.channels[0].fill(1.0);
+        let down = fit_take(st, 48_000, 1);
+        assert_eq!(down.num_channels(), 1);
+        assert!((down.channels[0][10] - 0.5).abs() < 1e-6, "sides averaged");
+        let re = fit_take(tone(48_000, 2, 48_000, 0.25), 88_200, 2);
+        assert_eq!(re.rate, 88_200);
+        assert!((re.frames() as i64 - 88_200).abs() < 200, "{}", re.frames());
+    }
+
+    #[test]
+    fn an_empty_file_takes_the_whole_take_and_a_full_one_is_recorded_over() {
+        let mut st = State::new();
+        let id = st.add_doc("Untitled".into(), None, AudioBuffer::new(88_200, 2, 0));
+        assert!(take_into_file(&mut st, id, 0.0, tone(48_000, 2, 48_000, 0.5)));
+        let d = st.docs.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(d.buf.rate, 88_200, "the file keeps its rate");
+        assert!((d.buf.frames() as i64 - 88_200).abs() < 200);
+        assert_eq!(st.current, Some(id));
+
+        // A 1 s file, recorded over from 0.5 s with 1 s: 1.5 s, the first
+        // half kept.
+        let id2 = st.add_doc("Full".into(), None, tone(48_000, 1, 48_000, 0.1));
+        assert!(take_into_file(&mut st, id2, 0.5, tone(48_000, 1, 48_000, 0.9)));
+        let d = st.docs.iter_mut().find(|d| d.id == id2).unwrap();
+        assert_eq!(d.buf.frames(), 72_000);
+        assert_eq!(d.buf.channels[0][1_000], 0.1);
+        assert_eq!(d.buf.channels[0][30_000], 0.9);
+        assert_eq!(d.buf.channels[0][71_000], 0.9);
+        // One undo step back to the original.
+        assert!(d.undo());
+        assert_eq!(d.buf.frames(), 48_000);
+    }
+
+    #[test]
+    fn a_take_saves_in_the_background_and_the_file_gets_its_path() {
+        let mut st = State::new();
+        let id = st.add_doc("Recording 1".into(), None, tone(48_000, 2, 48_000, 0.25));
+        let dir = std::env::temp_dir().join(format!("af2-takesave-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("take.flac");
+        save_in_background(&mut st, id, path.clone(), 24);
+        assert_eq!(st.docs.iter().find(|d| d.id == id).unwrap().path, None, "open at once");
+        for _ in 0..200 {
+            poll_saves(&mut st);
+            if st.take_saves.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(st.take_saves.is_empty());
+        assert_eq!(st.docs.iter().find(|d| d.id == id).unwrap().path.as_deref(), Some(path.as_path()));
+        assert!(path.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Records a second for real through the machine's audio device with a
+/// file open in the Waveform editor, the way Shift+Space does, and checks
+/// the take went into that file. Run with --ignored (needs a device).
+#[cfg(test)]
+mod live_record_check {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn shift_space_records_into_the_open_file() {
+        let mut st = State::new();
+        if st.engine.is_none() {
+            eprintln!("no audio device");
+            return;
+        }
+        let id = st.add_doc("Song".into(), None, AudioBuffer::new(48_000, 2, 48_000 * 3));
+        st.current = Some(id);
+        st.mode = Mode::Waveform;
+        let before = st.docs.len();
+        st.start_recording();
+        eprintln!("target after start: {:?}, recording {}", st.recording_target, st.is_recording());
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs_f64() < 1.2 {
+            st.tick();
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        eprintln!("target before stop: {:?}", st.recording_target);
+        st.stop_recording();
+        eprintln!("docs {} -> {}; current {:?}; song frames {}", before, st.docs.len(), st.current,
+            st.docs.iter().find(|d| d.id == id).map_or(0, |d| d.buf.frames()));
+        assert_eq!(st.docs.len(), before, "no new file");
     }
 }

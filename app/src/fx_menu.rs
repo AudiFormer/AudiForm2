@@ -1,20 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Effects menu's category submenus, named as long-time editors name
 //! them, and which of our effects goes in each.
 
-use af27_dsp::Effect;
+use af2_dsp::Effect;
 
 /// One entry in a category submenu.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    /// A built-in effect (`af27-dsp`).
+    /// A built-in effect (`af2-dsp`).
     Builtin(Effect),
-    /// A ported Audiform effect (`af27-fx`): (id, name).
+    /// A ported Audiform effect (`af2-fx`): (id, name).
     Fx(String, String),
     /// AI Stem Separation, in its own tab.
     Stems,
+    /// Spatialize to Surround, in its own window.
+    Spatialize,
     /// A Diagnostics scan, in the Diagnostics panel.
     Diagnose(crate::diagnostics::Kind),
 }
@@ -25,6 +27,7 @@ impl Item {
             Item::Builtin(e) => e.name().to_string(),
             Item::Fx(_, n) => n.clone(),
             Item::Stems => "AI Stem Separation...".to_string(),
+            Item::Spatialize => "Spatialize to Surround...".to_string(),
             Item::Diagnose(k) => format!("{}...", k.name()),
         }
     }
@@ -53,8 +56,42 @@ pub const TOP_LEVEL: [Effect; 4] = [
 ];
 
 /// Built-in effects kept for the sessions that use them but no longer
-/// offered: the Echo, whose place is taken by Delay and Echo (`af.echo`).
-pub const RETIRED: [Effect; 1] = [Effect::Echo];
+/// offered: the Reverb and Stereo Width, whose places are taken by
+/// Audiform's Reverb (`af.reverb`) and Stereo Width (`af.stereo_width`); the Echo, whose place is taken by Delay and Echo (`af.echo`),
+/// and the 3-Band EQ, whose place is taken by Band EQ (`af.band_eq`).
+/// Compressor, Limiter, Noise Gate, De-Esser and Amplify give their places
+/// to Audiform's Dynamics, Limiter, Breath Gate, De-Esser and Gain.
+/// High-Pass, Low-Pass, Notch, Hum Remover and Remove DC Offset give
+/// theirs to Audiform's Precision Filter, Notch Filter, Hum Cut and DC
+/// Offset Fix.
+pub const RETIRED: [Effect; 14] = [
+    Effect::Echo,
+    Effect::ParametricEq,
+    Effect::Compressor,
+    Effect::Limiter,
+    Effect::NoiseGate,
+    Effect::DeEsser,
+    Effect::Amplify,
+    Effect::Reverb,
+    Effect::StereoWidth,
+    Effect::HighPass,
+    Effect::LowPass,
+    Effect::Notch,
+    Effect::HumRemover,
+    Effect::DcOffset,
+];
+
+/// Audiform effects kept for the sessions that use them but not offered
+/// in the menus or the rack: the Studio Reverb and the Convolution
+/// Reverb (the Reverb's Studio and Impulse Response tabs), and Phase
+/// Rotate and the Center Remover (retired in Audiform too: Phase Curve
+/// and the Center Channel Extractor do what they did).
+pub const HIDDEN_FX: &[&str] = &[
+    "af.studio_reverb",
+    "af.convolution_reverb",
+    "af.phase_rotate",
+    "af.center_remover",
+];
 
 /// Where a built-in effect goes.
 fn builtin_category(e: Effect) -> Option<&'static str> {
@@ -84,7 +121,7 @@ fn builtin_category(e: Effect) -> Option<&'static str> {
 /// Where an Audiform effect goes, by the category it was filed under
 /// (Delay and Echo by name: it is filed with the reverbs).
 fn fx_category(id: &str, category: &str) -> &'static str {
-    if id == af27_fx::effects::echo::ID {
+    if id == af2_fx::effects::echo::ID {
         return "Delay and Echo";
     }
     match category {
@@ -114,13 +151,17 @@ pub fn categories() -> Vec<(&'static str, Vec<Item>)> {
             put(cat, Item::Builtin(e));
         }
     }
-    for info in af27_fx::registry() {
+    for info in af2_fx::registry() {
+        if HIDDEN_FX.contains(&info.id) {
+            continue;
+        }
         put(
             fx_category(info.id, info.category),
             Item::Fx(info.id.to_string(), info.name.to_string()),
         );
     }
     put("Special", Item::Stems);
+    put("Stereo Imagery", Item::Spatialize);
     for k in crate::diagnostics::Kind::ALL {
         put("Diagnostics", Item::Diagnose(k));
     }
@@ -144,10 +185,11 @@ mod tests {
             );
             assert!(!(offered && RETIRED.contains(&e)), "{}", e.name());
         }
-        for info in af27_fx::registry() {
-            assert!(items
+        for info in af2_fx::registry() {
+            let offered = items
                 .iter()
-                .any(|i| matches!(i, Item::Fx(id, _) if id == info.id)));
+                .any(|i| matches!(i, Item::Fx(id, _) if id == info.id));
+            assert_eq!(offered, !HIDDEN_FX.contains(&info.id), "{}", info.id);
         }
         assert!(cats
             .iter()

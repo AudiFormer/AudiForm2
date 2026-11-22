@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Themes. Every colour, gradient, corner radius and glow the app draws
-//! comes from a [`Theme`]. Themes are plain JSON (`.af27theme`) so anyone
-//! can make one: put it in `<data>/Audiform27/themes/` and pick it from
+//! comes from a [`Theme`]. Themes are plain JSON (`.af2theme`) so anyone
+//! can make one: put it in `<data>/Audiform2/themes/` and pick it from
 //! View > Theme. View > Theme > Save Current Theme As writes the active
 //! theme out as a starting point.
 
@@ -412,6 +412,7 @@ impl Theme {
         ]
         .into_iter()
         .chain(Theme::classics())
+        .chain([Theme::system_placeholder()])
         .collect()
     }
 
@@ -442,7 +443,18 @@ impl Theme {
     }
 
     pub fn apply(&self, ctx: &egui::Context) {
-        crate::skin::install_fonts(ctx, &self.font);
+        // egui keeps a light and a dark style and by default follows the
+        // system's setting; the visuals below go into whichever is current.
+        // Pin it to this theme's own, or a light Windows shows egui's plain
+        // light style (white boxes, white text) under a dark theme.
+        ctx.set_theme(if self.dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        let font = crate::skin::font_for(&self.font);
+        let font = font.as_str();
+        crate::skin::install_fonts(ctx, font);
         if crate::retro::on(self) {
             ctx.set_visuals(crate::retro::visuals(self));
             let mut style = (*ctx.style()).clone();
@@ -451,7 +463,7 @@ impl Theme {
             style.spacing.scroll = crate::retro::scroll_style();
             style.spacing.slider_rail_height = 4.0;
             style.spacing.interact_size.y = 20.0;
-            style.text_styles = crate::skin::text_sizes(&self.font, self.font_scale);
+            style.text_styles = crate::skin::text_sizes(font, self.font_scale);
             ctx.set_style(style);
             return;
         }
@@ -513,6 +525,9 @@ impl Theme {
             v.window_shadow = hard;
             v.window_stroke = Stroke::new(2.0_f32, c(shadow));
         }
+        if crate::backlit::on(self) {
+            crate::backlit::visuals(self, &mut v);
+        }
         ctx.set_visuals(v);
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);
@@ -520,7 +535,7 @@ impl Theme {
         style.spacing.scroll = egui::Style::default().spacing.scroll;
         style.spacing.slider_rail_height = egui::Style::default().spacing.slider_rail_height;
         style.spacing.interact_size = egui::Style::default().spacing.interact_size;
-        style.text_styles = crate::skin::text_sizes(&self.font, self.font_scale);
+        style.text_styles = crate::skin::text_sizes(font, self.font_scale);
         ctx.set_style(style);
     }
 
@@ -649,26 +664,116 @@ impl Theme {
     }
 }
 
-/// Built-ins first, then any `.af27theme` files in the user's folder.
-/// Where the user's own `.af27theme` files live.
+/// The System theme: the desktop's own colours (see `system_look.rs`).
+/// Its colours are read when it is shown and whenever the desktop's
+/// change.
+pub const SYSTEM_NAME: &str = "System";
+pub const SYSTEM_AUTHOR: &str = "Your desktop";
+
+/// Whether `t` is the System theme. A user's own file that happens to be
+/// called System (with another author) is not.
+pub fn is_system(t: &Theme) -> bool {
+    t.name == SYSTEM_NAME && t.author == SYSTEM_AUTHOR
+}
+
+/// `t` as shown: the System theme in the desktop's colours of the moment,
+/// any other theme as it is.
+pub fn resolve(t: Theme) -> Theme {
+    if is_system(&t) {
+        Theme::system()
+    } else {
+        t
+    }
+}
+
+/// How the theme lists (View > Theme, Preferences) are laid out: the
+/// first group has no heading. Membership goes by name, so a user's file
+/// that replaces a built-in sits where the built-in did, and nothing is
+/// added to `.af2theme` files.
+const GROUPS: [(Option<&str>, &[&str]); 4] = [
+    (None, &["Zero Point", "Studio Lite", SYSTEM_NAME]),
+    (Some("Neon"), &["Solar Flare", "Neon Abyss", "Synth Sunset", "Prism"]),
+    (Some("Legacy"), &["Phosphor", "Grey Desktop '95", "Analog"]),
+    (
+        Some("Aesthetics"),
+        &[
+            "Mall Pastel '95 (モール・パステル '95)",
+            "Mall Pastel '95 Night (モール・パステル '95 ナイト)",
+            "Moonlight Aero",
+            "Undercurrent",
+        ],
+    ),
+];
+
+/// `themes` in groups for listing: (heading, indices into `themes`).
+/// Themes in no group (the user's own) come last, under "Your Themes".
+/// Empty groups are left out.
+pub fn grouped(themes: &[Theme]) -> Vec<(Option<&'static str>, Vec<usize>)> {
+    let mut placed = vec![false; themes.len()];
+    let mut out = Vec::new();
+    for (head, names) in GROUPS {
+        let mut idx = Vec::new();
+        for n in names {
+            if let Some(i) = themes.iter().position(|t| t.name == *n) {
+                if !placed[i] {
+                    placed[i] = true;
+                    idx.push(i);
+                }
+            }
+        }
+        if !idx.is_empty() {
+            out.push((head, idx));
+        }
+    }
+    let rest: Vec<usize> = (0..themes.len()).filter(|&i| !placed[i]).collect();
+    if !rest.is_empty() {
+        out.push((Some("Your Themes"), rest));
+    }
+    out
+}
+
+/// Where the user's own `.af2theme` files live.
 pub fn user_dir() -> std::path::PathBuf {
     crate::state::data_dir().join("themes")
 }
 
+/// Theme files from before 2.0.4 (`.af27theme`) renamed to `.af2theme`
+/// (left as they are when a file of the new name is already there).
+fn rename_old_themes(dir: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for p in rd.flatten().map(|e| e.path()) {
+        if p.extension().is_some_and(|e| e == "af27theme") {
+            let new = p.with_extension("af2theme");
+            if !new.exists() {
+                let _ = std::fs::rename(&p, &new);
+            }
+        }
+    }
+}
+
 pub fn load_all(dir: &std::path::Path) -> Vec<Theme> {
     let mut list = Theme::builtins();
+    rename_old_themes(dir);
     if let Ok(rd) = std::fs::read_dir(dir) {
         let mut paths: Vec<_> = rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "af27theme"))
+            // Old files that could not be renamed still load.
+            .filter(|p| p.extension().is_some_and(|e| e == "af2theme" || e == "af27theme"))
             .collect();
         paths.sort();
         for p in paths {
-            if let Some(t) = std::fs::read_to_string(&p)
-                .ok()
-                .and_then(|s| serde_json::from_str::<Theme>(&s).ok())
+            let text = std::fs::read_to_string(&p).ok();
+            // Pictures carried inside the file (its "assets") are kept by name.
+            if let Some(serde_json::Value::Object(o)) = text
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             {
+                if let Some(serde_json::Value::Object(a)) = o.get("assets") {
+                    crate::pictures::register_assets(a);
+                }
+            }
+            if let Some(t) = text.and_then(|s| serde_json::from_str::<Theme>(&s).ok()) {
                 list.retain(|x| x.name != t.name);
                 list.push(t);
             }
@@ -680,6 +785,27 @@ pub fn load_all(dir: &std::path::Path) -> Vec<Theme> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_list_is_grouped_and_every_theme_listed_once() {
+        let mut themes = Theme::builtins();
+        themes.push(Theme {
+            name: "My Own".into(),
+            author: "me".into(),
+            ..Theme::default()
+        });
+        let g = grouped(&themes);
+        let names = |k: usize| -> Vec<&str> { g[k].1.iter().map(|&i| themes[i].name.as_str()).collect() };
+        assert_eq!(g[0].0, None);
+        assert_eq!(names(0), ["Zero Point", "Studio Lite", SYSTEM_NAME]);
+        let heads: Vec<_> = g.iter().map(|x| x.0).collect();
+        assert_eq!(heads, [None, Some("Neon"), Some("Legacy"), Some("Aesthetics"), Some("Your Themes")]);
+        assert_eq!(names(4), ["My Own"]);
+        // Every built-in has a group (none falls into "Your Themes").
+        let mut all: Vec<usize> = g.iter().flat_map(|x| x.1.clone()).collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..themes.len()).collect::<Vec<_>>());
+    }
 
     #[test]
     fn partial_theme_files_fill_in_defaults() {
@@ -781,5 +907,28 @@ mod tests {
         let t = Theme::neon_abyss();
         assert_eq!(t.spectrum_color(0.0), t.spectrum[0]);
         assert_eq!(t.spectrum_color(1.0), *t.spectrum.last().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod system_light_dark {
+    use super::*;
+
+    /// A frame with the system set to `sys`, every built-in theme applied:
+    /// what egui shows is the theme's own light or dark style, not the
+    /// system's (a light Windows once left dark themes with white boxes).
+    #[test]
+    fn the_theme_not_the_system_picks_light_or_dark() {
+        for sys in [egui::Theme::Light, egui::Theme::Dark] {
+            for th in Theme::builtins() {
+                let ctx = egui::Context::default();
+                let input = egui::RawInput { system_theme: Some(sys), ..Default::default() };
+                let _ = ctx.run(input.clone(), |ctx| th.apply(ctx));
+                let _ = ctx.run(input, |_| {});
+                let v = ctx.style().visuals.clone();
+                assert_eq!(v.dark_mode, th.dark, "{} under a {sys:?} system", th.name);
+                assert_eq!(ctx.theme(), if th.dark { egui::Theme::Dark } else { egui::Theme::Light }, "{}", th.name);
+            }
+        }
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! A clip's own automation, drawn over the clip in the Multitrack. Each
 //! audio clip shows the lines picked in the small menu at the right of
@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use af27_core::automation::{Curve, Lane, LanePoint, LaneTarget, RackParam};
-use af27_core::{ClipId, Session};
+use af2_core::automation::{Curve, Lane, LanePoint, LaneTarget, RackParam};
+use af2_core::{ClipId, Session};
 use egui::{pos2, vec2, Color32, CursorIcon, Rect, Sense, Stroke};
 
 use crate::mixing::{drag_value, draw_readout, lane_label_in, lane_value_text_in};
@@ -76,7 +76,7 @@ impl State {
 }
 
 /// The short name a line goes by in the title bar's menu button.
-fn short_name(c: &af27_core::Clip, target: &LaneTarget) -> String {
+fn short_name(c: &af2_core::Clip, target: &LaneTarget) -> String {
     match target {
         LaneTarget::Volume => "Vol".into(),
         LaneTarget::Pan => "Pan".into(),
@@ -96,7 +96,7 @@ fn short_name(c: &af27_core::Clip, target: &LaneTarget) -> String {
 }
 
 /// The menu button's label: the lines shown ("Vol/Pan", "Mix", "Vol/Pan+2").
-fn button_label(c: &af27_core::Clip, shown: &[LaneTarget]) -> String {
+fn button_label(c: &af2_core::Clip, shown: &[LaneTarget]) -> String {
     let names: Vec<String> = shown.iter().map(|t| short_name(c, t)).collect();
     match names.len() {
         0 => "Lanes".into(),
@@ -106,18 +106,18 @@ fn button_label(c: &af27_core::Clip, shown: &[LaneTarget]) -> String {
 }
 
 /// An effect slot's title in the menus.
-fn slot_title(s: &af27_core::EffectSlot) -> String {
-    af27_dsp::Effect::from_id(&s.effect)
+fn slot_title(s: &af2_core::EffectSlot) -> String {
+    af2_dsp::Effect::from_id(&s.effect)
         .map(|e| e.name().to_string())
-        .or_else(|| af27_fx::info(&s.effect).map(|i| i.name.to_string()))
+        .or_else(|| af2_fx::info(&s.effect).map(|i| i.name.to_string()))
         .unwrap_or_else(|| s.effect.clone())
 }
 
 /// An effect slot's value names.
-fn slot_params(s: &af27_core::EffectSlot) -> Vec<String> {
-    match af27_dsp::Effect::from_id(&s.effect) {
+fn slot_params(s: &af2_core::EffectSlot) -> Vec<String> {
+    match af2_dsp::Effect::from_id(&s.effect) {
         Some(e) => e.params().iter().map(|p| p.name.to_string()).collect(),
-        None => af27_fx::info(&s.effect)
+        None => af2_fx::info(&s.effect)
             .map(|i| i.params.iter().map(|p| p.name.to_string()).collect())
             .unwrap_or_default(),
     }
@@ -126,17 +126,17 @@ fn slot_params(s: &af27_core::EffectSlot) -> Vec<String> {
 /// The target of value `pi` of slot `si` of `chain`: by the slot's id, or
 /// `pending-<si>` while it has none (it is given one with the line's
 /// first point, so showing a line changes nothing saved).
-fn effect_target(chain: &[af27_core::EffectSlot], si: usize, pi: usize) -> LaneTarget {
+fn effect_target(chain: &[af2_core::EffectSlot], si: usize, pi: usize) -> LaneTarget {
     let s = &chain[si];
     LaneTarget::Effect {
         slot: s.ext_id.clone().unwrap_or_else(|| format!("pending-{si}")),
         param: pi,
-        key: af27_fx::info(&s.effect).and_then(|i| i.params.get(pi).map(|p| p.key.to_string())),
+        key: af2_fx::info(&s.effect).and_then(|i| i.params.get(pi).map(|p| p.key.to_string())),
     }
 }
 
 /// `target` with a `pending-` slot named by the slot's id once it has one.
-fn resolved(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> LaneTarget {
+fn resolved(chain: &[af2_core::EffectSlot], target: &LaneTarget) -> LaneTarget {
     if let LaneTarget::Effect { slot, param, key } = target {
         if let Some(id) = slot
             .strip_prefix("pending-")
@@ -156,7 +156,7 @@ fn resolved(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> LaneTarget 
 
 /// The value an empty lane of `target` draws at: the clip's rack as set,
 /// the effect value as set, or unity and centre.
-fn resting(c: &af27_core::Clip, target: &LaneTarget) -> f64 {
+fn resting(c: &af2_core::Clip, target: &LaneTarget) -> f64 {
     match target {
         LaneTarget::Effect { slot, param, .. } => {
             let by_id = c
@@ -169,9 +169,12 @@ fn resting(c: &af27_core::Clip, target: &LaneTarget) -> f64 {
                     .and_then(|n| n.parse::<usize>().ok())
                     .and_then(|i| c.props.chain.get(i))
             };
-            by_id
-                .or_else(pending)
-                .and_then(|s| s.values.get(*param))
+            let s = by_id.or_else(pending);
+            // A plug-in control: its value now (0..1).
+            if let Some(s) = s.filter(|s| af2_core::plugin::is_plugin(&s.effect)) {
+                return crate::mixing::plugin_value(s, *param as u32);
+            }
+            s.and_then(|s| s.values.get(*param))
                 .map_or(0.0, |v| *v as f64)
         }
         LaneTarget::Rack(p) => p.value_in(&c.props.rack),
@@ -189,7 +192,7 @@ struct Line {
 }
 
 /// The lines clip `c` shows (see [`State::clip_lines_shown`]).
-fn lines(st: &State, c: &af27_core::Clip) -> Vec<Line> {
+fn lines(st: &State, c: &af2_core::Clip) -> Vec<Line> {
     let th = &st.theme;
     let rgb = |x: [u8; 3]| Color32::from_rgb(x[0], x[1], x[2]);
     // Lines other than volume and pan take these in turn.
@@ -451,7 +454,7 @@ pub fn overlay(
                         .strip_prefix("pending-")
                         .and_then(|n| n.parse::<usize>().ok())
                     {
-                        let new = af27_core::session::new_uuid();
+                        let new = af2_core::session::new_uuid();
                         st.session.tracks[ti].clips[ci].props.chain[si].ext_id = Some(new.clone());
                         *slot = new;
                         let old = line.target.clone();
@@ -629,7 +632,19 @@ pub fn menu(ui: &mut egui::Ui, st: &mut State, id: ClipId) {
     if has_fx {
         ui.separator();
     }
+    let mut plug_pick: Option<LaneTarget> = None;
     for (si, s) in c.props.chain.iter().enumerate() {
+        // A VST3 plug-in: its controls (as in a track's lane menu).
+        if af2_core::plugin::is_plugin(&s.effect) {
+            let title = format!("{} {}", si + 1, crate::plugins::slot_name(s));
+            let has = |t: &LaneTarget| is_shown(t);
+            if let Some(pid) =
+                crate::mixing::plugin_lane_menu(ui, &title, s, id as usize, &has)
+            {
+                plug_pick = Some(crate::mixing::plugin_target(s, pid, &format!("pending-{si}")));
+            }
+            continue;
+        }
         let names = slot_params(s);
         if names.is_empty() {
             continue;
@@ -641,7 +656,7 @@ pub fn menu(ui: &mut egui::Ui, st: &mut State, id: ClipId) {
             }
         });
     }
-    if let Some(t) = toggle {
+    if let Some(t) = toggle.or(plug_pick) {
         st.toggle_clip_line(id, t);
     }
     ui.separator();

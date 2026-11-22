@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Noise reduction from a noise print, in the Waveform editor: select a
 //! stretch of only background (room tone before anyone speaks), Capture
 //! Noise Print, then Reduce Noise with Print on the file or a selection.
 //! The print is kept per channel until the next capture.
 
-use af27_dsp::noise::{self, NoisePrint};
+use af2_dsp::noise::{self, NoisePrint};
 use egui::RichText;
 
 use crate::state::State;

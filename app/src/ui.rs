@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The window: menu bar, tool strip, the dockable panel area, transport
 //! and status bar. Every panel lives in the dock and can be dragged to a
@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::keymap::{Cmd, Keymap};
 use crate::state::{data_dir, Mode, State, Tool};
 use crate::theme::c;
-use af27_core::time::{format_time, gain_to_db};
-use af27_dsp::Effect;
+use af2_core::time::{format_time, gain_to_db};
+use af2_dsp::Effect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum Tab {
@@ -244,6 +244,14 @@ impl App {
     fn show_tab(&mut self, tab: Tab) {
         if let Some(found) = self.dock.find_tab(&tab) {
             self.dock.set_active_tab(found);
+        } else if let Some((s, n, _)) = self
+            .dock
+            .find_tab(&Tab::Editor)
+            .filter(|_| matches!(tab, Tab::PianoRoll | Tab::Mixer))
+        {
+            // Closed: back beside the Editor, not in a window of its own.
+            self.dock.set_focused_node_and_surface((s, n));
+            self.dock.push_to_focused_leaf(tab);
         } else {
             self.dock.add_window(vec![tab]);
         }
@@ -331,7 +339,11 @@ impl TabViewer for Viewer<'_> {
             | Tab::Spectrum
             | Tab::PianoRoll
             | Tab::Visualizer
-            | Tab::Space => [false, false],
+            | Tab::Space
+            // The rack fills the panel's height exactly and scrolls its own
+            // rows; an outer bar would come and go every frame on the
+            // rounding (Grey Desktop '95's solid bars made it shake).
+            | Tab::Effects => [false, false],
             _ => [false, true],
         }
     }
@@ -382,6 +394,15 @@ impl App {
             return;
         }
         let typing = ctx.wants_keyboard_input();
+        // Ctrl+D in the Piano Roll (pointer over it, or clicked last)
+        // duplicates the picked notes, whatever the key does elsewhere.
+        if !typing
+            && self.st.piano_hover
+            && self.st.piano_clip.is_some()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D))
+        {
+            self.st.piano_cmd = Some(crate::pianoroll::PianoCmd::Duplicate);
+        }
         for cmd in self.keymap.pressed(ctx, typing) {
             self.run_cmd(cmd);
         }
@@ -422,6 +443,12 @@ impl App {
                     _ => PianoCmd::Delete,
                 });
             }
+            // After a click in the Files panel, Delete closes the picked
+            // files (as their menu's Close does).
+            Cmd::Delete if st.files_focus && !st.files_ui.selected.is_empty() => {
+                let picked: Vec<_> = st.files_ui.selected.clone();
+                crate::files_panel::close_files(st, picked);
+            }
             Cmd::Cut => st.edit_cut(),
             Cmd::Copy => st.edit_copy(),
             Cmd::Paste => st.edit_paste(),
@@ -443,6 +470,11 @@ impl App {
             Cmd::KeyboardShortcuts => self.shortcuts.open = true,
             Cmd::Preferences => self.settings.open(),
             Cmd::SplitAtPlayhead => st.split_at_playhead(),
+            Cmd::DuplicateClips => {
+                if st.mode == Mode::Multitrack && !crate::clip_ops::duplicate(st) {
+                    st.toast("Select clips to duplicate first");
+                }
+            }
             Cmd::Invert => apply_now(st, Effect::Invert),
             Cmd::Reverse => apply_now(st, Effect::Reverse),
             Cmd::Silence => apply_now(st, Effect::Silence),
@@ -623,17 +655,17 @@ pub fn zoom_amp(st: &mut State, notches: f64) {
     }
 }
 
-const AUDIO_FILTER: &[&str] = af27_io::EXTENSIONS;
+const AUDIO_FILTER: &[&str] = af2_io::EXTENSIONS;
 
 pub fn open_dialog(st: &mut State) {
     let mut all: Vec<&str> = AUDIO_FILTER.to_vec();
-    all.extend(["af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"]);
-    if let Some(paths) = rfd::FileDialog::new()
+    all.extend(["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"]);
+    if let Some(paths) = crate::file_dialog::FileDialog::new()
         .add_filter("Audio and sessions", &all)
         .add_filter("Audio", AUDIO_FILTER)
         .add_filter(
             "Sessions",
-            &["af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"],
+            &["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"],
         )
         .pick_files()
     {
@@ -656,7 +688,7 @@ fn save_session_as(st: &mut State) {
 
 /// Multitrack > Insert Files as Tracks.
 fn insert_files_as_tracks(st: &mut State) {
-    if let Some(paths) = rfd::FileDialog::new()
+    if let Some(paths) = crate::file_dialog::FileDialog::new()
         .add_filter("Audio", AUDIO_FILTER)
         .pick_files()
     {
@@ -792,7 +824,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 }
                 if ui.button("MIDI File...").clicked() {
                     ui.close_menu();
-                    if let Some(p) = rfd::FileDialog::new()
+                    if let Some(p) = crate::file_dialog::FileDialog::new()
                         .add_filter("MIDI files", &["mid", "midi", "smf"])
                         .pick_file()
                     {
@@ -940,29 +972,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             cmd_item(ui, km, Cmd::Preferences, "Preferences...", true, &mut cmd);
         });
         ui.menu_button("Multitrack", |ui| {
-            if ui.button("Add Audio Track").clicked() {
-                st.add_track_kind(af27_core::TrackKind::Audio);
-                ui.close_menu();
-            }
-            if ui.button("Add Bus Track").clicked() {
-                st.add_track_kind(af27_core::TrackKind::Bus);
-                ui.close_menu();
-            }
-            if ui.button("Add MIDI Track").clicked() {
-                let t = st.add_track_kind(af27_core::TrackKind::Midi);
-                crate::pianoroll::new_clip(st, t, 0.0);
-                ui.close_menu();
-            }
-            ui.separator();
-            if ui.button("Tempo and Time Signature...").clicked() {
-                st.tempo_ui.open = true;
-                ui.close_menu();
-            }
-            let mut m = st.session.tempo.metronome;
-            if ui.checkbox(&mut m, "Metronome").changed() {
-                st.session.tempo.metronome = m;
-                st.live_metronome();
-            }
+            crate::lane_menu::multitrack_menu_top(ui, st);
             playback_menu_items(ui, st, km, &mut cmd);
             ui.menu_button("Spoken Word", |ui| {
                 if ui
@@ -1002,7 +1012,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             ui.menu_button("Export", |ui| {
                 if ui.button("MIDI File...").clicked() {
                     ui.close_menu();
-                    if let Some(p) = rfd::FileDialog::new()
+                    if let Some(p) = crate::file_dialog::FileDialog::new()
                         .set_file_name(format!("{}.mid", st.session.name))
                         .add_filter("MIDI file", &["mid"])
                         .save_file()
@@ -1020,18 +1030,18 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 true,
                 &mut cmd,
             );
+            cmd_item(
+                ui,
+                km,
+                Cmd::DuplicateClips,
+                "Duplicate Selected Clips",
+                st.selected_clip.is_some(),
+                &mut cmd,
+            );
             if ui.button("Delete Selected Clip").clicked() {
                 st.delete_clip();
                 ui.close_menu();
             }
-            cmd_item(
-                ui,
-                km,
-                Cmd::BounceTrack,
-                "Bounce Selected Track to New Track",
-                st.selected_track.is_some(),
-                &mut cmd,
-            );
             ui.separator();
             if ui
                 .button("Insert Files as Tracks...")
@@ -1052,10 +1062,6 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.import_docs(docs, crate::sessions::Layout::AsTracks);
                 ui.close_menu();
             }
-            if ui.button("Session Properties...").clicked() {
-                open_props(st);
-                ui.close_menu();
-            }
             if ui.button("Insert Current File at Playhead").clicked() {
                 if let (Some(d), Some(t)) = (
                     st.current,
@@ -1065,6 +1071,11 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                     let at = st.session_cursor;
                     st.place_doc(d, t, at);
                 }
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Session Properties...").clicked() {
+                open_props(st);
                 ui.close_menu();
             }
         });
@@ -1183,34 +1194,46 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Theme", |ui| {
-                let names: Vec<String> = st.themes.iter().map(|t| t.name.clone()).collect();
-                let classic = st.themes.iter().position(|t| t.author == "Audiform");
-                for (i, n) in names.iter().enumerate() {
-                    let on = st.theme_base.name == *n;
-                    if st.themes[i].hidden && !on {
+                for (head, idx) in crate::theme::grouped(&st.themes) {
+                    // A hidden theme is listed only while it is in use.
+                    let shown: Vec<usize> = idx
+                        .into_iter()
+                        .filter(|&i| !st.themes[i].hidden || st.theme_base.name == st.themes[i].name)
+                        .collect();
+                    if shown.is_empty() {
                         continue;
                     }
-                    if Some(i) == classic {
+                    if let Some(h) = head {
                         ui.separator();
-                        ui.label(RichText::new("From Audiform").small().color(c(st.theme.text_dim)));
+                        ui.label(RichText::new(h).small().color(c(st.theme.text_dim)));
                     }
-                    let label = if st.themes[i].hidden { "Secret Theme" } else { n.as_str() };
-                    if ui.radio(on, label).clicked() {
-                        let t = st.themes[i].clone();
-                        st.set_theme(t);
-                        let _ = std::fs::create_dir_all(data_dir());
-                        let _ = std::fs::write(data_dir().join("theme.txt"), n);
-                        ui.close_menu();
+                    for i in shown {
+                        let n = st.themes[i].name.clone();
+                        let on = st.theme_base.name == n;
+                        let label = if st.themes[i].hidden { "Secret Theme" } else { n.as_str() };
+                        let mut r = ui.radio(on, label);
+                        if crate::theme::is_system(&st.themes[i]) {
+                            r = r.on_hover_text("Your desktop's colors, light or dark, following its settings as they change");
+                        } else if st.themes[i].author == "Audiform" && !st.themes[i].hidden {
+                            r = r.on_hover_text("From the original Audiform");
+                        }
+                        if r.clicked() {
+                            let t = st.themes[i].clone();
+                            st.set_theme(t);
+                            let _ = std::fs::create_dir_all(data_dir());
+                            let _ = std::fs::write(data_dir().join("theme.txt"), &n);
+                            ui.close_menu();
+                        }
                     }
                 }
                 ui.separator();
                 if ui.button("Save Current Theme As...").clicked() {
                     let dir = data_dir().join("themes");
                     let _ = std::fs::create_dir_all(&dir);
-                    if let Some(p) = rfd::FileDialog::new()
+                    if let Some(p) = crate::file_dialog::FileDialog::new()
                         .set_directory(&dir)
-                        .set_file_name(format!("{}.af27theme", st.theme.name))
-                        .add_filter("AudiForm 2 theme", &["af27theme"])
+                        .set_file_name(format!("{}.af2theme", st.theme.name))
+                        .add_filter("AudiForm 2 theme", &["af2theme"])
                         .save_file()
                     {
                         let mut t = st.theme.clone();
@@ -1278,8 +1301,12 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
         ui.menu_button("Help", |ui| {
             if ui.button("Report a Problem...").clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(
-                    "https://github.com/nwh212/AudiForm2/issues/new",
+                    "https://github.com/AudiFormer/AudiForm2/issues/new",
                 ));
+                ui.close_menu();
+            }
+            if ui.button("Check for Updates...").clicked() {
+                st.updater.check(true);
                 ui.close_menu();
             }
             if ui.button("About AudiForm 2").clicked() {
@@ -1372,7 +1399,7 @@ fn effects_menu(
             let (rate, ch) = st
                 .doc()
                 .map_or((48_000, 2), |d| (d.buf.rate, d.buf.num_channels()));
-            st.insert_buffer("Insert silence", af27_dsp::generate::silence(rate, ch, 5.0));
+            st.insert_buffer("Insert silence", af2_dsp::generate::silence(rate, ch, 5.0));
             ui.close_menu();
         }
     });
@@ -1431,6 +1458,7 @@ fn effects_menu(
                             }
                         }
                         crate::fx_menu::Item::Stems => *open_tab = Some(Tab::AiSeparation),
+                        crate::fx_menu::Item::Spatialize => st.spatialize.open = true,
                         crate::fx_menu::Item::Diagnose(k) => {
                             if st.diag.kind != k {
                                 st.diag.kind = k;
@@ -1475,7 +1503,7 @@ fn add_to_track_rack(st: &mut State, id: Option<String>) -> bool {
     let Some(ti) = st.selected_track.and_then(|t| st.session.track_index(t)) else {
         return false;
     };
-    if st.session.tracks[ti].chain.len() >= af27_core::session::CHAIN_SLOTS {
+    if st.session.tracks[ti].chain.len() >= af2_core::session::CHAIN_SLOTS {
         st.toast("This track's rack is full (16 effects).");
         return true;
     }
@@ -1699,6 +1727,40 @@ fn viewer_dock_nodes(dock: &mut DockState<Tab>) -> impl Iterator<Item = &mut egu
     dock.main_surface_mut().iter_mut()
 }
 
+/// The Harmonics setting, applied at once to the selection there is.
+fn set_harmonics(st: &mut State, set: crate::spectral_select::HarmSet) {
+    use crate::spectral_select::{HARM_ALL, HARM_OFF};
+    // Never none at all: unticking the last one leaves the shape itself.
+    let set = if set & HARM_ALL == 0 { HARM_OFF } else { set };
+    st.harmonics = set;
+    if let Some(d) = st.doc_mut() {
+        let ny = d.buf.rate as f64 / 2.0;
+        d.spec_sel.set_harmonics(set, ny);
+    }
+}
+
+/// The toolbar's name for a Harmonics set: "off", "all", "1, 3, 5".
+fn harmonics_label(set: crate::spectral_select::HarmSet) -> String {
+    use crate::spectral_select::{HARM_ALL, HARM_OFF};
+    if set == HARM_OFF {
+        return "Harmonics: off".into();
+    }
+    if set & HARM_ALL == HARM_ALL {
+        return "Harmonics: all".into();
+    }
+    let odd: u64 = (1..64).step_by(2).map(|k| 1u64 << k).sum();
+    let even: u64 = (2..64).step_by(2).map(|k| 1u64 << k).sum();
+    if set == odd {
+        return "Harmonics: odd".into();
+    }
+    if set == even {
+        return "Harmonics: even".into();
+    }
+    let ks: Vec<String> = (1..=10).filter(|k| set & (1u64 << k) != 0).map(|k| k.to_string()).collect();
+    let more = if set >> 11 != 0 { ", ..." } else { "" };
+    format!("Harmonics: {}{more}", ks.join(", "))
+}
+
 /// The spectral selection tools (Waveform editor only) and the brush size.
 fn spectral_tools(ui: &mut egui::Ui, st: &mut State) {
     ui.separator();
@@ -1733,6 +1795,63 @@ fn spectral_tools(ui: &mut egui::Ui, st: &mut State) {
             st.choose_tool(tool);
         }
     }
+    // Harmonic selection: each shape also copied to whole multiples of its
+    // frequency, whichever of them are ticked.
+    {
+        use crate::spectral_select::{HARM_ALL, HARM_OFF};
+        let label = harmonics_label(st.harmonics);
+        ui.add_enabled_ui(wave, |ui| {
+            egui::menu::menu_custom_button(
+                ui,
+                egui::Button::new(RichText::new(label).small()).selected(st.harmonics != HARM_OFF),
+                |ui| {
+                    ui.label(
+                        RichText::new("Copies of each selection at whole multiples of its frequency")
+                            .small()
+                            .color(c(th.text_dim)),
+                    );
+                    let mut set = st.harmonics;
+                    for k in 1..=10u32 {
+                        let mut on = set & (1u64 << k) != 0;
+                        let text = match k {
+                            1 => "1  (the shape you draw)".to_string(),
+                            2 => "2  (an octave up)".to_string(),
+                            k => format!("{k}"),
+                        };
+                        if ui.checkbox(&mut on, text).changed() {
+                            set = if on { set | (1u64 << k) } else { set & !(1u64 << k) };
+                        }
+                    }
+                    ui.separator();
+                    let odd: u64 = (1..64).step_by(2).map(|k| 1u64 << k).sum();
+                    let even: u64 = (2..64).step_by(2).map(|k| 1u64 << k).sum();
+                    ui.horizontal(|ui| {
+                        if ui.button("All").on_hover_text("Every harmonic up to the top of the spectrum").clicked() {
+                            set = HARM_ALL;
+                        }
+                        if ui.button("Odd").on_hover_text("1, 3, 5, 7... (as a clarinet's)").clicked() {
+                            set = odd;
+                        }
+                        if ui.button("Even").on_hover_text("2, 4, 6, 8... (leaving out the shape itself)").clicked() {
+                            set = even;
+                        }
+                        if ui.button("Off").on_hover_text("Just the shape you draw").clicked() {
+                            set = HARM_OFF;
+                        }
+                    });
+                    if set != st.harmonics {
+                        set_harmonics(st, set);
+                    }
+                },
+            )
+            .response
+            .on_hover_text(
+                "Harmonic selection: copies of each shape you draw with Box, Lasso or Brush Select, the same size, \
+                 moved to 2, 3, 4... times its frequency, to take a sound's overtones with it. Tick the ones you want; \
+                 changing them updates the selection there is",
+            )
+        });
+    }
     if wave && matches!(st.tool, Tool::BrushSelect | Tool::SpotRepair) {
         ui.add(
             crate::widgets::Slider::new(&mut st.brush_px, 4.0..=120.0)
@@ -1749,7 +1868,7 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State) {
         let fx = st.fx.clone();
         let th = st.theme.clone();
         let cur = if st.mode == Mode::Waveform { 0 } else { 1 };
-        match crate::hud::segmented(ui, "af27-mode", &["Waveform", "Multitrack"], cur, &th, &fx) {
+        match crate::hud::segmented(ui, "af2-mode", &["Waveform", "Multitrack"], cur, &th, &fx) {
             Some(0) => st.mode = Mode::Waveform,
             Some(1) => st.mode = Mode::Multitrack,
             _ => {}
@@ -2006,7 +2125,7 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                 ui.add_sized(
                     egui::vec2(78.0, 26.0),
                     egui::DragValue::new(&mut bpm)
-                        .range(af27_core::midi::BPM_MIN..=af27_core::midi::BPM_MAX)
+                        .range(af2_core::midi::BPM_MIN..=af2_core::midi::BPM_MAX)
                         .speed(0.5)
                         .suffix(" BPM")
                         .max_decimals(if glide { 1 } else { 2 }),
@@ -2053,7 +2172,14 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
         }
         // The metronome is switched on above the track list (it shows as
         // its own row there).
-        ui.add_space(14.0);
+        // The transport sits in the middle of the bar (its width measured
+        // last frame), never closer than 14 points to what is left of it.
+        let group_id = egui::Id::new("af2-transport-group-w");
+        let group_w: f32 = ui.data(|d| d.get_temp(group_id)).unwrap_or(330.0);
+        let bar = ui.max_rect();
+        let want = bar.center().x - group_w / 2.0;
+        ui.add_space((want - ui.cursor().left()).max(14.0));
+        let group_start = ui.cursor().left();
         // The transport, in the order and style long-time editors expect:
         // Stop, Play, Pause, previous, Rewind, Fast Forward, next, Record,
         // Loop.
@@ -2194,6 +2320,15 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
                 }
             }
         });
+        let measured = ui.cursor().left() - group_start;
+        if (measured - group_w).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(group_id, measured));
+            ui.ctx().request_repaint();
+        }
+        // A surround file: how it is heard (also Preferences > Playback).
+        if st.mode == Mode::Waveform {
+            surround_button(ui, st);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Right to left: Zoom Out Full, Zoom to Selection, Zoom Out,
             // Zoom In, then the amplitude and (Multitrack) track heights.
@@ -2230,6 +2365,56 @@ fn transport(ui: &mut egui::Ui, st: &mut State) {
             }
         });
     });
+}
+
+/// The playback mode of a file of more than two channels, on the
+/// transport: a menu of the modes, Auto showing what it chose.
+fn surround_button(ui: &mut egui::Ui, st: &mut State) {
+    use crate::settings::SurroundMode;
+    use af2_engine::SurroundPlay;
+    let Some(n) = st.doc().map(|d| d.buf.num_channels()).filter(|n| *n > 2) else {
+        return;
+    };
+    let fits = st.surround_direct_fits();
+    let now = st.surround_play();
+    let heard = match now {
+        SurroundPlay::Fold => "Stereo fold",
+        SurroundPlay::Headphones => "Headphones",
+        SurroundPlay::Speakers => "Speakers",
+        SurroundPlay::Direct if fits => "Direct outs",
+        SurroundPlay::Direct => "Direct (folded)",
+    };
+    let mode = st.prefs.surround_play;
+    let text = if mode == SurroundMode::Auto {
+        format!("{n} ch · Auto: {heard}")
+    } else {
+        format!("{n} ch · {heard}")
+    };
+    ui.add_space(10.0);
+    let r = ui
+        .menu_button(RichText::new(text).small(), |ui| {
+            for m in SurroundMode::ALL {
+                let tip = if m == SurroundMode::Direct && !fits {
+                    "Needs Settings > Channel Routing's speaker outputs on, and a device with                      enough outputs; until then it plays folded to stereo"
+                } else {
+                    m.describe()
+                };
+                if ui
+                    .radio(st.prefs.surround_play == m, m.label())
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    st.prefs.surround_play = m;
+                    st.prefs.save();
+                    ui.close_menu();
+                }
+            }
+        })
+        .response;
+    r.on_hover_text(format!(
+        "How this {n}-channel file plays: {} (Preferences > Playback)",
+        mode.describe()
+    ));
 }
 
 /// A panel's caption under the `win95` chrome: its shown tab's title, with
@@ -2321,11 +2506,11 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
         ui.label(RichText::new("AUDIFORM 2").size(28.0).strong().extra_letter_spacing(6.0).color(c(st.theme.accent)));
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.label(RichText::new("Highly experimental alpha: expect bugs, and keep backups of sessions you care about.").strong());
-        ui.hyperlink_to("Report a problem (GitHub Issues)", "https://github.com/nwh212/AudiForm2/issues");
+        ui.hyperlink_to("Report a problem (GitHub Issues)", "https://github.com/AudiFormer/AudiForm2/issues");
         ui.label("A fast, themeable audio editor written entirely in Rust.");
-        ui.label("Free software under the GNU General Public License, version 3 or later (see LICENSE and COPYING). The DTS decoder (af27-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
+        ui.label("Free software under the GNU General Public License, version 3 or later (see LICENSE and COPYING). The DTS decoder (af2-dts) is LGPL-2.1-or-later, ported from FFmpeg.");
         ui.label("The sequel to Audiform, by the same project lead.");
-        if let Some(credit) = af27_engine::ASIO_CREDIT {
+        if let Some(credit) = af2_engine::ASIO_CREDIT {
             ui.label(credit);
         }
     });
@@ -2359,7 +2544,7 @@ impl eframe::App for App {
         if !self.shown_env_tab {
             self.shown_env_tab = true;
             // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
-            // generate-tones | overlap-demo | fx:<effect id>[?key=value&...] |
+            // generate-tones | overlap-demo | spatialize | fx:<effect id>[?key=value&...] |
             // master-fx:<effect id>, for shots. AF2_FX_SET=key=value,... sets
             // the opened effect's controls (by key; `session_tempo` sets the
             // session's tempo); AF2_OPEN_DATA sets the slot's data (such as
@@ -2373,6 +2558,14 @@ impl eframe::App for App {
                     crate::instruments::shot(&mut self.st, v)
                 }
                 Ok("generate-noise") => self.st.generate.noise_open = true,
+                Ok("spatialize") => self.st.spatialize.open = true,
+                // spatialize:<layout>: the open file made into that layout.
+                Ok(v) if v.starts_with("spatialize:") => {
+                    if let Some(l) = af2_core::space::SpaceLayout::from_label(&v[11..]) {
+                        self.st.spatialize.layout = l;
+                        self.st.spatialize.apply_when_open = true;
+                    }
+                }
                 Ok("generate-tones") => self.st.generate.tones_open = true,
                 // synth: the built-in synth's window on the first MIDI
                 // track (one is added when there is none);
@@ -2384,13 +2577,13 @@ impl eframe::App for App {
                         .session
                         .tracks
                         .iter()
-                        .find(|t| t.kind == af27_core::TrackKind::Midi)
+                        .find(|t| t.kind == af2_core::TrackKind::Midi)
                     {
                         Some(t) => t.id,
-                        None => self.st.add_track_kind(af27_core::TrackKind::Midi),
+                        None => self.st.add_track_kind(af2_core::TrackKind::Midi),
                     };
                     if let Ok(m) = std::env::var("AF2_SYNTH_MODEL") {
-                        if let Some(m) = af27_core::synth_model::SynthModel::ALL
+                        if let Some(m) = af2_core::synth_model::SynthModel::ALL
                             .into_iter()
                             .find(|x| x.name().eq_ignore_ascii_case(m.trim()))
                         {
@@ -2433,7 +2626,7 @@ impl eframe::App for App {
                     let slot = shot_slot(&mut self.st, &v[10..]);
                     self.st.session.master_chain.push(slot);
                     let at = self.st.session.master_chain.len() - 1;
-                    crate::rack::open_window(&mut self.st, af27_engine::MASTER, at);
+                    crate::rack::open_window(&mut self.st, af2_engine::MASTER, at);
                 }
                 _ => {}
             }
@@ -2452,7 +2645,7 @@ impl eframe::App for App {
         if let Ok(v) = std::env::var("AF2_SELECT_CLIP") {
             if self.st.selected_clip.is_none() {
                 let n: usize = v.trim().parse().unwrap_or(1);
-                let all: Vec<&af27_core::Clip> = self
+                let all: Vec<&af2_core::Clip> = self
                     .st
                     .session
                     .tracks
@@ -2483,6 +2676,18 @@ impl eframe::App for App {
             }
         }
         let _trace = TraceGuard(__t0, ctx.screen_rect());
+        // The System theme follows the desktop's colours as they change
+        // (read on a background thread; only a finished reading lands here).
+        if crate::theme::is_system(&self.st.theme_base) {
+            crate::system_look::watch(ctx);
+            if let Some(c) = crate::system_look::take_change() {
+                let t = crate::theme::Theme::system_from(&c);
+                if let Some(e) = self.st.themes.iter_mut().find(|e| crate::theme::is_system(e)) {
+                    *e = t.clone();
+                }
+                self.st.show_theme(t);
+            }
+        }
         if self.st.theme_changed {
             lay_colors(&mut self.st);
             self.st.theme.apply(ctx);
@@ -2557,7 +2762,7 @@ impl eframe::App for App {
         let peak = self.st.meter.0.max(self.st.meter.1);
         self.st.fx.update(ctx, &th, peak);
         let fx = self.st.fx.clone();
-        ctx.data_mut(|d| d.insert_temp(egui::Id::new("af27-fx"), fx.clone()));
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("af2-fx"), fx.clone()));
         let screen = ctx.screen_rect();
         // The living backdrop, then last frame's cards as glass on top of it.
         {
@@ -2783,7 +2988,9 @@ impl eframe::App for App {
                         if let Some(t) = tabs.get(active.0) {
                             self.showing.insert(*t);
                         }
-                        crate::hud::frame(p, *rect, &th, &fx, on, serial);
+                        // The Visuals picture fills its card: no serial over it.
+                        let tag = if tabs.get(active.0) == Some(&Tab::Visualizer) { 0 } else { serial };
+                        crate::hud::frame(p, *rect, &th, &fx, on, tag);
                         if retro {
                             let mine: Vec<egui::Rect> = tabs
                                 .iter()
@@ -2861,7 +3068,7 @@ impl eframe::App for App {
         }
         // Stretched clips render in the background: keep drawing until
         // they are in.
-        if af27_engine::stretch::pending() > 0 {
+        if af2_engine::stretch::pending() > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
         if std::mem::take(&mut self.st.want_properties) {
@@ -2874,6 +3081,7 @@ impl eframe::App for App {
         crate::new_dialogs::show(ctx, &mut self.st);
         crate::podcast_tools::show(ctx, &mut self.st);
         crate::noise_print::show(ctx, &mut self.st);
+        crate::spatialize_ui::show(ctx, &mut self.st);
         crate::af1_import::window(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
         effect_dialog(ctx, &mut self.st);
@@ -2885,13 +3093,14 @@ impl eframe::App for App {
         crate::tempo::replace_prompt(ctx, &mut self.st);
         crate::synth_ui::window(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
+        crate::updater::ui(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);
         let th_now = self.st.theme.clone();
         self.shortcuts.show(ctx, &mut self.keymap, &th_now);
         {
             let top = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
-                egui::Id::new("af27-scan"),
+                egui::Id::new("af2-scan"),
             ));
             crate::hud::scanlines(&top, screen, &th, &fx);
         }
@@ -2933,10 +3142,10 @@ pub fn meter_db(x: f32) -> f32 {
 /// and `AF2_SPECTRAL_BOX=t0,t1,hz0,hz1` draws a Box selection.
 /// A new slot of `id` for a documentation shot, with the controls named
 /// in `AF2_FX_SET` (key=value, comma separated) set.
-fn shot_slot(st: &mut State, id: &str) -> af27_core::EffectSlot {
+fn shot_slot(st: &mut State, id: &str) -> af2_core::EffectSlot {
     let mut slot = crate::rack::new_slot(id);
     let keys: Vec<&str> =
-        af27_fx::info(id).map_or_else(Vec::new, |i| i.params.iter().map(|p| p.key).collect());
+        af2_fx::info(id).map_or_else(Vec::new, |i| i.params.iter().map(|p| p.key).collect());
     for pair in std::env::var("AF2_FX_SET").unwrap_or_default().split(',') {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
@@ -2971,10 +3180,35 @@ fn shot_setup(st: &mut State) {
             }
         }
     }
-    if let Ok(v) = std::env::var("AF2_SPECTRAL_BOX") {
-        if let (&[t0, t1, f0, f1], Some(d)) = (&nums(&v)[..], st.doc_mut()) {
-            use crate::spectral_select::{hz_to_u, Region, SPoint};
-            d.spec_sel.push(Region::Box {
+    // AF2_SPEC_VIEW=lo,hi,log_step: the spectrum's frequency range and scale.
+    if let Ok(v) = std::env::var("AF2_SPEC_VIEW") {
+        if let &[lo, hi, step] = &nums(&v)[..] {
+            st.spec.range = Some((lo, hi));
+            st.spec.log_step = step as u8;
+        }
+    }
+    // AF2_HARMONICS=1,3,5 or all: the Harmonics setting (applies to the
+    // boxes below).
+    if let Ok(v) = std::env::var("AF2_HARMONICS") {
+        st.harmonics = if v.trim().eq_ignore_ascii_case("all") {
+            crate::spectral_select::HARM_ALL
+        } else {
+            v.split(',')
+                .filter_map(|k| k.trim().parse::<u32>().ok())
+                .filter(|k| (1..64).contains(k))
+                .fold(0u64, |s, k| s | (1u64 << k))
+        };
+        if st.harmonics == 0 {
+            st.harmonics = crate::spectral_select::HARM_OFF;
+        }
+    }
+    // Several boxes: separated by ';'.
+    for v in std::env::var("AF2_SPECTRAL_BOX").unwrap_or_default().split(';') {
+        let ny = st.doc().map_or(24_000.0, |d| d.buf.rate as f64 / 2.0);
+        let harmonics = st.harmonics;
+        if let (&[t0, t1, f0, f1], Some(d)) = (&nums(v)[..], st.doc_mut()) {
+            use crate::spectral_select::{hz_to_u, harmonics_of, Region, SPoint};
+            let base = Region::Box {
                 a: SPoint {
                     t: t0,
                     u: hz_to_u(f0),
@@ -2983,7 +3217,10 @@ fn shot_setup(st: &mut State) {
                     t: t1,
                     u: hz_to_u(f1),
                 },
-            });
+            };
+            let _ = harmonics_of;
+            d.spec_sel.push(base);
+            d.spec_sel.set_harmonics(harmonics, ny);
             st.choose_tool(Tool::BoxSelect);
         }
     }

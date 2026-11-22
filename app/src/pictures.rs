@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The pictures themes can put behind everything, built into the app.
 //! Taken from Audiform's theme files (see `assets/themes/README.md` for
@@ -37,7 +37,61 @@ pub fn bytes(name: &str) -> Option<&'static [u8]> {
         }
         "mall-night-real-shaft" => include_bytes!("../../assets/themes/mall-night-real-shaft.png"),
         "mall-night-real-base" => include_bytes!("../../assets/themes/mall-night-real-base.png"),
-        _ => return None,
+        _ => return user_file(name),
+    })
+}
+
+static EMBEDDED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, &'static [u8]>>> =
+    std::sync::OnceLock::new();
+
+/// A picture carried inside a user's theme file (its `assets`), by name.
+fn embedded(name: &str) -> Option<&'static [u8]> {
+    EMBEDDED.get()?.lock().ok()?.get(name).copied()
+}
+
+/// Keeps the pictures a theme file carries (`"assets": {name: data}`,
+/// each a `data:image/...;base64,` URI or plain base64), so the theme can
+/// name them like built-in pictures. Kept for the run of the app.
+pub fn register_assets(assets: &serde_json::Map<String, serde_json::Value>) {
+    let Ok(mut map) = EMBEDDED.get_or_init(Default::default).lock() else {
+        return;
+    };
+    for (name, v) in assets {
+        let Some(text) = v.as_str() else { continue };
+        let b64 = text.split_once(";base64,").map_or(text, |(_, d)| d);
+        if map.contains_key(name) {
+            continue;
+        }
+        if let Some(bytes) = af2_vst3::protocol::base64_decode(b64.trim()) {
+            map.insert(name.clone(), &*Box::leak(bytes.into_boxed_slice()));
+        }
+    }
+}
+
+/// A picture file beside the user's own themes (in the themes folder),
+/// named with its extension: `"my-wall.jpg"`. Read once and kept for the
+/// run of the app. Plain file names only, nothing outside that folder.
+fn user_file(name: &str) -> Option<&'static [u8]> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    let plain = !name.is_empty()
+        && !name.contains(['/', '\\', ':'])
+        && !name.starts_with('.')
+        && [".png", ".jpg", ".jpeg", ".webp"]
+            .iter()
+            .any(|e| name.to_ascii_lowercase().ends_with(e));
+    if !plain {
+        return None;
+    }
+    if let Some(b) = embedded(name) {
+        return Some(b);
+    }
+    static FILES: OnceLock<Mutex<HashMap<String, Option<&'static [u8]>>>> = OnceLock::new();
+    let mut files = FILES.get_or_init(Default::default).lock().ok()?;
+    *files.entry(name.to_string()).or_insert_with(|| {
+        std::fs::read(crate::theme::user_dir().join(name))
+            .ok()
+            .map(|b| &*Box::leak(b.into_boxed_slice()))
     })
 }
 

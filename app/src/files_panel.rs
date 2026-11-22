@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Files panel: the open sessions on top (the one in front first,
 //! then those set aside), then every open audio file.
@@ -21,7 +21,7 @@ use egui::{pos2, vec2, Align2, FontId, Rect, RichText, Rounding, Sense, Stroke};
 use crate::sessions::Layout;
 use crate::state::{DocId, Mode, State};
 use crate::theme::{c, ca};
-use af27_core::time::format_time;
+use af2_core::time::format_time;
 
 /// What a drag from the Files panel carries: the files, in list order.
 #[derive(Debug, Clone)]
@@ -121,6 +121,11 @@ const ROW_H: f32 = 20.0;
 
 pub fn files(ui: &mut egui::Ui, st: &mut State) {
     let th = st.theme.clone();
+    // A click here gives the panel the keys (Delete closes the picked
+    // files); a click anywhere else takes them back.
+    if let Some(q) = ui.input(|i| i.pointer.press_origin().filter(|_| i.pointer.any_pressed())) {
+        st.files_focus = ui.max_rect().contains(q) && ui.clip_rect().contains(q);
+    }
     ui.horizontal_wrapped(|ui| {
         if ui
             .button("New Session")
@@ -378,14 +383,51 @@ pub fn files(ui: &mut egui::Ui, st: &mut State) {
             );
         }
         Some(Action::AsTracks) => st.import_docs(picked, Layout::AsTracks),
-        Some(Action::Close) => {
-            for d in picked {
-                st.close_doc(d);
-            }
-        }
+        Some(Action::Close) => close_files(st, picked),
         Some(Action::RemoveUnused) => st.remove_unused_files(),
         Some(Action::SelectAll) => st.files_ui.selected = order.clone(),
         None => {}
+    }
+}
+
+/// Closes `ids`, first asking to save any with unsaved edits (Save
+/// writes each in place; one that does not save stays open; Cancel
+/// closes nothing).
+pub fn close_files(st: &mut State, ids: Vec<crate::state::DocId>) {
+    let edited: Vec<_> = ids
+        .iter()
+        .copied()
+        .filter(|&d| st.doc_by_id(d).is_some_and(|x| x.dirty))
+        .collect();
+    let mut saving = false;
+    if !edited.is_empty() {
+        let what = if edited.len() == 1 {
+            st.doc_by_id(edited[0])
+                .map_or("this file".into(), |d| format!("\"{}\"", d.name))
+        } else {
+            format!("{} edited files", edited.len())
+        };
+        match crate::sessions::ask_save(&format!("{what} before closing")) {
+            crate::sessions::Answer::Save => {
+                saving = true;
+                let was = st.current;
+                for &d in &edited {
+                    st.current = Some(d);
+                    crate::export::save_in_place(st);
+                }
+                st.current = was.filter(|w| st.doc_by_id(*w).is_some());
+            }
+            crate::sessions::Answer::Discard => {}
+            crate::sessions::Answer::Cancel => return,
+        }
+    }
+    for d in ids {
+        // Discard closes edited files as they are; after Save, one that
+        // still has edits (its save failed or was cancelled) stays open.
+        let unsaved = saving && st.doc_by_id(d).is_some_and(|x| x.dirty);
+        if !unsaved {
+            st.close_doc(d);
+        }
     }
 }
 
@@ -602,5 +644,25 @@ mod tests {
         f.forget(1);
         assert_eq!(f.selected, [5]);
         assert_eq!(range_select(&order, 42, 9), [9]);
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use af2_core::AudioBuffer;
+
+    #[test]
+    fn delete_closes_the_picked_unedited_files_only() {
+        let mut st = State::new();
+        let a = st.add_doc("a".into(), None, AudioBuffer::new(48_000, 2, 100));
+        let b = st.add_doc("b".into(), None, AudioBuffer::new(48_000, 2, 100));
+        let c = st.add_doc("c".into(), None, AudioBuffer::new(48_000, 2, 100));
+        st.files_ui.selected = vec![a, c];
+        let picked = st.files_ui.selected.clone();
+        close_files(&mut st, picked);
+        assert!(st.doc_by_id(a).is_none() && st.doc_by_id(c).is_none());
+        assert!(st.doc_by_id(b).is_some());
+        assert!(st.files_ui.selected.is_empty(), "closed files are no longer picked");
     }
 }

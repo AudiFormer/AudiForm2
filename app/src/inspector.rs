@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Inspector: everything about the selected track (output, sends, its
 //! effect chain, 3D position, MIDI instrument), or the master chain when
@@ -10,16 +10,16 @@ use egui::RichText;
 
 use crate::state::State;
 use crate::theme::c;
-use af27_core::midi::Wave;
-use af27_core::{EffectSlot, TrackKind};
-use af27_engine::MASTER;
+use af2_core::midi::Wave;
+use af2_core::{EffectSlot, TrackKind};
+use af2_engine::MASTER;
 
 /// Tracks one pointer gesture so a drag makes a single undo step.
 fn live_commit(
     st: &mut State,
     ui: &egui::Ui,
     label: &str,
-    before: &af27_core::Session,
+    before: &af2_core::Session,
     changed: bool,
 ) {
     let down = ui.input(|i| i.pointer.any_down());
@@ -119,7 +119,7 @@ pub fn track_settings(ui: &mut egui::Ui, st: &mut State, ti: usize) {
 
     // Output and sends (structural: the mix is rebuilt).
     // Only buses that would not feed back into this track.
-    let buses: Vec<(af27_core::TrackId, String)> = st
+    let buses: Vec<(af2_core::TrackId, String)> = st
         .session
         .tracks
         .iter()
@@ -145,7 +145,7 @@ pub fn track_settings(ui: &mut egui::Ui, st: &mut State, ti: usize) {
         .selected_text(st.session.tracks[ti].automation.label())
         .show_ui(ui, |ui| {
             let t = &mut st.session.tracks[ti];
-            for m in af27_core::automation::AutomationMode::ALL {
+            for m in af2_core::automation::AutomationMode::ALL {
                 structural |= ui
                     .selectable_value(&mut t.automation, m, m.label())
                     .changed();
@@ -219,7 +219,7 @@ pub fn track_settings(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                 ui.menu_button("➕ Add Send", |ui| {
                     for (id, name) in &buses {
                         if ui.button(name).clicked() {
-                            st.session.tracks[ti].sends.push(af27_core::Send {
+                            st.session.tracks[ti].sends.push(af2_core::Send {
                                 bus: *id,
                                 level_db: -6.0,
                                 pre_fader: false,
@@ -352,7 +352,7 @@ fn rack_link(ui: &mut egui::Ui, st: &mut State, track: u16) {
 
 /// Picks a SoundFont file.
 fn pick_sf2() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
+    crate::file_dialog::FileDialog::new()
         .add_filter("SoundFont", &["sf2"])
         .pick_file()
 }
@@ -362,9 +362,9 @@ fn pick_sf2() -> Option<std::path::PathBuf> {
 /// Plays track `ti`'s notes through the SoundFont at `path` (keeping the
 /// preset when the new file has it).
 pub fn set_soundfont(st: &mut State, ti: usize, path: std::path::PathBuf) {
-    match af27_engine::soundfont::load(&path) {
+    match af2_engine::soundfont::load(&path) {
         Ok(font) => {
-            let list = af27_engine::soundfont::presets(&font);
+            let list = af2_engine::soundfont::presets(&font);
             let keep = st.session.tracks[ti].soundfont.clone();
             // Keep the preset when it is in the new file; else the first.
             let pick = keep
@@ -378,7 +378,7 @@ pub fn set_soundfont(st: &mut State, ti: usize, path: std::path::PathBuf) {
             let before = st.session.clone();
             // A SoundFont plays in place of a VST3 instrument.
             crate::instruments::clear(st, ti);
-            st.session.tracks[ti].soundfont = Some(af27_core::midi::SoundFontRef {
+            st.session.tracks[ti].soundfont = Some(af2_core::midi::SoundFontRef {
                 path,
                 bank: pick.as_ref().map_or(0, |p| p.bank),
                 program: pick.as_ref().map_or(0, |p| p.program),
@@ -455,9 +455,9 @@ fn instrument_choice(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             }
         }
     });
-    match af27_engine::soundfont::load(&sf.path) {
+    match af2_engine::soundfont::load(&sf.path) {
         Ok(font) => {
-            let list = af27_engine::soundfont::presets(&font);
+            let list = af2_engine::soundfont::presets(&font);
             let mut pick = None;
             egui::ComboBox::from_id_salt(("preset", ti))
                 .selected_text(format!(
@@ -644,7 +644,7 @@ fn chain(ui: &mut egui::Ui, st: &mut State, track: u16) {
         st.open_slot = None;
         structural = true;
     }
-    if slots.len() < af27_core::session::CHAIN_SLOTS {
+    if slots.len() < af2_core::session::CHAIN_SLOTS {
         ui.menu_button("➕ Add Effect", |ui| {
             for (group, list) in crate::fx::catalog() {
                 ui.menu_button(group, |ui| {
@@ -704,7 +704,7 @@ fn file_info(ui: &mut egui::Ui, st: &State) {
                     }
                 });
             if found > 0 {
-                use af27_io::meta::MarkerKind;
+                use af2_io::meta::MarkerKind;
                 let n = |k| d.info.markers.iter().filter(|m| m.kind == k).count();
                 let mut parts = Vec::new();
                 for (k, one, many) in [

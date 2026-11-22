@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The dockable side panels.
 
@@ -10,8 +10,8 @@ use egui::{pos2, vec2, Align2, FontId, Rect, RichText, Rounding, Sense, Shape, S
 use crate::state::{Mode, State};
 use crate::theme::{c, ca};
 use crate::ui::{Caches, Tab};
-use af27_core::time::format_time;
-use af27_dsp::effects::GROUPS;
+use af2_core::time::format_time;
+use af2_dsp::effects::GROUPS;
 
 // ------------------------------------------------------------------ Files
 
@@ -22,7 +22,7 @@ pub fn files(ui: &mut egui::Ui, st: &mut State, _open: &mut Option<Tab>) {
 // ---------------------------------------------------------------- Markers
 
 pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
-    use af27_core::session::MarkerKind;
+    use af2_core::session::MarkerKind;
     ui.horizontal(|ui| {
         if ui.button("➕ Add at Playhead (M)").clicked() {
             st.add_marker();
@@ -55,7 +55,7 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     let mut jump = None;
     let mut remove = None;
     let mut changed = false;
-    let markers: &mut Vec<af27_core::Marker> = match st.mode {
+    let markers: &mut Vec<af2_core::Marker> = match st.mode {
         Mode::Waveform => match st.doc_mut() {
             Some(d) => &mut d.markers,
             None => return,
@@ -111,7 +111,7 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
 }
 
 /// Saves the chapter or ad list (Markers panel > Export).
-fn export_markers(st: &mut State, kind: &af27_core::session::MarkerKind, f: crate::chapters::Format) {
+fn export_markers(st: &mut State, kind: &af2_core::session::MarkerKind, f: crate::chapters::Format) {
     let (markers, duration, name) = match st.mode {
         Mode::Waveform => match st.doc() {
             Some(d) => (d.markers.clone(), d.duration(), d.name.clone()),
@@ -127,8 +127,8 @@ fn export_markers(st: &mut State, kind: &af27_core::session::MarkerKind, f: crat
     let stem = std::path::Path::new(&name)
         .file_stem()
         .map_or(name.clone(), |s| s.to_string_lossy().to_string());
-    let suffix = if *kind == af27_core::session::MarkerKind::AdSlot { "ads" } else { "chapters" };
-    let Some(path) = rfd::FileDialog::new()
+    let suffix = if *kind == af2_core::session::MarkerKind::AdSlot { "ads" } else { "chapters" };
+    let Some(path) = crate::file_dialog::FileDialog::new()
         .set_file_name(format!("{stem} {suffix}.{}", f.ext()))
         .add_filter(f.name(), &[f.ext()])
         .save_file()
@@ -137,7 +137,7 @@ fn export_markers(st: &mut State, kind: &af27_core::session::MarkerKind, f: crat
     };
     match std::fs::write(&path, crate::chapters::render(&list, f)) {
         Ok(()) => {
-            let warn = if *kind == af27_core::session::MarkerKind::Chapter {
+            let warn = if *kind == af2_core::session::MarkerKind::Chapter {
                 crate::chapters::warnings(&list, duration)
             } else {
                 Vec::new()
@@ -237,7 +237,7 @@ fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
             .strong()
             .color(c(th.accent)),
     );
-    let reg = af27_fx::registry();
+    let reg = af2_fx::registry();
     let current = st.fx_pick.clone().unwrap_or_else(|| reg[0].id.to_string());
     egui::ComboBox::from_id_salt("fx-pick")
         .selected_text(crate::fx::name(&current))
@@ -297,7 +297,7 @@ fn audiform_effects(ui: &mut egui::Ui, st: &mut State) {
     let apply = egui::Button::new(RichText::new("Apply").strong().color(c(th.background)))
         .fill(c(th.accent));
     if ui.add_enabled(st.doc().is_some(), apply).clicked() {
-        let slot = af27_core::EffectSlot {
+        let slot = af2_core::EffectSlot {
             position: None,
             sidechain: None,
             effect: id.clone(),
@@ -330,7 +330,7 @@ fn preview(st: &mut State) {
     let out = st.effect.process(&seg, &vals);
     let len = out.duration_secs();
     if let Some(eng) = &mut st.engine {
-        eng.set_program(af27_engine::buffer_program(Arc::new(out)));
+        eng.set_program(af2_engine::buffer_program(Arc::new(out)));
         eng.play(0.0, None, false, len);
     }
     // Force the normal program back on the next play.
@@ -391,6 +391,41 @@ pub fn levels(ui: &mut egui::Ui, st: &mut State) {
         rect.min + vec2(18.0, 4.0),
         pos2(rect.right() - 8.0 - latch_w, rect.bottom() - 6.0),
     );
+    // A surround file: a bar for each of its channels, before the fold.
+    if !st.src_levels.is_empty() {
+        let n = st.src_levels.len();
+        let names = af2_space::channels::names(n, st.doc().and_then(|d| d.speaker_mask()));
+        let gap = 2.0;
+        let bar_h = ((bars.height() - gap * (n as f32 - 1.0)) / n as f32).max(2.0);
+        for (i, ch) in st.src_levels.iter().enumerate() {
+            let r = Rect::from_min_size(
+                pos2(bars.left(), bars.top() + i as f32 * (bar_h + gap)),
+                vec2(bars.width(), bar_h),
+            );
+            meters::draw_channel(&p, r, ch, &prefs, &th);
+            p.text(
+                pos2(rect.left() + 3.0, r.center().y),
+                Align2::LEFT_CENTER,
+                names.get(i).map_or("", |s| s.as_str()),
+                FontId::proportional(if bar_h < 9.0 { 7.5 } else { 9.0 }),
+                c(th.text_dim),
+            );
+            if prefs.clip {
+                meters::draw_clip_latch(&p, meters::clip_latch(r), ch.clipped, &th);
+            }
+        }
+        if resp.clicked() {
+            for ch in &mut st.src_levels {
+                ch.clipped = false;
+                ch.reset_hold(prefs.kind);
+            }
+        }
+        resp.on_hover_text(format!(
+            "Each of the file's {n} channels before it is folded or placed around \
+             the head. Click to clear the clip lights and peak hold"
+        ));
+        return;
+    }
     let gap = if bars.height() > 30.0 { 13.0 } else { 3.0 };
     let bar_h = ((bars.height() - gap) / 2.0).max(2.0);
     for (i, ch) in st.levels.ch.iter().enumerate() {
@@ -494,7 +529,7 @@ pub fn spectrum(ui: &mut egui::Ui, st: &mut State) {
     p.rect_filled(rect, Rounding::same(th.rounding), c(th.wave_background));
     let (frames, rate) = st.scope_frames(4096);
     let mono: Vec<f32> = frames.iter().map(|f| (f[0] + f[1]) * 0.5).collect();
-    let col = af27_dsp::fft::spectrogram(&mono, 0, mono.len(), 1, 4096);
+    let col = af2_dsp::fft::spectrogram(&mono, 0, mono.len(), 1, 4096);
     let bins = &col[0];
     let ny = rate as f32 / 2.0;
     let x_of = |f: f32| rect.left() + ((f.max(20.0) / 20.0).ln() / (ny / 20.0).ln()) * rect.width();
@@ -564,7 +599,7 @@ pub fn statistics(ui: &mut egui::Ui, st: &mut State) {
                 st.render_mix(a, b, false)
             }
         };
-        st.stats = Some((what.to_string(), af27_dsp::loudness::analyze(&buf)));
+        st.stats = Some((what.to_string(), af2_dsp::loudness::analyze(&buf)));
     }
     if let Some((label, s)) = &st.stats {
         ui.label(

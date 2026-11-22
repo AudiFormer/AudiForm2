@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! File > New Audio File and File > New Multitrack Session: the small
 //! dialogs that ask for a name and a format first. Each remembers the
@@ -10,27 +10,44 @@ use std::path::PathBuf;
 use egui::{vec2, Align2, RichText};
 use serde::{Deserialize, Serialize};
 
-use af27_core::space::SpaceLayout;
+use af2_core::space::SpaceLayout;
 
 use crate::state::State;
 use crate::theme::c;
 
-/// What New Audio File starts with (the last choices).
+/// What New Audio File starts with: 48 kHz, stereo, 24-bit, unless the
+/// user ticked "Make these my defaults" (`chosen`). Settings saved before
+/// that box existed only remembered the last file made, and are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NewFileDefaults {
-    /// 0: the audio device's rate.
+    /// 0 (older settings): 48 kHz.
     pub rate: u32,
     pub channels: usize,
     pub bits: u16,
+    /// Set by the user on purpose (else the built-in defaults apply).
+    pub chosen: bool,
+}
+
+impl NewFileDefaults {
+    /// What a new file starts as now.
+    pub fn starting(&self) -> NewFileDefaults {
+        if self.chosen {
+            self.clone()
+        } else {
+            NewFileDefaults::default()
+        }
+    }
 }
 
 impl Default for NewFileDefaults {
     fn default() -> Self {
+        // 48 kHz, stereo, 24-bit: what new files start as (the lead's pick).
         NewFileDefaults {
-            rate: 0,
+            rate: 48_000,
             channels: 2,
             bits: 24,
+            chosen: false,
         }
     }
 }
@@ -73,6 +90,10 @@ pub struct NewFileDraft {
     pub channels: usize,
     pub bits: u16,
     focused: bool,
+    /// Opened by Record with no file open: OK starts recording into it.
+    pub record_after: bool,
+    /// "Make these my defaults" is ticked.
+    pub make_default: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,24 +107,35 @@ pub struct NewSessionDraft {
     focused: bool,
 }
 
-const RATES: [u32; 9] = [
-    8_000, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 192_000,
+const RATES: [u32; 10] = [
+    8_000, 16_000, 22_050, 32_000, 44_100, 48_000, 64_000, 88_200, 96_000, 192_000,
 ];
 
-fn device_rate(st: &State) -> u32 {
-    st.engine.as_ref().map_or(48_000, |e| e.rate)
-}
-
 pub fn open_new_file(st: &mut State) {
-    let d = st.prefs.new_file.clone();
+    let d = st.prefs.new_file.starting();
+    let chosen = st.prefs.new_file.chosen;
     let n = st.docs.len() + 1;
     st.new_file_ui = Some(NewFileDraft {
         name: format!("Untitled {n}"),
-        rate: if d.rate == 0 { device_rate(st) } else { d.rate },
+        // 0 (the old "the device's rate" default) starts at 48 kHz now.
+        rate: if d.rate == 0 { 48_000 } else { d.rate },
         channels: d.channels.clamp(1, 8),
         bits: d.bits,
         focused: false,
+        record_after: false,
+        make_default: chosen,
     });
+}
+
+/// Record with no file open in the Waveform editor: the New Audio File
+/// dialog first (rate, channels, bit depth), and recording into the new
+/// file once it is made. A many-input device (four on an SSL 2+) then
+/// records the channels asked for, not all of them.
+pub fn open_new_file_to_record(st: &mut State) {
+    open_new_file(st);
+    if let Some(d) = st.new_file_ui.as_mut() {
+        d.record_after = true;
+    }
 }
 
 pub fn open_new_session(st: &mut State, template: Option<PathBuf>) {
@@ -127,7 +159,8 @@ pub fn open_new_session(st: &mut State, template: Option<PathBuf>) {
         name,
         folder,
         template,
-        rate: if d.rate == 0 { device_rate(st) } else { d.rate },
+        // 0 (the old "the device's rate" default) starts at 48 kHz now.
+        rate: if d.rate == 0 { 48_000 } else { d.rate },
         bits: d.bits,
         mix: d.mix,
         focused: false,
@@ -220,7 +253,7 @@ fn new_file_window(ctx: &egui::Context, st: &mut State) {
     crate::ui::popup(
         ctx,
         egui::Id::new(("af2-popup", "new_dialogs.rs", 0)),
-        "New Audio File",
+        if d.record_after { "New Audio File to Record" } else { "New Audio File" },
     )
     .open(&mut open)
     .collapsible(false)
@@ -258,6 +291,8 @@ fn new_file_window(ctx: &egui::Context, st: &mut State) {
                 ui.horizontal(|ui| bits_box(ui, "nf-bits", &mut d.bits));
                 ui.end_row();
             });
+        ui.checkbox(&mut d.make_default, "Make these my defaults")
+            .on_hover_text("Unticked, new files start at 48 kHz, stereo, 24-bit");
         ui.label(
             RichText::new("Saved as FLAC by default (lossless and compressed).")
                 .size(10.5)
@@ -282,12 +317,20 @@ fn new_file_window(ctx: &egui::Context, st: &mut State) {
                 doc.name = name;
                 doc.new_bits = Some(d.bits);
             }
-            st.prefs.new_file = NewFileDefaults {
-                rate: d.rate,
-                channels: d.channels,
-                bits: d.bits,
+            st.prefs.new_file = if d.make_default {
+                NewFileDefaults {
+                    rate: d.rate,
+                    channels: d.channels,
+                    bits: d.bits,
+                    chosen: true,
+                }
+            } else {
+                NewFileDefaults::default()
             };
             st.prefs.save();
+            if d.record_after {
+                st.start_recording();
+            }
         }
         (Some(false), _) | (None, false) => {}
         (None, true) => st.new_file_ui = Some(d),
@@ -332,7 +375,7 @@ fn new_session_window(ctx: &egui::Context, st: &mut State) {
                             d.folder = PathBuf::from(text);
                         }
                         if ui.button("Browse...").clicked() {
-                            if let Some(p) = rfd::FileDialog::new()
+                            if let Some(p) = crate::file_dialog::FileDialog::new()
                                 .set_directory(&d.folder)
                                 .pick_folder()
                             {
@@ -460,7 +503,7 @@ fn create_session(st: &mut State, d: NewSessionDraft) {
 /// The extension new audio from the app is written with: FLAC (lossless
 /// and compressed), or 32-bit float WAV when the audio goes past full
 /// scale, which FLAC's whole numbers would clip.
-pub fn lossless_ext(buf: &af27_core::AudioBuffer) -> &'static str {
+pub fn lossless_ext(buf: &af2_core::AudioBuffer) -> &'static str {
     let over = buf
         .channels
         .iter()
@@ -477,16 +520,16 @@ pub fn lossless_ext(buf: &af27_core::AudioBuffer) -> &'static str {
 /// 16-bit for a 16-bit choice, else 24-bit (FLAC holds no float).
 pub fn write_lossless(
     path: &std::path::Path,
-    buf: &af27_core::AudioBuffer,
+    buf: &af2_core::AudioBuffer,
     bits: u16,
 ) -> Result<(), String> {
-    use af27_io::export::{Container, Options, SampleFormat};
+    use af2_io::export::{Container, Options, SampleFormat};
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     if name.ends_with(".wav") || name.ends_with(".wav.part") {
-        return af27_io::write_wav(path, buf, af27_io::WavFormat::Float32);
+        return af2_io::write_wav(path, buf, af2_io::WavFormat::Float32);
     }
     let opts = Options {
         container: Container::Flac,
@@ -499,7 +542,7 @@ pub fn write_lossless(
         flac_level: 8,
         ..Options::default()
     };
-    af27_io::export::export_buffer(path, buf, &opts, &Default::default()).map(|_| ())
+    af2_io::export::export_buffer(path, buf, &opts, &Default::default()).map(|_| ())
 }
 
 #[cfg(test)]
@@ -508,14 +551,14 @@ mod tests {
     fn recordings_write_as_flac_and_read_back() {
         let dir = std::env::temp_dir().join(format!("af2-flac-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut b = af27_core::AudioBuffer::new(48_000, 2, 4800);
+        let mut b = af2_core::AudioBuffer::new(48_000, 2, 4800);
         for (i, s) in b.channels[0].iter_mut().enumerate() {
             *s = (i as f32 * 0.05).sin() * 0.5;
         }
         for bits in [16u16, 24, 32] {
             let p = dir.join(format!("t{bits}.flac"));
             super::write_lossless(&p, &b, bits).unwrap();
-            let back = af27_io::decode_file(&p).unwrap();
+            let back = af2_io::decode_file(&p).unwrap();
             assert_eq!(back.frames(), 4800);
             assert_eq!(back.num_channels(), 2);
         }
@@ -524,7 +567,7 @@ mod tests {
 
     #[test]
     fn audio_past_full_scale_goes_to_float_wav() {
-        let mut b = af27_core::AudioBuffer::new(48_000, 1, 10);
+        let mut b = af2_core::AudioBuffer::new(48_000, 1, 10);
         assert_eq!(super::lossless_ext(&b), "flac");
         b.channels[0][3] = 1.5;
         assert_eq!(super::lossless_ext(&b), "wav");
@@ -532,7 +575,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("hot.wav");
         super::write_lossless(&p, &b, 24).unwrap();
-        let back = af27_io::decode_file(&p).unwrap();
+        let back = af2_io::decode_file(&p).unwrap();
         assert!(
             (back.channels[0][3] - 1.5).abs() < 1e-6,
             "kept above full scale"
@@ -544,5 +587,22 @@ mod tests {
     fn clean_names_never_empty_or_unsafe() {
         assert_eq!(super::clean_name("  a/b:c "), "a_b_c");
         assert_eq!(super::clean_name("   "), "Untitled Session");
+    }
+}
+
+#[cfg(test)]
+mod defaults_tests {
+    use super::*;
+
+    #[test]
+    fn old_remembered_choices_give_way_to_48k_24_bit() {
+        // What an older copy saved: the last file made, 44.1 kHz 32-bit.
+        let old: NewFileDefaults =
+            serde_json::from_str(r#"{"rate":44100,"channels":2,"bits":32}"#).unwrap();
+        let s = old.starting();
+        assert_eq!((s.rate, s.channels, s.bits), (48_000, 2, 24));
+        // Ticked "Make these my defaults": they stay.
+        let mine = NewFileDefaults { rate: 96_000, channels: 1, bits: 32, chosen: true };
+        assert_eq!(mine.starting().rate, 96_000);
     }
 }

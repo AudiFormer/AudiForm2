@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
-//! The dynamics and mastering units: AudiForm 2's own Compressor,
-//! Limiter, Noise Gate and De-Esser faces, and the Opto Leveler, Tube
-//! Preamp and Vox Strip faces after the lead's Audiform panels (big
-//! numbered dials, a needle meter, lever switches, small dials for the
-//! rest). The Vox Strip follows its Audiform window closely: a heading
-//! with the Low Cut switch, three numbered modules in signal order
-//! (Dynamics, Tone, Effects), each with a power light, a style stepper
-//! with the style's icon, its main controls and a trim, and the Input and
-//! Output dials either side of an output ladder.
+//! The dynamics units: AudiForm 2's own Compressor, Limiter, Noise Gate
+//! and De-Esser faces (kept for the built-in effects that older sessions
+//! use), and the Vox Strip face after the lead's Audiform panel. The Vox
+//! Strip follows its Audiform window closely: a heading with the Low Cut
+//! switch, three numbered modules in signal order (Dynamics, Tone,
+//! Effects), each with a power light, a style stepper with the style's
+//! icon, its main controls and a trim, and the Input and Output dials
+//! either side of an output ladder. (The Opto Leveler, Tube Preamp, Amp
+//! Model and Audiform Limiter faces are in `units.rs`.)
 //!
 //! The needles show the reduction worked out from the rack's input level
 //! and the unit's own curve and timing (or the rack's output level); the
@@ -17,14 +17,12 @@
 
 use std::sync::Arc;
 
-use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke};
+use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke};
 
 use super::layout::{self, GAP, GAP_S, HERO, KNOB, PAD, SIDE};
 use super::parts::{self, comp_gr};
 use super::{Env, Fx};
 use crate::theme::{c, ca, lerp, Theme};
-
-const NUMS: [f64; 6] = [0.0, 20.0, 40.0, 60.0, 80.0, 100.0];
 
 /// The rack's input level in dB while playing.
 fn input_db(env: &Env) -> Option<f64> {
@@ -237,149 +235,6 @@ pub fn deesser(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
     );
 }
 
-/// The Opto Leveler's static reduction (its curve: Peak Reduction lowers
-/// the threshold to 60 dB down; Compress 3:1 with a 12 dB knee, Limit
-/// 20:1 with 3 dB).
-fn opto_gr(fx: &Fx, input: f64) -> f64 {
-    let limit = fx.get("mode").round() as i64 == 1;
-    let thr = -fx.get("peak") * 0.6;
-    if limit {
-        comp_gr(input, thr, 20.0, 3.0)
-    } else {
-        comp_gr(input, thr, 3.0, 12.0)
-    }
-}
-
-/// A two-way lever: `key`'s choice 0 or 1, named on either side.
-fn lever(ui: &mut egui::Ui, fx: &mut Fx, key: &str, a: &str, b: &str) {
-    ui.horizontal(|ui| {
-        let mut on = fx.get(key).round() as i64 == 1;
-        ui.label(RichText::new(a).size(10.5));
-        if crate::widgets::switch(ui, &mut on, b).changed() {
-            fx.set(key, if on { 1.0 } else { 0.0 });
-        }
-    });
-}
-
-pub fn opto(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
-    let target = input_db(env).map_or(0.0, |i| opto_gr(fx, i));
-    let gr = parts::est_gr(ui, env.key.with("gr"), target, 10.0, 300.0);
-    let out_mode = fx.get("meter").round() as i64 == 1;
-    let reading = if out_mode { output_db(env) + 18.0 } else { -gr };
-    let makeup = (fx.get("gain") - 40.0) * 0.5;
-    let th = env.th.clone();
-    parts::faceplate(
-        ui,
-        &th,
-        "Opto Leveler",
-        "optical leveling amplifier",
-        UNIT_W,
-        |ui| {
-            layout::hero(ui, UNIT_W, SIDE, |ui, i| match i {
-                0 => fx.knob_fmt(ui, "gain", HERO, "Gain", &NUMS, &|v| format!("{v:.1}")),
-                1 => {
-                    let snap: Vec<f64> = (0..=60).map(|k| -60.0 + k as f64).collect();
-                    let table: Vec<f64> =
-                        snap.iter().map(|i| i - opto_gr(fx, *i) + makeup).collect();
-                    centre(
-                        ui,
-                        env,
-                        reading,
-                        if out_mode { "OUTPUT" } else { "GAIN REDUCTION" },
-                        &|i| table[((i + 60.0).round() as usize).min(60)],
-                        Some(-fx.get("peak") * 0.6),
-                    );
-                }
-                _ => fx.knob_fmt(ui, "peak", HERO, "Peak Reduction", &NUMS, &|v| {
-                    format!("{v:.1}")
-                }),
-            });
-            ui.add_space(GAP_S);
-            layout::cells(ui, UNIT_W, 2, |ui, i| match i {
-                0 => lever(ui, fx, "mode", "Compress", "Limit"),
-                _ => lever(ui, fx, "meter", "Reduction", "Output"),
-            });
-            ui.add_space(GAP);
-            let keys = ["emphasis", "tube", "mix"];
-            layout::cells(ui, UNIT_W, keys.len(), |ui, i| {
-                fx.knob(ui, keys[i], KNOB, "", &[]);
-            });
-            ui.add_space(GAP_S);
-            layout::note(
-                ui,
-                UNIT_W,
-                RichText::new(
-                    "Turn up Peak Reduction until the needle shows a few dB of leveling, then set Gain for the level you want. Emphasis makes it listen harder to s sounds.",
-                )
-                .size(10.5)
-                .color(c(th.text_dim)),
-            );
-        },
-    );
-}
-
-/// The Tube Preamp's side columns and width: two big dials either side
-/// of the needle.
-const PRE_SIDE: f32 = 112.0;
-const PRE_W: f32 = 4.0 * PRE_SIDE + 256.0;
-
-pub fn preamp(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
-    let reading = output_db(env) + 18.0;
-    let th = env.th.clone();
-    parts::faceplate(
-        ui,
-        &th,
-        "Tube Preamp",
-        "vintage tube preamplifier",
-        PRE_W,
-        |ui| {
-            // In signal order: Input and Drive, the needle with the tone
-            // either side of the level bars, Output and Mix.
-            let s = PRE_SIDE;
-            let cw = PRE_W - 4.0 * s;
-            layout::row(ui, PRE_W, &[s, s, cw, s, s], |ui, i| match i {
-                0 => fx.knob(ui, "input", HERO, "Input", &[-12.0, 0.0, 12.0, 24.0]),
-                1 => fx.knob_fmt(ui, "drive", HERO, "Drive", &NUMS, &|v| format!("{v:.0}")),
-                2 => {
-                    layout::centred(ui, cw, |ui| {
-                        parts::needle(
-                            ui,
-                            &th,
-                            env.key.with("needle"),
-                            reading,
-                            "OUTPUT (0 = -18 dBFS)",
-                            METER_W,
-                        );
-                    });
-                    ui.add_space(GAP_S);
-                    layout::row(ui, cw, &[1.0, 0.55, 0.55, 1.0], |ui, k| match k {
-                        0 => fx.knob(ui, "low", KNOB, "", &[]),
-                        1 => parts::level_bar(ui, env, false, 56.0),
-                        2 => parts::level_bar(ui, env, true, 56.0),
-                        _ => fx.knob(ui, "high", KNOB, "", &[]),
-                    });
-                    ui.add_space(GAP_S);
-                    layout::centred(ui, cw, |ui| fx.toggle(ui, "transformer", "Transformer"));
-                }
-                3 => fx.knob(ui, "output", HERO, "Output", &[-24.0, -12.0, 0.0, 12.0]),
-                _ => {
-                    // Numbered like its neighbours, so it is drawn the same size.
-                    let (lo, hi) = fx.ctl("mix").map_or((0.0, 100.0), |c| (c.min, c.max));
-                    fx.knob(ui, "mix", HERO, "", &[lo, (lo + hi) / 2.0, hi]);
-                }
-            });
-            ui.add_space(GAP_S);
-            layout::note(
-                ui,
-                PRE_W,
-                RichText::new("Drive adds warmth; past halfway it starts to sound overdriven.")
-                    .size(10.5)
-                    .color(c(th.text_dim)),
-            );
-        },
-    );
-}
-
 // ------------------------------------------------------------ Vox Strip
 
 /// A Vox Strip module: its name and its power, style and trim controls.
@@ -451,7 +306,7 @@ const SIBILANCE_DB: f64 = 15.0;
 
 /// The Dynamics module's reduction and de-essing (dB) while playing,
 /// estimated from the rack's input level and the style's own curve and
-/// timing (the same settings `af27_fx`'s Vox Strip uses). The effect
+/// timing (the same settings `af2_fx`'s Vox Strip uses). The effect
 /// reports its real reduction only to a meter the app does not read yet.
 fn vox_meters(ui: &egui::Ui, fx: &Fx, env: &Env) -> (f64, f64) {
     let input = input_db(env).map(|i| i + fx.get("input"));
@@ -930,8 +785,8 @@ fn tone_graph(ui: &mut egui::Ui, fx: &Fx, th: &Theme) {
         .zip(&fx.vals)
         .map(|(c, v)| (c.key.clone(), f64::from(*v)))
         .collect();
-    let curve = af27_fx::params_from(&fx.id, &pairs)
-        .map(|p| af27_fx::effects::vocal::tone_curve(&p, 96))
+    let curve = af2_fx::params_from(&fx.id, &pairs)
+        .map(|p| af2_fx::effects::vocal::tone_curve(&p, 96))
         .unwrap_or_default();
     let p = ui.painter_at(r.expand(1.0));
     let rad = if th.bevel.is_some() { 0.0 } else { 4.0 };

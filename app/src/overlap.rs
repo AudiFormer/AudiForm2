@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Overlapping clips on one track, as the Multitrack edits them.
 //!
 //! A track's clips list is its stacking order: a later clip lies on top
 //! and covers the clips under it (the engine plays them only under the
-//! top clip's fades, see `af27_engine::mix::covers_of`). This module has
+//! top clip's fades, see `af2_engine::mix::covers_of`). This module has
 //! the pure rules the editor applies:
 //!
 //! - [`restack`]: a dragged clip lands on top of the clips it now
@@ -20,7 +20,7 @@
 //!   top, which can still be grabbed low in the lane to trim them.
 //! - [`source_range`]: the part of its file a clip plays.
 
-use af27_core::{Clip, ClipId, Session};
+use af2_core::{Clip, ClipId, Session};
 
 /// A clip's span on the timeline (start, end) in seconds.
 pub fn span(c: &Clip) -> (f64, f64) {
@@ -28,10 +28,10 @@ pub fn span(c: &Clip) -> (f64, f64) {
 }
 
 /// How far clip `c`'s fades let it through at timeline time `t`: 0..1,
-/// on the curve playback uses ([`af27_core::session::fade_shape`], skew
+/// on the curve playback uses ([`af2_core::session::fade_shape`], skew
 /// and bell included); gain and mute are not part of it.
 pub fn fade_level(c: &Clip, t: f64) -> f64 {
-    use af27_core::session::fade_shape;
+    use af2_core::session::fade_shape;
     let local = (t - c.start).clamp(0.0, c.length);
     let mut g = 1.0;
     if c.fade_in > 0.0 && local < c.fade_in {
@@ -410,7 +410,7 @@ pub fn source_range(c: &Clip, media_len: f64) -> (f64, f64) {
 /// over another, and a clip tucked under a longer one with its end
 /// hidden.
 pub fn demo(st: &mut crate::state::State) {
-    use af27_core::AudioBuffer;
+    use af2_core::AudioBuffer;
     fn tone(secs: f64, hz: f64, wobble: f64) -> AudioBuffer {
         let rate = 48_000;
         let n = (secs * rate as f64) as usize;
@@ -525,7 +525,7 @@ mod tests {
         c.props.fade_in_skew = 60.0;
         c.props.fade_out_bell = true;
         c.gain_db = -6.0;
-        let unity = af27_core::time::db_to_gain(c.gain_db) as f64;
+        let unity = af2_core::time::db_to_gain(c.gain_db) as f64;
         for k in 0..40 {
             let t = 2.0 + 4.0 * k as f64 / 40.0;
             let played = c.gain_at(t) as f64 / unity;
@@ -730,7 +730,7 @@ mod tests {
         c.offset = 2.0;
         assert_eq!(source_range(&c, 0.0), (2.0, 6.0));
         // Stretched to twice as long: half as much of the file.
-        c.props.stretch.mode = af27_core::StretchMode::Live;
+        c.props.stretch.mode = af2_core::StretchMode::Live;
         c.props.stretch.ratio = 2.0;
         let r = source_range(&c, 0.0);
         assert!(

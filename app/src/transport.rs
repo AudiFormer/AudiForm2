@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The transport's rules, kept apart from the window so they can be
 //! tested: the Loop / Skip mode and the plan it gives the audio thread,
 //! where Stop leaves the playhead, a new loop taking over while playing,
 //! and the time display formats (the clock, the ruler and typed times).
 
-use af27_core::midi::Tempo;
-use af27_engine::{Plan, Region};
+use af2_core::midi::Tempo;
+use af2_engine::{Plan, Region};
 use serde::{Deserialize, Serialize};
 
 // ------------------------------------------------------------ play mode
@@ -149,15 +149,29 @@ impl Settle {
     }
 }
 
-/// Held Left/Right while playing: every this many seconds playback jumps.
+/// Held Right while playing: every this many seconds playback jumps.
 pub const SCRUB_STEP: f64 = 0.1;
+/// Held Left while playing: longer snippets, since each one plays forward
+/// while the playhead goes back. Short ones sound choppy; long ones lag.
+/// About 150 ms (with the engine's 4 ms fade either side of each jump)
+/// is the middle ground.
+pub const SCRUB_STEP_BACK: f64 = 0.15;
 /// Held Left/Right move the playhead at this many times real time.
 pub const SCRUB_SPEED: f64 = 4.0;
 
-/// The jump to make each [`SCRUB_STEP`] while playing, so playback (which
+/// How often playback jumps while scrubbing in direction `dir`.
+pub fn scrub_step(dir: f64) -> f64 {
+    if dir < 0.0 {
+        SCRUB_STEP_BACK
+    } else {
+        SCRUB_STEP
+    }
+}
+
+/// The jump to make each [`scrub_step`] while playing, so playback (which
 /// moves on by itself) covers ground at [`SCRUB_SPEED`] times real time.
 pub fn scrub_jump(dir: f64) -> f64 {
-    (SCRUB_SPEED * dir - 1.0) * SCRUB_STEP
+    (SCRUB_SPEED * dir - 1.0) * scrub_step(dir)
 }
 
 // ---------------------------------------------------------- time format
@@ -238,7 +252,7 @@ impl TimeCtx {
     pub fn format(&self, secs: f64) -> String {
         let secs = secs.max(0.0);
         match self.format {
-            TimeFormat::MinSec => af27_core::time::format_time(secs),
+            TimeFormat::MinSec => af2_core::time::format_time(secs),
             TimeFormat::Seconds => format!("{secs:.3}"),
             TimeFormat::BarsBeats => self.tempo.format(secs),
             TimeFormat::Samples => format!("{}", (secs * self.rate()).round() as u64),
@@ -539,7 +553,10 @@ mod tests {
     fn held_arrows_cover_four_times_real_time() {
         // Forward: playback's own 0.1 s plus the jump.
         assert!((scrub_jump(1.0) + SCRUB_STEP - 0.4).abs() < 1e-12);
-        assert!((scrub_jump(-1.0) + SCRUB_STEP + 0.4).abs() < 1e-12);
+        // Back: longer snippets, still four times real time overall.
+        let back = scrub_step(-1.0);
+        assert_eq!(back, SCRUB_STEP_BACK);
+        assert!(((scrub_jump(-1.0) + back) / back + 4.0).abs() < 1e-12);
     }
 
     fn ctx(format: TimeFormat) -> TimeCtx {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The space units: the Reverb and Convolution Reverb faceplates and the
 //! Delay faceplate (after the lead's Audiform windows), here driving the
@@ -15,7 +15,7 @@
 //! carrying the settings both have (`to_impulse`, `from_impulse`).
 //!
 //! On a 3D Space session or a surround file these effects run across the
-//! speaker bed (see `af27_dsp::wide`): the reverbs fill the room, the
+//! speaker bed (see `af2_dsp::wide`): the reverbs fill the room, the
 //! echo repeats on each speaker pair; the displays say so.
 
 use std::sync::Arc;
@@ -121,21 +121,45 @@ type Group<'a> = (&'a str, &'a [(&'a str, &'a str)]);
 
 /// The Reverb window's tabs: the made spaces, then the recorded one
 /// (Impulse Response turns the slot into the Convolution Reverb).
-pub(super) const TABS: [&str; 6] = [
+pub(super) const TABS: [&str; 7] = [
     "Room",
     "Hall",
     "Plate",
     "Spring",
     "Tape",
     "Impulse Response",
+    "Studio",
 ];
-const TAB_TIPS: [&str; 6] = [
+/// The order the tabs are shown in: Studio first, the recorded space last.
+const TAB_ORDER: [usize; 7] = [STUDIO_TAB, 0, 1, 2, 3, 4, IMPULSE];
+/// The Studio tab (its kind is `af2_fx::effects::verb::STUDIO`).
+const STUDIO_TAB: usize = 6;
+
+/// The tab a Reverb kind is shown on.
+pub(super) fn tab_of(kind: usize) -> usize {
+    if kind == af2_fx::effects::verb::STUDIO {
+        STUDIO_TAB
+    } else {
+        kind.min(4)
+    }
+}
+
+/// The Reverb kind a made-space tab stands for.
+fn kind_of(tab: usize) -> usize {
+    if tab == STUDIO_TAB {
+        af2_fx::effects::verb::STUDIO
+    } else {
+        tab
+    }
+}
+const TAB_TIPS: [&str; 7] = [
     "A small room: strong early reflections and a short, natural tail",
     "A large hall: slow, soft and wide, with a long build",
     "A plate: no reflections, a dense, bright wash",
     "A spring: short and boingy, dark at both ends",
     "A ring of tape echoes that blur into a tail, with wow and saturation",
     "A recorded space: load any audio file of a room's, hall's or plate's echo",
+    "A studio: a dense, even room that grows and softens with its size, with early reflections only when asked",
 ];
 /// The Impulse Response tab.
 pub(super) const IMPULSE: usize = 5;
@@ -143,15 +167,15 @@ pub const REVERB_ID: &str = "af.reverb";
 pub const IMPULSE_ID: &str = "af.convolution_reverb";
 
 /// A kind's faceplate: its face (top and bottom), its ink and its glow.
-struct Look {
-    face: Rgb,
-    face2: Rgb,
-    ink: Rgb,
-    glow: Rgb,
+pub(super) struct Look {
+    pub(super) face: Rgb,
+    pub(super) face2: Rgb,
+    pub(super) ink: Rgb,
+    pub(super) glow: Rgb,
 }
 
-/// Room, Hall, Plate, Spring, Tape, then Impulse Response.
-const LOOKS: [Look; 6] = [
+/// Room, Hall, Plate, Spring, Tape, Impulse Response, then Studio.
+const LOOKS: [Look; 7] = [
     Look {
         face: [0x32, 0x26, 0x1c],
         face2: [0x1c, 0x14, 0x0e],
@@ -188,6 +212,13 @@ const LOOKS: [Look; 6] = [
         ink: [0xec, 0xe4, 0xff],
         glow: [0xb4, 0x8c, 0xff],
     },
+    // Studio: graphite with a cool teal light.
+    Look {
+        face: [0x1e, 0x26, 0x2a],
+        face2: [0x10, 0x15, 0x18],
+        ink: [0xe0, 0xf0, 0xf2],
+        glow: [0x5c, 0xd0, 0xc8],
+    },
 ];
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
@@ -199,7 +230,7 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 /// face, ink and light are mostly the kind's; on a light theme the face
 /// takes a tint of the glow and the light is the glow darkened enough to
 /// read on it. Borders, fonts and the theme's shapes stay its own.
-fn tinted(th: &Theme, look: &Look) -> Theme {
+pub(super) fn tinted(th: &Theme, look: &Look) -> Theme {
     let mut t = th.clone();
     if th.dark {
         t.panel_raised = mix(th.panel_raised, look.face, 0.8);
@@ -224,7 +255,7 @@ fn tinted(th: &Theme, look: &Look) -> Theme {
 
 /// Draws `add` with `th` as the theme the widgets read (the knobs and
 /// value boxes take the kind's light), then puts the theme back.
-fn with_theme(ui: &mut egui::Ui, th: &Theme, add: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn with_theme(ui: &mut egui::Ui, th: &Theme, add: impl FnOnce(&mut egui::Ui)) {
     let was = crate::widgets::theme(ui);
     crate::widgets::set_theme(ui.ctx(), th);
     add(ui);
@@ -233,7 +264,7 @@ fn with_theme(ui: &mut egui::Ui, th: &Theme, add: impl FnOnce(&mut egui::Ui)) {
 
 /// The kind's faceplate: its face blended from top to bottom, lit from
 /// the top in its glow, `w` wide inside its margin.
-fn plate(ui: &mut egui::Ui, th: &Theme, w: f32, add: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn plate(ui: &mut egui::Ui, th: &Theme, w: f32, add: impl FnOnce(&mut egui::Ui)) {
     // A slot taken before the contents, so the plate lands under them.
     let back = ui.painter().add(Shape::Noop);
     let rect = egui::Frame::none()
@@ -305,7 +336,7 @@ fn key_w(ui: &egui::Ui, label: &str) -> f32 {
 }
 
 /// A faceplate key: a dark switch, lit in the kind's glow when on.
-fn key(ui: &mut egui::Ui, th: &Theme, label: &str, lit: bool, enabled: bool) -> egui::Response {
+pub(super) fn key(ui: &mut egui::Ui, th: &Theme, label: &str, lit: bool, enabled: bool) -> egui::Response {
     let w = key_w(ui, label);
     let sense = if enabled {
         Sense::click()
@@ -397,7 +428,8 @@ fn key(ui: &mut egui::Ui, th: &Theme, label: &str, lit: bool, enabled: bool) -> 
 /// clicked (never the lit one).
 fn kind_tabs(ui: &mut egui::Ui, th: &Theme, lit: usize) -> Option<usize> {
     let mut picked = None;
-    for (i, name) in TABS.iter().enumerate() {
+    for i in TAB_ORDER {
+        let name = TABS[i];
         if key(ui, th, name, i == lit, true)
             .on_hover_text(TAB_TIPS[i])
             .clicked()
@@ -465,8 +497,9 @@ pub fn from_impulse(get: impl Fn(&str) -> f64, kind: usize) -> Vec<(String, f64)
 const VERB_W: f32 = hero_w(256.0);
 
 pub fn verb(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
-    let kind = (fx.get("kind").round().max(0.0) as usize).min(4);
-    let th = tinted(&env.th, &LOOKS[kind]);
+    let kind = (fx.get("kind").round().max(0.0) as usize).min(af2_fx::effects::verb::STUDIO);
+    let tab = tab_of(kind);
+    let th = tinted(&env.th, &LOOKS[tab]);
     // Plates and springs have no walls to bounce off.
     let no_early = kind == 2 || kind == 3;
     let w = VERB_W.max(tabs_w(ui));
@@ -475,17 +508,41 @@ pub fn verb(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
             let picked = ui
                 .horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = TAB_GAP;
-                    kind_tabs(ui, &th, kind)
+                    kind_tabs(ui, &th, tab)
                 })
                 .inner;
             match picked {
                 Some(IMPULSE) => {
                     fx.new_effect = Some((IMPULSE_ID.into(), to_impulse(|k| fx.get(k))));
                 }
-                Some(k) => fx.set("kind", k as f64),
+                Some(t) => {
+                    for (k, v) in af2_fx::effects::verb::switch_kind(kind, kind_of(t), |k| fx.get(k)) {
+                        fx.set(k, v);
+                    }
+                }
                 None => {}
             }
             ui.add_space(GAP);
+            if kind == af2_fx::effects::verb::STUDIO {
+                // Studio: its ten long sliders, in the kind's light.
+                let studio_env = Env {
+                    th: th.clone(),
+                    levels: env.levels,
+                    playing: env.playing,
+                    spatial: env.spatial,
+                    rate: env.rate,
+                    tempo: env.tempo,
+                    key: env.key,
+                };
+                super::studio::panel(ui, fx, &studio_env);
+                spatial_note(
+                    ui,
+                    env,
+                    w,
+                    "On the speaker bed: the tail spreads round the whole room (the LFE stays dry).",
+                );
+                return;
+            }
             let disp = w - 2.0 * SIDE - 2.0 * GAP;
             layout::hero(ui, w, SIDE, |ui, i| match i {
                 0 => fx.knob(ui, "size", HERO, "Size", &[0.0, 50.0, 100.0]),
@@ -505,7 +562,7 @@ pub fn verb(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
                         vec2(disp, 128.0),
                         c(th.accent),
                         &secs(decay),
-                        &format!("{} · pre-delay {}", TABS[kind].to_lowercase(), secs(pre)),
+                        &format!("{} · pre-delay {}", TABS[tab].to_lowercase(), secs(pre)),
                         |p, r, light| {
                             let span = (pre + decay * 1.15).max(300.0);
                             let x = |ms: f64| r.left() + r.width() * (ms / span) as f32;
@@ -611,7 +668,7 @@ struct IrShape {
 /// The slot's response file, read once per file (and kept for the
 /// window), or why it could not be read.
 fn ir_shape(ui: &egui::Ui, data: Option<&str>, rate: u32) -> Option<Result<Arc<IrShape>, String>> {
-    let d: af27_fx::effects::reverb::ReverbData =
+    let d: af2_fx::effects::reverb::ReverbData =
         serde_json::from_str(data.filter(|t| !t.is_empty())?).ok()?;
     let id = egui::Id::new(("ir-shape", d.path.to_string_lossy().to_string(), rate));
     if let Some(s) = ui
@@ -620,7 +677,7 @@ fn ir_shape(ui: &egui::Ui, data: Option<&str>, rate: u32) -> Option<Result<Arc<I
     {
         return Some((*s).clone());
     }
-    let res = af27_fx::effects::reverb::read(&d.path, rate).map(|r| {
+    let res = af2_fx::effects::reverb::read(&d.path, rate).map(|r| {
         let frames = r.channels.first().map_or(0, Vec::len);
         let n = 240;
         let per = (frames / n).max(1);
@@ -706,21 +763,21 @@ pub fn convolution(ui: &mut egui::Ui, fx: &mut Fx, env: &Env) {
                 });
             }
             if let Some(k) = picked {
-                fx.new_effect = Some((REVERB_ID.into(), from_impulse(|k| fx.get(k), k)));
+                fx.new_effect = Some((REVERB_ID.into(), from_impulse(|k| fx.get(k), kind_of(k))));
             }
             if pick_file {
-                if let Some(path) = rfd::FileDialog::new()
+                if let Some(path) = crate::file_dialog::FileDialog::new()
                     .add_filter(
                         "Audio",
                         &["wav", "flac", "aif", "aiff", "mp3", "ogg", "m4a"],
                     )
                     .pick_file()
                 {
-                    af27_fx::effects::reverb::forget(&path);
+                    af2_fx::effects::reverb::forget(&path);
                     let name = path
                         .file_name()
                         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                    let d = af27_fx::effects::reverb::ReverbData { path, name };
+                    let d = af2_fx::effects::reverb::ReverbData { path, name };
                     if let Ok(t) = serde_json::to_string(&d) {
                         fx.new_data = Some(Some(t));
                     }
@@ -993,6 +1050,19 @@ mod tests {
     fn readouts() {
         assert_eq!(super::secs(350.0), "350 ms");
         assert_eq!(super::secs(1800.0), "1.80 s");
+    }
+
+    #[test]
+    fn studio_is_the_first_tab_and_every_kind_has_its_own() {
+        use af2_fx::effects::verb::{KINDS, STUDIO};
+        assert_eq!(super::TABS[super::TAB_ORDER[0]], "Studio");
+        assert_eq!(*super::TAB_ORDER.last().unwrap(), super::IMPULSE);
+        for (kind, name) in KINDS.iter().enumerate() {
+            let tab = super::tab_of(kind);
+            assert_eq!(super::TABS[tab], *name);
+            assert_eq!(super::kind_of(tab), kind);
+        }
+        assert_eq!(super::kind_of(super::tab_of(STUDIO)), STUDIO);
     }
 
     #[test]

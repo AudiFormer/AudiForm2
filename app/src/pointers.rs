@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Theme mouse pointers: Audiform's glass, Phosphor pixel and Mall Pastel
 //! pointers (see `assets/pointers/README.md`).

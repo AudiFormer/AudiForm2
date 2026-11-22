@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Loudness panel: a live meter on what is playing (after the master
 //! fader): momentary, short-term and integrated loudness, loudness range
 //! and true peak, read against a delivery target, with the last minute of
 //! short-term loudness drawn as a line.
 
-use af27_dsp::loudness::LiveLoudness;
+use af2_dsp::loudness::LiveLoudness;
 use egui::{pos2, vec2, RichText, Stroke};
 
 use crate::state::State;
@@ -39,7 +39,7 @@ impl Default for Meter {
     fn default() -> Self {
         Self {
             live: LiveLoudness::new(48_000),
-            pos: af27_engine::scope::written(),
+            pos: af2_engine::scope::written(),
             target: 0,
             history: Vec::new(),
             last_step: 0,
@@ -50,12 +50,12 @@ impl Default for Meter {
 impl Meter {
     /// Takes in what played since the last frame.
     pub fn poll(&mut self, playing: bool) {
-        let (frames, pos) = af27_engine::scope::since(self.pos);
+        let (frames, pos) = af2_engine::scope::since(self.pos);
         self.pos = pos;
         if !playing || frames.is_empty() {
             return;
         }
-        let rate = af27_engine::scope::rate();
+        let rate = af2_engine::scope::rate();
         if rate != self.live.rate() {
             self.live = LiveLoudness::new(rate);
             self.history.clear();
@@ -148,7 +148,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
                 if live.max_true_peak > 0.0 { format!("{tp:.1} dBTP") } else { "—".into() },
                 tp_col,
             );
-            row("Measured", af27_core::time::format_time(live.measured_secs()), c(th.text_dim));
+            row("Measured", af2_core::time::format_time(live.measured_secs()), c(th.text_dim));
         });
     });
 

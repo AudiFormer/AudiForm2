@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! AudiForm 2's own slider, in place of egui's generic track-and-circle.
 //! Same builder calls as `egui::Slider` for what the app uses (`text`,

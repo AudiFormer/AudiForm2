@@ -119,35 +119,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "af27-core"
-version = "2.0.3"
+name = "af2-core"
+version = "2.1.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "af27-dsp"
-version = "2.0.3"
+name = "af2-dsp"
+version = "2.1.0"
 dependencies = [
- "af27-core",
+ "af2-core",
  "rustfft",
 ]
 
 [[package]]
-name = "af27-dts"
-version = "2.0.3"
+name = "af2-dts"
+version = "2.1.0"
 dependencies = [
  "hound",
 ]
 
 [[package]]
-name = "af27-engine"
-version = "2.0.3"
+name = "af2-engine"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
- "af27-space",
+ "af2-core",
+ "af2-dsp",
+ "af2-space",
  "asio-sys",
  "cpal",
  "rtrb",
@@ -158,12 +158,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "af27-fx"
-version = "2.0.3"
+name = "af2-fx"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
- "af27-io",
+ "af2-core",
+ "af2-dsp",
+ "af2-io",
  "hound",
  "realfft",
  "serde",
@@ -171,12 +171,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "af27-interop"
-version = "2.0.3"
+name = "af2-interop"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
- "af27-fx",
+ "af2-core",
+ "af2-dsp",
+ "af2-fx",
  "hound",
  "midly",
  "roxmltree",
@@ -185,13 +185,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "af27-io"
-version = "2.0.3"
+name = "af2-io"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
- "af27-dts",
- "af27-osdecode",
+ "af2-core",
+ "af2-dsp",
+ "af2-dts",
+ "af2-osdecode",
  "flacenc",
  "hound",
  "id3",
@@ -204,19 +204,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "af27-osdecode"
-version = "2.0.3"
+name = "af2-osdecode"
+version = "2.1.0"
 dependencies = [
  "windows 0.58.0",
 ]
 
 [[package]]
-name = "af27-separation"
-version = "2.0.3"
+name = "af2-separation"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
- "af27-io",
+ "af2-core",
+ "af2-dsp",
+ "af2-io",
  "audiform-separate-client",
  "serde",
  "serde_json",
@@ -224,21 +224,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "af27-space"
-version = "2.0.3"
+name = "af2-space"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
+ "af2-core",
+ "af2-dsp",
  "realfft",
 ]
 
 [[package]]
-name = "af27-vst3"
-version = "2.0.3"
+name = "af2-vst3"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
- "af27-engine",
+ "af2-core",
+ "af2-dsp",
+ "af2-engine",
  "rtrb",
  "serde",
  "serde_json",
@@ -247,8 +247,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "af27-vst3-testplug"
-version = "2.0.3"
+name = "af2-vst3-testplug"
+version = "2.1.0"
 dependencies = [
  "vst3",
 ]
@@ -645,30 +645,34 @@ dependencies = [
 
 [[package]]
 name = "audiform2"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
- "af27-core",
- "af27-dsp",
- "af27-engine",
- "af27-fx",
- "af27-interop",
- "af27-io",
- "af27-separation",
- "af27-space",
- "af27-vst3",
+ "af2-core",
+ "af2-dsp",
+ "af2-engine",
+ "af2-fx",
+ "af2-interop",
+ "af2-io",
+ "af2-separation",
+ "af2-space",
+ "af2-vst3",
+ "ashpd",
  "eframe",
  "egui",
  "egui_dock",
  "embed-resource",
+ "futures-util",
  "image",
  "midir",
  "naga",
+ "pollster 0.4.0",
  "raw-window-handle",
  "rfd",
  "rtrb",
  "serde",
  "serde_json",
  "sha2",
+ "winreg",
 ]
 
 [[package]]

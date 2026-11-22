@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Multitrack's track headers and the strip above them.
 //!
@@ -13,10 +13,10 @@
 use egui::{pos2, vec2, Align2, FontId, Rect, Response, RichText, Rounding, Sense, Stroke};
 use std::ops::RangeInclusive;
 
-use af27_core::automation::{AutomationMode, LaneTarget};
-use af27_core::midi::{ClickSound, Subdivide};
-use af27_core::{Send, TrackId, TrackKind};
-use af27_engine::MASTER;
+use af2_core::automation::{AutomationMode, LaneTarget};
+use af2_core::midi::{ClickSound, Subdivide};
+use af2_core::{Send, TrackId, TrackKind};
+use af2_engine::MASTER;
 
 use crate::state::State;
 use crate::theme::{c, ca, lerp, Theme};
@@ -138,8 +138,67 @@ pub fn dial(
 
 /// A little square key with a letter (M, S, R): outlined, filled with
 /// its colour when on, as in the leading editor's track headers.
+/// Draws the symbol for a toggle button's label in `r`, in `col`: a
+/// speaker struck out for Mute ("M"), headphones for Solo ("S"), a dot for
+/// record arm ("R"), one ring for Mono ("Mo"/"Mono") and a slashed ring
+/// for polarity ("Ø"). False for any other label (drawn as text).
+pub fn button_symbol(p: &egui::Painter, r: Rect, label: &str, col: egui::Color32) -> bool {
+    let s = r.height().min(r.width()) * 0.7;
+    let m = r.center();
+    let at = |x: f32, y: f32| pos2(m.x + x * s, m.y + y * s);
+    let line = Stroke::new((s * 0.11).max(1.2), col);
+    match label {
+        "M" => {
+            // A speaker with a cross beside it.
+            p.rect_filled(
+                Rect::from_min_max(at(-0.46, -0.16), at(-0.24, 0.16)),
+                Rounding::ZERO,
+                col,
+            );
+            p.add(egui::Shape::convex_polygon(
+                vec![at(-0.24, -0.16), at(0.02, -0.4), at(0.02, 0.4), at(-0.24, 0.16)],
+                col,
+                Stroke::NONE,
+            ));
+            p.line_segment([at(0.17, -0.17), at(0.47, 0.17)], line);
+            p.line_segment([at(0.17, 0.17), at(0.47, -0.17)], line);
+        }
+        "S" => {
+            // Headphones: the band and two ear cups.
+            let pts: Vec<_> = (0..=16)
+                .map(|k| {
+                    let a = std::f32::consts::PI * (1.0 + k as f32 / 16.0);
+                    at(0.36 * a.cos(), 0.1 + 0.42 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, line));
+            for x in [-0.5, 0.22] {
+                p.rect_filled(
+                    Rect::from_min_max(at(x, 0.02), at(x + 0.28, 0.44)),
+                    Rounding::same(s * 0.08),
+                    col,
+                );
+            }
+        }
+        "R" => {
+            p.circle_filled(m, s * 0.3, col);
+        }
+        "Mo" | "Mono" => {
+            // One ring (stereo would be two).
+            p.circle_stroke(m, s * 0.3, line);
+            p.circle_filled(m, s * 0.08, col);
+        }
+        "Ø" => {
+            p.circle_stroke(m, s * 0.3, line);
+            p.line_segment([at(-0.36, 0.36), at(0.36, -0.36)], line);
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn letter(ui: &mut egui::Ui, on: bool, label: &str, col: [u8; 3], tip: &str, th: &Theme) -> bool {
-    let w = if label.chars().count() > 1 {
+    let w = if label.chars().count() > 1 && !matches!(label, "Mono" | "Mo") {
         22.0
     } else {
         17.0
@@ -169,20 +228,197 @@ fn letter(ui: &mut egui::Ui, on: bool, label: &str, col: [u8; 3], tip: &str, th:
             ),
         );
     }
-    p.text(
-        r.center(),
-        Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(10.0),
-        if on {
-            c(th.background)
-        } else if hot {
-            c(th.text)
-        } else {
-            c(th.text_dim)
-        },
-    );
+    let ink = if on {
+        c(th.background)
+    } else if hot {
+        c(th.text)
+    } else {
+        c(th.text_dim)
+    };
+    if !button_symbol(p, r, label, ink) {
+        p.text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(10.0), ink);
+    }
     resp.on_hover_text(tip).clicked()
+}
+
+/// The pre-render button on a track's header: a little render icon,
+/// outlined while off; filling with amber as the render goes; green with a
+/// tick once the rendered track is what plays. Any change to the track
+/// takes the tick away and the render runs again.
+fn prerender_key(
+    ui: &mut egui::Ui,
+    status: Option<crate::prerender::Status>,
+    progress: Option<f32>,
+    th: &Theme,
+) -> bool {
+    use crate::prerender::Status;
+    let (r, resp) = ui.allocate_exact_size(vec2(20.0, 16.0), Sense::click());
+    let p = ui.painter();
+    let hot = resp.hovered();
+    let rgb = crate::prerender::status_rgb(status).unwrap_or(th.accent);
+    let round = if th.bevel.is_some() { Rounding::ZERO } else { Rounding::same(2.0) };
+    if th.bevel.is_some() {
+        p.rect_filled(r, 0.0, c(th.panel_raised));
+        crate::skin::bevel(p, r, th, status == Some(Status::Ready));
+    } else {
+        p.rect_filled(r, round, ca(th.background, 140));
+    }
+    let ink = match status {
+        Some(Status::Ready) => {
+            p.rect_filled(r, round, c(rgb));
+            c(th.background)
+        }
+        Some(Status::Rendering) => {
+            // Fills left to right as the render goes.
+            let f = progress.unwrap_or(0.0).clamp(0.0, 1.0);
+            let mut fill = r;
+            fill.set_right(r.left() + r.width() * f);
+            p.rect_filled(fill, round, ca(rgb, 170));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+            if hot { c(th.text) } else { c(rgb) }
+        }
+        Some(Status::Waiting) => c(rgb),
+        None if hot => c(th.text),
+        None => c(th.text_dim),
+    };
+    if th.bevel.is_none() {
+        let edge = match status {
+            Some(_) => c(rgb),
+            None if hot => c(th.text),
+            None => ca(th.text_dim, 150),
+        };
+        p.rect_stroke(r, round, Stroke::new(1.0_f32, edge));
+    }
+    if status == Some(Status::Ready) {
+        // A tick.
+        let a = pos2(r.left() + 5.0, r.center().y);
+        let b = pos2(r.left() + 8.5, r.bottom() - 4.0);
+        let e = pos2(r.right() - 5.0, r.top() + 4.0);
+        p.line_segment([a, b], Stroke::new(1.8_f32, ink));
+        p.line_segment([b, e], Stroke::new(1.8_f32, ink));
+    } else {
+        // A wave going into a block: the track rendered to a file.
+        let y = r.center().y;
+        let x0 = r.left() + 3.5;
+        let pts: Vec<egui::Pos2> = (0..=5)
+            .map(|k| pos2(x0 + k as f32 * 1.5, y + if k % 2 == 0 { -3.0 } else { 3.0 }))
+            .collect();
+        p.add(egui::Shape::line(pts, Stroke::new(1.2_f32, ink)));
+        let blk = Rect::from_min_max(pos2(r.right() - 8.0, y - 4.0), pos2(r.right() - 3.5, y + 4.0));
+        p.rect_stroke(blk, 1.0, Stroke::new(1.2_f32, ink));
+    }
+    resp.on_hover_text(prerender_tip(status, progress)).clicked()
+}
+
+/// The pre-render button's tooltip, in its state.
+fn prerender_tip(status: Option<crate::prerender::Status>, progress: Option<f32>) -> String {
+    use crate::prerender::Status;
+    match (status, progress) {
+        (Some(Status::Rendering), Some(f)) => format!(
+            "Pre-render: rendering, {:.0}% done. The live track plays until it is ready. \
+             Click to stop pre-rendering.",
+            f * 100.0
+        ),
+        (Some(s), _) => format!("{} Click to stop pre-rendering.", s.words()),
+        (None, _) => "Pre-render: render this track's clips and effects ahead, so heavy plug-ins \
+                      rest during playback. Renders again after any change."
+            .to_string(),
+    }
+}
+
+/// The input monitoring button: a dot with sound waves either side. Lit
+/// when the input is heard; outlined in the same colour when it is on
+/// but waits for the track to be armed.
+fn monitor_key(ui: &mut egui::Ui, on: bool, armed: bool, th: &Theme) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(17.0, 16.0), Sense::click());
+    let p = ui.painter();
+    let hot = resp.hovered();
+    let col = th.meter_low;
+    let lit = on && armed;
+    if th.bevel.is_some() {
+        p.rect_filled(r, 0.0, if lit { c(col) } else { c(th.panel_raised) });
+        crate::skin::bevel(p, r, th, lit);
+    } else {
+        p.rect_filled(
+            r,
+            Rounding::same(2.0),
+            if lit { c(col) } else { ca(th.background, 140) },
+        );
+    }
+    let edge = if on && !armed {
+        Stroke::new(1.5_f32, c(col))
+    } else if hot {
+        Stroke::new(1.0_f32, c(th.text))
+    } else {
+        Stroke::new(1.0_f32, ca(th.text_dim, 150))
+    };
+    if th.bevel.is_none() || (on && !armed) {
+        p.rect_stroke(r, Rounding::same(2.0), edge);
+    }
+    let ink = if lit {
+        c(th.background)
+    } else if on {
+        c(col)
+    } else if hot {
+        c(th.text)
+    } else {
+        c(th.text_dim)
+    };
+    let m = r.center();
+    p.circle_filled(m, 1.6, ink);
+    let arc = |rad: f32, side: f32| -> Vec<egui::Pos2> {
+        (0..=6)
+            .map(|k| {
+                let a = (k as f32 / 6.0 - 0.5) * 1.6;
+                pos2(m.x + side * rad * a.cos(), m.y + rad * a.sin())
+            })
+            .collect()
+    };
+    for side in [-1.0, 1.0] {
+        p.add(egui::Shape::line(arc(3.6, side), Stroke::new(1.2_f32, ink)));
+        p.add(egui::Shape::line(arc(6.2, side), Stroke::new(1.2_f32, ink)));
+    }
+    let tip = match (on, armed) {
+        (false, _) => {
+            "Monitor input: off. Click to hear this track's input live through its effects, fader and pan while it is armed (R). Recordings stay dry. Use headphones: speakers feed back into the microphone. (Ctrl+Shift: every audio track)"
+        }
+        (true, true) => "Monitor input: on, heard through the track's effects. Click to turn it off.",
+        (true, false) => "Monitor input: on, heard once the track is armed (R). Click to turn it off.",
+    };
+    resp.on_hover_text(tip).clicked()
+}
+
+/// A click on a track's monitor button (Ctrl+Shift: every audio track).
+/// Turning it on warns once about speakers feeding back.
+fn click_monitor(ui: &egui::Ui, st: &mut State, ti: usize, mods: egui::Modifiers) {
+    let Some(t) = st.session.tracks.get(ti) else {
+        return;
+    };
+    let on = !t.monitor;
+    let before = st.session.clone();
+    if mods.command && mods.shift {
+        for t in st
+            .session
+            .tracks
+            .iter_mut()
+            .filter(|t| t.kind == TrackKind::Audio)
+        {
+            t.monitor = on;
+        }
+    } else {
+        st.session.tracks[ti].monitor = on;
+    }
+    st.commit_live(if on { "Monitor Input On" } else { "Monitor Input Off" }, before);
+    let warned = egui::Id::new("monitor-feedback-warned");
+    if on && !ui.ctx().data(|d| d.get_temp::<bool>(warned).unwrap_or(false)) {
+        ui.ctx().data_mut(|d| d.insert_temp(warned, true));
+        st.toast(
+            "Monitoring plays the input straight back out: use headphones, and keep them away \
+             from the microphone (it can still howl). If it feeds back, monitoring turns \
+             itself off."
+                .to_string(),
+        );
+    }
 }
 
 /// Small drawn icons for the header rows.
@@ -569,16 +805,23 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                 },
                 &th,
             );
+            let pre = st.prerender_status(id);
+            let pre_done = st.prerender_progress(id);
             let tr = &mut st.session.tracks[ti];
+            // The name gives way to the buttons in a narrow header.
+            let name_w = (ui.available_width() - 104.0).clamp(40.0, 86.0);
             let r = ui.add(
                 egui::TextEdit::singleline(&mut tr.name)
-                    .desired_width(86.0)
+                    .desired_width(name_w)
                     .frame(false)
                     .font(egui::TextStyle::Body),
             );
             structural |= r.lost_focus() && before.tracks[ti].name != tr.name;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                if kind == TrackKind::Audio && monitor_key(ui, tr.monitor, tr.armed, &th) {
+                    clicked = Some('I');
+                }
                 if kind != TrackKind::Bus
                     && letter(
                         ui,
@@ -610,6 +853,11 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
                     &th,
                 ) {
                     clicked = Some('M');
+                }
+                // Pre-render (not on buses: they mix other tracks live).
+                if kind != TrackKind::Bus && prerender_key(ui, pre, pre_done, &th) {
+                    tr.prerender = !tr.prerender;
+                    structural = true;
                 }
             });
         });
@@ -701,6 +949,7 @@ pub fn header(ui: &mut egui::Ui, st: &mut State, ti: usize, rect: Rect) {
         Some('S') => st.click_solo(ti, mods),
         Some('M') => st.click_mute(ti, mods),
         Some('R') => st.click_arm(ti, mods),
+        Some('I') => click_monitor(ui, st, ti, mods),
         _ => {}
     }
     if structural {
@@ -714,7 +963,6 @@ fn strip_options_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        let is_bus = st.session.tracks[ti].kind == TrackKind::Bus;
         let tr = &mut st.session.tracks[ti];
         if letter(
             ui,
@@ -727,7 +975,7 @@ fn strip_options_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -
             tr.mono = !tr.mono;
             changed = true;
         }
-        let _ = is_bus;
+        // Pre-render has its own button on the header's top row.
         let mode = tr.automation;
         let id = tr.id;
         egui::ComboBox::from_id_salt(("auto-mode", id))
@@ -814,7 +1062,7 @@ fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
     let mut builtin = false;
     let mut font = false;
     let mut picked: Option<String> = None;
-    let mut preset: Option<af27_engine::soundfont::Preset> = None;
+    let mut preset: Option<af2_engine::soundfont::Preset> = None;
     let mut settings = false;
     let mut restart = false;
     let popup = egui::Id::new(("instrument-presets", ti));
@@ -844,12 +1092,12 @@ fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
                 egui::PopupCloseBehavior::CloseOnClickOutside,
                 |ui| {
                     ui.set_min_width(220.0);
-                    match af27_engine::soundfont::load(&f.path) {
+                    match af2_engine::soundfont::load(&f.path) {
                         Ok(loaded) => {
                             egui::ScrollArea::vertical()
                                 .max_height(300.0)
                                 .show(ui, |ui| {
-                                    for p in af27_engine::soundfont::presets(&loaded) {
+                                    for p in af2_engine::soundfont::presets(&loaded) {
                                         let on = p.bank == f.bank && p.program == f.program;
                                         let label =
                                             format!("{:03}:{:03} {}", p.bank, p.program, p.name);
@@ -919,7 +1167,7 @@ fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
         match (&plug, &sf) {
             (Some(_), _) => crate::instruments::open_editor(st, ti),
             (None, Some(f)) => {
-                if af27_engine::soundfont::load(&f.path).is_ok() {
+                if af2_engine::soundfont::load(&f.path).is_ok() {
                     ui.memory_mut(|m| m.toggle_popup(popup));
                 } else {
                     font = true;
@@ -998,7 +1246,7 @@ fn midi_input_pick(ui: &mut egui::Ui, st: &mut State, id: TrackId) {
     let mut pick: Option<Option<String>> = None;
     egui::ComboBox::from_id_salt(("midi-in", id))
         .selected_text(RichText::new(shown).size(11.0))
-        .width(150.0)
+        .width((ui.available_width() - 6.0).clamp(70.0, 420.0))
         .show_ui(ui, |ui| {
             if ui
                 .selectable_label(cur.is_none(), "All MIDI inputs")
@@ -1047,7 +1295,7 @@ fn output_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -> bool 
         head_icon(ui, HeadIcon::Out, th);
         egui::ComboBox::from_id_salt(("track-out", me))
             .selected_text(RichText::new(shown).size(11.0))
-            .width(150.0)
+            .width((ui.available_width() - 6.0).clamp(70.0, 420.0))
             .show_ui(ui, |ui| {
                 if ui.selectable_label(cur.is_none(), "Master").clicked() {
                     pick = Some(None);
@@ -1249,7 +1497,7 @@ fn key_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -> bool {
                 .on_hover_text("Sidechain key");
             egui::ComboBox::from_id_salt(("key-in", me, i))
                 .selected_text(RichText::new(format!("{name}: {shown}")).size(10.5))
-                .width(160.0)
+                .width((ui.available_width() - 6.0).clamp(70.0, 420.0))
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(cur.is_none(), "Own input").clicked() {
                         pick = Some(None);
@@ -1373,7 +1621,7 @@ fn rack_rows(ui: &mut egui::Ui, st: &mut State, ti: usize, h: f32, th: &Theme) {
                 .size(10.0)
                 .color(c(th.text_dim)),
         );
-    } else if n < af27_core::session::CHAIN_SLOTS {
+    } else if n < af2_core::session::CHAIN_SLOTS {
         ui.menu_button(
             RichText::new("+ Add effect")
                 .size(10.5)
@@ -1463,20 +1711,12 @@ pub fn master_header(ui: &mut egui::Ui, st: &mut State, rect: Rect) {
                 changed = true;
             }
             let mono = st.session.master_mono;
-            if ui
-                .add(egui::Button::new(RichText::new("Mono").size(10.0)).selected(mono))
-                .on_hover_text("Sum the master to mono")
-                .clicked()
-            {
+            if letter(ui, mono, "Mono", th.accent, "Mono: sum the master to mono", &th) {
                 st.session.master_mono = !mono;
                 changed = true;
             }
             let inv = st.session.master_invert;
-            if ui
-                .add(egui::Button::new(RichText::new("Ø").size(10.5)).selected(inv))
-                .on_hover_text("Invert the master's polarity")
-                .clicked()
-            {
+            if letter(ui, inv, "Ø", th.accent, "Invert the master's polarity", &th) {
                 st.session.master_invert = !inv;
                 changed = true;
             }
@@ -1556,7 +1796,7 @@ pub fn metronome_header(ui: &mut egui::Ui, st: &mut State, rect: Rect) {
             let r = ui.add_enabled(
                 !glide,
                 egui::DragValue::new(&mut bpm)
-                    .range(af27_core::midi::BPM_MIN..=af27_core::midi::BPM_MAX)
+                    .range(af2_core::midi::BPM_MIN..=af2_core::midi::BPM_MAX)
                     .speed(0.5)
                     .suffix(" BPM")
                     .max_decimals(1),
@@ -1616,7 +1856,7 @@ fn sound_name(s: ClickSound) -> &'static str {
 pub fn metronome_menu(
     ui: &mut egui::Ui,
     st: &mut State,
-    m: &mut af27_core::midi::MetronomeSettings,
+    m: &mut af2_core::midi::MetronomeSettings,
     changed: &mut bool,
 ) {
     ui.label(RichText::new("Click").small());
@@ -1710,4 +1950,58 @@ pub fn metronome_lane(
 #[allow(dead_code)]
 fn unused(_: u16) -> u16 {
     MASTER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draws track `ti`'s header at a known place for one frame.
+    fn frame(ctx: &egui::Context, st: &mut State, ti: usize, rect: Rect, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 400.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| header(ui, st, ti, rect));
+        });
+    }
+
+    #[test]
+    fn the_pre_render_button_is_on_the_top_row_of_every_track_header() {
+        let mut st = State::new();
+        let ti = 0;
+        assert_eq!(st.session.tracks[ti].kind, TrackKind::Audio);
+        // A short track: only the top row shows.
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(220.0, 24.0));
+        let ctx = egui::Context::default();
+        // Right to left: monitor, R, S, M, then pre-render (20 px wide).
+        let at = pos2(rect.right() - 4.0 * 19.0 - 10.0, rect.top() + 10.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&ctx, &mut st, ti, rect, vec![egui::Event::PointerMoved(at)]);
+        frame(&ctx, &mut st, ti, rect, vec![click(true)]);
+        frame(&ctx, &mut st, ti, rect, vec![click(false)]);
+        assert!(st.session.tracks[ti].prerender, "the click turned pre-render on");
+        assert!(!st.session.tracks[ti].mute && !st.session.tracks[ti].solo);
+        // It can be undone like any track setting.
+        st.mode = crate::state::Mode::Multitrack;
+        st.undo();
+        assert!(!st.session.tracks[ti].prerender);
+    }
+
+    #[test]
+    fn the_pre_render_tip_says_how_far_it_is() {
+        use crate::prerender::Status;
+        assert!(prerender_tip(Some(Status::Rendering), Some(0.42)).contains("42%"));
+        assert!(prerender_tip(Some(Status::Ready), None).contains("Pre-rendered"));
+        assert!(prerender_tip(None, None).starts_with("Pre-render:"));
+    }
 }

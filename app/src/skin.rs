@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Theme styling beyond colours: what made the Mall Pastel '95 themes (and
 //! the secret ones) themselves in Audiform, drawn for AudiForm 2.
@@ -281,7 +281,7 @@ pub fn title(ui: &mut egui::Ui, th: &Theme) -> bool {
         // The glow may reach over the bar's edges.
         let p = ui.painter().with_clip_rect(ui.ctx().screen_rect());
         // The gas breathes, slowly and barely.
-        let fx: Option<crate::hud::Fx> = ui.ctx().data(|d| d.get_temp(egui::Id::new("af27-fx")));
+        let fx: Option<crate::hud::Fx> = ui.ctx().data(|d| d.get_temp(egui::Id::new("af2-fx")));
         let k = fx.map_or(1.0, |f| {
             0.96 + 0.04 * (f.t * 1.7).sin() * (f.t * 0.43).cos()
         });
@@ -478,6 +478,27 @@ pub fn install_fonts(ctx: &egui::Context, font: &str) {
             bold.insert(0, "ui95-bold".into());
         }
     }
+    if font == "system" {
+        if let Some(((reg, ri), bold_face)) = system_ui_font() {
+            let mut d = egui::FontData::from_static(reg);
+            d.index = ri;
+            fonts.font_data.insert("sysui".into(), d);
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "sysui".into());
+            match bold_face {
+                Some((b, bi)) => {
+                    let mut d = egui::FontData::from_static(b);
+                    d.index = bi;
+                    fonts.font_data.insert("sysui-bold".into(), d);
+                    bold.insert(0, "sysui-bold".into());
+                }
+                None => bold.insert(0, "sysui".into()),
+            }
+        }
+    }
     if let Some((bytes, index)) = cjk_font() {
         let mut data = egui::FontData::from_static(bytes);
         data.index = index;
@@ -554,6 +575,48 @@ const SYMBOL_FONTS: &[&[&str]] = &[
         "/System/Library/Fonts/Apple Symbols.ttf",
     ],
 ];
+
+static SYSTEM_FONT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Settings > Appearance > Use my desktop's font.
+pub fn set_system_font(on: bool) {
+    SYSTEM_FONT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The font to install for a theme's `font`: `system` when the desktop's
+/// font is asked for (in Settings, or by the System theme) and found.
+pub fn font_for(theme_font: &str) -> String {
+    let want = SYSTEM_FONT.load(std::sync::atomic::Ordering::Relaxed) || theme_font == "system";
+    if want && system_ui_font().is_some() {
+        "system".into()
+    } else if theme_font == "system" {
+        String::new()
+    } else {
+        theme_font.into()
+    }
+}
+
+/// The desktop font's name, for Settings.
+pub fn system_font_name() -> Option<String> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        system_ui_font()?;
+        crate::system_look::font().map(|f| f.family)
+    })
+    .clone()
+}
+
+type Face = (&'static [u8], u32);
+
+/// The desktop's UI font (regular, and bold when it has one), read once.
+fn system_ui_font() -> Option<(Face, Option<Face>)> {
+    static FONT: std::sync::OnceLock<Option<(Face, Option<Face>)>> = std::sync::OnceLock::new();
+    *FONT.get_or_init(|| {
+        let ((r, ri), bold) = crate::system_look::font_files()?;
+        let leak = |b: Vec<u8>| -> &'static [u8] { Box::leak(b.into_boxed_slice()) };
+        Some(((leak(r), ri), bold.map(|(b, bi)| (leak(b), bi))))
+    })
+}
 
 /// A system Japanese font, read once.
 fn cjk_font() -> Option<(&'static [u8], u32)> {

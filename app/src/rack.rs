@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Effects Rack: sixteen numbered slots for a track, a bus, the master,
 //! a single clip or (in the Waveform editor) the open file. Each slot has a power
@@ -9,9 +9,9 @@
 
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Rounding, Sense, Stroke};
 
-use af27_core::session::CHAIN_SLOTS;
-use af27_core::{Clip, ClipId, EffectSlot, Rack, TrackKind};
-use af27_engine::MASTER;
+use af2_core::session::CHAIN_SLOTS;
+use af2_core::{Clip, ClipId, EffectSlot, Rack, TrackKind};
+use af2_engine::MASTER;
 
 use crate::state::{data_dir, Mode, State};
 use crate::theme::{c, ca, lerp, Theme};
@@ -149,16 +149,21 @@ pub fn current_target(st: &State) -> Option<u16> {
 }
 
 /// A rack edit is done: one undo step (session racks) and the mix hears it.
-fn structural(st: &mut State, target: u16, label: &str, before: af27_core::Session) {
+fn structural(st: &mut State, target: u16, label: &str, before: af2_core::Session) {
     if target != FILE {
         st.commit_session(label, before);
     }
 }
 
 /// Opens (or brings back) a slot's window.
-/// A plug-in slot also opens the plug-in's own window. Every way of
-/// opening a slot comes here.
+/// A plug-in with a window of its own opens just that window (its power
+/// and presets are in the slot's right-click menu); other slots open
+/// Audiform's window. Every way of opening a slot comes here.
 pub fn open_window(st: &mut State, target: u16, slot: usize) {
+    if crate::plugins::opens_own_window(st, target, slot) {
+        crate::plugins::open_editor(st, target, slot);
+        return;
+    }
     if !st.fx_windows.contains(&(target, slot)) {
         st.fx_windows.push((target, slot));
     }
@@ -166,8 +171,11 @@ pub fn open_window(st: &mut State, target: u16, slot: usize) {
 }
 
 /// A slot's name as the rack shows it.
+/// How far (points) a slot's name must be pulled before it lifts to move.
+const SLOT_DRAG_PX: f32 = 8.0;
+
 fn slot_name(s: &EffectSlot) -> String {
-    if af27_core::plugin::is_plugin(&s.effect) {
+    if af2_core::plugin::is_plugin(&s.effect) {
         crate::plugins::slot_name(s)
     } else {
         crate::fx::name(&s.effect)
@@ -359,6 +367,48 @@ fn place(list: &mut Vec<EffectSlot>, placed: Option<(usize, usize)>) -> Vec<usiz
     order
 }
 
+/// A filled slot's menu items (its right-click menu and the end of its
+/// arrow menu): open, power, a plug-in's presets, remove. What is picked
+/// is passed back for `slots` to do.
+fn slot_actions(
+    ui: &mut egui::Ui,
+    st: &mut State,
+    target: u16,
+    i: usize,
+    toggled: &mut Option<usize>,
+    open: &mut Option<usize>,
+    removed: &mut Option<usize>,
+) {
+    let Some(s) = chain_ref(st, target).and_then(|c| c.get(i)).cloned() else {
+        return;
+    };
+    let plugin = af2_core::plugin::is_plugin(&s.effect);
+    let open_text = if plugin && crate::plugins::found(&s.effect).is_some_and(|f| f.info.has_editor)
+    {
+        "Open Plug-In Window"
+    } else {
+        "Open Effect Window"
+    };
+    if ui.button(open_text).clicked() {
+        *open = Some(i);
+        ui.close_menu();
+    }
+    let mut on = !s.bypass;
+    if ui.checkbox(&mut on, "On (untick to bypass)").clicked() {
+        *toggled = Some(i);
+        ui.close_menu();
+    }
+    if plugin {
+        ui.separator();
+        crate::plugins::slot_menu(ui, st, target, i);
+    }
+    ui.separator();
+    if ui.button("Remove").clicked() {
+        *removed = Some(i);
+        ui.close_menu();
+    }
+}
+
 /// The sixteen rows, as the leading editor lays them out: number, power,
 /// name, and a menu on every row (empty ones add an effect there).
 fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
@@ -455,9 +505,46 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
             let id = ui.id().with(("rack-slot", target, i));
             let is_open = st.fx_windows.contains(&(target, i));
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(name_r), |ui| {
-                let r = ui
-                    .dnd_drag_source(id, i, |ui| {
-                        let (r, resp) = ui.allocate_exact_size(name_r.size(), Sense::click());
+                // A drag begins only once the pointer has really moved from
+                // where it went down (a click with a little hand movement
+                // stays a click; egui's own drag source lifts the name at
+                // once).
+                let (r, resp) = ui.allocate_exact_size(name_r.size(), Sense::click_and_drag());
+                let moved = ui.input(|inp| {
+                    match (inp.pointer.press_origin(), inp.pointer.interact_pos()) {
+                        (Some(a), Some(b)) => a.distance(b) > SLOT_DRAG_PX,
+                        _ => false,
+                    }
+                });
+                let lifting = resp.dragged_by(egui::PointerButton::Primary) && moved;
+                if lifting {
+                    egui::DragAndDrop::set_payload(ui.ctx(), i);
+                }
+                let _ = id;
+                let r = {
+                    let ui = &mut *ui;
+                    {
+                        if lifting {
+                            // The name follows the pointer while it is carried.
+                            if let Some(q) = ui.input(|inp| inp.pointer.interact_pos()) {
+                                let layer = egui::LayerId::new(
+                                    egui::Order::Tooltip,
+                                    ui.id().with("rack-slot-carry"),
+                                );
+                                let pp = ui.ctx().layer_painter(layer);
+                                let g = Rect::from_min_size(q + vec2(8.0, -10.0), vec2(name_r.width(), 20.0));
+                                pp.rect_filled(g, 3.0, ca(th.panel, 230));
+                                pp.rect_stroke(g, 3.0, Stroke::new(1.0_f32, c(th.accent)));
+                                pp.text(
+                                    g.left_center() + vec2(6.0, 0.0),
+                                    Align2::LEFT_CENTER,
+                                    slot_name(s),
+                                    FontId::proportional(12.5),
+                                    c(th.text),
+                                );
+                            }
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
                         ui.painter().text(
                             r.left_center(),
                             Align2::LEFT_CENTER,
@@ -484,8 +571,8 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                             );
                         }
                         resp
-                    })
-                    .inner;
+                    }
+                };
                 if r.clicked() {
                     st.rack_row = Some((target, row));
                 }
@@ -500,7 +587,10 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 if r.double_clicked() || dbl {
                     open = Some(i);
                 }
-                r.on_hover_text("Double-click to open its window (a plug-in's own). Drag to another row to move it.");
+                r.context_menu(|ui| {
+                    slot_actions(ui, st, target, i, &mut toggled, &mut open, &mut removed);
+                });
+                r.on_hover_text("Double-click to open its window (a plug-in's own). Right-click for power, presets and more. Drag to another row to move it.");
             });
         } else if resp.clicked() {
             st.rack_row = Some((target, row));
@@ -518,24 +608,17 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 .min_size(arrow.size());
             let inner = egui::menu::menu_custom_button(ui, btn, |ui| match slot {
                 Some((i, _)) => {
-                    if ui.button("Open").clicked() {
-                        open = Some(i);
-                        ui.close_menu();
-                    }
-                    ui.menu_button("Replace With", |ui| {
-                        if let Some(id) = effect_picker(ui) {
-                            removed = Some(i);
-                            add_at = Some((row, id));
-                        }
-                    });
-                    ui.separator();
-                    if ui.button("Remove").clicked() {
+                    // The effects themselves: picking one puts it in this
+                    // slot in place of what is there (double-click the
+                    // slot to open it).
+                    if let Some(id) = effect_picker(ui) {
                         removed = Some(i);
-                        ui.close_menu();
+                        add_at = Some((row, id));
                     }
+                    ui.separator();
+                    slot_actions(ui, st, target, i, &mut toggled, &mut open, &mut removed);
                 }
                 None => {
-                    ui.label(RichText::new(format!("Slot {}", row + 1)).small());
                     if let Some(id) = effect_picker(ui) {
                         add_at = Some((row, id));
                     }
@@ -582,6 +665,7 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
             st.live_slot(target, i);
             st.commit_live("Bypass", before.clone());
         }
+        crate::plugins::show_bypassed(st, target, i);
     }
     if let Some(i) = open {
         open_window(st, target, i);
@@ -645,7 +729,7 @@ fn slots(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
 }
 
 pub fn new_slot(id: &str) -> EffectSlot {
-    if af27_core::plugin::is_plugin(id) {
+    if af2_core::plugin::is_plugin(id) {
         return crate::plugins::new_slot(id);
     }
     EffectSlot {
@@ -889,8 +973,8 @@ pub fn apply_file_rack(st: &mut State) {
         return;
     }
     let dry = d.buf.slice(r);
-    let gin = af27_core::time::db_to_gain(rack.input_db);
-    let gout = af27_core::time::db_to_gain(rack.output_db);
+    let gin = af2_core::time::db_to_gain(rack.input_db);
+    let gout = af2_core::time::db_to_gain(rack.output_db);
     let mut seg = dry.clone();
     for ch in &mut seg.channels {
         for s in ch.iter_mut() {
@@ -1080,11 +1164,21 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
         let mut keep = true;
         let eq = crate::eq_editor::is_eq(&slot.effect);
         let title = format!("{}: {}", target_name(st, target), slot_name(&slot));
-        crate::ui::popup(
+        // egui never shrinks a window that is not resizable (it keeps the
+        // widest it has been, even across runs), so an effect window could
+        // stay far wider than its face. Each window is held to the width
+        // its contents took last frame (nothing in it fills the width).
+        let fit_id = egui::Id::new(("fx-window-fit", target, i));
+        let fit: f32 = ctx.data(|d| d.get_temp(fit_id)).unwrap_or(360.0);
+        let mut window = crate::ui::popup(
             ctx,
             egui::Id::new(("fx-window", target, i)),
             RichText::new(&title).strong(),
-        )
+        );
+        if !eq {
+            window = window.max_width(fit.max(200.0));
+        }
+        window
         .id(egui::Id::new(("fx-window", target, i)))
         .open(&mut keep)
         .resizable(eq)
@@ -1118,8 +1212,15 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
             {
                 listen_to(ui, st, target, i, &th);
             }
-            ui.separator();
-            if af27_core::plugin::is_plugin(&slot.effect) {
+            // A rule across the window that takes no width of its own (a
+            // separator would fill the window and keep it from shrinking).
+            let (sep, _) = ui.allocate_exact_size(vec2(0.0, 6.0), Sense::hover());
+            ui.painter().hline(
+                ui.max_rect().x_range(),
+                sep.center().y,
+                ui.visuals().widgets.noninteractive.bg_stroke,
+            );
+            if af2_core::plugin::is_plugin(&slot.effect) {
                 crate::plugins::slot_controls(ui, st, target, i, &th);
             } else if eq {
                 crate::eq_editor::show(ui, st, target, i, &th);
@@ -1127,6 +1228,13 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
                 // Tube Master draws its own hardware panel.
             } else if !crate::fx_windows::custom(ui, st, target, i, &th) {
                 slot_controls(ui, st, target, i, &th);
+            }
+            if !eq {
+                let w = ui.min_rect().width().ceil();
+                if (w - fit).abs() > 0.5 {
+                    ui.ctx().data_mut(|d| d.insert_temp(fit_id, w));
+                    ui.ctx().request_repaint();
+                }
             }
         });
         if !keep {
@@ -1157,7 +1265,7 @@ pub fn listen_to(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &
             })
     };
     let shown = cur.map_or("Own input".to_string(), |id| name_of(st, id));
-    let mut pick: Option<Option<af27_core::TrackId>> = None;
+    let mut pick: Option<Option<af2_core::TrackId>> = None;
     ui.horizontal(|ui| {
         ui.label(RichText::new("Listen to").color(c(th.text_dim)));
         egui::ComboBox::from_id_salt(("listen", target, i))
@@ -1167,7 +1275,7 @@ pub fn listen_to(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &
                 if ui.selectable_label(cur.is_none(), "Own input").clicked() {
                     pick = Some(None);
                 }
-                let ids: Vec<af27_core::TrackId> = st
+                let ids: Vec<af2_core::TrackId> = st
                     .session
                     .tracks
                     .iter()

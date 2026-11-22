@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Spectral selection and editing in the Waveform editor's spectral
 //! display: the Box, Lasso and Brush selection tools, Spot Repair, the
@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 
-use af27_core::AudioBuffer;
-use af27_dsp::spectral_edit::{edit_channel, Action, Grid};
-use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke};
+use af2_core::AudioBuffer;
+use af2_dsp::spectral_edit::{edit_channel, Action, Grid};
+use egui::{pos2, vec2, Align2, Color32, Pos2, Rect, Sense, Stroke};
 
 use crate::state::{DocId, State, Tool, View};
 use crate::theme::ca;
@@ -96,7 +96,33 @@ pub struct SpecSel {
     pub regions: Vec<Region>,
     /// Changes whenever the selection does (unique across documents).
     pub version: u64,
+    /// Per shape: the drawn shape it belongs to and which harmonic of it
+    /// it is (1 is the shape as drawn). Shorter than `regions` means the
+    /// rest are shapes of their own.
+    pub harm: Vec<Tag>,
 }
+
+/// Which drawn shape a selection shape comes from, and which harmonic of
+/// it it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tag {
+    pub group: u32,
+    pub k: u8,
+}
+
+static NEXT_GROUP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn new_group() -> u32 {
+    NEXT_GROUP.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The Harmonics setting: bit k set takes the kth harmonic (bit 1 is the
+/// shape as drawn). Only bit 1: off.
+pub type HarmSet = u64;
+/// Just what is drawn.
+pub const HARM_OFF: HarmSet = 1 << 1;
+/// Every harmonic, up to the top of the spectrum.
+pub const HARM_ALL: HarmSet = !1;
 
 impl SpecSel {
     pub fn is_empty(&self) -> bool {
@@ -107,7 +133,16 @@ impl SpecSel {
         self.version = NEXT_VERSION.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// `harm` as long as `regions` (missing ones: shapes of their own).
+    fn fill_tags(&mut self) {
+        while self.harm.len() < self.regions.len() {
+            self.harm.push(Tag { group: new_group(), k: 1 });
+        }
+        self.harm.truncate(self.regions.len());
+    }
+
     pub fn clear(&mut self) {
+        self.harm.clear();
         if !self.regions.is_empty() {
             self.regions.clear();
             self.bump();
@@ -115,14 +150,51 @@ impl SpecSel {
     }
 
     pub fn push(&mut self, r: Region) {
+        self.fill_tags();
+        self.harm.push(Tag { group: new_group(), k: 1 });
         self.regions.push(r);
         self.bump();
     }
 
-    fn last_mut(&mut self) -> Option<&mut Region> {
+    /// Drops every shape from `n` on.
+    fn truncate(&mut self, n: usize) {
+        self.regions.truncate(n);
+        self.harm.truncate(n);
         self.bump();
-        self.regions.last_mut()
     }
+
+    /// Harmonics changed while there is a selection: every drawn shape
+    /// gets the harmonics in `set` again (found from whichever of its
+    /// shapes is left).
+    pub fn set_harmonics(&mut self, set: HarmSet, ny: f64) {
+        if self.regions.is_empty() {
+            return;
+        }
+        let set = if set & HARM_ALL == 0 { HARM_OFF } else { set };
+        self.fill_tags();
+        let mut seen: Vec<u32> = Vec::new();
+        let mut drawn: Vec<(u32, Region)> = Vec::new();
+        for (r, t) in self.regions.iter().zip(&self.harm) {
+            if !seen.contains(&t.group) {
+                seen.push(t.group);
+                drawn.push((t.group, harmonic_shift(r, t.k.max(1) as f64, 1.0)));
+            }
+        }
+        self.regions.clear();
+        self.harm.clear();
+        for (group, r) in drawn {
+            if set & HARM_OFF != 0 {
+                self.regions.push(r.clone());
+                self.harm.push(Tag { group, k: 1 });
+            }
+            for (k, h) in harmonics_of(&r, set, ny) {
+                self.regions.push(h);
+                self.harm.push(Tag { group, k });
+            }
+        }
+        self.bump();
+    }
+
 
     /// (t0, t1, u0, u1) around every shape.
     pub fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
@@ -390,9 +462,6 @@ impl Mapper {
         r.bottom() - self.spec.pos(u_to_hz(u), self.ny) as f32 * r.height()
     }
 
-    pub fn screen(&self, k: usize, p: SPoint) -> Pos2 {
-        pos2(self.x(p.t), self.y(k, p.u))
-    }
 
     /// The brush's radius in selection units for a `px`-pixel radius at `pos`.
     fn brush_radius(&self, k: usize, pos: Pos2, px: f32) -> (f64, f64) {
@@ -401,6 +470,16 @@ impl Mapper {
         let b = self.point(k, pos + vec2(0.0, px));
         (rt.max(1e-6), ((a.u - b.u).abs() / 2.0).max(1e-4))
     }
+}
+
+/// The frequency under `pos` in the spectrum `sa`, if it is over the
+/// picture (not its frequency scale).
+pub fn hz_at(st: &State, sa: Rect, pos: Pos2) -> Option<f64> {
+    if !sa.contains(pos) || pos.x >= sa.right() - SCALE_W {
+        return None;
+    }
+    let m = mapper(st, sa)?;
+    Some(u_to_hz(m.point(m.band_of(pos.y), pos).u))
 }
 
 fn mapper(st: &State, area: Rect) -> Option<Mapper> {
@@ -423,15 +502,218 @@ struct Drag {
     tool: Tool,
     /// Last point added to a lasso or stroke, on screen.
     last: Pos2,
+    /// The shape being drawn (its harmonics follow it).
+    base: usize,
+    harmonics: HarmSet,
 }
 
 fn drag_id() -> egui::Id {
-    egui::Id::new("af27-spec-drag")
+    egui::Id::new("af2-spec-drag")
+}
+
+/// The middle of `r` in Hz (halfway between its lowest and highest).
+fn centre_hz(r: &Region) -> Option<f64> {
+    let (_, _, u0, u1) = r.bounds()?;
+    Some((u_to_hz(u0) + u_to_hz(u1)) / 2.0)
+}
+
+/// `r`, which sits at harmonic `from` of some sound, moved to harmonic
+/// `to`: the same shape and the same size in Hz, its middle at `to /
+/// from` times where it was. (A copy, not a stretched shape.)
+fn harmonic_shift(r: &Region, from: f64, to: f64) -> Region {
+    let Some(c) = centre_hz(r) else { return r.clone() };
+    let d = c / from * (to - from);
+    let mv = |p: &SPoint| SPoint {
+        t: p.t,
+        u: hz_to_u((u_to_hz(p.u) + d).max(0.0)),
+    };
+    match r {
+        Region::Box { a, b } => Region::Box { a: mv(a), b: mv(b) },
+        Region::Lasso(v) => Region::Lasso(v.iter().map(mv).collect()),
+        Region::Brush { pts, rt, ru } => Region::Brush {
+            pts: pts.iter().map(mv).collect(),
+            rt: *rt,
+            // The same height in Hz around each dab's new place.
+            ru: {
+                let mid = pts.iter().map(|p| p.u).sum::<f64>() / pts.len().max(1) as f64;
+                let half = (u_to_hz(mid + ru) - u_to_hz(mid - ru)) / 2.0;
+                let m = u_to_hz(mid) + d;
+                ((hz_to_u(m + half) - hz_to_u((m - half).max(0.0))) / 2.0).max(1e-4)
+            },
+        },
+    }
+}
+
+/// A copy of `r` at `k` times its frequency (see [`harmonic_shift`]).
+pub fn harmonic(r: &Region, k: f64) -> Region {
+    harmonic_shift(r, 1.0, k)
+}
+
+/// The harmonics in `set` above the first, each with its number, that
+/// still fit below `ny` Hz.
+pub fn harmonics_of(r: &Region, set: HarmSet, ny: f64) -> Vec<(u8, Region)> {
+    let Some(c) = centre_hz(r) else { return Vec::new() };
+    // A shape down at 0 Hz has no meaningful multiples.
+    if c < 10.0 {
+        return Vec::new();
+    }
+    (2..=63u8)
+        .filter(|k| set & (1 << k) != 0)
+        .map(|k| (k, harmonic(r, k as f64)))
+        .take_while(|(_, h)| h.bounds().is_some_and(|b| u_to_hz(b.3) <= ny))
+        .collect()
+}
+
+impl SpecSel {
+    /// Shape `base` (being drawn) followed by its harmonics in `set`, and
+    /// nothing after them. The drawn shape stays while drawing, so it can
+    /// be seen; [`SpecSel::finish`] drops it if `set` leaves it out.
+    fn regrow(&mut self, base: usize, set: HarmSet, ny: f64) {
+        if set & HARM_ALL & !HARM_OFF == 0 || base >= self.regions.len() {
+            return;
+        }
+        self.fill_tags();
+        let group = self.harm[base].group;
+        self.regions.truncate(base + 1);
+        self.harm.truncate(base + 1);
+        self.harm[base].k = 1;
+        let more = harmonics_of(&self.regions[base], set, ny);
+        for (k, h) in more {
+            self.regions.push(h);
+            self.harm.push(Tag { group, k });
+        }
+        self.bump();
+    }
+
+    /// Done drawing shape `base`: without the first harmonic in `set`, only
+    /// its copies stay.
+    fn finish(&mut self, base: usize, set: HarmSet) {
+        if set & HARM_OFF == 0 && base < self.regions.len() && self.regions.len() > base + 1 {
+            self.fill_tags();
+            self.regions.remove(base);
+            self.harm.remove(base);
+            self.bump();
+        }
+    }
+}
+
+/// Which edges of the selection's outline a pointer is on.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Edges {
+    l: bool,
+    r: bool,
+    t: bool,
+    b: bool,
+}
+
+impl Edges {
+    fn any(self) -> bool {
+        self.l || self.r || self.t || self.b
+    }
+
+    fn cursor(self) -> egui::CursorIcon {
+        use egui::CursorIcon as C;
+        match ((self.l || self.r), (self.t || self.b)) {
+            (true, true) if (self.l && self.t) || (self.r && self.b) => C::ResizeNwSe,
+            (true, true) => C::ResizeNeSw,
+            (true, false) => C::ResizeHorizontal,
+            _ => C::ResizeVertical,
+        }
+    }
+}
+
+/// Stretching the whole selection by an edge or corner of its outline.
+#[derive(Debug, Clone)]
+struct Resize {
+    edges: Edges,
+    band: usize,
+    orig: Vec<Region>,
+    /// The outline when the drag began: seconds, and heights on the
+    /// display (0 bottom, 1 top).
+    t0: f64,
+    t1: f64,
+    f0: f64,
+    f1: f64,
+}
+
+fn resize_id() -> egui::Id {
+    egui::Id::new("af2-spec-resize")
+}
+
+/// How near an edge the pointer must be to take it, pixels.
+const GRAB: f32 = 5.0;
+
+/// The edges of the selection's outline under `pp`, and its band.
+fn edge_hit(m: &Mapper, sel: &SpecSel, pp: Pos2) -> Option<(Edges, usize)> {
+    let (t0, t1, u0, u1) = sel.bounds()?;
+    let k = m.band_of(pp.y);
+    let (x0, x1) = (m.x(t0), m.x(t1));
+    let (yt, yb) = (m.y(k, u1), m.y(k, u0));
+    let inx = pp.x > x0 - GRAB && pp.x < x1 + GRAB;
+    let iny = pp.y > yt - GRAB && pp.y < yb + GRAB;
+    let (dl, dr, dt, db) = ((pp.x - x0).abs(), (pp.x - x1).abs(), (pp.y - yt).abs(), (pp.y - yb).abs());
+    let e = Edges {
+        l: iny && dl < GRAB && dl <= dr,
+        r: iny && dr < GRAB && dr < dl,
+        t: inx && dt < GRAB && dt <= db,
+        b: inx && db < GRAB && db < dt,
+    };
+    e.any().then_some((e, k))
+}
+
+impl Mapper {
+    /// Height on the display (0 bottom, 1 top) of axis value `u`.
+    fn frac(&self, u: f64) -> f64 {
+        self.spec.pos(u_to_hz(u), self.ny)
+    }
+
+    fn unfrac(&self, f: f64) -> f64 {
+        hz_to_u(self.spec.freq_at(f.clamp(0.0, 1.0), self.ny))
+    }
+}
+
+/// The selection stretched so its outline's dragged edges follow `pp`.
+fn stretched(m: &Mapper, rz: &Resize, pp: Pos2) -> Vec<Region> {
+    let r = m.band_rect(rz.band);
+    let ft = (((r.bottom() - pp.y) / r.height().max(1.0)) as f64).clamp(0.0, 1.0);
+    let tt = m.point(rz.band, pp).t;
+    let min_t = (m.view.len * 0.002).max(1e-4);
+    let (mut t0, mut t1, mut f0, mut f1) = (rz.t0, rz.t1, rz.f0, rz.f1);
+    if rz.edges.l {
+        t0 = tt.min(t1 - min_t);
+    }
+    if rz.edges.r {
+        t1 = tt.max(t0 + min_t);
+    }
+    if rz.edges.b {
+        f0 = ft.min(f1 - 0.004);
+    }
+    if rz.edges.t {
+        f1 = ft.max(f0 + 0.004);
+    }
+    let st = (t1 - t0) / (rz.t1 - rz.t0).max(1e-9);
+    let sf = (f1 - f0) / (rz.f1 - rz.f0).max(1e-9);
+    let map = |p: &SPoint| SPoint {
+        t: t0 + (p.t - rz.t0) * st,
+        u: m.unfrac(f0 + (m.frac(p.u) - rz.f0) * sf),
+    };
+    rz.orig
+        .iter()
+        .map(|reg| match reg {
+            Region::Box { a, b } => Region::Box { a: map(a), b: map(b) },
+            Region::Lasso(v) => Region::Lasso(v.iter().map(map).collect()),
+            Region::Brush { pts, rt, ru } => Region::Brush {
+                pts: pts.iter().map(map).collect(),
+                rt: (rt * st).max(1e-6),
+                ru: (ru * sf).max(1e-4),
+            },
+        })
+        .collect()
 }
 
 /// The width of the spectrum's frequency scale (as the Waveform editor
 /// draws it).
-const SCALE_W: f32 = 44.0;
+const SCALE_W: f32 = 46.0;
 
 /// The spectral tools' pointer handling over the spectrum `sa`. Only
 /// while a spectral tool is chosen; the response it returns covers the
@@ -440,13 +722,57 @@ pub fn overlay(ui: &mut egui::Ui, st: &mut State, sa: Rect) -> Option<egui::Resp
     if !st.tool.is_spectral() || st.doc().is_none() {
         return None;
     }
-    let resp = ui.interact(sa, egui::Id::new("af27-spec-sel"), Sense::click_and_drag());
+    let resp = ui.interact(sa, egui::Id::new("af2-spec-sel"), Sense::click_and_drag());
     let m = mapper(st, sa)?;
     let shift = ui.input(|i| i.modifiers.shift);
     let tool = st.tool;
     let brush_r = st.brush_px / 2.0;
+    let can_stretch = tool != Tool::SpotRepair && !shift;
+    let edge_at = |pp: Pos2| {
+        Some(pp)
+            .filter(|_| can_stretch)
+            .and_then(|pp| st.doc().and_then(|d| edge_hit(&m, &d.spec_sel, pp)))
+    };
+    // A drag is only reported once the pointer has moved a little, by
+    // when it can have left an edge's few pixels: where the button went
+    // down decides what the drag does, and where a shape starts.
+    let pressed_at = ui.input(|i| i.pointer.press_origin());
+    let hit = resp.hover_pos().and_then(edge_at);
+    let mut stretching = ui.data(|x| x.get_temp::<Resize>(resize_id()));
     if resp.drag_started() {
-        if let Some(pp) = resp.interact_pointer_pos() {
+        let at_press = pressed_at.or(resp.interact_pointer_pos()).and_then(edge_at);
+        if let (Some((edges, band)), Some(d)) = (at_press, st.doc()) {
+            if let Some((t0, t1, u0, u1)) = d.spec_sel.bounds() {
+                let rz = Resize {
+                    edges,
+                    band,
+                    orig: d.spec_sel.regions.clone(),
+                    t0,
+                    t1,
+                    f0: m.frac(u0),
+                    f1: m.frac(u1),
+                };
+                ui.data_mut(|x| x.insert_temp(resize_id(), rz.clone()));
+                stretching = Some(rz);
+            }
+        }
+    }
+    if let Some(rz) = &stretching {
+        if let Some(pp) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
+            let regions = stretched(&m, rz, pp);
+            if let Some(d) = st.doc_mut() {
+                d.spec_sel.regions = regions;
+                d.spec_sel.bump();
+            }
+        }
+        if resp.drag_stopped() || !resp.dragged() && !resp.drag_started() {
+            ui.data_mut(|x| x.remove::<Resize>(resize_id()));
+        }
+        ui.ctx().set_cursor_icon(rz.edges.cursor());
+        return Some(resp);
+    }
+    if resp.drag_started() {
+        if let Some(pp) = pressed_at.filter(|p| sa.contains(*p)).or(resp.interact_pointer_pos()) {
             let k = m.band_of(pp.y);
             let p = m.point(k, pp);
             let region = match tool {
@@ -467,6 +793,8 @@ pub fn overlay(ui: &mut egui::Ui, st: &mut State, sa: Rect) -> Option<egui::Resp
             }
             d.spec_sel.push(region);
             d.sel = None;
+            let base = d.spec_sel.regions.len() - 1;
+            let harmonics = if tool == Tool::SpotRepair { HARM_OFF } else { st.harmonics };
             ui.data_mut(|x| {
                 x.insert_temp(
                     drag_id(),
@@ -474,6 +802,8 @@ pub fn overlay(ui: &mut egui::Ui, st: &mut State, sa: Rect) -> Option<egui::Resp
                         band: k,
                         tool,
                         last: pp,
+                        base,
+                        harmonics,
                     },
                 )
             });
@@ -488,23 +818,31 @@ pub fn overlay(ui: &mut egui::Ui, st: &mut State, sa: Rect) -> Option<egui::Resp
                 _ => (brush_r / 3.0).max(1.5),
             };
             let far = (pp - g.last).length() >= spacing;
+            let ny = m.ny;
             let d = st.doc_mut().unwrap();
-            match (g.tool, d.spec_sel.regions.last()) {
-                (Tool::BoxSelect, Some(Region::Box { .. })) => {
-                    if let Some(Region::Box { b, .. }) = d.spec_sel.last_mut() {
-                        *b = p;
-                    }
+            let mut grew = false;
+            match (g.tool, d.spec_sel.regions.get_mut(g.base)) {
+                (Tool::BoxSelect, Some(Region::Box { b, .. })) => {
+                    *b = p;
+                    grew = true;
                 }
-                (_, Some(Region::Lasso(_))) | (_, Some(Region::Brush { .. })) if far => {
-                    match d.spec_sel.last_mut() {
-                        Some(Region::Lasso(v)) => v.push(p),
-                        Some(Region::Brush { pts, .. }) => pts.push(p),
-                        _ => {}
-                    }
+                (_, Some(Region::Lasso(v))) if far => {
+                    v.push(p);
+                    grew = true;
+                }
+                (_, Some(Region::Brush { pts, .. })) if far => {
+                    pts.push(p);
+                    grew = true;
+                }
+                _ => {}
+            }
+            if grew {
+                d.spec_sel.bump();
+                d.spec_sel.regrow(g.base, g.harmonics, ny);
+                if g.tool != Tool::BoxSelect {
                     g.last = pp;
                     ui.data_mut(|x| x.insert_temp(drag_id(), g));
                 }
-                _ => {}
             }
         }
     }
@@ -512,9 +850,11 @@ pub fn overlay(ui: &mut egui::Ui, st: &mut State, sa: Rect) -> Option<egui::Resp
         if let Some(g) = drag {
             ui.data_mut(|x| x.remove::<Drag>(drag_id()));
             let d = st.doc_mut().unwrap();
-            if d.spec_sel.regions.last().is_some_and(|r| !r.usable()) {
-                d.spec_sel.regions.pop();
-                d.spec_sel.bump();
+            if d.spec_sel.regions.get(g.base).is_some_and(|r| !r.usable()) {
+                // Nothing drawn: neither it nor its harmonics stay.
+                d.spec_sel.truncate(g.base);
+            } else {
+                d.spec_sel.finish(g.base, g.harmonics);
             }
             if g.tool == Tool::SpotRepair && !d.spec_sel.is_empty() {
                 run(st, Action::Repair, "Spot Repair", true);
@@ -535,7 +875,11 @@ pub fn overlay(ui: &mut egui::Ui, st: &mut State, sa: Rect) -> Option<egui::Resp
     }
     if let Some(hp) = resp.hover_pos() {
         if hp.x < sa.right() - SCALE_W {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            let icon = match hit {
+                Some((e, _)) if drag.is_none() => e.cursor(),
+                _ => egui::CursorIcon::Crosshair,
+            };
+            ui.ctx().set_cursor_icon(icon);
         }
     }
     Some(resp)
@@ -545,7 +889,7 @@ pub fn overlay(ui: &mut egui::Ui, st: &mut State, sa: Rect) -> Option<egui::Resp
 /// across `body`. Sets [`State::spec_split`].
 pub fn divider(ui: &mut egui::Ui, st: &mut State, body: Rect, y: f32) {
     let r = Rect::from_min_max(pos2(body.left(), y - 3.0), pos2(body.right(), y + 3.0));
-    let resp = ui.interact(r, egui::Id::new("af27-spec-divider"), Sense::drag());
+    let resp = ui.interact(r, egui::Id::new("af2-spec-divider"), Sense::drag());
     if resp.hovered() || resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
@@ -582,46 +926,40 @@ pub fn draw(ui: &egui::Ui, st: &State, sa: Rect, p: &egui::Painter) {
     let Some(m) = mapper(st, sa) else { return };
     let d = st.doc().unwrap();
     let th = &st.theme;
-    let nch = d.buf.num_channels();
-    // Band names on the frequency scale.
-    if m.bands > 1 {
-        for k in 0..m.bands {
-            let r = m.band_rect(k);
-            p.text(
-                pos2(r.right() - 4.0, r.top() + 2.0),
-                Align2::RIGHT_TOP,
-                crate::waveform::channel_name(nch, k),
-                FontId::proportional(10.0),
-                ca(th.accent, 230),
-            );
-        }
-    }
+    // (Band names are the frequency scale's headings, drawn with it.)
     if !d.spec_sel.is_empty() {
         let tex = selection_texture(ui, st, &m);
+        let stretchable = st.tool.is_spectral() && st.tool != Tool::SpotRepair;
+        let bounds = d.spec_sel.bounds();
         for k in 0..m.bands {
             let r = m.band_rect(k);
             let pc = p.with_clip_rect(r.intersect(p.clip_rect()));
-            if let Some(tex) = &tex {
+            let s = Stroke::new(1.0_f32, ca(th.selection, 230));
+            if let Some((tex, outline)) = &tex {
                 pc.image(
                     tex.id(),
                     r,
                     Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                     Color32::WHITE,
                 );
+                // One outline around everything selected: shapes that
+                // overlap share it.
+                let at = |q: Pos2| pos2(r.left() + q.x * r.width(), r.top() + q.y * r.height());
+                let lines: Vec<egui::Shape> = outline
+                    .iter()
+                    .map(|[a, b]| egui::Shape::line_segment([at(*a), at(*b)], s))
+                    .collect();
+                pc.extend(lines);
             }
-            let s = Stroke::new(1.0_f32, ca(th.selection, 230));
-            for reg in &d.spec_sel.regions {
-                match reg {
-                    Region::Box { a, b } => {
-                        let (x0, x1) = (m.x(a.t.min(b.t)), m.x(a.t.max(b.t)));
-                        let (y0, y1) = (m.y(k, a.u.max(b.u)), m.y(k, a.u.min(b.u)));
-                        pc.rect_stroke(Rect::from_min_max(pos2(x0, y0), pos2(x1, y1)), 0.0, s);
-                    }
-                    Region::Lasso(pts) if pts.len() > 1 => {
-                        let v: Vec<Pos2> = pts.iter().map(|q| m.screen(k, *q)).collect();
-                        pc.add(egui::Shape::closed_line(v, s));
-                    }
-                    _ => {}
+            // Handles on the outline's edges and corners to stretch it.
+            if let (true, Some((t0, t1, u0, u1))) = (stretchable, bounds) {
+                let (x0, x1) = (m.x(t0), m.x(t1));
+                let (y0, y1) = (m.y(k, u1), m.y(k, u0));
+                let (xm, ym) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                for (x, y) in [(x0, y0), (xm, y0), (x1, y0), (x1, ym), (x1, y1), (xm, y1), (x0, y1), (x0, ym)] {
+                    let h = Rect::from_center_size(pos2(x, y), vec2(5.0, 5.0));
+                    pc.rect_filled(h, 0.0, ca(th.selection, 230));
+                    pc.rect_stroke(h, 0.0, Stroke::new(1.0_f32, ca(th.background, 200)));
                 }
             }
         }
@@ -639,8 +977,55 @@ pub fn draw(ui: &egui::Ui, st: &State, sa: Rect, p: &egui::Painter) {
     }
 }
 
-/// The selection, rasterised at half the screen's resolution for one band.
-fn selection_texture(ui: &egui::Ui, st: &State, m: &Mapper) -> Option<egui::TextureHandle> {
+/// The outline of a mask (`cols` x `rows`, row 0 at the top) as line
+/// segments, in 0..1 across and down. Marching squares through the cells'
+/// centres: one outline around everything set, however many shapes made
+/// it, with corners cut at 45 degrees.
+pub fn outline(mask: &[f32], cols: usize, rows: usize) -> Vec<[Pos2; 2]> {
+    let on = |c: isize, r: isize| {
+        c >= 0 && r >= 0 && (c as usize) < cols && (r as usize) < rows && mask[r as usize * cols + c as usize] > 0.0
+    };
+    let (w, h) = (cols as f32, rows as f32);
+    let mut out = Vec::new();
+    for r in -1..rows as isize {
+        for c in -1..cols as isize {
+            let idx = (on(c, r) as u8) << 3 | (on(c + 1, r) as u8) << 2 | (on(c + 1, r + 1) as u8) << 1 | on(c, r + 1) as u8;
+            if idx == 0 || idx == 15 {
+                continue;
+            }
+            let (x, y) = (c as f32, r as f32);
+            let top = pos2((x + 1.0) / w, (y + 0.5) / h);
+            let right = pos2((x + 1.5) / w, (y + 1.0) / h);
+            let bottom = pos2((x + 1.0) / w, (y + 1.5) / h);
+            let left = pos2((x + 0.5) / w, (y + 1.0) / h);
+            let mut seg = |a: Pos2, b: Pos2| out.push([a, b]);
+            match idx {
+                1 | 14 => seg(left, bottom),
+                2 | 13 => seg(bottom, right),
+                3 | 12 => seg(left, right),
+                4 | 11 => seg(top, right),
+                6 | 9 => seg(top, bottom),
+                7 | 8 => seg(left, top),
+                5 => {
+                    seg(top, right);
+                    seg(left, bottom);
+                }
+                _ => {
+                    // 10
+                    seg(left, top);
+                    seg(bottom, right);
+                }
+            }
+        }
+    }
+    out
+}
+
+type SelectionPicture = (egui::TextureHandle, std::sync::Arc<Vec<[Pos2; 2]>>);
+
+/// The selection, rasterised at half the screen's resolution for one band,
+/// and its outline.
+fn selection_texture(ui: &egui::Ui, st: &State, m: &Mapper) -> Option<SelectionPicture> {
     let d = st.doc()?;
     let cols = ((m.area.width() / 2.0) as usize).clamp(8, 2048);
     let rows = ((m.band_h() / 2.0) as usize).clamp(8, 1024);
@@ -655,13 +1040,13 @@ fn selection_texture(ui: &egui::Ui, st: &State, m: &Mapper) -> Option<egui::Text
         rows,
         (st.theme.selection, st.theme.selection_alpha),
     );
-    let id = egui::Id::new("af27-spec-sel-tex");
-    if let Some((k, tex)) = ui
+    let id = egui::Id::new("af2-spec-sel-tex");
+    let kept = ui
         .ctx()
-        .data(|x| x.get_temp::<(String, egui::TextureHandle)>(id))
-    {
-        if k == key {
-            return Some(tex);
+        .data(|x| x.get_temp::<(String, egui::TextureHandle, std::sync::Arc<Vec<[Pos2; 2]>>)>(id));
+    if let Some((k, tex, lines)) = &kept {
+        if *k == key {
+            return Some((tex.clone(), lines.clone()));
         }
     }
     let times: Vec<f64> = (0..cols)
@@ -683,11 +1068,21 @@ fn selection_texture(ui: &egui::Ui, st: &State, m: &Mapper) -> Option<egui::Text
             img.pixels[i] = Color32::from_rgba_unmultiplied(r, g, b, a);
         }
     }
-    let tex = ui
-        .ctx()
-        .load_texture("spectral-selection", img, egui::TextureOptions::LINEAR);
-    ui.ctx().data_mut(|x| x.insert_temp(id, (key, tex.clone())));
-    Some(tex)
+    // The same texture updated, never one made and dropped between two
+    // paints (wgpu panics on a texture freed before it is drawn).
+    let tex = match kept {
+        Some((_, mut tex, _)) => {
+            tex.set(img, egui::TextureOptions::LINEAR);
+            tex
+        }
+        None => ui
+            .ctx()
+            .load_texture("spectral-selection", img, egui::TextureOptions::LINEAR),
+    };
+    let lines = std::sync::Arc::new(outline(&mask, cols, rows));
+    ui.ctx()
+        .data_mut(|x| x.insert_temp(id, (key, tex.clone(), lines.clone())));
+    Some((tex, lines))
 }
 
 /// The small floating bar over a selection: its actions.
@@ -709,7 +1104,7 @@ pub fn action_bar(ui: &egui::Ui, st: &mut State, sa: Rect) {
     let y = m.y(0, u1).max(sa.top() + 30.0).min(sa.bottom());
     let mut pick: Option<(Action, &str)> = None;
     let mut clear = false;
-    egui::Area::new(egui::Id::new("af27-spec-bar"))
+    egui::Area::new(egui::Id::new("af2-spec-bar"))
         .order(egui::Order::Foreground)
         .pivot(Align2::RIGHT_BOTTOM)
         .fixed_pos(pos2(x, y - 4.0))
@@ -1148,6 +1543,121 @@ mod tests {
         }
     }
 
+    impl Mapper {
+        fn screen(&self, k: usize, p: SPoint) -> Pos2 {
+            pos2(self.x(p.t), self.y(k, p.u))
+        }
+    }
+
+    fn sp(t: f64, hz: f64) -> SPoint {
+        SPoint { t, u: hz_to_u(hz) }
+    }
+
+    #[test]
+    fn overlapping_shapes_share_one_outline() {
+        // Two 6x4 boxes on a 12x8 grid, overlapping in the middle.
+        let (cols, rows) = (12, 8);
+        let mut mask = vec![0.0f32; cols * rows];
+        for r in 2..6 {
+            for c in 2..8 {
+                mask[r * cols + c] = 1.0;
+            }
+            for c in 5..11 {
+                mask[r * cols + c] = 1.0;
+            }
+        }
+        let segs = outline(&mask, cols, rows);
+        assert!(!segs.is_empty());
+        // No outline runs through the overlap (columns 5 to 7, rows 3 to 4).
+        for [a, b] in &segs {
+            let mid = pos2((a.x + b.x) / 2.0 * cols as f32, (a.y + b.y) / 2.0 * rows as f32);
+            let inside = mid.x > 5.5 && mid.x < 7.5 && mid.y > 3.0 && mid.y < 5.0;
+            assert!(!inside, "a line inside the overlap at {mid:?}");
+        }
+        // Closed: every end point is shared by exactly two segments.
+        let key = |p: Pos2| ((p.x * 1000.0).round() as i32, (p.y * 1000.0).round() as i32);
+        let mut count = std::collections::HashMap::new();
+        for [a, b] in &segs {
+            *count.entry(key(*a)).or_insert(0) += 1;
+            *count.entry(key(*b)).or_insert(0) += 1;
+        }
+        assert!(count.values().all(|n| *n == 2));
+    }
+
+    #[test]
+    fn harmonics_sit_at_whole_multiples() {
+        let set = |ks: &[u32]| ks.iter().fold(0u64, |s, k| s | (1u64 << k));
+        // 200 to 220 Hz: centre 210 Hz, 20 Hz tall.
+        let r = Region::Box { a: sp(1.0, 200.0), b: sp(2.0, 220.0) };
+        // Just the 3rd and 5th (not the 2nd or 4th).
+        let h = harmonics_of(&r, set(&[1, 3, 5]), 24_000.0);
+        assert_eq!(h.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![3, 5]);
+        for (k, reg) in &h {
+            let (t0, t1, u0, u1) = reg.bounds().unwrap();
+            let n = *k as f64;
+            assert_eq!((t0, t1), (1.0, 2.0), "same time");
+            // A copy: the same 20 Hz, its middle at k x 210 Hz.
+            assert!((u_to_hz(u0) - (210.0 * n - 10.0)).abs() < 1e-6, "{k}: {}", u_to_hz(u0));
+            assert!((u_to_hz(u1) - (210.0 * n + 10.0)).abs() < 1e-6, "{k}: {}", u_to_hz(u1));
+        }
+        // All: up to the top of the spectrum, no further.
+        assert_eq!(harmonics_of(&r, HARM_ALL, 24_000.0).len(), 62, "2nd to 63rd");
+        assert_eq!(harmonics_of(&r, HARM_ALL, 2_000.0).len(), 8, "up to 9 x 210 + 10 Hz");
+        // Off: none.
+        assert!(harmonics_of(&r, HARM_OFF, 24_000.0).is_empty());
+        let mut sel = SpecSel::default();
+        sel.push(r.clone());
+        sel.regrow(0, set(&[1, 2, 3]), 24_000.0);
+        assert_eq!(sel.regions.len(), 3);
+        sel.regrow(0, set(&[1, 2, 3]), 24_000.0);
+        assert_eq!(sel.regions.len(), 3, "regrowing replaces, never piles up");
+        // Without the 1st, only the copies stay once drawn.
+        sel.finish(0, set(&[2, 3]));
+        assert_eq!(sel.regions.len(), 2);
+        // And changing the set later finds the drawn shape again from a copy.
+        sel.set_harmonics(set(&[1, 4]), 24_000.0);
+        assert_eq!(sel.regions.len(), 2);
+        let (_, _, u0, u1) = sel.regions[0].bounds().unwrap();
+        assert!((u_to_hz(u0) - 200.0).abs() < 1e-6 && (u_to_hz(u1) - 220.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dragging_an_edge_stretches_the_whole_selection() {
+        let m = mapper(SpecView::default(), 1);
+        let orig = vec![
+            Region::Box { a: sp(2.0, 500.0), b: sp(4.0, 1000.0) },
+            Region::Box { a: sp(3.0, 2000.0), b: sp(6.0, 3000.0) },
+        ];
+        let mut sel = SpecSel::default();
+        for r in &orig {
+            sel.push(r.clone());
+        }
+        let (t0, t1, u0, u1) = sel.bounds().unwrap();
+        // The right edge, where it is on screen.
+        let mid_y = (m.y(0, u0) + m.y(0, u1)) / 2.0;
+        let (e, band) = edge_hit(&m, &sel, pos2(m.x(t1), mid_y)).unwrap();
+        assert!(e.r && !e.l && !e.t && !e.b);
+        let rz = Resize { edges: e, band, orig: orig.clone(), t0, t1, f0: m.frac(u0), f1: m.frac(u1) };
+        // Dragged to 8 s: every shape stretches in time from the left edge.
+        let out = stretched(&m, &rz, pos2(m.x(8.0), mid_y));
+        let b0 = out[0].bounds().unwrap();
+        let b1 = out[1].bounds().unwrap();
+        assert!((b0.0 - 2.0).abs() < 1e-9 && (b0.1 - 5.0).abs() < 1e-6, "{b0:?}");
+        assert!((b1.1 - 8.0).abs() < 1e-6, "{b1:?}");
+        // Frequencies untouched.
+        assert!((u_to_hz(b0.2) - 500.0).abs() < 1e-3 && (u_to_hz(b1.3) - 3000.0).abs() < 1e-3);
+        // A corner moves both ways; the top edge only the height.
+        let (e, _) = edge_hit(&m, &sel, pos2(m.x(t0), m.y(0, u1))).unwrap();
+        assert!(e.l && e.t);
+        let top = Resize { edges: Edges { t: true, ..Edges::default() }, ..rz };
+        let out = stretched(&m, &top, pos2(m.x(5.0), m.y(0, hz_to_u(6000.0))));
+        let all = out.iter().filter_map(Region::bounds).fold((f64::MAX, f64::MIN), |a, b| (a.0.min(b.2), a.1.max(b.3)));
+        assert!((u_to_hz(all.1) - 6000.0).abs() < 30.0, "top {}", u_to_hz(all.1));
+        assert!((u_to_hz(all.0) - 500.0).abs() < 1e-3, "bottom stays");
+        // Nowhere near: no edge.
+        assert!(edge_hit(&m, &sel, pos2(m.x(3.0), m.y(0, hz_to_u(700.0)))).is_none());
+    }
+
     #[test]
     fn axis_round_trip() {
         for f in [0.0, 20.0, 440.0, 1000.0, 12_345.0, 24_000.0] {
@@ -1270,7 +1780,8 @@ mod tests {
         assert_eq!(m.band_of(150.0), 0);
         assert_eq!(m.band_of(350.0), 1);
         assert_eq!(m.band_of(9999.0), 1);
-        let (lo, hi) = spec.bounds(24_000.0);
+        // The scale's ends (a bent scale starts a little above 0 Hz).
+        let (lo, hi) = (spec.freq_at(0.0, 24_000.0), spec.freq_at(1.0, 24_000.0));
         // Past band 0's bottom (into band 1): band 0's lowest frequency.
         let p = m.point(0, pos2(500.0, 420.0));
         assert!((u_to_hz(p.u) - lo).abs() < 1e-6);
@@ -1339,5 +1850,88 @@ mod tests {
         assert!(end[2] > 250 && end[0] < 5);
         let mid = wheel_blend([255, 0, 0], [0, 0, 255], 0.5);
         assert!(mid[1] > 200, "{mid:?}");
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+    use egui::{pos2, vec2, Event, PointerButton};
+
+    fn setup(harmonics: HarmSet) -> State {
+        let mut st = State::new();
+        let id = st.add_doc("t.wav".into(), None, af2_core::AudioBuffer::new(48_000, 1, 48_000 * 10));
+        st.current = Some(id);
+        st.mode = crate::state::Mode::Waveform;
+        if let Some(d) = st.doc_mut() {
+            d.view = View { start: 0.0, len: 10.0 };
+        }
+        st.tool = Tool::BoxSelect;
+        st.harmonics = harmonics;
+        st
+    }
+
+    const SA: Rect = Rect { min: pos2(0.0, 100.0), max: pos2(1000.0, 600.0) };
+
+    fn frame(ctx: &egui::Context, st: &mut State, events: Vec<Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+                overlay(ui, st, SA);
+            });
+        });
+    }
+
+    fn drag(ctx: &egui::Context, st: &mut State, from: Pos2, to: Pos2) {
+        let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(ctx, st, vec![Event::PointerMoved(from)]);
+        frame(ctx, st, vec![press(from, true)]);
+        for k in 1..=10 {
+            frame(ctx, st, vec![Event::PointerMoved(from + (to - from) * (k as f32 / 10.0))]);
+        }
+        frame(ctx, st, vec![press(to, false)]);
+        frame(ctx, st, vec![]);
+    }
+
+    #[test]
+    fn a_drawn_box_takes_its_harmonics() {
+        let ctx = egui::Context::default();
+        let mut st = setup(0b1110);
+        drag(&ctx, &mut st, pos2(200.0, 560.0), pos2(400.0, 540.0));
+        let n = st.doc().unwrap().spec_sel.regions.len();
+        assert_eq!(n, 3, "the box and its 2nd and 3rd harmonics");
+    }
+
+    #[test]
+    fn choosing_harmonics_after_drawing_applies_them() {
+        let ctx = egui::Context::default();
+        let mut st = setup(HARM_OFF);
+        drag(&ctx, &mut st, pos2(200.0, 560.0), pos2(400.0, 540.0));
+        assert_eq!(st.doc().unwrap().spec_sel.regions.len(), 1);
+        st.doc_mut().unwrap().spec_sel.set_harmonics(0b11110, 24_000.0);
+        assert_eq!(st.doc().unwrap().spec_sel.regions.len(), 4, "the box and 3 harmonics");
+        st.doc_mut().unwrap().spec_sel.set_harmonics(0b110, 24_000.0);
+        assert_eq!(st.doc().unwrap().spec_sel.regions.len(), 2, "fewer again");
+        st.doc_mut().unwrap().spec_sel.set_harmonics(HARM_OFF, 24_000.0);
+        assert_eq!(st.doc().unwrap().spec_sel.regions.len(), 1, "back to what was drawn");
+    }
+
+    #[test]
+    fn dragging_an_edge_stretches_the_selection() {
+        let ctx = egui::Context::default();
+        let mut st = setup(HARM_OFF);
+        drag(&ctx, &mut st, pos2(200.0, 400.0), pos2(400.0, 300.0));
+        let (t0, t1, ..) = st.doc().unwrap().spec_sel.bounds().unwrap();
+        // The right edge at x 400 (4 s), dragged to x 600.
+        drag(&ctx, &mut st, pos2(400.0, 350.0), pos2(600.0, 350.0));
+        let sel = &st.doc().unwrap().spec_sel;
+        assert_eq!(sel.regions.len(), 1, "still one shape, not a new box");
+        let (u0, u1, ..) = sel.bounds().unwrap();
+        assert!((u0 - t0).abs() < 1e-6, "left edge stays: {t0} -> {u0}");
+        assert!(u1 > t1 + 1.5, "right edge follows: {t1} -> {u1}");
     }
 }

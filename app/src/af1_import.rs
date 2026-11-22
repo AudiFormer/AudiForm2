@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Bringing settings and the VST3 plug-in scan over from Audiform 1.
 //!
@@ -122,14 +122,14 @@ pub fn apply_prefs(st: &mut State, v: &Value) -> Vec<String> {
     }
     // Audio devices.
     match a["driver"].as_str() {
-        Some("asio") if af27_engine::ASIO_BUILT => {
-            p.audio.host = af27_engine::HostKind::Asio;
+        Some("asio") if af2_engine::ASIO_BUILT => {
+            p.audio.host = af2_engine::HostKind::Asio;
             p.audio.asio_driver = a["asioDriver"].as_str().map(str::to_string);
             p.audio.buffer = u(&a["asioBuffer"]).map(|n| n as u32);
             note("Audio driver (ASIO)");
         }
         Some(_) => {
-            p.audio.host = af27_engine::HostKind::System;
+            p.audio.host = af2_engine::HostKind::System;
             note("Audio driver");
         }
         None => {}
@@ -155,7 +155,7 @@ pub fn apply_prefs(st: &mut State, v: &Value) -> Vec<String> {
     // Metronome.
     let m = &a["metronome"];
     if m.is_object() {
-        use af27_core::midi::{ClickSound, Subdivide};
+        use af2_core::midi::{ClickSound, Subdivide};
         let mt = &mut p.metronome;
         if let Some(x) = b(&m["accent"]) {
             mt.accent = x;
@@ -337,9 +337,9 @@ pub fn apply_prefs(st: &mut State, v: &Value) -> Vec<String> {
     let sa = &v["save-audio.format"];
     if sa.is_object() {
         if sa["kind"].as_str() == Some("flac") {
-            ex.container = af27_io::export::Container::Flac;
+            ex.container = af2_io::export::Container::Flac;
         } else if sa["kind"].as_str() == Some("wav") {
-            ex.container = af27_io::export::Container::Wav;
+            ex.container = af2_io::export::Container::Wav;
         }
         if let Some(x) = u(&sa["flacLevel"]) {
             ex.flac.flac_level = x.min(8) as u8;
@@ -377,7 +377,7 @@ pub fn apply_prefs(st: &mut State, v: &Value) -> Vec<String> {
 pub fn apply_plugins(dir: &Path) -> Result<(usize, usize), String> {
     let text = std::fs::read_to_string(dir.join("plugins.json")).map_err(|e| e.to_string())?;
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let mgr = af27_vst3::live::manager();
+    let mgr = af2_vst3::live::manager();
     let (added, folders) = {
         let mut reg = mgr.registry();
         merge(&mut reg, &v)
@@ -387,8 +387,8 @@ pub fn apply_plugins(dir: &Path) -> Result<(usize, usize), String> {
 }
 
 /// Merges an Audiform 1 scan (`v`) into `reg`.
-pub fn merge(reg: &mut af27_vst3::registry::Registry, v: &Value) -> (usize, usize) {
-    use af27_vst3::registry::{Failed, Found};
+pub fn merge(reg: &mut af2_vst3::registry::Registry, v: &Value) -> (usize, usize) {
+    use af2_vst3::registry::{Failed, Found};
     let mut added = 0;
     for p in v["plugins"].as_array().into_iter().flatten() {
         let Ok(found) = serde_json::from_value::<Found>(p.clone()) else {
@@ -605,7 +605,7 @@ mod tests {
             "stamps": {"C:\\X.vst3": 5},
             "separate_makers": ["Waves"]
         });
-        let mut reg = af27_vst3::registry::Registry::default();
+        let mut reg = af2_vst3::registry::Registry::default();
         assert_eq!(merge(&mut reg, &v), (1, 1));
         assert_eq!(merge(&mut reg, &v), (0, 0), "a second import adds nothing");
         assert_eq!(reg.plugins.len(), 1);
@@ -620,7 +620,7 @@ mod tests {
             if let Some((n, _)) = found.plugins {
                 let text = std::fs::read_to_string(found.dir.join("plugins.json")).unwrap();
                 let v: Value = serde_json::from_str(&text).unwrap();
-                let mut reg = af27_vst3::registry::Registry::default();
+                let mut reg = af2_vst3::registry::Registry::default();
                 let (added, _) = merge(&mut reg, &v);
                 assert!(added > 0 && added <= n);
             }

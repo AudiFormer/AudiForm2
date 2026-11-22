@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The `win95` chrome: flat grey windows with two-pixel bevels on a teal
 //! desktop, navy captions, raised tabs, sunken white fields and navy menu

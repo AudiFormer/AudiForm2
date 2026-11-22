@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The grid every effect face is laid out on, so the windows come out
 //! even: one margin and gap scale, rows of equal cells that fill the

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Mixing rules the track headers and the Mixer share: solo, mute and arm
 //! clicks with their modifiers, automation writing while playing, and
@@ -13,17 +13,17 @@
 //!
 //! Automation: while playing, moving a track's volume or pan on a track
 //! in Write, Latch or Touch writes into its lane (see
-//! `af27_core::automation::AutoWriter`). The lanes being written play
+//! `af2_core::automation::AutoWriter`). The lanes being written play
 //! from the live control, so nothing is rebuilt while writing; the
 //! written points go into the session when play stops, as one undo step
 //! with the moves that made them.
 
 use std::collections::HashMap;
 
-use af27_core::automation::{
+use af2_core::automation::{
     AutoWriter, AutomationMode, Curve, Lane, LanePoint, LaneTarget, Owner, Written,
 };
-use af27_core::{Session, TrackId, TrackKind};
+use af2_core::{Session, TrackId, TrackKind};
 use egui::{pos2, vec2, Color32, Modifiers, Rect, Sense, Stroke};
 
 use crate::state::State;
@@ -55,10 +55,10 @@ fn now(st: &State) -> f64 {
     st.clock()
 }
 
-fn kind_of(target: &LaneTarget) -> Option<af27_engine::mix::LaneKind> {
+fn kind_of(target: &LaneTarget) -> Option<af2_engine::mix::LaneKind> {
     match target {
-        LaneTarget::Volume => Some(af27_engine::mix::LaneKind::Volume),
-        LaneTarget::Pan => Some(af27_engine::mix::LaneKind::Pan),
+        LaneTarget::Volume => Some(af2_engine::mix::LaneKind::Volume),
+        LaneTarget::Pan => Some(af2_engine::mix::LaneKind::Pan),
         _ => None,
     }
 }
@@ -201,7 +201,7 @@ impl State {
             return;
         }
         // Lanes on slots that had none get the effect's slot id.
-        af27_core::automation::apply(&mut self.session, &done);
+        af2_core::automation::apply(&mut self.session, &done);
         self.commit_session("Write Automation", before);
     }
 
@@ -263,16 +263,20 @@ impl State {
 }
 
 /// The value a lane of `target` holds for track `t` now (its control).
-pub fn control_value(t: &af27_core::Track, target: &LaneTarget) -> f64 {
+pub fn control_value(t: &af2_core::Track, target: &LaneTarget) -> f64 {
     match target {
         LaneTarget::Volume => t.volume_db as f64,
         LaneTarget::Pan => t.pan as f64,
-        LaneTarget::Effect { slot, param, .. } => t
-            .chain
-            .iter()
-            .find(|s| s.ext_id.as_deref() == Some(slot.as_str()))
-            .and_then(|s| s.values.get(*param))
-            .map_or(0.0, |v| *v as f64),
+        LaneTarget::Effect { slot, param, .. } => {
+            if let Some(s) = plugin_slot_of(t, slot) {
+                return plugin_value(s, *param as u32);
+            }
+            t.chain
+                .iter()
+                .find(|s| s.ext_id.as_deref() == Some(slot.as_str()))
+                .and_then(|s| s.values.get(*param))
+                .map_or(0.0, |v| *v as f64)
+        }
         LaneTarget::Space(_) => 0.0,
         LaneTarget::Mute => t.mute as u8 as f64,
         LaneTarget::SendLevel(id) => t
@@ -291,7 +295,7 @@ pub fn control_value(t: &af27_core::Track, target: &LaneTarget) -> f64 {
 
 /// The range a lane is drawn over: its target's, widened for effect
 /// values to the effect's own range when known.
-fn lane_range(t: &af27_core::Track, target: &LaneTarget) -> (f64, f64) {
+fn lane_range(t: &af2_core::Track, target: &LaneTarget) -> (f64, f64) {
     lane_range_in(&t.chain, target)
 }
 
@@ -302,20 +306,20 @@ pub fn drawn_flipped(target: &LaneTarget) -> bool {
 }
 
 /// [`lane_range`] for a lane on the owner of `chain` (a track or a clip).
-pub fn lane_range_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> (f64, f64) {
+pub fn lane_range_in(chain: &[af2_core::EffectSlot], target: &LaneTarget) -> (f64, f64) {
     if let LaneTarget::Effect { slot, param, .. } = target {
         if let Some(s) = chain
             .iter()
             .find(|s| s.ext_id.as_deref() == Some(slot.as_str()))
         {
-            if let Some(p) = af27_dsp::Effect::from_id(&s.effect)
+            if let Some(p) = af2_dsp::Effect::from_id(&s.effect)
                 .map(|e| e.params())
                 .and_then(|ps| ps.get(*param).map(|p| (p.min as f64, p.max as f64)))
             {
                 return p;
             }
             if let Some(p) =
-                af27_fx::info(&s.effect).and_then(|i| i.params.get(*param).map(|p| (p.min, p.max)))
+                af2_fx::info(&s.effect).and_then(|i| i.params.get(*param).map(|p| (p.min, p.max)))
             {
                 return p;
             }
@@ -327,7 +331,7 @@ pub fn lane_range_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> (f
 /// An effect lane's value as its effect has it: (name, unit, default),
 /// when the effect is known.
 fn effect_param(
-    chain: &[af27_core::EffectSlot],
+    chain: &[af2_core::EffectSlot],
     target: &LaneTarget,
 ) -> Option<(String, &'static str, f64)> {
     let LaneTarget::Effect { slot, param, .. } = target else {
@@ -342,12 +346,20 @@ fn effect_param(
                 .and_then(|n| n.parse::<usize>().ok())
                 .and_then(|i| chain.get(i))
         })?;
+    if af2_core::plugin::is_plugin(&s.effect) {
+        let p = plugin_param(s, *param as u32);
+        let name = p.as_ref().map_or_else(
+            || format!("Control {param}"),
+            |p| p.title.clone(),
+        );
+        return Some((name, "", p.map_or(0.0, |p| p.default)));
+    }
     if let Some(p) =
-        af27_dsp::Effect::from_id(&s.effect).and_then(|e| e.params().get(*param).cloned())
+        af2_dsp::Effect::from_id(&s.effect).and_then(|e| e.params().get(*param).cloned())
     {
         return Some((p.name.to_string(), p.unit, p.default as f64));
     }
-    af27_fx::info(&s.effect).and_then(|i| {
+    af2_fx::info(&s.effect).and_then(|i| {
         i.params
             .get(*param)
             .map(|p| (p.name.to_string(), p.unit, p.default))
@@ -357,7 +369,7 @@ fn effect_param(
 /// What a lane's value rests at by default (where a dragged point snaps
 /// to): 0 dB, centre, the rack's 0 dB, full mix and on, or the effect
 /// value's default.
-pub fn lane_default_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> f64 {
+pub fn lane_default_in(chain: &[af2_core::EffectSlot], target: &LaneTarget) -> f64 {
     match target {
         LaneTarget::Rack(p) => p.default_value(),
         LaneTarget::Effect { .. } => effect_param(chain, target).map_or(0.0, |p| p.2),
@@ -366,14 +378,14 @@ pub fn lane_default_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> 
 }
 
 /// A lane's name for its label: the effect value's own name when known.
-pub fn lane_label_in(chain: &[af27_core::EffectSlot], target: &LaneTarget) -> String {
+pub fn lane_label_in(chain: &[af2_core::EffectSlot], target: &LaneTarget) -> String {
     effect_param(chain, target).map_or_else(|| target.label(), |p| p.0)
 }
 
 /// A lane value as the readout shows it: "-3.4 dB", "L 20", "Centre",
 /// "80 % wet", "On", or the effect value in its unit.
-pub fn lane_value_text_in(chain: &[af27_core::EffectSlot], target: &LaneTarget, v: f64) -> String {
-    use af27_core::automation::RackParam;
+pub fn lane_value_text_in(chain: &[af2_core::EffectSlot], target: &LaneTarget, v: f64) -> String {
+    use af2_core::automation::RackParam;
     let db = |v: f64| {
         let r = (v * 10.0).round() / 10.0;
         if r == 0.0 {
@@ -384,7 +396,7 @@ pub fn lane_value_text_in(chain: &[af27_core::EffectSlot], target: &LaneTarget, 
     };
     match target {
         LaneTarget::Volume | LaneTarget::SendLevel(_) => {
-            if v <= af27_core::automation::SILENT_DB {
+            if v <= af2_core::automation::SILENT_DB {
                 "-inf dB".into()
             } else {
                 db(v)
@@ -404,6 +416,10 @@ pub fn lane_value_text_in(chain: &[af27_core::EffectSlot], target: &LaneTarget, 
         LaneTarget::Rack(RackParam::Mix) => format!("{:.0} % wet", v.clamp(0.0, 1.0) * 100.0),
         LaneTarget::Rack(RackParam::Power) => if v >= 0.5 { "On" } else { "Off" }.into(),
         LaneTarget::Mute => if v >= 0.5 { "Muted" } else { "Heard" }.into(),
+        LaneTarget::Effect { slot, param, .. } if plugin_in(chain, slot).is_some() => {
+            let s = plugin_in(chain, slot).unwrap();
+            plugin_value_text(plugin_param(s, *param as u32).as_ref(), v)
+        }
         _ => match effect_param(chain, target) {
             Some((_, unit, _)) => {
                 let digits = if v.abs() >= 100.0 {
@@ -425,29 +441,32 @@ pub fn lane_value_text_in(chain: &[af27_core::EffectSlot], target: &LaneTarget, 
 }
 
 /// A dragged point's value: snapped onto the lane's default when within
-/// [`af27_core::automation::SNAP_PX`] of it (not while Alt is held), and
+/// [`af2_core::automation::SNAP_PX`] of it (not while Alt is held), and
 /// on or off for a power lane. `px_per_unit` is the lane's drawn scale.
 pub fn drag_value(
     ui: &egui::Ui,
-    chain: &[af27_core::EffectSlot],
+    chain: &[af2_core::EffectSlot],
     target: &LaneTarget,
     raw: f64,
     px_per_unit: f64,
 ) -> f64 {
     if matches!(
         target,
-        LaneTarget::Rack(af27_core::automation::RackParam::Power) | LaneTarget::Mute
+        LaneTarget::Rack(af2_core::automation::RackParam::Power) | LaneTarget::Mute
     ) {
         return if raw >= 0.5 { 1.0 } else { 0.0 };
+    }
+    if let Some(v) = plugin_snap(chain, target, raw) {
+        return v;
     }
     if ui.input(|i| i.modifiers.alt) {
         return raw;
     }
-    af27_core::automation::snap_to(
+    af2_core::automation::snap_to(
         raw,
         lane_default_in(chain, target),
         px_per_unit,
-        af27_core::automation::SNAP_PX,
+        af2_core::automation::SNAP_PX,
     )
 }
 
@@ -565,7 +584,7 @@ pub fn lane_overlay(
         egui::Align2::LEFT_TOP,
         format!(
             "{} ({})",
-            lane_label_in(&t.chain, &lane.target),
+            lane_label_in(&lane_slots(&t), &lane.target),
             t.automation.label()
         ),
         egui::FontId::proportional(10.0),
@@ -603,7 +622,7 @@ pub fn lane_overlay(
     ) {
         let value = drag_value(
             ui,
-            &t.chain,
+            &lane_slots(&t),
             &lane.target,
             val_of(pos.y),
             area.height() as f64 / (hi - lo).max(1e-9),
@@ -637,7 +656,7 @@ pub fn lane_overlay(
                 &painter,
                 &th,
                 at,
-                lane_value_text_in(&t.chain, &lane.target, p.value),
+                lane_value_text_in(&lane_slots(&t), &lane.target, p.value),
                 lanes.intersect(row),
             );
         }
@@ -705,7 +724,7 @@ pub fn lanes_menu(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             ui.close_menu();
         }
     }
-    for p in af27_core::automation::RackParam::ALL {
+    for p in af2_core::automation::RackParam::ALL {
         let tg = LaneTarget::Rack(p);
         let label = format!("{}{}", tg.label(), if has(&tg) { " (shown)" } else { "" });
         if ui.button(label).clicked() {
@@ -713,19 +732,36 @@ pub fn lanes_menu(ui: &mut egui::Ui, st: &mut State, ti: usize) {
             ui.close_menu();
         }
     }
+    // A MIDI track's instrument plug-in, then each plug-in in the chain:
+    // their own controls, by the names the plug-in gives them.
+    if t.kind == TrackKind::Midi {
+        if let Some(s) = t.instrument_plugin.as_ref().filter(|s| is_plugin(&s.effect)) {
+            let title = format!("Instrument: {}", crate::plugins::slot_name(s));
+            if let Some(id) = plugin_lane_menu(ui, &title, s, ti, &has) {
+                pick = Some(plugin_target(s, id, PENDING_INSTRUMENT));
+            }
+        }
+    }
     for (si, s) in t.chain.iter().enumerate() {
-        let names: Vec<String> = match af27_dsp::Effect::from_id(&s.effect) {
+        if is_plugin(&s.effect) {
+            let title = format!("{} {}", si + 1, crate::plugins::slot_name(s));
+            if let Some(id) = plugin_lane_menu(ui, &title, s, ti, &has) {
+                pick = Some(plugin_target(s, id, &format!("pending-{si}")));
+            }
+            continue;
+        }
+        let names: Vec<String> = match af2_dsp::Effect::from_id(&s.effect) {
             Some(e) => e.params().iter().map(|p| p.name.to_string()).collect(),
-            None => af27_fx::info(&s.effect)
+            None => af2_fx::info(&s.effect)
                 .map(|i| i.params.iter().map(|p| p.name.to_string()).collect())
                 .unwrap_or_default(),
         };
         if names.is_empty() {
             continue;
         }
-        let title = af27_dsp::Effect::from_id(&s.effect)
+        let title = af2_dsp::Effect::from_id(&s.effect)
             .map(|e| e.name().to_string())
-            .or_else(|| af27_fx::info(&s.effect).map(|i| i.name.to_string()))
+            .or_else(|| af2_fx::info(&s.effect).map(|i| i.name.to_string()))
             .unwrap_or_else(|| s.effect.clone());
         ui.menu_button(format!("{} {}", si + 1, title), |ui| {
             for (pi, name) in names.iter().enumerate() {
@@ -733,7 +769,7 @@ pub fn lanes_menu(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                     pick = Some(LaneTarget::Effect {
                         slot: s.ext_id.clone().unwrap_or_else(|| format!("pending-{si}")),
                         param: pi,
-                        key: af27_fx::info(&s.effect)
+                        key: af2_fx::info(&s.effect)
                             .and_then(|i| i.params.get(pi).map(|p| p.key.to_string())),
                     });
                     ui.close_menu();
@@ -748,11 +784,311 @@ pub fn lanes_menu(ui: &mut egui::Ui, st: &mut State, ti: usize) {
                 .strip_prefix("pending-")
                 .and_then(|n| n.parse::<usize>().ok())
             {
-                let id = af27_interop::audfrm::new_uuid();
+                let id = af2_interop::audfrm::new_uuid();
                 st.session.tracks[ti].chain[si].ext_id = Some(id.clone());
+                *slot = id;
+            } else if slot == PENDING_INSTRUMENT {
+                let id = af2_interop::audfrm::new_uuid();
+                if let Some(s) = st.session.tracks[ti].instrument_plugin.as_mut() {
+                    s.ext_id = Some(id.clone());
+                }
                 *slot = id;
             }
         }
         st.add_lane(ti, tg);
+    }
+}
+
+// ------------------------------------------------------------ plug-in lanes
+//
+// Lanes on a VST3 plug-in's controls are effect lanes whose slot is a
+// plug-in (the MIDI track's instrument or one in the chain) and whose
+// value is the control's VST3 id; they hold the control's normalized
+// value (0..1), as Audiform saves them (`effect_param`, key `p<id>`).
+
+/// An instrument lane picked before the instrument slot has an id.
+const PENDING_INSTRUMENT: &str = "pending-instrument";
+
+fn is_plugin(effect: &str) -> bool {
+    af2_core::plugin::is_plugin(effect)
+}
+
+/// The slots a track's effect lanes can name: its chain, then (a MIDI
+/// track) its instrument plug-in.
+pub fn lane_slots(t: &af2_core::Track) -> Vec<af2_core::EffectSlot> {
+    let mut v = t.chain.clone();
+    if t.kind == TrackKind::Midi {
+        v.extend(t.instrument_plugin.clone());
+    }
+    v
+}
+
+/// The plug-in slot with id `slot` among `slots`.
+fn plugin_in<'a>(
+    slots: &'a [af2_core::EffectSlot],
+    slot: &str,
+) -> Option<&'a af2_core::EffectSlot> {
+    slots
+        .iter()
+        .find(|s| is_plugin(&s.effect) && s.ext_id.as_deref() == Some(slot))
+}
+
+/// The plug-in slot with id `slot` on track `t` (chain or instrument).
+fn plugin_slot_of<'a>(t: &'a af2_core::Track, slot: &str) -> Option<&'a af2_core::EffectSlot> {
+    let inst = t.instrument_plugin.iter().filter(|_| t.kind == TrackKind::Midi);
+    t.chain
+        .iter()
+        .chain(inst)
+        .find(|s| is_plugin(&s.effect) && s.ext_id.as_deref() == Some(slot))
+}
+
+/// A lane target on control `id` of plug-in slot `s` (`pending` names
+/// the slot until it has an id).
+pub(crate) fn plugin_target(s: &af2_core::EffectSlot, id: u32, pending: &str) -> LaneTarget {
+    LaneTarget::Effect {
+        slot: s.ext_id.clone().unwrap_or_else(|| pending.to_string()),
+        param: id as usize,
+        key: Some(af2_core::plugin::param_key(id)),
+    }
+}
+
+type ParamList = std::rc::Rc<Vec<af2_vst3::protocol::ParamInfo>>;
+
+thread_local! {
+    /// Each plug-in copy's controls, fetched at most once a second (a
+    /// plug-in can have thousands).
+    static PARAMS: std::cell::RefCell<HashMap<String, (std::time::Instant, ParamList)>> =
+        Default::default();
+}
+
+/// A plug-in slot's controls: as its running copy reported them, else as
+/// the scan read them (empty when it is not installed).
+pub fn plugin_params(s: &af2_core::EffectSlot) -> ParamList {
+    let inst = s.plugin_data().inst;
+    let key = format!("{}#{}", s.effect, inst);
+    PARAMS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some((at, list)) = m.get(&key) {
+            if at.elapsed().as_secs_f64() < 1.0 {
+                return list.clone();
+            }
+        }
+        let list: ParamList = std::rc::Rc::new(
+            af2_vst3::manager()
+                .get(&inst)
+                .map(|i| i.params())
+                .filter(|p| !p.is_empty())
+                .or_else(|| crate::plugins::found(&s.effect).map(|f| f.info.params))
+                .unwrap_or_default(),
+        );
+        m.insert(key, (std::time::Instant::now(), list.clone()));
+        list
+    })
+}
+
+/// Control `id` of plug-in slot `s`, when it is known.
+fn plugin_param(s: &af2_core::EffectSlot, id: u32) -> Option<af2_vst3::protocol::ParamInfo> {
+    plugin_params(s).iter().find(|p| p.id == id).cloned()
+}
+
+/// Control `id` of plug-in slot `s` now (0..1): the running copy's, the
+/// saved one, or the control's default.
+pub(crate) fn plugin_value(s: &af2_core::EffectSlot, id: u32) -> f64 {
+    let d = s.plugin_data();
+    af2_vst3::manager()
+        .get(&d.inst)
+        .and_then(|i| i.value(id))
+        .or_else(|| d.param(id))
+        .or_else(|| plugin_param(s, id).map(|p| p.default))
+        .unwrap_or(0.0)
+}
+
+/// A plug-in control's normalized value as the readout shows it: on or
+/// off for a switch, the step for a stepped control, else a percentage.
+pub fn plugin_value_text(p: Option<&af2_vst3::protocol::ParamInfo>, v: f64) -> String {
+    let v = v.clamp(0.0, 1.0);
+    match p.map_or(0, |p| p.steps) {
+        1 => if v >= 0.5 { "On" } else { "Off" }.into(),
+        n if n > 1 => format!(
+            "Step {} of {}",
+            (v * n as f64).round() as i64 + 1,
+            n as i64 + 1
+        ),
+        _ => format!("{:.1} %", v * 100.0),
+    }
+}
+
+/// A value on a stepped plug-in control's nearest step (others as they
+/// are).
+fn plugin_snap(chain: &[af2_core::EffectSlot], target: &LaneTarget, raw: f64) -> Option<f64> {
+    let LaneTarget::Effect { slot, param, .. } = target else {
+        return None;
+    };
+    let s = plugin_in(chain, slot)?;
+    let n = plugin_param(s, *param as u32)?.steps;
+    (n > 0).then(|| (raw.clamp(0.0, 1.0) * n as f64).round() / n as f64)
+}
+
+/// The control of plug-in copy `inst` last moved in its own window, if
+/// that was in the last two minutes.
+fn last_touched(inst: &str) -> Option<u32> {
+    let (id, at) = af2_vst3::manager().get(inst)?.last_turned()?;
+    (at.elapsed().as_secs() < 120).then_some(id)
+}
+
+/// One plug-in's controls as a submenu: the control last moved in its
+/// own window first, a search box for long lists. Returns the id picked.
+pub(crate) fn plugin_lane_menu(
+    ui: &mut egui::Ui,
+    title: &str,
+    s: &af2_core::EffectSlot,
+    ti: usize,
+    has: &dyn Fn(&LaneTarget) -> bool,
+) -> Option<u32> {
+    let mut picked = None;
+    ui.menu_button(title, |ui| {
+        let all = plugin_params(s);
+        let params: Vec<&af2_vst3::protocol::ParamInfo> =
+            all.iter().filter(|p| !p.hidden).collect();
+        if params.is_empty() {
+            ui.label("No controls to automate (the plug-in is not running or not installed).");
+            return;
+        }
+        let shown = |id: u32| {
+            if has(&plugin_target(s, id, "")) {
+                " (shown)"
+            } else {
+                ""
+            }
+        };
+        let inst = s.plugin_data().inst;
+        let touched = last_touched(&inst).and_then(|id| params.iter().find(|p| p.id == id));
+        match touched {
+            Some(p) => {
+                if ui
+                    .button(format!("Last touched: {}{}", p.title, shown(p.id)))
+                    .on_hover_text("The control you last moved in the plug-in's own window.")
+                    .clicked()
+                {
+                    picked = Some(p.id);
+                    ui.close_menu();
+                }
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(
+                        "Move a control in the plug-in's window, then open this menu again to pick it.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+        }
+        ui.separator();
+        let fid = egui::Id::new(("af2-plugin-lane-find", ti, inst.as_str()));
+        let mut find: String = ui.data(|d| d.get_temp(fid)).unwrap_or_default();
+        if params.len() > 12 {
+            ui.add(
+                egui::TextEdit::singleline(&mut find)
+                    .hint_text("Find a control")
+                    .desired_width(180.0),
+            );
+            ui.data_mut(|d| d.insert_temp(fid, find.clone()));
+        }
+        let needle = find.to_lowercase();
+        crate::plugins::tall_list(ui, fid.with("list"), |ui| {
+            for p in params
+                .iter()
+                .filter(|p| needle.is_empty() || p.title.to_lowercase().contains(&needle))
+            {
+                let name = if p.title.is_empty() {
+                    format!("Control {}", p.id)
+                } else {
+                    p.title.clone()
+                };
+                if ui.button(format!("{name}{}", shown(p.id))).clicked() {
+                    picked = Some(p.id);
+                    ui.close_menu();
+                }
+            }
+        });
+    });
+    picked
+}
+
+#[cfg(test)]
+mod plugin_lane_tests {
+    use super::*;
+    use af2_vst3::protocol::ParamInfo;
+
+    fn plug(id: &str, params: &[(u32, f64)]) -> af2_core::EffectSlot {
+        let mut d = af2_core::plugin::PluginData {
+            inst: format!("test-{id}"),
+            ..Default::default()
+        };
+        for &(k, v) in params {
+            d.set_param(k, v);
+        }
+        af2_core::EffectSlot {
+            position: None,
+            effect: "vst3:00000000000000000000000000000000".into(),
+            values: Vec::new(),
+            bypass: false,
+            sidechain: None,
+            data: Some(d.to_json()),
+            ext_id: Some(id.into()),
+        }
+    }
+
+    #[test]
+    fn instrument_and_chain_plugin_lanes_read_their_controls() {
+        let mut s = Session::new("t", 48_000, 0);
+        let tid = s.add_track_of(TrackKind::Midi);
+        let t = s.track_mut(tid).unwrap();
+        t.instrument_plugin = Some(plug("inst", &[(42, 0.3)]));
+        t.chain.push(plug("fx", &[(7, 0.8)]));
+        let t = t.clone();
+        let inst = plugin_target(t.instrument_plugin.as_ref().unwrap(), 42, "x");
+        let fx = plugin_target(&t.chain[0], 7, "x");
+        assert_eq!(
+            inst,
+            LaneTarget::Effect {
+                slot: "inst".into(),
+                param: 42,
+                key: Some("p42".into())
+            }
+        );
+        // The saved values (no running copy in tests).
+        assert!((control_value(&t, &inst) - 0.3).abs() < 1e-9);
+        assert!((control_value(&t, &fx) - 0.8).abs() < 1e-9);
+        let slots = lane_slots(&t);
+        assert_eq!(lane_range_in(&slots, &inst), (0.0, 1.0));
+        assert_eq!(lane_range_in(&slots, &fx), (0.0, 1.0));
+        // Not installed here: named by id, resting at 0.
+        assert_eq!(lane_label_in(&slots, &inst), "Control 42");
+        assert_eq!(lane_default_in(&slots, &inst), 0.0);
+        assert_eq!(lane_value_text_in(&slots, &fx, 0.25), "25.0 %");
+        // An audio track's instrument slot is not a lane target.
+        let mut a = t.clone();
+        a.kind = TrackKind::Audio;
+        assert_eq!(lane_slots(&a).len(), 1);
+        assert_eq!(control_value(&a, &inst), 0.0);
+    }
+
+    #[test]
+    fn plugin_values_read_as_switches_steps_or_percent() {
+        let info = |steps| ParamInfo {
+            id: 1,
+            title: "Cutoff".into(),
+            units: String::new(),
+            steps,
+            default: 0.5,
+            hidden: false,
+        };
+        assert_eq!(plugin_value_text(Some(&info(1)), 0.7), "On");
+        assert_eq!(plugin_value_text(Some(&info(1)), 0.2), "Off");
+        assert_eq!(plugin_value_text(Some(&info(3)), 2.0 / 3.0), "Step 3 of 4");
+        assert_eq!(plugin_value_text(Some(&info(0)), 0.5), "50.0 %");
+        assert_eq!(plugin_value_text(None, 1.5), "100.0 %");
     }
 }

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! What a 3D Space export writes: the speaker bed in any layout (chosen
 //! per export, whatever the session's own), a stereo or binaural file,
 //! and the channel order of a 7.x bed (WAV speaker-mask order, or the film
 //! order with sides before rears).
 
-use af27_core::space::{Monitor, SpaceLayout};
-use af27_core::Session;
-use af27_io::export::Container;
+use af2_core::space::{Monitor, SpaceLayout};
+use af2_core::Session;
+use af2_io::export::Container;
 
 /// What the bed export writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,13 +40,13 @@ impl BedOptions {
 
     pub fn channels(&self, session: Option<SpaceLayout>) -> usize {
         self.layout(session)
-            .map_or(2, |l| af27_space::pan::speakers(l).len())
+            .map_or(2, |l| af2_space::pan::speakers(l).len())
     }
 
     fn film(&self, layout: Option<SpaceLayout>) -> Option<Vec<usize>> {
         layout
             .filter(|_| self.film_order)
-            .and_then(af27_space::pan::film_order)
+            .and_then(af2_space::pan::film_order)
     }
 
     /// Readies `s` (a copy of the session) for the render. Returns whether
@@ -68,7 +68,7 @@ impl BedOptions {
                 let mask = if order.is_some() {
                     0
                 } else {
-                    af27_space::pan::channel_mask(l)
+                    af2_space::pan::channel_mask(l)
                 };
                 (true, Some(mask), order)
             }
@@ -78,7 +78,7 @@ impl BedOptions {
     /// Why this export cannot be written in `container`, if it cannot.
     pub fn refuse(&self, session: Option<SpaceLayout>, container: Container) -> Option<String> {
         let l = self.layout(session)?;
-        (container == Container::Flac && !af27_space::pan::flac_ok(l)).then(|| {
+        (container == Container::Flac && !af2_space::pan::flac_ok(l)).then(|| {
             format!(
                 "FLAC knows the channel order of 2.0, 5.1 and 7.1 only; write {} as WAV.",
                 l.label()
@@ -121,7 +121,7 @@ impl BedOptions {
         ui.end_row();
         if self
             .layout(session)
-            .and_then(af27_space::pan::film_order)
+            .and_then(af2_space::pan::film_order)
             .is_some()
         {
             ui.label("Channel order");

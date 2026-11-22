@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! Chapter and ad lists from markers: a plain timestamp list (for show
 //! notes and video descriptions), CSV, or the open podcast chapters JSON
 //! format (version 1.2.0) that podcast hosts and apps read. Ad slots go
 //! in their own list, never among the chapters. Exported FLAC files also
-//! carry the chapters inside (see `af27_io::export::chapter_comments`).
+//! carry the chapters inside (see `af2_io::export::chapter_comments`).
 
-use af27_core::session::MarkerKind;
-use af27_core::Marker;
+use af2_core::session::MarkerKind;
+use af2_core::Marker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

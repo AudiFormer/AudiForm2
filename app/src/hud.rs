@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
-//! The HUD layer: everything that makes Audiform27 look like an instrument
+//! The HUD layer: everything that makes Audiform2 look like an instrument
 //! panel from the future rather than a form. A living backdrop (a moving
 //! grid with drifting light behind glass panels), chamfered glass cards with
 //! corner brackets and a light that runs around the focused one, a laser
@@ -513,6 +513,7 @@ pub fn frame(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool, serial
     }
     if th.bevel.is_some() {
         crate::skin::panel(p, rect, th);
+        mall_corner(p, rect, th, serial);
         return;
     }
     let pts = chamfer(rect, th.chamfer);
@@ -546,8 +547,9 @@ pub fn frame(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool, serial
             vec![br - Vec2::new(0.0, len), br, br - Vec2::new(len, 0.0)],
             s,
         ));
-        // A serial number etched in the corner, because why not.
-        if rect.width() > 160.0 && rect.height() > 80.0 {
+        // A serial number etched in the corner, because why not (0: none,
+        // for a card whose picture reaches its corner).
+        if serial > 0 && rect.width() > 160.0 && rect.height() > 80.0 {
             p.text(
                 rect.right_bottom() - Vec2::new(8.0, 4.0),
                 Align2::RIGHT_BOTTOM,
@@ -559,6 +561,57 @@ pub fn frame(p: &Painter, rect: Rect, th: &Theme, fx: &Fx, focused: bool, serial
     }
     if focused && th.motion > 0.0 {
         running_light(p, &pts, th, fx);
+    }
+}
+
+/// The mall themes' stand-in for the serial: a floor-directory sign in the
+/// card's corner (none for serial 0).
+fn mall_corner(p: &Painter, rect: Rect, th: &Theme, serial: usize) {
+    if is_mall(th) && serial > 0 && rect.width() > 160.0 && rect.height() > 80.0 {
+        p.text(
+            rect.right_bottom() - Vec2::new(9.0, 5.0),
+            Align2::RIGHT_BOTTOM,
+            mall_sign(serial),
+            FontId::new(9.0, egui::FontFamily::Name(crate::skin::JP.into())),
+            ca(th.text_dim, 120),
+        );
+    }
+}
+
+/// The Mall Pastel '95 themes (day and night).
+fn is_mall(th: &Theme) -> bool {
+    th.name.starts_with("Mall Pastel")
+}
+
+/// A mall directory sign for panel `serial` (1 up): its floor and a shop.
+fn mall_sign(serial: usize) -> String {
+    const SHOPS: [&str; 10] = [
+        "インフォメーション", // information
+        "フードコート",       // food court
+        "エスカレーター",     // escalator
+        "ミュージック",       // music
+        "ゲームセンター",     // arcade
+        "ギフトショップ",     // gift shop
+        "カフェ",             // café
+        "セール",             // sale
+        "ショッピング",       // shopping
+        "ようこそ",           // welcome
+    ];
+    format!("{}F {}", serial, SHOPS[(serial - 1) % SHOPS.len()])
+}
+
+#[cfg(test)]
+mod mall_tests {
+    use super::*;
+
+    #[test]
+    fn mall_signs_name_a_floor_and_a_shop() {
+        assert_eq!(mall_sign(1), "1F インフォメーション");
+        assert_eq!(mall_sign(2), "2F フードコート");
+        assert_eq!(mall_sign(11), "11F インフォメーション");
+        assert!(is_mall(&Theme::mall_pastel_95()));
+        assert!(is_mall(&Theme::mall_pastel_95_night()));
+        assert!(!is_mall(&Theme::zero_point()));
     }
 }
 
@@ -798,6 +851,14 @@ pub fn transport_button(
     let p = ui.painter_at(rect.expand(2.0));
     let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
     let down = resp.is_pointer_button_down_on();
+    if crate::backlit::on(th) {
+        // A backlit plastic push-button: lit in its colour when on.
+        let p = ui.painter_at(rect.expand(8.0));
+        let lit = (on || down).then_some(rgb);
+        let (at, legend) = crate::backlit::cap(&p, rect, lit, hover, down, th.accent);
+        draw_icon(&p, icon, at, 13.0, legend);
+        return resp;
+    }
     if th.bevel.is_some() {
         // A square bevelled key; pressed or on, it sinks.
         let face = match (on, th.button_on) {
@@ -1359,9 +1420,13 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
     let themed = matches!(
         th.splash.as_str(),
         "mall-day" | "mall-night" | "undercurrent"
-    );
+    ) || th.splash.starts_with("pop:");
     let len = if themed { crate::splash::LEN } else { 2.1 };
-    let t = fx.clock;
+    // Timed from the first frame it is drawn on, not from when the app
+    // started: a slow start (big theme pictures, many plug-ins) would
+    // otherwise use the whole splash up before the window shows.
+    static START: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    let t = fx.clock - *START.get_or_init(|| fx.clock);
     if *skipped || !th.intro || t > len {
         return false;
     }
@@ -1372,7 +1437,7 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
     let screen = ctx.screen_rect();
     let p = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("af27-boot"),
+        egui::Id::new("af2-boot"),
     ));
     let fade = if t > len - 0.45 {
         (len - t) / 0.45
@@ -1382,6 +1447,7 @@ pub fn boot(ctx: &egui::Context, th: &Theme, fx: &Fx, skipped: &mut bool) -> boo
     if themed {
         match th.splash.as_str() {
             "undercurrent" => crate::splash::undercurrent(&p, screen, th, t, fade),
+            s if s.starts_with("pop:") => crate::splash::pop(&p, screen, th, t, fade, &s[4..]),
             s => crate::splash::mall(&p, screen, th, t, fade, s == "mall-night"),
         }
         p.ctx().request_repaint();

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The rack presets that come with the app, listed under the saved ones in
 //! the Effects rack's Presets list. The four echoes are the project lead's
-//! own settings from Audiform; the rest are Audiform27's own, set by ear.
+//! own settings from Audiform; the rest are Audiform2's own, set by ear.
 
-use af27_core::{EffectSlot, Rack};
+use af2_core::{EffectSlot, Rack};
 
 /// One built-in rack preset.
 pub struct Builtin {
@@ -29,7 +29,7 @@ fn s(id: &str, sets: &[(&str, f32)]) -> EffectSlot {
 }
 
 fn index(id: &str, key: &str) -> Option<usize> {
-    if let Some(info) = af27_fx::info(id) {
+    if let Some(info) = af2_fx::info(id) {
         return info.params.iter().position(|p| p.key == key);
     }
     crate::fx::controls(id).iter().position(|c| c.name == key)
@@ -39,46 +39,46 @@ fn index(id: &str, key: &str) -> Option<usize> {
 
 fn gate(threshold: f32, floor: f32) -> EffectSlot {
     s(
-        "noise-gate",
+        "af.breath_gate",
         &[
-            ("Threshold", threshold),
-            ("Attack", 1.0),
-            ("Hold", 60.0),
-            ("Release", 180.0),
-            ("Floor", floor),
+            ("threshold", threshold),
+            ("attack", 1.0),
+            ("hold", 60.0),
+            ("release", 180.0),
+            ("range", floor),
         ],
     )
 }
 
 fn comp(threshold: f32, ratio: f32, attack: f32, release: f32, makeup: f32) -> EffectSlot {
     s(
-        "compressor",
+        "af.dynamics",
         &[
-            ("Threshold", threshold),
-            ("Ratio", ratio),
-            ("Attack", attack),
-            ("Release", release),
-            ("Knee", 6.0),
-            ("Makeup", makeup),
+            ("threshold", threshold),
+            ("ratio", ratio),
+            ("attack", attack),
+            ("release", release),
+            ("knee", 6.0),
+            ("makeup", makeup),
         ],
     )
 }
 
 fn deess(freq: f32, threshold: f32, reduction: f32) -> EffectSlot {
     s(
-        "de-esser",
+        "af.deesser",
         &[
-            ("Frequency", freq),
-            ("Threshold", threshold),
-            ("Reduction", reduction),
+            ("freq", freq),
+            ("threshold", threshold),
+            ("reduction", reduction),
         ],
     )
 }
 
 fn limit(ceiling: f32) -> EffectSlot {
     s(
-        "limiter",
-        &[("Ceiling", ceiling), ("Look-ahead", 5.0), ("Release", 80.0)],
+        "af.limiter",
+        &[("ceiling", ceiling), ("lookahead", 5.0), ("release", 80.0)],
     )
 }
 
@@ -90,7 +90,7 @@ fn leveler() -> EffectSlot {
 /// and clicks out, the level ridden, esses softened, peaks held.
 pub fn spoken_voice() -> Vec<EffectSlot> {
     vec![
-        s("high-pass", &[("Cutoff", 80.0), ("Slope", 2.0)]),
+        s("af.precision_filter", &[("mode", 1.0), ("freq", 80.0), ("order", 1.0)]),
         s("af.noise_reducer", &[("reduction", 12.0)]),
         s("af.click_repair", &[]),
         s("af.speech_leveler", &[("target", -20.0)]),
@@ -122,17 +122,22 @@ fn voice_eq() -> EffectSlot {
     ])
 }
 
+/// A Reverb of `kind`, the rest at that kind's own starts (the Reverb
+/// starts as Studio, whose starts differ from the made kinds').
 fn reverb(kind: f32, size: f32, decay: f32, predelay: f32, wet: f32) -> EffectSlot {
-    s(
-        "af.reverb",
-        &[
-            ("kind", kind),
-            ("size", size),
-            ("decay", decay),
-            ("predelay", predelay),
-            ("wet", wet),
-        ],
-    )
+    use af2_fx::effects::verb;
+    let mut sets: Vec<(&str, f32)> = verb::KIND_DEFAULTS
+        .iter()
+        .filter_map(|(k, ..)| Some((*k, verb::kind_default(kind as usize, k)? as f32)))
+        .collect();
+    sets.extend([
+        ("kind", kind),
+        ("size", size),
+        ("decay", decay),
+        ("predelay", predelay),
+        ("wet", wet),
+    ]);
+    s("af.reverb", &sets)
 }
 
 fn chorus(rate: f32, depth: f32) -> EffectSlot {
@@ -151,7 +156,7 @@ fn drive(amount: f32) -> EffectSlot {
 /// sound at full level.
 fn echo(time: f32, feedback: f32, tone: f32, wet: f32, pingpong: bool) -> EffectSlot {
     s(
-        af27_fx::effects::echo::ID,
+        af2_fx::effects::echo::ID,
         &[
             ("kind", 0.0),
             ("time", time),
@@ -401,22 +406,22 @@ pub fn all() -> Vec<Builtin> {
             DYN,
             "Brickwall -0.1 dB",
             vec![s(
-                "limiter",
-                &[("Ceiling", -0.1), ("Look-ahead", 5.0), ("Release", 50.0)],
+                "af.limiter",
+                &[("ceiling", -0.1), ("lookahead", 5.0), ("release", 50.0)],
             )],
         ),
         b(
             DYN,
             "Voiceover Squeeze",
             vec![s(
-                "compressor",
+                "af.dynamics",
                 &[
-                    ("Threshold", -26.0),
-                    ("Ratio", 4.0),
-                    ("Attack", 4.0),
-                    ("Release", 120.0),
-                    ("Knee", 4.0),
-                    ("Makeup", 6.0),
+                    ("threshold", -26.0),
+                    ("ratio", 4.0),
+                    ("attack", 4.0),
+                    ("release", 120.0),
+                    ("knee", 4.0),
+                    ("makeup", 6.0),
                 ],
             )],
         ),
@@ -449,7 +454,7 @@ pub fn all() -> Vec<Builtin> {
             REPAIR,
             "Hiss Tamer",
             vec![
-                s("low-pass", &[("Cutoff", 10000.0), ("Slope", 2.0)]),
+                s("af.precision_filter", &[("mode", 0.0), ("freq", 10000.0), ("order", 1.0)]),
                 gate(-55.0, -12.0),
             ],
         ),
@@ -457,17 +462,17 @@ pub fn all() -> Vec<Builtin> {
             REPAIR,
             "Room Tail Tamer",
             vec![s(
-                "noise-gate",
+                "af.breath_gate",
                 &[
-                    ("Threshold", -38.0),
-                    ("Attack", 1.0),
-                    ("Hold", 30.0),
-                    ("Release", 90.0),
-                    ("Floor", -14.0),
+                    ("threshold", -38.0),
+                    ("attack", 1.0),
+                    ("hold", 30.0),
+                    ("release", 90.0),
+                    ("range", -14.0),
                 ],
             )],
         ),
-        b(REPAIR, "DC Offset Fix", vec![s("dc-offset", &[])]),
+        b(REPAIR, "DC Offset Fix", vec![s("af.dc_offset", &[])]),
         b(REPAIR, "Remove Clicks", vec![s("af.click_repair", &[])]),
         b(REPAIR, "Repair Clipping", vec![s("af.clip_repair", &[])]),
         b(REPAIR, "Reduce Background Noise", vec![s("af.noise_reducer", &[])]),
@@ -478,7 +483,7 @@ pub fn all() -> Vec<Builtin> {
             SPOKEN,
             "Remote Guest Clean-Up",
             vec![
-                s("high-pass", &[("Cutoff", 100.0), ("Slope", 2.0)]),
+                s("af.precision_filter", &[("mode", 1.0), ("freq", 100.0), ("order", 1.0)]),
                 s("af.noise_reducer", &[("reduction", 18.0), ("strength", 2.5)]),
                 s("af.room_reducer", &[("amount", 50.0)]),
                 s("af.click_repair", &[]),
@@ -491,7 +496,7 @@ pub fn all() -> Vec<Builtin> {
             SPOKEN,
             "Audiobook Narration",
             vec![
-                s("high-pass", &[("Cutoff", 70.0), ("Slope", 2.0)]),
+                s("af.precision_filter", &[("mode", 1.0), ("freq", 70.0), ("order", 1.0)]),
                 s("af.noise_reducer", &[("reduction", 10.0)]),
                 s("af.click_repair", &[("sensitivity", 60.0)]),
                 s("af.speech_leveler", &[("target", -22.0), ("max_gain", 6.0), ("max_cut", 6.0), ("speed", 3000.0)]),
@@ -505,27 +510,27 @@ pub fn all() -> Vec<Builtin> {
             EQ,
             "Mains Hum 60 Hz",
             vec![s(
-                "hum-remover",
-                &[("Base", 60.0), ("Harmonics", 5.0), ("Q", 35.0)],
+                "af.hum_cut",
+                &[("mains", 0.0), ("harmonics", 5.0), ("q", 35.0)],
             )],
         ),
         b(
             EQ,
             "Mains Hum 50 Hz",
             vec![s(
-                "hum-remover",
-                &[("Base", 50.0), ("Harmonics", 5.0), ("Q", 35.0)],
+                "af.hum_cut",
+                &[("mains", 1.0), ("harmonics", 5.0), ("q", 35.0)],
             )],
         ),
         b(
             EQ,
             "Low Rumble Filter",
-            vec![s("high-pass", &[("Cutoff", 75.0), ("Slope", 3.0)])],
+            vec![s("af.precision_filter", &[("mode", 1.0), ("freq", 75.0), ("order", 2.0)])],
         ),
         b(
             EQ,
             "Infrasonic Filter",
-            vec![s("high-pass", &[("Cutoff", 28.0), ("Slope", 4.0)])],
+            vec![s("af.precision_filter", &[("mode", 1.0), ("freq", 28.0), ("order", 3.0)])],
         ),
         b(
             EQ,
@@ -589,7 +594,7 @@ mod tests {
             for slot in &p.chain {
                 let controls = crate::fx::controls(&slot.effect);
                 assert!(
-                    !controls.is_empty() || slot.effect == "dc-offset",
+                    !controls.is_empty() || slot.effect == "af.dc_offset",
                     "{}: {}",
                     p.name,
                     slot.effect
@@ -626,15 +631,15 @@ mod tests {
             }
         };
         check(
-            "noise-gate",
-            &["Threshold", "Attack", "Hold", "Release", "Floor"],
+            "af.breath_gate",
+            &["threshold", "attack", "hold", "release", "range"],
         );
         check(
-            "compressor",
-            &["Threshold", "Ratio", "Attack", "Release", "Knee", "Makeup"],
+            "af.dynamics",
+            &["threshold", "ratio", "attack", "release", "knee", "makeup"],
         );
-        check("de-esser", &["Frequency", "Threshold", "Reduction"]);
-        check("limiter", &["Ceiling", "Look-ahead", "Release"]);
+        check("af.deesser", &["freq", "threshold", "reduction"]);
+        check("af.limiter", &["ceiling", "lookahead", "release"]);
         check(
             "af.echo",
             &["kind", "time", "feedback", "tone", "dry", "wet", "pingpong"],

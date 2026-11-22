@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The time ruler both editors share: its marks in the chosen time format,
 //! click-or-drag positioning of the playhead, its right-click menu, the
@@ -26,7 +26,7 @@ pub fn draw_ruler(
     rect: Rect,
     v: &View,
     th: &Theme,
-    markers: &[af27_core::Marker],
+    markers: &[af2_core::Marker],
     tc: &TimeCtx,
 ) {
     p.rect_filled(rect, Rounding::ZERO, c(th.panel));

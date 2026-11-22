@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The export dialog (File > Save Audio As, Export > Multitrack Mixdown,
 //! Track Stems and the 3D speaker bed) and the background jobs that write
@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 
-use af27_core::{AudioBuffer, Session, TrackKind};
-use af27_io::export::{
+use af2_core::{AudioBuffer, Session, TrackKind};
+use af2_io::export::{
     self as ex, ChannelChoice, Container, LoudnessTarget, MarkerOut, Meta, Options, Report,
     SampleFormat, Tag,
 };
@@ -163,6 +163,8 @@ pub enum Purpose {
 enum Then {
     SaveDoc { doc: DocId, path: PathBuf },
     Files,
+    /// A mixdown: when written, it opens in the Waveform editor.
+    Mixdown(PathBuf),
     Bounce { name: String, at: f64 },
 }
 
@@ -213,7 +215,14 @@ fn stem_of(name: &str) -> String {
 }
 
 fn with_ext(name: &str, c: Container) -> String {
-    format!("{}.{}", stem_of(name), c.extension())
+    // Only an audio extension comes off: "Song v1.2 Mixdown" keeps its
+    // whole name (its ".2 Mixdown" is not an extension).
+    let stem = if Container::from_path(Path::new(name)).is_some() {
+        stem_of(name)
+    } else {
+        name.to_string()
+    };
+    format!("{stem}.{}", c.extension())
 }
 
 // ------------------------------------------------------------ opening
@@ -248,7 +257,7 @@ pub fn export_sesx(st: &mut State) {
         })
         .unwrap_or_else(home);
     let name = format!("{}.sesx", ex::safe_file_name(&st.session.name));
-    let Some(path) = rfd::FileDialog::new()
+    let Some(path) = crate::file_dialog::FileDialog::new()
         .set_title("Export Multitrack Session")
         .set_directory(&folder)
         .set_file_name(name)
@@ -268,7 +277,7 @@ pub fn export_sesx(st: &mut State) {
         PathBuf::from(p)
     };
     crate::plugins::capture_all(st);
-    match af27_interop::sesx_out::export(&st.session, &path) {
+    match af2_interop::sesx_out::export(&st.session, &path) {
         Ok(report) => {
             st.toast(format!(
                 "Exported {}",
@@ -377,7 +386,7 @@ pub fn save_in_place(st: &mut State) {
 
 // ------------------------------------------------------------ tracks
 
-fn has_clips(t: &af27_core::Track) -> bool {
+fn has_clips(t: &af2_core::Track) -> bool {
     !t.clips.is_empty() || !t.midi.is_empty()
 }
 
@@ -407,7 +416,7 @@ pub fn only_track(s: &Session, ti: usize) -> Session {
 }
 
 /// The session with only the selected clip(s) left, and their span.
-fn only_clips(s: &Session, keep: &[af27_core::ClipId]) -> (Session, f64, f64) {
+fn only_clips(s: &Session, keep: &[af2_core::ClipId]) -> (Session, f64, f64) {
     let mut s = s.clone();
     let (mut a, mut b) = (f64::MAX, 0.0f64);
     for t in &mut s.tracks {
@@ -435,7 +444,7 @@ fn session_meta(s: &Session, from: f64, to: f64, title: &str) -> Meta {
                 name: m.name.clone(),
                 time: m.time - from,
                 length: m.length.min(to - m.time),
-                chapter: m.kind == af27_core::session::MarkerKind::Chapter,
+                chapter: m.kind == af2_core::session::MarkerKind::Chapter,
             })
             .collect(),
         tags: tags(title),
@@ -473,7 +482,7 @@ fn mix_source(st: &State, range: MixRange) -> (Session, f64, f64) {
 /// renders unless the options need the whole mix first.
 #[allow(clippy::too_many_arguments)]
 fn render_to_file(
-    program: af27_engine::Program,
+    program: af2_engine::Program,
     rate: u32,
     from: f64,
     to: f64,
@@ -484,11 +493,11 @@ fn render_to_file(
     done: &AtomicU64,
     cancel: &AtomicBool,
 ) -> Result<Report, String> {
-    let ch = af27_engine::render_channels(&program, bed);
+    let ch = af2_engine::render_channels(&program, bed);
     let stopped = || "Cancelled.".to_string();
     if opts.needs_whole(rate) || opts.channels.count(ch) != ch {
         let mut inter = Vec::new();
-        af27_engine::render_each(program, rate, from, to, bed, |b| {
+        af2_engine::render_each(program, rate, from, to, bed, |b| {
             inter.extend_from_slice(b);
             done.fetch_add((b.len() / ch) as u64 / 2, Ordering::Relaxed);
             !cancel.load(Ordering::Relaxed)
@@ -512,7 +521,7 @@ fn render_to_file(
         meta,
     )?;
     let mut err = None;
-    af27_engine::render_each(program, rate, from, to, bed, |b| {
+    af2_engine::render_each(program, rate, from, to, bed, |b| {
         if let Err(e) = w.push(b) {
             err = Some(e);
             return false;
@@ -565,13 +574,18 @@ fn spawn(
     });
 }
 
-fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, opts: Options) {
+fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, mut opts: Options) {
     if st.export.job.is_some() {
         st.error("An export is still running.");
         return;
     }
     let Some(d) = st.doc_by_id(id) else { return };
     let buf = d.buf.clone();
+    // The file's own speaker layout (5.1.2 and 7.1 both have eight
+    // channels), while its channels are kept.
+    if opts.channels.count(buf.num_channels()) == buf.num_channels() {
+        opts.channel_mask = opts.channel_mask.or(d.speaker_mask());
+    }
     let meta = Meta {
         markers: d
             .markers
@@ -580,7 +594,7 @@ fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, opts: Options) {
                 name: m.name.clone(),
                 time: m.time,
                 length: m.length,
-                chapter: m.kind == af27_core::session::MarkerKind::Chapter,
+                chapter: m.kind == af2_core::session::MarkerKind::Chapter,
             })
             .collect(),
         tags: tags(&stem_of(
@@ -606,7 +620,7 @@ fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, opts: Options) {
             let rep = ex::export_buffer(&p2, &buf, &opts, &meta)?;
             done.store(total, Ordering::Relaxed);
             let reload = if changes {
-                Some(af27_io::decode_file(&p2)?)
+                Some(af2_io::decode_file(&p2)?)
             } else {
                 None
             };
@@ -647,7 +661,7 @@ pub fn bounce_track(st: &mut State) {
     }
     let s = only_track(&st.session, ti);
     let rate = st.session.rate;
-    let program = af27_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
+    let program = af2_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
     let name = format!("{} Bounce", st.session.tracks[ti].name);
     let dir = data_dir().join("bounces");
     let _ = std::fs::create_dir_all(&dir);
@@ -681,7 +695,7 @@ pub fn bounce_track(st: &mut State) {
                 done,
                 cancel,
             )?;
-            let buf = af27_io::decode_file(&p2)?;
+            let buf = af2_io::decode_file(&p2)?;
             Ok(Done {
                 reports: vec![rep],
                 reload: Some(buf),
@@ -734,31 +748,40 @@ fn start(st: &mut State, paths: Vec<PathBuf>) {
                 (bed, order)
             } else {
                 if s.space.is_some() {
-                    s.monitor = af27_core::space::Monitor::StereoFold;
+                    s.monitor = af2_core::space::Monitor::StereoFold;
                 }
                 (false, None)
             };
-            let mut program = af27_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
-            if let af27_engine::Program::Mix(m) = &mut program {
+            let mut program = af2_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
+            if let af2_engine::Program::Mix(m) = &mut program {
                 m.set_bed_order(order);
             }
             let path = paths[0].clone();
             let meta = session_meta(&s, from, to, &stem_of(&prefs_name(&path)));
             let total = ((to - from) * rate as f64) as u64;
             let p2 = path.clone();
+            // Exported over a file the editor has open (a second mixdown
+            // to the same name): read it back here, as opening it again
+            // would only bring the old copy to the front.
+            let read_back = st.doc_for_path(&path).is_some();
             spawn(
                 st,
                 format!("Exporting {}", path.display()),
                 total,
-                Then::Files,
+                Then::Mixdown(path.clone()),
                 float,
                 move |done, cancel| {
                     let r = render_to_file(
                         program, rate, from, to, bed, &p2, &opts, &meta, done, cancel,
                     )?;
+                    let reload = if read_back {
+                        Some(af2_io::open_file(&p2)?.buf)
+                    } else {
+                        None
+                    };
                     Ok(Done {
                         reports: vec![r],
-                        reload: None,
+                        reload,
                     })
                 },
                 vec![path],
@@ -770,7 +793,7 @@ fn start(st: &mut State, paths: Vec<PathBuf>) {
             let mut jobs = Vec::new();
             for (ti, path) in tracks.iter().zip(&paths) {
                 let s = only_track(&st.session, *ti);
-                let program = af27_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
+                let program = af2_engine::mix_program(&s, &|m| st.media_buffer(m), rate);
                 let meta = session_meta(&s, 0.0, to, &st.session.tracks[*ti].name);
                 jobs.push((program, path.clone(), meta));
             }
@@ -870,6 +893,23 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
             } else {
                 format!("Exported {n} files ({})", ex::human_bytes(bytes))
             });
+        }
+        Then::Mixdown(path) => {
+            let bytes: u64 = done.reports.iter().map(|r| r.bytes).sum();
+            st.toast(format!("Exported {} ({})", path.display(), ex::human_bytes(bytes)));
+            // The mixdown comes up in the Waveform editor to listen to.
+            match (st.doc_for_path(&path), done.reload) {
+                (Some(id), Some(buf)) => {
+                    if let Some(d) = st.docs.iter_mut().find(|d| d.id == id) {
+                        d.set_buffer("Mixdown exported again", buf);
+                        d.dirty = false;
+                    }
+                    st.current = Some(id);
+                }
+                (Some(id), None) => st.current = Some(id),
+                (None, _) => st.load_file(path, None),
+            }
+            st.mode = Mode::Waveform;
         }
         Then::Bounce { name, at } => {
             if let (Some(buf), Some(rep)) = (done.reload, done.reports.first()) {
@@ -1027,13 +1067,13 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                         ui.label(ex_ui.folder.display().to_string());
                         if ui.button("Browse...").clicked() {
                             if purpose == Purpose::Stems {
-                                if let Some(d) = rfd::FileDialog::new()
+                                if let Some(d) = crate::file_dialog::FileDialog::new()
                                     .set_directory(&ex_ui.folder)
                                     .pick_folder()
                                 {
                                     ex_ui.folder = d;
                                 }
-                            } else if let Some(p) = rfd::FileDialog::new()
+                            } else if let Some(p) = crate::file_dialog::FileDialog::new()
                                 .set_directory(&ex_ui.folder)
                                 .set_file_name(&ex_ui.name)
                                 .add_filter("WAV", &["wav"])
@@ -1192,7 +1232,7 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                 out_rate,
                 opts.effective_format().label(),
                 opts.container.label(),
-                af27_core::time::format_time(secs.max(0.0)),
+                af2_core::time::format_time(secs.max(0.0)),
                 if files > 1 {
                     format!(", {files} files")
                 } else {
@@ -1263,7 +1303,7 @@ mod tests {
     fn stems_take_unmuted_tracks_with_clips_and_ignore_solo() {
         let mut s = Session::default();
         let m = s.alloc_id();
-        s.media.push(af27_core::MediaItem {
+        s.media.push(af2_core::MediaItem {
             id: m,
             name: "a".into(),
             path: None,
@@ -1311,5 +1351,59 @@ mod tests {
     fn typed_extension_names() {
         assert_eq!(with_ext("Take 1.wav", Container::Flac), "Take 1.flac");
         assert_eq!(with_ext("Take", Container::Wav), "Take.wav");
+        assert_eq!(with_ext("Song v1.2 Mixdown", Container::Wav), "Song v1.2 Mixdown.wav");
+        assert_eq!(with_ext("Song v1.2 Mixdown.wav", Container::Flac), "Song v1.2 Mixdown.flac");
+    }
+
+    /// Runs a mixdown job to its end the way the app does each frame.
+    fn finish_mixdown(st: &mut State, path: &Path, secs: usize) {
+        let ctx = egui::Context::default();
+        let p2 = path.to_path_buf();
+        let read_back = st.doc_for_path(path).is_some();
+        spawn(
+            st,
+            "Exporting".into(),
+            1,
+            Then::Mixdown(path.to_path_buf()),
+            false,
+            move |_, _| {
+                let buf = AudioBuffer::new(48_000, 2, 48_000 * secs);
+                let r = ex::export_buffer(&p2, &buf, &Options::default(), &Meta::default())?;
+                let reload = read_back.then(|| af2_io::open_file(&p2).unwrap().buf);
+                Ok(Done { reports: vec![r], reload })
+            },
+            vec![],
+        );
+        for _ in 0..500 {
+            poll(st, &ctx);
+            st.poll_jobs();
+            if st.export.job.is_none() && st.jobs.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_finished_mixdown_opens_in_the_waveform_editor_even_when_exported_again() {
+        let dir = std::env::temp_dir().join(format!("af2-mixdown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song v1.2 Mixdown.wav");
+        let mut st = State::new();
+        st.mode = Mode::Multitrack;
+        finish_mixdown(&mut st, &path, 1);
+        assert_eq!(st.mode, Mode::Waveform);
+        let d = st.doc().expect("the mixdown is the file in front");
+        assert_eq!(d.path.as_deref(), Some(path.as_path()));
+        assert!((d.duration() - 1.0).abs() < 1e-3);
+        // Exported again over the same file (the session changed): the
+        // editor shows the new file, not the one it had open.
+        st.mode = Mode::Multitrack;
+        finish_mixdown(&mut st, &path, 2);
+        assert_eq!(st.mode, Mode::Waveform);
+        let d = st.doc().unwrap();
+        assert_eq!(d.path.as_deref(), Some(path.as_path()));
+        assert!((d.duration() - 2.0).abs() < 1e-3, "{}", d.duration());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,10 +3,10 @@
 ## 2026-11-18: project start
 
 - **Clean room, MIT OR Apache-2.0.** Decided by the project lead, so that
-  Audiform27 is free of Altered Audio Editor's GPL. See `clean-room.md`.
+  Audiform2 is free of Altered Audio Editor's GPL. See `clean-room.md`.
 - **Audiform-only files may be ported** (project lead, 2026-11-18). Only
   files Audiform created from scratch, with no AAE copyright line.
-- **The DTS decoder stays LGPL-2.1** in its own crate (`af27-dts`), because
+- **The DTS decoder stays LGPL-2.1** in its own crate (`af2-dts`), because
   it is a port of FFmpeg's. Everything else is permissive.
 - **All Rust UI: egui + egui_dock.** egui gives full control over drawing
   (waveforms, spectrograms, glow), so the theme reaches every pixel.
@@ -21,7 +21,7 @@
   sample rate mix without conversion first. Playback resamples on the fly.
 - **Real-time rule.** The audio thread never allocates, locks or frees.
   Programs arrive over `rtrb` and are dropped on the UI thread.
-- **AI stems share Audiform's engine and models.** Audiform27 looks in its
+- **AI stems share Audiform's engine and models.** Audiform2 looks in its
   own folder, then in Audiform's (`io.github.nwh212.audiform/separation`),
   so a user who already downloaded gigabytes of models does not do it
   again. Extra models can be described in `models.json` in either folder.
@@ -33,15 +33,15 @@
 
 - **`.audfrm` is the session format** (project lead: compatibility comes
   first). It is written losslessly: each object keeps its id from the
-  file, and saving writes only Audiform27's fields over the original
+  file, and saving writes only Audiform2's fields over the original
   object, so automation, stretch, routing and future fields survive.
-  This is better than copying Audiform's internal model into Audiform27:
+  This is better than copying Audiform's internal model into Audiform2:
   the new engine stays free of old limits, and nothing AAE-derived comes
   in. Checked against all 75 of the lead's sessions: byte-identical
   after a load and save.
-- **Audiform27-only data in `.audfrm`**: its own effects are saved as
-  `af27.<id>` slots (Audiform skips them when playing but keeps them when
-  it saves). The synth settings go in `af27_synth` on the track.
+- **Audiform2-only data in `.audfrm`**: its own effects are saved as
+  `af2.<id>` slots (Audiform skips them when playing but keeps them when
+  it saves). The synth settings go in `af2_synth` on the track.
 - **The project lead's 3D Space, Phase Wheel and effects are ported.**
   Provenance was checked file by file (`clean-room.md`). Delay and Echo
   was dropped: Audiform's own records list it as AAE's.
@@ -49,10 +49,10 @@
   positions and instrument settings go to the audio thread as fixed-size
   commands. Only structural changes rebuild the mix. Each drag is one
   undo step.
-- **Licence changed to the Audiform27 License 1.0** (project lead): MIT
+- **Licence changed to the Audiform2 License 1.0** (project lead): MIT
   freedoms for everyone except GeekCast Radio Network, LLC and anyone
   acting for it. It is visible, not hidden, because a hidden term is not
-  enforceable. `af27-dts` stays LGPL, which forbids added restrictions.
+  enforceable. `af2-dts` stays LGPL, which forbids added restrictions.
   The lead's earlier upstream contributions were licensed to AAE under its
   agreement; this licence does not and cannot change that.
   *(Superseded later the same day: AudiForm 2 is GPL-3.0-or-later, so
@@ -62,7 +62,7 @@
 
 - **Renamed AudiForm 2** (project lead). Visible name, logo and licence
   title. Crate names, file extensions and the settings folder keep
-  `af27`/`Audiform27` so nothing saved is lost.
+  `af2`/`Audiform2` so nothing saved is lost.
 - **Parallel engine.** A pool of worker threads (one fewer than the
   cores, at most 15) driven by the audio thread with atomics only: no
   locks or allocation, unlike rayon (which Audiform uses), whose
@@ -136,11 +136,11 @@
   chorus in the font player are off (use the track's effects). A missing
   font leaves the track silent and says so in the Inspector.
 - **Where the SoundFont is saved.** `.audfrm` has no place for it, so it
-  goes in AudiForm 2's own track field `af27_soundfont` (path, bank,
-  program, preset name, level), next to the existing `af27_synth`; the
+  goes in AudiForm 2's own track field `af2_soundfont` (path, bank,
+  program, preset name, level), next to the existing `af2_synth`; the
   writer only adds it when a track uses a SoundFont and removes it when
   the track goes back to the built-in synth, so other sessions are
-  untouched and Audiform keeps the field. `.af27` saves it as
+  untouched and Audiform keeps the field. `.af2` saves it as
   `soundfont` on the track.
 - **Hand-played notes** go through an audition voice in the engine, made
   on the UI thread for the open track's instrument and swapped in over

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The 3D Space panel: the room seen from above, front at the top.
 //!
@@ -17,8 +17,8 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Pos2, Rect, RichText, Rounding, 
 
 use crate::state::State;
 use crate::theme::{c, ca};
-use af27_core::space::{Monitor, SpaceLayout, SpacePos, SpatializeMode};
-use af27_core::{Session, Track, TrackKind};
+use af2_core::space::{Monitor, SpaceLayout, SpacePos, SpatializeMode};
+use af2_core::{Session, Track, TrackKind};
 
 /// What a drag in the room holds.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,7 +38,7 @@ pub fn is_placed(s: &Session, t: &Track) -> bool {
     if t.kind != TrackKind::Bus && t.clips.is_empty() && t.midi.is_empty() {
         return false;
     }
-    let room = |id: af27_core::TrackId| {
+    let room = |id: af2_core::TrackId| {
         s.tracks
             .iter()
             .any(|b| b.id == id && b.kind == TrackKind::Bus && b.spatial.room)
@@ -259,7 +259,7 @@ fn source_buttons(ui: &mut egui::Ui, st: &mut State, placed: &[usize], picked: O
 /// Speaker meters, one narrow bar per channel in layout order.
 fn meters(ui: &mut egui::Ui, st: &mut State, layout: SpaceLayout) {
     let th = st.theme.clone();
-    let names = af27_space::pan::layout_info(layout).names;
+    let names = af2_space::pan::layout_info(layout).names;
     let id = egui::Id::new("space_meters");
     let fresh = st
         .engine
@@ -316,7 +316,7 @@ fn shown_pos(st: &State, t: &Track) -> SpacePos {
 
 /// Where the pair's sides sit (x, y), as the mix has them.
 fn sides(p: &SpacePos) -> [[f64; 2]; 2] {
-    let s = af27_space::pan::sides(&p.tidy());
+    let s = af2_space::pan::sides(&p.tidy());
     [
         [s[0][0] as f64, s[0][1] as f64],
         [s[1][0] as f64, s[1][1] as f64],
@@ -326,7 +326,7 @@ fn sides(p: &SpacePos) -> [[f64; 2]; 2] {
 /// Snaps a spot onto a speaker (within 0.09) or each axis onto the
 /// quarter grid (within 0.06).
 fn snap_spot(layout: SpaceLayout, x: f64, y: f64) -> (f64, f64) {
-    let near = af27_space::speakers(layout)
+    let near = af2_space::speakers(layout)
         .iter()
         .filter_map(|s| s.at)
         .map(|a| (a[0] as f64, a[1] as f64))
@@ -431,7 +431,7 @@ fn room_view(
     );
     // Speakers: ear level as rounded squares, raised as diamonds set in
     // from their corners, named outside the room.
-    for s in af27_space::speakers(layout) {
+    for s in af2_space::speakers(layout) {
         let Some([x, y, z]) = s.at else { continue };
         let q = to_px(x as f64, y as f64);
         let out = vec2(x, -y).normalized() * 12.0;
@@ -837,7 +837,7 @@ mod tests {
         let bus = s.add_track_of(TrackKind::Bus);
         // Tracks with nothing on them are not shown.
         assert!(!is_placed(&s, &s.tracks[0]));
-        s.tracks[0].midi.push(af27_core::midi::MidiClip {
+        s.tracks[0].midi.push(af2_core::midi::MidiClip {
             id: 99,
             name: "m".into(),
             start: 0.0,

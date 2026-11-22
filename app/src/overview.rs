@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Multitrack's overview strip, above the time ruler: the whole
 //! session in miniature (one thin row per track) with the part in view

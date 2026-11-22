@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! MIDI tracks' VST3 instruments in the app: the VST3 part of the
 //! instrument menu (by maker, with kinds and a search box), the
@@ -12,11 +12,11 @@ use std::collections::{BTreeMap, HashSet};
 
 use egui::RichText;
 
-use af27_core::plugin::{is_plugin, PluginData};
-use af27_core::{EffectSlot, TrackId, TrackKind};
-use af27_dsp::instrument::{NoteEvent, Use};
-use af27_vst3::live::{Status, KEYS};
-use af27_vst3::manager;
+use af2_core::plugin::{is_plugin, PluginData};
+use af2_core::{EffectSlot, TrackId, TrackKind};
+use af2_dsp::instrument::{NoteEvent, Use};
+use af2_vst3::live::{Status, KEYS};
+use af2_vst3::manager;
 
 use crate::state::State;
 use crate::theme::{c, Theme};
@@ -129,7 +129,7 @@ pub fn menu_items(ui: &mut egui::Ui, current: Option<&str>, th: &Theme) -> Optio
                 .push((
                 kind,
                 f.info.name.clone(),
-                format!("{}{}", af27_vst3::PREFIX, f.info.cid),
+                format!("{}{}", af2_vst3::PREFIX, f.info.cid),
             ));
         }
         for (_, v) in m.values_mut() {
@@ -269,6 +269,7 @@ pub fn restart(st: &mut State, ti: usize) {
         manager().restart(&format!("{}{KEYS}", d.inst));
         UI.with(|u| u.borrow_mut().keys = None);
         st.session_version += 1;
+        st.rebuild_program();
     }
 }
 
@@ -378,7 +379,7 @@ fn keys_copy(s: &EffectSlot) -> EffectSlot {
     s
 }
 
-fn keys_sig(t: &af27_core::Track, rate: u32) -> String {
+fn keys_sig(t: &af2_core::Track, rate: u32) -> String {
     let inst = t.instrument_plugin.as_ref().map(|s| (s.effect.clone(), s.plugin_data().inst));
     let chain: Vec<(&str, bool, Option<String>)> = t
         .chain
@@ -390,7 +391,7 @@ fn keys_sig(t: &af27_core::Track, rate: u32) -> String {
 
 /// The track's settings the keys copies should have: (instrument slot
 /// data, each plug-in effect's data), as one text.
-fn keys_settings(t: &af27_core::Track) -> String {
+fn keys_settings(t: &af2_core::Track) -> String {
     let mut s = t
         .instrument_plugin
         .as_ref()
@@ -418,7 +419,7 @@ pub fn keys_for(st: &mut State, ti: usize) -> bool {
     let rate = rate_of(st);
     let sig = keys_sig(t, rate);
     let gain = {
-        let (l, r) = af27_engine::track_gains(t, false);
+        let (l, r) = af2_engine::track_gains(t, false);
         [l, r]
     };
     let id = t.id;
@@ -437,7 +438,7 @@ pub fn keys_for(st: &mut State, ti: usize) -> bool {
     if let Some(eb) = e.real_buffer().or(e.buffer) {
         manager().set_keys_buffer(Some(eb));
     }
-    let Some(inst) = af27_dsp::instrument::build_instrument(&slot, rate, Use::Keys) else {
+    let Some(inst) = af2_dsp::instrument::build_instrument(&slot, rate, Use::Keys) else {
         // Not installed: nothing plays (said by `tick`).
         e.set_keys_player(None);
         UI.with(|u| u.borrow_mut().keys = None);
@@ -450,10 +451,10 @@ pub fn keys_for(st: &mut State, ti: usize) -> bool {
         .filter(|s| s.sidechain.is_none())
         .map(keys_copy)
         .collect();
-    let mut chain = af27_dsp::live::build_chain(&chain_slots, rate, af27_engine::BLOCK);
+    let mut chain = af2_dsp::live::build_chain(&chain_slots, rate, af2_engine::BLOCK);
     chain.set_rack(&t.rack);
     let synced = keys_settings(t);
-    e.set_keys_player(Some(af27_engine::plugin_inst::KeysPlayer::new(
+    e.set_keys_player(Some(af2_engine::plugin_inst::KeysPlayer::new(
         inst, chain, gain,
     )));
     UI.with(|u| {
@@ -495,7 +496,7 @@ fn keys_follow(st: &mut State) {
         keys_stop(st);
         return;
     };
-    let (l, r) = af27_engine::track_gains(t, false);
+    let (l, r) = af2_engine::track_gains(t, false);
     if [l, r] != gain0 {
         if let Some(e) = st.engine.as_mut() {
             e.set_keys_gain([l, r]);
@@ -506,6 +507,7 @@ fn keys_follow(st: &mut State) {
             }
         });
     }
+    keys_mirror(t);
     let now = keys_settings(t);
     if now != synced0 {
         let mut all: Vec<&EffectSlot> = t.instrument_plugin.iter().collect();
@@ -524,6 +526,38 @@ fn keys_follow(st: &mut State) {
     }
 }
 
+thread_local! {
+    static MIRRORED_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// The keys copies take playback's copies' settings: once when they start,
+/// then every couple of seconds while playback's window is open (a patch
+/// or library picked there often never shows as a change). Without this
+/// a sampler loaded in its window stays silent from the keyboard until
+/// notes in a clip play it through playback's copy.
+fn keys_mirror(t: &af2_core::Track) {
+    let due = MIRRORED_AT.with(|m| m.get().is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(2)));
+    let mut all: Vec<&EffectSlot> = t.instrument_plugin.iter().collect();
+    all.extend(t.chain.iter().filter(|s| is_plugin(&s.effect)));
+    for s in all {
+        let d = s.plugin_data();
+        let (Some(play), Some(keys)) = (
+            manager().get(&d.inst),
+            manager().get(&format!("{}{KEYS}", d.inst)),
+        ) else {
+            continue;
+        };
+        let first = !keys.mirrored.load(std::sync::atomic::Ordering::Relaxed);
+        let open = play.editor_open.load(std::sync::atomic::Ordering::Relaxed);
+        if first || (open && due) {
+            keys.mirror(&play);
+        }
+    }
+    if due {
+        MIRRORED_AT.with(|m| m.set(Some(std::time::Instant::now())));
+    }
+}
+
 /// Whether the keys should pass the sustain pedal on to track `id`'s
 /// VST3 instrument (it takes controller 64), or hold notes themselves.
 /// None for a track that does not play one.
@@ -534,13 +568,13 @@ pub fn pass_pedal(st: &State, id: TrackId) -> Option<bool> {
         manager()
             .get(&format!("{}{KEYS}", d.inst))
             .or_else(|| manager().get(&d.inst))
-            .is_none_or(|i| i.takes(af27_core::midi::SUSTAIN)),
+            .is_none_or(|i| i.takes(af2_core::midi::SUSTAIN)),
     )
 }
 
 /// A key played, as the instrument hears it.
-pub fn note_event(e: &af27_core::midi_live::KeyEvent) -> NoteEvent {
-    use af27_core::midi_live::KeyEvent;
+pub fn note_event(e: &af2_core::midi_live::KeyEvent) -> NoteEvent {
+    use af2_core::midi_live::KeyEvent;
     match *e {
         KeyEvent::On {
             pitch,
@@ -567,7 +601,7 @@ pub fn note_event(e: &af27_core::midi_live::KeyEvent) -> NoteEvent {
 
 /// The piano roll plays a note on track `ti`: through its VST3 instrument
 /// when it has one (true), else the caller's audition plays it.
-pub fn audition_on(st: &mut State, ti: usize, pitch: u8, velocity: u8) -> bool {
+pub fn audition_on(st: &mut State, ti: usize, pitch: u8, velocity: u8, channel: u8) -> bool {
     if slot_of(st, ti).is_none() || !keys_for(st, ti) {
         return false;
     }
@@ -575,17 +609,17 @@ pub fn audition_on(st: &mut State, ti: usize, pitch: u8, velocity: u8) -> bool {
         e.keys_event(NoteEvent::On {
             pitch,
             velocity: velocity as f32 / 127.0,
-            channel: 0,
+            channel: channel & 15,
             tuning: 0.0,
         });
     }
     true
 }
 
-pub fn audition_off(st: &mut State, pitch: u8) {
+pub fn audition_off(st: &mut State, pitch: u8, channel: u8) {
     if UI.with(|u| u.borrow().keys.is_some()) {
         if let Some(e) = st.engine.as_mut() {
-            e.keys_event(NoteEvent::Off { pitch, channel: 0 });
+            e.keys_event(NoteEvent::Off { pitch, channel: channel & 15 });
         }
     }
 }
@@ -618,14 +652,14 @@ pub fn shot(st: &mut State, arg: &str) {
         list.iter()
             .find(|f| f.info.name.eq_ignore_ascii_case("dexed"))
             .or(list.first())
-            .map(|f| format!("{}{}", af27_vst3::PREFIX, f.info.cid))
+            .map(|f| format!("{}{}", af2_vst3::PREFIX, f.info.cid))
     };
     let cid = st.session.alloc_id();
     if let Some(t) = st.session.track_mut(id) {
         t.instrument_plugin = pick.map(|e| crate::plugins::new_slot(&e));
-        let mut c = af27_core::midi::MidiClip::new(cid, "Chords", 0.0, 8.0);
+        let mut c = af2_core::midi::MidiClip::new(cid, "Chords", 0.0, 8.0);
         for (k, p) in [60u8, 64, 67, 62, 65, 69].iter().enumerate() {
-            c.notes.push(af27_core::midi::MidiNote {
+            c.notes.push(af2_core::midi::MidiNote {
                 pitch: *p,
                 start: (k / 3) as f64 * 4.0,
                 length: 3.5,
@@ -664,7 +698,7 @@ mod tests {
 
     #[test]
     fn keys_hear_controllers_and_velocity_as_played() {
-        use af27_core::midi_live::KeyEvent;
+        use af2_core::midi_live::KeyEvent;
         let e = note_event(&KeyEvent::On {
             pitch: 60,
             velocity: 0.5,

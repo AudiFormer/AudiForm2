@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) The Audiform2 contributors.
+
+//! A stand-alone plug-in host, for this crate's tests. The app hosts
+//! plug-ins by starting itself again with `--plugin-host`.
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    match af2_vst3::main_with_args(&args) {
+        Some(code) => af2_vst3::exit_now(code),
+        None => {
+            eprintln!("usage: af2-plughost --plugin-host | --plugin-scan <bundle>");
+            af2_vst3::exit_now(2);
+        }
+    }
+}

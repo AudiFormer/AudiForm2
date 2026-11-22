@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) The Audiform27 contributors.
+// Copyright (c) The Audiform2 contributors.
 
 //! The Waveform editor: one file, every channel stacked, an overview bar,
 //! a time ruler with markers, and an optional spectral display under the
@@ -28,7 +28,7 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Rounding, Sens
 use crate::state::{State, View};
 use crate::theme::{c, ca, Theme};
 use crate::ui::Caches;
-use af27_dsp::Peaks;
+use af2_dsp::Peaks;
 
 #[derive(Debug, Clone, Copy)]
 pub enum WaveDrag {
@@ -246,7 +246,7 @@ fn spectrogram_texture(
     let lut = crate::spectral_select::color_lut(st);
     let mut img = egui::ColorImage::new([cols, rows_per_ch * nch], Color32::BLACK);
     for ch in 0..nch {
-        let spec = af27_dsp::fft::spectrogram(&d.buf.channels[ch], start, end, cols, size);
+        let spec = af2_dsp::fft::spectrogram(&d.buf.channels[ch], start, end, cols, size);
         for (x, col) in spec.iter().enumerate() {
             for (y, &(b, fr)) in row_bins.iter().enumerate() {
                 let b1 = (b + 1).min(bins - 1);
@@ -257,9 +257,18 @@ fn spectrogram_texture(
             }
         }
     }
-    let tex = ui
-        .ctx()
-        .load_texture("spectrogram", img, egui::TextureOptions::LINEAR);
+    // Drawn into the same texture again rather than a new one: a texture
+    // made and freed between two paints (as before the window is first
+    // shown) would be written to after it is gone.
+    let tex = match caches.spectro.take() {
+        Some((mut tex, _)) => {
+            tex.set(img, egui::TextureOptions::LINEAR);
+            tex
+        }
+        None => ui
+            .ctx()
+            .load_texture("spectrogram", img, egui::TextureOptions::LINEAR),
+    };
     caches.spectro = Some((tex.clone(), key));
     Some(tex)
 }
@@ -275,21 +284,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         );
         return;
     }
-    // File tabs for every open document.
-    ui.horizontal_wrapped(|ui| {
-        let docs: Vec<_> = st
-            .docs
-            .iter()
-            .map(|d| (d.id, d.name.clone(), d.dirty))
-            .collect();
-        for (id, name, dirty) in docs {
-            let on = st.current == Some(id);
-            let label = format!("{}{}", name, if dirty { " •" } else { "" });
-            if ui.selectable_label(on, label).clicked() {
-                st.current = Some(id);
-            }
-        }
-    });
+    // (No file tabs: the Files panel lists the open files and picks one.)
     let full = ui.available_rect_before_wrap();
     let (rect, resp) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
     let p = ui.painter_at(rect);
@@ -313,7 +308,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     // The ruler is its own widget on top: it moves the playhead.
     let rresp = ui.interact(
         ruler,
-        ui.id().with("af27-wave-ruler"),
+        ui.id().with("af2-wave-ruler"),
         Sense::click_and_drag(),
     );
     // The spectral tools take the spectrum's pointer while chosen; the
@@ -327,10 +322,17 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
 
     // Interaction first so drawing shows this frame's state.
     st.wave_px = body.width();
+    // Over any of the editor's own widgets (the frequency scale's drag
+    // area, the channel switches) counts too: only something on a layer
+    // above, such as a menu, takes the pointer away.
     let hover = resp
         .hover_pos()
         .or(rresp.hover_pos())
-        .or_else(|| spec_resp.as_ref().and_then(|r| r.hover_pos()));
+        .or_else(|| spec_resp.as_ref().and_then(|r| r.hover_pos()))
+        .or_else(|| {
+            ui.input(|i| i.pointer.hover_pos())
+                .filter(|_| ui.rect_contains_pointer(rect))
+        });
     if let Some(hp) = hover {
         let input = ui.input(|i| {
             crate::zoom::WheelInput::read(
@@ -590,27 +592,52 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         let d = st.doc().unwrap();
         let lane_h = sa.height() / nch.min(SPEC_MAX_CH) as f32;
         let ny = d.buf.rate as f64 / 2.0;
+        // The frequency scale, as Audiform 1 draws it: a column of its own,
+        // a short mark off its left edge and the label beside it, and a
+        // heading at the top of each band.
         let scale = Rect::from_min_max(pos2(sa.right() - SCALE_W, sa.top()), sa.max);
-        p.rect_filled(scale, Rounding::ZERO, ca(th.panel, 150));
-        for ch in 0..nch.min(SPEC_MAX_CH) {
+        p.rect_filled(scale, Rounding::ZERO, c(th.panel));
+        let bands = nch.min(SPEC_MAX_CH);
+        for ch in 0..bands {
             let lane = Rect::from_min_size(
                 pos2(sa.left(), sa.top() + lane_h * ch as f32),
                 vec2(sa.width(), lane_h),
             );
-            for (f, label) in st.spec.ticks(ny, lane.height(), 14.0) {
+            let x = scale.left();
+            // (Each band's channel name is its on/off switch, beside this.)
+            let heading = if st.spec.notes {
+                "Note".to_string()
+            } else {
+                "Hz".to_string()
+            };
+            p.text(
+                pos2(x + 7.0, lane.top() + 2.0),
+                Align2::LEFT_TOP,
+                heading,
+                FontId::proportional(10.0),
+                ca(th.accent, 220),
+            );
+            let labels = lane.height() >= 40.0;
+            for (f, label) in st.spec.ticks(ny, lane.height(), 16.0) {
                 let y = lane.bottom() - st.spec.pos(f, ny) as f32 * lane.height();
+                let from_top = y - lane.top();
+                // Clear of the heading at the top and of the band's foot.
+                if from_top < 18.0 || from_top > lane.height() - 6.0 {
+                    continue;
+                }
                 p.line_segment(
-                    [pos2(lane.right() - 4.0, y), pos2(lane.right(), y)],
-                    Stroke::new(1.0_f32, ca(th.text, 150)),
+                    [pos2(x, y), pos2(x + 4.0, y)],
+                    Stroke::new(1.0_f32, c(th.text_dim)),
                 );
-                let y = y.clamp(lane.top() + 6.0, lane.bottom() - 6.0);
-                p.text(
-                    pos2(lane.right() - 6.0, y),
-                    Align2::RIGHT_CENTER,
-                    label,
-                    FontId::proportional(9.0),
-                    ca(th.text, 190),
-                );
+                if labels {
+                    p.text(
+                        pos2(x + 7.0, y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        FontId::proportional(10.0),
+                        c(th.text_dim),
+                    );
+                }
             }
             if ch > 0 {
                 p.line_segment(
@@ -664,20 +691,34 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     if let Some(g) = ghost {
         crate::ruler::ghost(&p, time_to_x(&v, body, g), ruler.top(), body.bottom(), &th);
     }
+    live_take(&p, st, wave_area, &v);
     let x = time_to_x(&v, body, pos);
     if x >= body.left() && x <= body.right() {
         playhead(&p, x, ruler.top(), body.bottom(), &th);
     }
     if let Some(hp) = hover {
         if body.contains(hp) {
-            let t = x_to_time(&v, body, hp.x);
-            p.text(
-                hp + vec2(10.0, -14.0),
-                Align2::LEFT_BOTTOM,
-                tc.format(t),
-                FontId::monospace(10.0),
-                ca(th.text, 200),
-            );
+            // The time under the mouse in the ruler's format and, over the
+            // spectrum, the frequency under it (each can be turned off in
+            // Preferences).
+            let mut lines = Vec::new();
+            if st.prefs.hover_time {
+                lines.push(tc.format(x_to_time(&v, body, hp.x)));
+            }
+            if st.prefs.hover_freq {
+                if let Some(hz) = spec_area.and_then(|sa| crate::spectral_select::hz_at(st, sa, hp)) {
+                    lines.push(crate::zoom::hz_readout(hz));
+                }
+            }
+            if !lines.is_empty() {
+                p.text(
+                    hp + vec2(10.0, -14.0),
+                    Align2::LEFT_BOTTOM,
+                    lines.join("\n"),
+                    FontId::monospace(10.0),
+                    ca(th.text, 200),
+                );
+            }
         }
     }
     if let Some(sa) = spec_area {
@@ -686,7 +727,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
 }
 
 /// Width of the spectrum's frequency scale at its right edge.
-const SCALE_W: f32 = 44.0;
+const SCALE_W: f32 = 46.0;
 
 /// Most channels the spectral display shows a band for (7.1.4 is 12).
 pub const SPEC_MAX_CH: usize = 16;
@@ -702,7 +743,13 @@ const SWITCH_FONT: f32 = 10.5;
 
 /// Where each channel's name sits: in the waveform lanes left of the
 /// level scale, and in the spectrum bands left of the frequency scale.
-fn switch_rects(ui: &egui::Ui, nch: usize, wave: Rect, spec: Option<Rect>) -> Vec<(usize, Rect)> {
+fn switch_rects(
+    ui: &egui::Ui,
+    nch: usize,
+    mask: Option<u32>,
+    wave: Rect,
+    spec: Option<Rect>,
+) -> Vec<(usize, Rect)> {
     let size = |name: &str| {
         ui.fonts(|f| {
             f.layout_no_wrap(
@@ -714,7 +761,7 @@ fn switch_rects(ui: &egui::Ui, nch: usize, wave: Rect, spec: Option<Rect>) -> Ve
         })
     };
     let place = |ch: usize, right: f32, top: f32| {
-        let s = size(channel_name(nch, ch));
+        let s = size(channel_name_in(nch, mask, ch));
         Rect::from_min_max(pos2(right - s.x, top), pos2(right, top + s.y)).expand2(vec2(4.0, 1.5))
     };
     let lane_h = wave.height() / nch as f32;
@@ -754,6 +801,7 @@ fn channel_switches(ui: &egui::Ui, st: &mut State, wave: Rect, spec: Option<Rect
         return Vec::new();
     };
     let nch = d.buf.num_channels().max(1);
+    let mask = d.speaker_mask();
     let set = d.chans;
     let solo_key = if cfg!(target_os = "macos") {
         "Cmd"
@@ -762,13 +810,13 @@ fn channel_switches(ui: &egui::Ui, st: &mut State, wave: Rect, spec: Option<Rect
     };
     let mut out = Vec::new();
     let mut new_set = None;
-    for (i, (ch, rect)) in switch_rects(ui, nch, wave, spec).into_iter().enumerate() {
+    for (i, (ch, rect)) in switch_rects(ui, nch, mask, wave, spec).into_iter().enumerate() {
         let r = ui.interact(
             rect,
             ui.id().with(("af2-chan-switch", i)),
             Sense::click_and_drag(),
         );
-        let name = channel_long_name(nch, ch);
+        let name = channel_long_name_in(nch, mask, ch);
         let r = if nch == 1 {
             r.on_hover_text("Mono: the only channel, always on")
         } else if set.is_on(ch) {
@@ -848,7 +896,7 @@ fn draw_channel_switches(
         p.text(
             s.rect.center(),
             Align2::CENTER_CENTER,
-            channel_name(nch, s.ch),
+            channel_name_in(nch, d.speaker_mask(), s.ch),
             FontId::proportional(SWITCH_FONT),
             col,
         );
@@ -937,6 +985,8 @@ fn wheel(st: &mut State, a: &Areas, hp: Pos2, w: crate::zoom::WheelInput) {
         .is_some_and(|sa| sa.contains(hp) && hp.x >= sa.right() - SCALE_W)
     {
         Region::FreqScale
+    } else if a.spec.is_some_and(|sa| sa.contains(hp)) {
+        Region::Spectrum
     } else {
         Region::Wave
     };
@@ -999,24 +1049,35 @@ fn wheel(st: &mut State, a: &Areas, hp: Pos2, w: crate::zoom::WheelInput) {
 
 /// The spectrum's right-click menu: frequency zoom, scale, resolution.
 fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect) {
-    let id = egui::Id::new("af27-spectrum-menu");
-    if resp.secondary_clicked() {
-        let on = resp.interact_pointer_pos().is_some_and(|p| sa.contains(p));
-        ui.data_mut(|d| d.insert_temp(id, on));
-    }
+    let id = egui::Id::new("af2-spectrum-menu");
     let ny = st.doc().map_or(24_000.0, |d| d.buf.rate as f64 / 2.0);
+    if resp.secondary_clicked() {
+        // Where the menu opens, and the frequency there (its zooms keep it
+        // in place, as Audiform 1's do).
+        let at = resp.interact_pointer_pos().filter(|p| sa.contains(*p)).map(|p| {
+            let bands = st.doc().map_or(1, |d| d.buf.num_channels().clamp(1, SPEC_MAX_CH));
+            let h = sa.height() / bands as f32;
+            let k = ((p.y - sa.top()) / h).floor().clamp(0.0, bands as f32 - 1.0);
+            let bottom = sa.top() + h * (k + 1.0);
+            st.spec.freq_at(((bottom - p.y) / h.max(1.0)) as f64, ny)
+        });
+        ui.data_mut(|d| d.insert_temp(id, at));
+    }
     resp.context_menu(|ui| {
-        if !ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+        let Some(at) = ui.data(|d| d.get_temp::<Option<f64>>(id)).flatten() else {
             ui.close_menu();
             return;
-        }
+        };
         let s = &mut st.spec;
         if ui.button("Zoom In (Frequency)").clicked() {
-            s.zoom_step(true, ny);
+            s.zoom_step(true, Some(at), ny);
             ui.close_menu();
         }
-        if ui.button("Zoom Out (Frequency)").clicked() {
-            s.zoom_step(false, ny);
+        if ui
+            .add_enabled(s.range.is_some(), egui::Button::new("Zoom Out (Frequency)"))
+            .clicked()
+        {
+            s.zoom_step(false, Some(at), ny);
             ui.close_menu();
         }
         if ui
@@ -1097,21 +1158,56 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
 }
 
 pub fn channel_name(n: usize, ch: usize) -> &'static str {
-    const STEREO: [&str; 2] = ["L", "R"];
-    // 7.1, then 7.1.4's height channels.
-    const SURROUND: [&str; 12] = [
-        "L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb", "Ltf", "Rtf", "Ltb", "Rtb",
-    ];
+    channel_name_in(n, None, ch)
+}
+
+/// A channel's short name by the file's WAV speaker mask (`mask`, when
+/// known and naming every channel), else by the usual mask for its
+/// channel count.
+pub fn channel_name_in(n: usize, mask: Option<u32>, ch: usize) -> &'static str {
     match n {
-        1 => "M",
-        2 => STEREO.get(ch).copied().unwrap_or("·"),
-        _ => SURROUND.get(ch).copied().unwrap_or("·"),
+        1 => return "M",
+        2 => return ["L", "R"].get(ch).copied().unwrap_or("·"),
+        _ => {}
+    }
+    let mask = mask
+        .filter(|m| m.count_ones() as usize == n)
+        .unwrap_or_else(|| af2_io::export::wav::default_channel_mask(n as u16));
+    if mask.count_ones() as usize != n {
+        return "·";
+    }
+    // With side channels, the back pair is the rear pair.
+    let sides = mask & 0x600 != 0;
+    let Some(bit) = (0..18).filter(|b| mask & (1 << b) != 0).nth(ch) else {
+        return "·";
+    };
+    match bit {
+        0 => "L",
+        1 => "R",
+        2 => "C",
+        3 => "LFE",
+        4 if sides => "Lb",
+        4 => "Ls",
+        5 if sides => "Rb",
+        5 => "Rs",
+        6 => "Lc",
+        7 => "Rc",
+        8 => "Cb",
+        9 => "Ls",
+        10 => "Rs",
+        11 => "Tc",
+        12 => "Ltf",
+        13 => "Tfc",
+        14 => "Rtf",
+        15 => "Ltb",
+        16 => "Tbc",
+        _ => "Rtb",
     }
 }
 
-/// [`channel_name`] spelled out, for hover hints.
-pub fn channel_long_name(n: usize, ch: usize) -> String {
-    let name = match channel_name(n, ch) {
+/// [`channel_name_in`] spelled out, for hover hints.
+pub fn channel_long_name_in(n: usize, mask: Option<u32>, ch: usize) -> String {
+    let name = match channel_name_in(n, mask, ch) {
         "M" => "Mono",
         "L" => "Left",
         "R" => "Right",
@@ -1125,6 +1221,12 @@ pub fn channel_long_name(n: usize, ch: usize) -> String {
         "Rtf" => "Right top front",
         "Ltb" => "Left top back",
         "Rtb" => "Right top back",
+        "Lc" => "Left of centre",
+        "Rc" => "Right of centre",
+        "Cb" => "Centre back",
+        "Tc" => "Top centre",
+        "Tfc" => "Top front centre",
+        "Tbc" => "Top back centre",
         _ => return format!("Channel {}", ch + 1),
     };
     name.to_string()
@@ -1137,7 +1239,7 @@ pub fn playhead(p: &egui::Painter, x: f32, top: f32, bottom: f32, th: &Theme) {
     let x = crate::ruler::pixel_x(p, x);
     let fx: crate::hud::Fx = p
         .ctx()
-        .data(|d| d.get_temp(egui::Id::new("af27-fx")))
+        .data(|d| d.get_temp(egui::Id::new("af2-fx")))
         .unwrap_or_default();
     crate::hud::laser(p, x, top, bottom, th, &fx);
 }
@@ -1185,4 +1287,114 @@ pub fn empty_state(ui: &mut egui::Ui, th: &Theme, title: &str, hint: &str) {
         c(th.text_dim),
     );
     ui.allocate_rect(rect, Sense::hover());
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+    use egui::{pos2, vec2, Event};
+
+    fn run(st: &mut State, caches: &mut Caches, events: Vec<Event>) {
+        let ctx_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        CTX.with(|ctx| {
+            let _ = ctx.run(ctx_input, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| editor(ui, st, caches));
+            });
+        });
+    }
+
+    thread_local! { static CTX: egui::Context = egui::Context::default(); }
+
+    fn wheel_at(st: &mut State, caches: &mut Caches, at: egui::Pos2) {
+        run(st, caches, vec![Event::PointerMoved(at)]);
+        run(st, caches, vec![Event::PointerMoved(at)]);
+        run(
+            st,
+            caches,
+            vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, 40.0), modifiers: Default::default() }],
+        );
+        run(st, caches, vec![]);
+    }
+
+    fn setup() -> (State, Caches) {
+        let mut st = State::new();
+        let id = st.add_doc("t.wav".into(), None, af2_core::AudioBuffer::new(48_000, 1, 48_000 * 10));
+        st.current = Some(id);
+        st.mode = crate::state::Mode::Waveform;
+        st.doc_mut().unwrap().spectral = true;
+        (st, Caches::default())
+    }
+
+    #[test]
+    fn the_wheel_on_the_frequency_scale_zooms_frequency() {
+        let (mut st, mut caches) = setup();
+        wheel_at(&mut st, &mut caches, pos2(1580.0, 800.0));
+        assert!(st.spec.zoomed(), "zoomed in: {:?}", st.spec.range);
+    }
+
+    #[test]
+    fn the_wheel_over_the_spectrum_zooms_frequency() {
+        let (mut st, mut caches) = setup();
+        wheel_at(&mut st, &mut caches, pos2(800.0, 800.0));
+        assert!(st.spec.zoomed(), "zoomed in: {:?}", st.spec.range);
+    }
+}
+
+/// While recording into this file: the take so far, a low-resolution
+/// waveform growing from where recording began, over what it replaces.
+fn live_take(p: &egui::Painter, st: &State, wave: Rect, v: &View) {
+    let Some(crate::state::RecordTarget::File(doc, at)) = st.recording_target else {
+        return;
+    };
+    if st.current != Some(doc) {
+        return;
+    }
+    live_take_at(p, st, wave, v, at);
+}
+
+/// The take being recorded, from `at` seconds on the view `v` over `wave`.
+fn live_take_at(p: &egui::Painter, st: &State, wave: Rect, v: &View, at: f64) {
+    let Some(e) = st.engine.as_ref().filter(|e| e.is_recording()) else {
+        return;
+    };
+    let rec = Color32::from_rgb(230, 70, 70);
+    e.recording_live(|i, rate, peaks| {
+        if i != 0 || peaks.is_empty() || rate == 0 {
+            return;
+        }
+        let bin = af2_engine::RECORD_LIVE_BIN as f64 / rate as f64;
+        let len = peaks.len() as f64 * bin;
+        let (x0, x1) = (time_to_x(v, wave, at), time_to_x(v, wave, at + len));
+        let r = Rect::from_min_max(pos2(x0.max(wave.left()), wave.top()), pos2(x1.min(wave.right()), wave.bottom()));
+        if r.width() <= 0.0 {
+            return;
+        }
+        // Covers what is being recorded over.
+        p.rect_filled(r, Rounding::ZERO, Color32::from_black_alpha(170));
+        p.rect_filled(r, Rounding::ZERO, rec.gamma_multiply(0.12));
+        let mid = wave.center().y;
+        let half = wave.height() * 0.45;
+        let px_secs = if x1 > x0 { len / f64::from(x1 - x0) } else { len };
+        let stroke = Stroke::new(1.0_f32, rec);
+        for px in (r.left().floor() as i32)..(r.right().ceil() as i32) {
+            let t0 = f64::from(px as f32 - x0) * px_secs;
+            let a = (t0 / bin).floor().max(0.0) as usize;
+            if a >= peaks.len() {
+                break;
+            }
+            let b = (((t0 + px_secs) / bin).ceil() as usize).max(a + 1).min(peaks.len());
+            let (mut lo, mut hi) = (0.0f32, 0.0f32);
+            for pk in &peaks[a..b] {
+                lo = lo.min(pk[0]);
+                hi = hi.max(pk[1]);
+            }
+            let (y0, y1) = (mid - hi.min(1.0) * half, mid - lo.max(-1.0) * half);
+            p.line_segment([pos2(px as f32 + 0.5, y0), pos2(px as f32 + 0.5, y1.max(y0 + 1.0))], stroke);
+        }
+        p.text(r.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, "Recording", FontId::proportional(10.0), rec);
+    });
 }
