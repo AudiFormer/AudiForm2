@@ -1,0 +1,129 @@
+name: Release builds (Linux, macOS)
+
+# Builds the Linux and macOS programs for a release and attaches them to
+# it. Runs when a release is published, or by hand for an existing tag
+# (Actions > Release builds > Run workflow, or
+# `gh workflow run release.yml -f tag=v2.1.0`). The Windows program (with
+# ASIO) is built on the lead's machine and attached by hand.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach to (e.g. v2.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    # 22.04: an older glibc, so the program runs on more distributions.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev libwayland-dev libudev-dev
+      - run: cargo build --release -p audiform2
+      - name: Package
+        run: |
+          V="${TAG#v}"
+          D="AudiForm2-${V}-linux-x64"
+          mkdir -p "$D"
+          cp target/release/audiform2 "$D/audiform2"
+          cp assets/icon/audiform2-256.png "$D/audiform2.png"
+          cp LICENSE "$D/"
+          cat > "$D/README.txt" <<'EOF'
+          AudiForm 2 for Linux (x86-64)
+
+          Run ./audiform2 from this folder. It needs ALSA (libasound2), which
+          almost every desktop distribution has. Settings are kept in
+          ~/.local/share/Audiform2.
+
+          Linux builds are still lightly tested: please report problems at
+          https://github.com/AudiFormer/AudiForm2/issues
+          EOF
+          sed -i 's/^          //' "$D/README.txt"
+          chmod +x "$D/audiform2"
+          tar -czf "$D.tar.gz" "$D"
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" AudiForm2-*-linux-x64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build for Apple silicon and Intel
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release -p audiform2 --target aarch64-apple-darwin
+          cargo build --release -p audiform2 --target x86_64-apple-darwin
+      - name: Make the app
+        run: |
+          V="${TAG#v}"
+          APP="AudiForm 2.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          lipo -create \
+            target/aarch64-apple-darwin/release/audiform2 \
+            target/x86_64-apple-darwin/release/audiform2 \
+            -output "$APP/Contents/MacOS/AudiForm2"
+          # The icon from the 256 px picture (and its half sizes).
+          ICON=icon.iconset
+          mkdir -p "$ICON"
+          for s in 16 32 64 128 256; do
+            sips -z $s $s assets/icon/audiform2-256.png --out "$ICON/icon_${s}x${s}.png" >/dev/null
+          done
+          cp "$ICON/icon_32x32.png" "$ICON/icon_16x16@2x.png"
+          cp "$ICON/icon_64x64.png" "$ICON/icon_32x32@2x.png"
+          cp "$ICON/icon_256x256.png" "$ICON/icon_128x128@2x.png"
+          rm "$ICON/icon_64x64.png"
+          iconutil -c icns "$ICON" -o "$APP/Contents/Resources/AppIcon.icns"
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>AudiForm 2</string>
+            <key>CFBundleDisplayName</key><string>AudiForm 2</string>
+            <key>CFBundleIdentifier</key><string>io.github.audiformer.audiform2</string>
+            <key>CFBundleExecutable</key><string>AudiForm2</string>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${V}</string>
+            <key>CFBundleVersion</key><string>${V}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>AudiForm 2 records from your microphone or audio interface.</string>
+          </dict>
+          </plist>
+          EOF
+          sed -i '' 's/^          //' "$APP/Contents/Info.plist"
+          # Ad-hoc signed (no developer certificate): Apple silicon needs a
+          # signature to run at all.
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" "AudiForm2-${V}-macos-universal.zip"
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" AudiForm2-*-macos-universal.zip --clobber --repo "$GITHUB_REPOSITORY"
