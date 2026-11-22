@@ -370,6 +370,13 @@ pub fn ui(ctx: &egui::Context, st: &mut State) {
                             )
                             .small(),
                         );
+                    } else if std::env::var_os("APPIMAGE").is_some() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Running as an AppImage: download the new .AppImage from the release page and use it in place of this one.",
+                            )
+                            .small(),
+                        );
                     }
                     if !r.notes.trim().is_empty() {
                         egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
