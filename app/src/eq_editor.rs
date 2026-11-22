@@ -245,7 +245,6 @@ pub fn show(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &Theme
     let Some(info) = af2_fx::info(eq::ID) else {
         return;
     };
-    let before = st.session.clone();
     let mut vals = slot.values.clone();
     for p in info.params.iter().skip(vals.len()) {
         vals.push(p.default as f32);
@@ -291,10 +290,17 @@ pub fn show(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &Theme
 
     // Into the slot and the running mix, one undo step per gesture.
     if v.changed {
+        // For undo; taken only on a change, as a session can carry
+        // megabytes of slot data.
+        let before = st.session.clone();
         if let Some(s) = chain_of(st, target).and_then(|c| c.get_mut(i)) {
             s.values = v.vals.clone();
         }
-        if target != FILE {
+        if target == FILE {
+            // The Waveform editor plays through the file's rack.
+            st.live_file_slot(i);
+            st.gesture = ui.input(|i| i.pointer.any_down()) || wheel_pending(ui);
+        } else {
             st.live_slot(target, i);
             let down = ui.input(|i| i.pointer.any_down()) || wheel_pending(ui);
             if !st.gesture {

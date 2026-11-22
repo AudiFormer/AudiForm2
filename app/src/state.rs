@@ -257,6 +257,12 @@ pub struct State {
     /// change the sound (see `audio_view`).
     program_session: Option<Session>,
     program_docs: u64,
+    /// The Waveform editor's rack as the playing program last took it
+    /// (see [`State::file_fx_key`]); held still while a control is dragged.
+    file_fx_key: u64,
+    /// The Waveform editor plays through the file's rack (a one-track mix
+    /// of the file), so slot changes can go to it live.
+    pub file_live: bool,
     /// Pre-rendered tracks (see `prerender`).
     pub prerender: crate::prerender::Prerender,
     /// Where playback began, shown on the ruler while playing or paused;
@@ -617,6 +623,8 @@ impl State {
             program_key: (Mode::Waveform, 0, 0, 0, 0),
             program_session: None,
             program_docs: 0,
+            file_fx_key: 0,
+            file_live: false,
             prerender: Default::default(),
             start_marker: None,
             paused: false,
@@ -1283,10 +1291,21 @@ impl State {
             Audition::Pending => 1,
             Audition::Ready(_, v) => (v << 1) | 1,
         };
+        // The file's rack, when the Waveform editor plays through it. While
+        // a control is dragged the change goes to the playing rack live,
+        // and the mix is rebuilt (keeping the running effects) on release.
+        if self.mode == Mode::Waveform && !self.gesture {
+            self.file_fx_key = self.file_fx_key();
+        }
+        let file_fx = if self.mode == Mode::Waveform {
+            self.file_fx_key
+        } else {
+            0
+        };
         let key = (
             self.mode,
             self.current.unwrap_or(0),
-            self.doc().map_or(0, |d| d.version),
+            self.doc().map_or(0, |d| d.version) ^ file_fx,
             self.session_version
                 + self.docs.iter().map(|d| d.version).sum::<u64>()
                 + (self.prerender.version << 32),
@@ -1334,6 +1353,7 @@ impl State {
         } else {
             self.program_session = None;
         }
+        self.file_live = false;
         let program = match self.mode {
             Mode::Waveform => match self.doc() {
                 Some(_) if !matches!(audition, Audition::None) => {
@@ -1342,6 +1362,17 @@ impl State {
                         // Rendering (a moment): silence, not the whole file.
                         _ => Arc::new(AudioBuffer::new(self.session.rate, 2, 0)),
                     })
+                }
+                // Through the file's rack, live (mono and stereo files).
+                Some(d) if self.file_rack_heard() && d.buf.num_channels() <= 2 => {
+                    let rate = self.engine.as_ref().map_or(d.buf.rate, |e| e.rate);
+                    let buf = d.chans.audible(&d.buf).map_or_else(|| d.buf.clone(), Arc::new);
+                    let p = file_mix_program(buf, &self.file_chain, self.file_rack, rate);
+                    if let af2_engine::Program::Mix(m) = &p {
+                        self.rack_meters = m.tracks.iter().map(|t| t.meter.clone()).collect();
+                    }
+                    self.file_live = true;
+                    p
                 }
                 // A surround file is heard around the head on headphones
                 // (Preferences > Playback), else folded to stereo.
@@ -1376,6 +1407,66 @@ impl State {
 
     pub fn is_playing(&self) -> bool {
         self.engine.as_ref().is_some_and(|e| e.is_playing())
+    }
+
+    /// Whether the file's rack changes what the Waveform editor plays: on,
+    /// with at least one effect switched on.
+    pub fn file_rack_heard(&self) -> bool {
+        !self.file_rack.bypass && self.file_chain.iter().any(|s| !s.bypass)
+    }
+
+    /// A fingerprint of the file's rack: its slots (effect, values, power,
+    /// data) and its levels. 0 when the rack is not heard. Slot data (an
+    /// amp capture, an impulse response) can be large, so only its length
+    /// and its ends are taken.
+    fn file_fx_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        if !self.file_rack_heard() {
+            return 0;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for s in &self.file_chain {
+            s.effect.hash(&mut h);
+            s.bypass.hash(&mut h);
+            for v in &s.values {
+                v.to_bits().hash(&mut h);
+            }
+            if let Some(d) = &s.data {
+                let b = d.as_bytes();
+                b.len().hash(&mut h);
+                b[..b.len().min(4096)].hash(&mut h);
+                b[b.len().saturating_sub(4096)..].hash(&mut h);
+            }
+        }
+        let r = self.file_rack;
+        (r.input_db.to_bits(), r.output_db.to_bits(), r.mix.to_bits()).hash(&mut h);
+        h.finish() | 1
+    }
+
+    /// A slot of the file's rack changed while the Waveform editor plays
+    /// through it: the playing rack takes the new settings.
+    pub fn live_file_slot(&mut self, slot: usize) {
+        if !self.file_live {
+            return;
+        }
+        let Some(s) = self.file_chain.get(slot).cloned() else {
+            return;
+        };
+        if let Some(e) = &mut self.engine {
+            e.set_param(0, slot, &s.values);
+            e.set_bypass(0, slot, s.bypass);
+        }
+    }
+
+    /// The file rack's levels or mix changed: the playing rack takes them.
+    pub fn live_file_rack(&mut self) {
+        if !self.file_live {
+            return;
+        }
+        let r = self.file_rack;
+        if let Some(e) = &mut self.engine {
+            e.set_rack(0, r);
+        }
     }
 
     /// The time display format with this editor's rate and tempo.
@@ -2425,6 +2516,14 @@ impl State {
             crate::rack::clip_of(self, target)
                 .and_then(|id| self.clip_meters.get(&id))
                 .map_or((0.0, 0.0), |m| m.take())
+        } else if target == crate::rack::FILE {
+            // The Waveform editor's one-track mix, while it plays through
+            // the file's rack.
+            if self.file_live {
+                self.track_levels.first().copied().unwrap_or((0.0, 0.0))
+            } else {
+                (0.0, 0.0)
+            }
         } else {
             self.track_levels
                 .get(target as usize)
@@ -2775,6 +2874,51 @@ mod view_tests {
 
 /// The session with everything that does not change the sound cleared, to
 /// tell whether an edit needs a new mix.
+/// The Waveform editor's file as a mix of one track carrying the file's
+/// rack: the effects run live, as a Multitrack track's do. The track and
+/// master are left at unity (fader 0 dB, centred), so with the rack
+/// bypassed this plays the file as it is.
+fn file_mix_program(
+    buf: Arc<AudioBuffer>,
+    chain: &[af2_core::EffectSlot],
+    rack: af2_core::Rack,
+    rate: u32,
+) -> af2_engine::Program {
+    let mut s = Session::new("file", rate, 0);
+    let tid = s.add_track_of(af2_core::TrackKind::Audio);
+    let media = s.alloc_id();
+    let length = buf.frames() as f64 / f64::from(buf.rate.max(1));
+    s.media.push(af2_core::MediaItem {
+        id: media,
+        name: "file".into(),
+        path: None,
+        duration: length,
+        rate: buf.rate,
+        channels: buf.num_channels() as u16,
+        ext_id: None,
+    });
+    let clip = s.alloc_id();
+    if let Some(t) = s.track_mut(tid) {
+        t.chain = chain.to_vec();
+        t.rack = rack;
+        t.clips.push(af2_core::Clip {
+            props: Default::default(),
+            id: clip,
+            media,
+            name: "file".into(),
+            start: 0.0,
+            offset: 0.0,
+            length,
+            gain_db: 0.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            muted: false,
+            ext_id: None,
+        });
+    }
+    af2_engine::mix_program(&s, &|m| (m == media).then(|| buf.clone()), rate)
+}
+
 fn audio_view(s: &Session) -> Session {
     let mut s = s.clone();
     s.name.clear();
@@ -2844,5 +2988,48 @@ mod howl_tests {
         assert!(s < HOWL_SECS);
         // Not monitoring: full-scale playback is not a howl.
         assert_eq!(howl_step(0.0, false, 1.0, 1.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod file_rack_tests {
+    use super::*;
+
+    fn file(frames: usize, rate: u32) -> Arc<AudioBuffer> {
+        let l: Vec<f32> = (0..frames).map(|i| ((i as f32) * 0.01).sin() * 0.5).collect();
+        let r: Vec<f32> = l.iter().map(|v| -v).collect();
+        Arc::new(AudioBuffer { rate, channels: vec![l, r] })
+    }
+
+    fn render(buf: &Arc<AudioBuffer>, chain: &[af2_core::EffectSlot], rack: af2_core::Rack) -> AudioBuffer {
+        // As at startup: chains can build the Audiform effects.
+        crate::fx::register();
+        let rate = buf.rate;
+        let secs = buf.frames() as f64 / f64::from(rate);
+        af2_engine::render(file_mix_program(buf.clone(), chain, rack, rate), rate, 0.0, secs)
+    }
+
+    #[test]
+    fn the_file_mix_plays_the_file_as_it_is_without_effects() {
+        let buf = file(4_800, 48_000);
+        let mut off = crate::rack::new_slot(af2_fx::effects::dynamics::GAIN);
+        off.bypass = true;
+        let out = render(&buf, &[off], Default::default());
+        for c in 0..2 {
+            for (a, b) in out.channels[c].iter().zip(&buf.channels[c]).skip(10).take(4_000) {
+                assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_file_mix_runs_the_rack() {
+        let buf = file(4_800, 48_000);
+        let mut gain = crate::rack::new_slot(af2_fx::effects::dynamics::GAIN);
+        gain.values = crate::fx_windows::values_for(gain.effect.as_str(), &[("gain".into(), -6.0206)]);
+        let out = render(&buf, &[gain], Default::default());
+        for (a, b) in out.channels[0].iter().zip(&buf.channels[0]).skip(100).take(4_000) {
+            assert!((a - b * 0.5).abs() < 2e-3, "{a} vs {}", b * 0.5);
+        }
     }
 }

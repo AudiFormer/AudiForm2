@@ -331,7 +331,7 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
         uid,
     };
     let playing = st.is_playing();
-    let levels = (target != FILE).then(|| st.rack_levels(target));
+    let levels = (target != FILE || st.file_live).then(|| st.rack_levels(target));
     let spatial = if target == FILE {
         st.doc().is_some_and(|d| d.buf.num_channels() > 2)
     } else {
@@ -409,6 +409,11 @@ fn finish(ui: &egui::Ui, st: &mut State, target: u16, i: usize, slot: &EffectSlo
                 st.commit_live(&crate::fx::name(&slot.effect), before);
                 st.gesture = down && !data_changed;
             }
+        } else {
+            // The Waveform editor plays through the file's rack: the
+            // change is heard now, and the mix is rebuilt on release.
+            st.live_file_slot(i);
+            st.gesture = ui.input(|i| i.pointer.any_down()) && !data_changed;
         }
     }
     if fx.released || data_changed {

@@ -929,6 +929,9 @@ fn rack_controls(ui: &mut egui::Ui, st: &mut State, target: u16, th: &Theme) {
                 st.commit_live("Rack levels", before);
                 st.gesture = !done;
             }
+        } else {
+            st.live_file_rack();
+            st.gesture = !done;
         }
     }
     if done {
@@ -996,6 +999,10 @@ pub fn apply_file_rack(st: &mut State) {
     let mut b = (*d.buf).clone();
     b.replace(r, &seg);
     d.set_buffer_on("Effects Rack", b);
+    // The file is played through the rack, so once applied the rack goes
+    // off (its settings kept) rather than being heard a second time.
+    st.file_rack.bypass = true;
+    st.toast("Applied. The rack is switched off so it isn't heard twice; its settings are kept.");
 }
 
 // ------------------------------------------------------------ presets
@@ -1369,6 +1376,10 @@ pub fn slot_controls(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, t
                 st.commit_live(&crate::fx::name(&slot.effect), before);
                 st.gesture = down;
             }
+        } else {
+            // The Waveform editor plays through the file's rack.
+            st.live_file_slot(i);
+            st.gesture = ui.input(|i| i.pointer.any_down());
         }
     }
     if released {
