@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) The Audiform2 contributors.
 
-//! Open, save and folder dialogs. The same calls as `rfd::FileDialog`; on
-//! a KDE Plasma desktop with `kdialog` installed they are Plasma's own
-//! dialogs (the Dolphin file view, places and previews), and everywhere
-//! else, or when `kdialog` cannot be run, they are `rfd`'s.
+//! Open, save and folder dialogs, and question boxes ([`ask`]). The same
+//! calls as `rfd`'s; on a KDE Plasma desktop with `kdialog` installed they
+//! are Plasma's own dialogs (the Dolphin file view, places and previews),
+//! and everywhere else, or when `kdialog` cannot be run, they are `rfd`'s
+//! (the desktop portal's file dialogs; zenity's GTK question boxes).
 
 use std::path::{Path, PathBuf};
 
@@ -189,6 +190,72 @@ impl FileDialog {
     }
 }
 
+/// A question's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    Yes,
+    No,
+    Cancel,
+}
+
+/// A question box: Plasma's own (`kdialog`) on a Plasma desktop, as the
+/// file dialogs are, else `rfd`'s (zenity, GTK, elsewhere on Linux).
+/// `labels` names the Yes, No (and Cancel) buttons in Plasma's; `cancel`
+/// adds the third button; `warning` shows the warning sign.
+pub fn ask(title: &str, text: &str, labels: &[&str], cancel: bool, warning: bool) -> Reply {
+    if let Some(r) = kde_ask(title, text, labels, cancel, warning) {
+        return r;
+    }
+    let r = rfd::MessageDialog::new()
+        .set_title(title)
+        .set_description(text)
+        .set_level(if warning { rfd::MessageLevel::Warning } else { rfd::MessageLevel::Info })
+        .set_buttons(if cancel { rfd::MessageButtons::YesNoCancel } else { rfd::MessageButtons::YesNo })
+        .show();
+    match r {
+        rfd::MessageDialogResult::Yes => Reply::Yes,
+        rfd::MessageDialogResult::No => Reply::No,
+        _ if cancel => Reply::Cancel,
+        _ => Reply::No,
+    }
+}
+
+fn kde_ask(title: &str, text: &str, labels: &[&str], cancel: bool, warning: bool) -> Option<Reply> {
+    if !use_kdialog() {
+        return None;
+    }
+    let out = std::process::Command::new("kdialog")
+        .args(kde_ask_args(title, text, labels, cancel, warning))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    // 0 Yes, 1 No, 2 Cancel (or the window closed); anything else, such as
+    // a crash or no display, falls back to the other dialog.
+    match out.code() {
+        Some(0) => Some(Reply::Yes),
+        Some(1) => Some(Reply::No),
+        Some(2) => Some(if cancel { Reply::Cancel } else { Reply::No }),
+        _ => None,
+    }
+}
+
+fn kde_ask_args(title: &str, text: &str, labels: &[&str], cancel: bool, warning: bool) -> Vec<String> {
+    let kind = match (warning, cancel) {
+        (true, true) => "--warningyesnocancel",
+        (true, false) => "--warningyesno",
+        (false, true) => "--yesnocancel",
+        (false, false) => "--yesno",
+    };
+    let mut a = vec!["--title".to_string(), title.to_string(), kind.to_string(), text.to_string()];
+    for (flag, l) in ["--yes-label", "--no-label", "--cancel-label"].iter().zip(labels) {
+        a.push(flag.to_string());
+        a.push(l.to_string());
+    }
+    a
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
     Open,
@@ -254,6 +321,18 @@ mod tests {
         assert_eq!(a[4], "*.wav *.flac|Audio\n*|All files");
         let f = FileDialog::new().set_directory("/tmp").kdialog_args(Kind::Folder);
         assert_eq!(f, vec!["--getexistingdirectory".to_string(), "/tmp".into()]);
+    }
+
+    #[test]
+    fn kdialog_questions_get_their_buttons() {
+        assert_eq!(
+            kde_ask_args("AudiForm 2", "Save changes?", &["Save", "Don't Save", "Cancel"], true, true),
+            [
+                "--title", "AudiForm 2", "--warningyesnocancel", "Save changes?",
+                "--yes-label", "Save", "--no-label", "Don't Save", "--cancel-label", "Cancel",
+            ]
+        );
+        assert_eq!(kde_ask_args("T", "Q", &[], false, false), ["--title", "T", "--yesno", "Q"]);
     }
 
     #[test]

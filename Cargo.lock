@@ -663,6 +663,7 @@ dependencies = [
  "embed-resource",
  "futures-util",
  "image",
+ "libc",
  "midir",
  "naga",
  "pollster 0.4.0",
@@ -672,6 +673,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "wayland-backend",
+ "wayland-client",
  "winreg",
 ]
 

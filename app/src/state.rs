@@ -341,6 +341,7 @@ pub struct State {
     pub show_about: bool,
     /// Updates: the background check and its window.
     pub updater: crate::updater::Updater,
+    pub desktop_entry: crate::desktop_entry::Ui,
     /// The check at start has been made (once a run).
     pub update_checked: bool,
     /// An available update's window has been shown once this run.
@@ -662,6 +663,7 @@ impl State {
             tool: Tool::Move,
             show_about: false,
             updater: Default::default(),
+            desktop_entry: Default::default(),
             update_checked: false,
             update_shown: false,
             last_autosave: Instant::now(),

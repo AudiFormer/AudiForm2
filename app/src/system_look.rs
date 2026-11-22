@@ -352,7 +352,14 @@ fn fc_match(family: &str, bold: bool) -> Option<(PathBuf, u32)> {
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
     let file = PathBuf::from(lines.next()?.trim());
-    let index = lines.next().and_then(|i| i.trim().parse().ok()).unwrap_or(0);
+    // For a variable font fontconfig puts the named instance in the high
+    // 16 bits (Adwaita Sans bold is 7 << 16); egui wants only the face, and
+    // asking it for face 458752 panics with InvalidFont.
+    let index = lines
+        .next()
+        .and_then(|i| i.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+        & 0xFFFF;
     // egui reads TrueType and OpenType, not Type 1 or bitmap fonts.
     let ext = file.extension()?.to_string_lossy().to_ascii_lowercase();
     matches!(ext.as_str(), "ttf" | "otf" | "ttc" | "otc").then_some((file, index))

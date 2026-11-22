@@ -39,6 +39,13 @@ rtrb.workspace = true
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
 futures-util = { version = "0.3", default-features = false }
 pollster = "0.4"
+# Files dropped from the file manager on Wayland, where winit gives none:
+# a data device on the window's own display connection (MIT; both already
+# in the tree through winit and smithay-clipboard).
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+# poll(), to wait on that connection with a timeout (already in the tree).
+libc = "0.2"
 
 # The System theme reads Windows' light or dark mode and accent from the
 # registry (MIT; already in the tree through embed-resource).

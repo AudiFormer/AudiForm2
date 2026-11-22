@@ -195,6 +195,7 @@ impl App {
             crate::settings::firewall_follow(&mut st.prefs);
         }
         crate::hwcursor::install(cc);
+        crate::wayland_dnd::install(cc);
         crate::caustics::install(cc);
         crate::app_icon::install(cc);
         lay_colors(&mut st);
@@ -1309,6 +1310,7 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 st.updater.check(true);
                 ui.close_menu();
             }
+            crate::desktop_entry::menu_item(ui, st);
             if ui.button("About AudiForm 2").clicked() {
                 st.show_about = true;
                 ui.close_menu();
@@ -2518,6 +2520,10 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::wayland_dnd::stop();
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Without vsync, frames are capped at 240 a second so steady
         // animation does not run the graphics card flat out.
@@ -2695,6 +2701,7 @@ impl eframe::App for App {
             self.st.theme_changed = false;
         }
         crate::app_icon::frame();
+        crate::wayland_dnd::frame(ctx);
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -3094,6 +3101,7 @@ impl eframe::App for App {
         crate::synth_ui::window(ctx, &mut self.st);
         about_window(ctx, &mut self.st);
         crate::updater::ui(ctx, &mut self.st);
+        crate::desktop_entry::ui(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);
         let th_now = self.st.theme.clone();
         self.shortcuts.show(ctx, &mut self.keymap, &th_now);
