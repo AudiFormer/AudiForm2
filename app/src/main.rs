@@ -117,7 +117,10 @@ fn main() -> eframe::Result<()> {
 }
 
 fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Result<()> {
-    let mut viewport = egui::ViewportBuilder::default().with_title("AudiForm 2");
+    // The app ID matches the desktop entry, so Linux desktops show its icon.
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("AudiForm 2")
+        .with_app_id("io.github.audiformer.AudiForm2");
     // The Zero Point icon until the theme's own is put up (app_icon.rs).
     if let Some(icon) = app_icon::default_icon_data() {
         viewport = viewport.with_icon(icon);

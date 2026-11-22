@@ -1,0 +1,56 @@
+# AudiForm 2 as a Flatpak, from the Linux program the release workflow
+# builds (`audiform2`, copied next to this file before flatpak-builder runs).
+#
+#   flatpak-builder --user --install-deps-from=flathub --repo=repo build \
+#       packaging/flatpak/io.github.audiformer.AudiForm2.yml
+#   flatpak build-bundle repo AudiForm2.flatpak io.github.audiformer.AudiForm2
+id: io.github.audiformer.AudiForm2
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: audiform2
+finish-args:
+  # The window: Wayland, or X11 where there is no Wayland.
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # The GPU, ALSA devices and MIDI keyboards.
+  - --device=all
+  # Sound through PipeWire / PulseAudio.
+  - --socket=pulseaudio
+  # Update checks, AI model downloads, plug-ins' licence checks.
+  - --share=network
+  # Audio files, sessions and ~/.vst3 plug-ins wherever they are kept.
+  - --filesystem=home
+  # The system's plug-ins (/usr/lib/vst3), seen at /run/host/usr.
+  - --filesystem=host-os:ro
+  # Removable drives and other disks.
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --filesystem=/mnt
+modules:
+  - name: audiform2
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 audiform2 /app/bin/audiform2
+      - install -Dm644 io.github.audiformer.AudiForm2.desktop /app/share/applications/io.github.audiformer.AudiForm2.desktop
+      - install -Dm644 io.github.audiformer.AudiForm2.metainfo.xml /app/share/metainfo/io.github.audiformer.AudiForm2.metainfo.xml
+      - install -Dm644 icon-256.png /app/share/icons/hicolor/256x256/apps/io.github.audiformer.AudiForm2.png
+      - install -Dm644 icon-128.png /app/share/icons/hicolor/128x128/apps/io.github.audiformer.AudiForm2.png
+      - install -Dm644 icon-64.png /app/share/icons/hicolor/64x64/apps/io.github.audiformer.AudiForm2.png
+    sources:
+      - type: file
+        path: audiform2
+      - type: file
+        path: io.github.audiformer.AudiForm2.desktop
+      - type: file
+        path: io.github.audiformer.AudiForm2.metainfo.xml
+      - type: file
+        path: ../../assets/icon/audiform2-256.png
+        dest-filename: icon-256.png
+      - type: file
+        path: ../../assets/icon/audiform2-128.png
+        dest-filename: icon-128.png
+      - type: file
+        path: ../../assets/icon/audiform2-64.png
+        dest-filename: icon-64.png

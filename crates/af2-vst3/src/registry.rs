@@ -151,6 +151,11 @@ pub fn standard_folders() -> Vec<PathBuf> {
         }
         out.push(PathBuf::from("/usr/lib/vst3"));
         out.push(PathBuf::from("/usr/local/lib/vst3"));
+        // In a Flatpak the system's own folders are under /run/host.
+        if std::env::var_os("FLATPAK_ID").is_some() {
+            out.push(PathBuf::from("/run/host/usr/lib/vst3"));
+            out.push(PathBuf::from("/run/host/usr/local/lib/vst3"));
+        }
     }
     out
 }

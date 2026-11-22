@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=AudiForm 2
+GenericName=Audio Editor
+Comment=Edit, record and mix audio
+Exec=audiform2 %F
+Icon=io.github.audiformer.AudiForm2
+Terminal=false
+Categories=AudioVideo;Audio;AudioVideoEditing;
+Keywords=audio;editor;waveform;multitrack;recording;mixing;
+MimeType=audio/wav;audio/x-wav;audio/flac;audio/mpeg;audio/ogg;audio/x-aiff;
+StartupWMClass=io.github.audiformer.AudiForm2

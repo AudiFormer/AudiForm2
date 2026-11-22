@@ -363,6 +363,14 @@ pub fn ui(ctx: &egui::Context, st: &mut State) {
                             .size(15.0),
                     );
                     ui.label(format!("You have {now}."));
+                    if std::env::var_os("FLATPAK_ID").is_some() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Installed as a Flatpak: download the new .flatpak from the release page and open it to update.",
+                            )
+                            .small(),
+                        );
+                    }
                     if !r.notes.trim().is_empty() {
                         egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                             ui.label(egui::RichText::new(notes_text(&r.notes)).size(11.5));

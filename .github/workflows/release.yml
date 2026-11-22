@@ -18,6 +18,10 @@ on:
         description: "Source to build, if not the tag itself (e.g. main for a build fix)"
         required: false
         default: ""
+      skip_macos:
+        description: "Leave out the macOS build (Linux and Flatpak only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -42,6 +46,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev libwayland-dev libudev-dev
       - run: cargo build --release -p audiform2
+      # For the Flatpak job.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audiform2-linux
+          path: target/release/audiform2
       - name: Package
         run: |
           V="${TAG#v}"
@@ -68,7 +77,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" AudiForm2-*-linux-x64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
 
+  flatpak:
+    # The same Linux program in a Flatpak bundle (a .flatpak file people
+    # open or `flatpak install`); the runtime comes from Flathub.
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SRC }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: audiform2-linux
+          path: packaging/flatpak
+      - name: Flatpak tools and runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Build the bundle
+        run: |
+          V="${TAG#v}"
+          ID=io.github.audiformer.AudiForm2
+          flatpak-builder --user --install-deps-from=flathub --force-clean             --repo=repo build "packaging/flatpak/$ID.yml"
+          flatpak build-bundle repo "AudiForm2-${V}-linux-x64.flatpak" "$ID"             --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" AudiForm2-*-linux-x64.flatpak --clobber --repo "$GITHUB_REPOSITORY"
+
   macos:
+    if: ${{ !inputs.skip_macos }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

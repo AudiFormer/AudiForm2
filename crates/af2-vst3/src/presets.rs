@@ -34,6 +34,10 @@ pub fn folders() -> Vec<PathBuf> {
         }
         out.push(PathBuf::from("/usr/share/vst3/presets"));
         out.push(PathBuf::from("/usr/local/share/vst3/presets"));
+        if std::env::var_os("FLATPAK_ID").is_some() {
+            out.push(PathBuf::from("/run/host/usr/share/vst3/presets"));
+            out.push(PathBuf::from("/run/host/usr/local/share/vst3/presets"));
+        }
     }
     out
 }
