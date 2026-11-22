@@ -20,6 +20,7 @@ struct Shared {
     hover: Option<(Vec<PathBuf>, Pos)>,
     drops: Vec<Vec<PathBuf>>,
     /// The drag's last place, for `hwcursor::system_pointer`.
+    #[cfg_attr(windows, allow(dead_code))]
     last: Option<Pos>,
     /// Logical to physical pixels, as egui last saw it.
     scale: f32,
@@ -42,6 +43,13 @@ pub fn install(cc: &eframe::CreationContext) {
     imp::install(cc);
     #[cfg(not(target_os = "linux"))]
     let _ = cc;
+}
+
+/// Stops listening before the window (and with it the display connection
+/// shared with winit) goes away. Waits at most half a second.
+pub fn stop() {
+    #[cfg(target_os = "linux")]
+    imp::stop();
 }
 
 /// Each frame, before anything reads dropped files: a drag over the window
@@ -76,6 +84,7 @@ pub fn frame(ctx: &egui::Context) {
 
 /// Where the last drag over the window was, in physical pixels (as
 /// `hwcursor::system_pointer` gives it on Windows).
+#[cfg_attr(windows, allow(dead_code))]
 pub fn pointer() -> Option<(f32, f32)> {
     let s = shared();
     let (x, y) = s.last?;
@@ -96,9 +105,7 @@ pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(unix)]
 fn percent_decode(s: &str) -> std::ffi::OsString {
-    use std::os::unix::ffi::OsStringExt;
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -114,28 +121,51 @@ fn percent_decode(s: &str) -> std::ffi::OsString {
         out.push(b[i]);
         i += 1;
     }
-    std::ffi::OsString::from_vec(out)
-}
-
-#[cfg(not(unix))]
-fn percent_decode(s: &str) -> std::ffi::OsString {
-    s.into()
+    // File names on Linux are bytes, not necessarily UTF-8.
+    #[cfg(unix)]
+    return std::os::unix::ffi::OsStringExt::from_vec(out);
+    #[cfg(not(unix))]
+    return String::from_utf8_lossy(&out).into_owned().into();
 }
 
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{parse_uri_list, shared, Pos};
     use std::io::Read;
+    use std::os::fd::AsRawFd;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
     use wayland_client::globals::{registry_queue_init, GlobalListContents};
     use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
     use wayland_client::protocol::wl_data_device_manager::{DndAction, WlDataDeviceManager};
     use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
     use wayland_client::protocol::{wl_registry, wl_seat::WlSeat};
+    use wayland_client::backend::WaylandError;
     use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 
     const URI_LIST: &str = "text/uri-list";
+
+    /// Asks the listening thread to finish.
+    static STOP: AtomicBool = AtomicBool::new(false);
+    /// The listening thread is running.
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub fn stop() {
+        STOP.store(true, Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_millis(500);
+        while RUNNING.load(Ordering::SeqCst) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 
     pub fn install(cc: &eframe::CreationContext) {
         use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
@@ -148,9 +178,11 @@ mod imp {
         let display = d.display.as_ptr() as usize;
         let surface = w.surface.as_ptr() as usize;
         let ctx = cc.egui_ctx.clone();
+        RUNNING.store(true, Ordering::SeqCst);
         let _ = std::thread::Builder::new()
             .name("af2-wayland-dnd".into())
             .spawn(move || {
+                let _running = Running;
                 if let Err(e) = run(display, surface, ctx) {
                     eprintln!("Wayland drag and drop is off: {e}");
                 }
@@ -158,7 +190,9 @@ mod imp {
     }
 
     fn run(display: usize, surface: usize, ctx: egui::Context) -> Result<(), String> {
-        // SAFETY: winit's wl_display, which lives as long as the program.
+        // SAFETY: winit's wl_display. It stays valid until the window
+        // closes, and `stop` (from the app's on_exit) ends this thread
+        // before then, as smithay-clipboard does for its own.
         let backend = unsafe {
             wayland_backend::client::Backend::from_foreign_display(display as *mut _)
         };
@@ -169,11 +203,36 @@ mod imp {
         let manager: WlDataDeviceManager =
             globals.bind(&qh, 3..=3, ()).map_err(|e| format!("no data device manager v3 ({e})"))?;
         let seat: WlSeat = globals.bind(&qh, 1..=1, ()).map_err(|e| format!("no seat ({e})"))?;
-        let _device = manager.get_data_device(&seat, &qh, ());
+        let device = manager.get_data_device(&seat, &qh, ());
         let mut st = State { conn: conn.clone(), surface, ctx, offer: None };
-        loop {
-            queue.blocking_dispatch(&mut st).map_err(|e| e.to_string())?;
+        // A blocking dispatch can't be told to stop, so wait on the
+        // connection a tenth of a second at a time and look at STOP between.
+        while !STOP.load(Ordering::SeqCst) {
+            queue.dispatch_pending(&mut st).map_err(|e| e.to_string())?;
+            match conn.flush() {
+                Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                r => r.map_err(|e| e.to_string())?,
+            }
+            let Some(guard) = queue.prepare_read() else { continue };
+            let mut pfd = libc::pollfd {
+                fd: guard.connection_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd.
+            if unsafe { libc::poll(&mut pfd, 1, 100) } > 0 {
+                match guard.read() {
+                    Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    r => {
+                        r.map_err(|e| e.to_string())?;
+                    }
+                }
+            }
         }
+        st.end();
+        device.release();
+        let _ = conn.flush();
+        Ok(())
     }
 
     #[derive(Default)]
@@ -217,6 +276,9 @@ mod imp {
             };
             offer.receive(URI_LIST.into(), w.as_fd());
             drop(w);
+            // A source that never answers mustn't hold this thread (or the
+            // app's exit) for ever.
+            let _ = r.set_read_timeout(Some(Duration::from_secs(2)));
             if self.conn.flush().is_err() {
                 return Vec::new();
             }

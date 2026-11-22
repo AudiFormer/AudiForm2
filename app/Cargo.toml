@@ -44,6 +44,8 @@ pollster = "0.4"
 # in the tree through winit and smithay-clipboard).
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
+# poll(), to wait on that connection with a timeout (already in the tree).
+libc = "0.2"
 
 # The System theme reads Windows' light or dark mode and accent from the
 # registry (MIT; already in the tree through embed-resource).

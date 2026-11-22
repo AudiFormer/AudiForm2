@@ -36,7 +36,28 @@ pub fn appimage() -> Option<PathBuf> {
         return None;
     }
     let p = PathBuf::from(std::env::var_os("APPIMAGE")?);
-    p.is_file().then_some(p)
+    // A desktop entry is UTF-8 text; a path that isn't can't be written in it.
+    (p.is_file() && p.to_str().is_some()).then_some(p)
+}
+
+/// Where another install (a Flatpak, a distribution package) keeps its
+/// entry under the same name. An entry in ~/.local/share would hide it, so
+/// none is offered or written while one is there.
+fn other_install() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    let mut found: Vec<PathBuf> = dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from).collect();
+    found.push(PathBuf::from("/var/lib/flatpak/exports/share"));
+    if let Some(h) = home {
+        found.push(h.join(".local/share/flatpak/exports/share"));
+    }
+    found
+        .into_iter()
+        .map(|d| d.join("applications").join(format!("{ID}.desktop")))
+        .find(|p| p.is_file())
 }
 
 fn data_home() -> Option<PathBuf> {
@@ -118,6 +139,12 @@ pub fn add(app: &Path) -> Result<(), String> {
             entry.display()
         ));
     }
+    if let Some(other) = other_install() {
+        return Err(format!(
+            "AudiForm 2 is already in your applications menu from another install ({}). An entry for this AppImage would hide it, so none was added.",
+            other.display()
+        ));
+    }
     let write = |p: &Path, b: &[u8]| -> Result<(), String> {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d).map_err(|e| format!("Couldn't make {}: {e}", d.display()))?;
@@ -147,11 +174,14 @@ pub fn remove() -> Result<(), String> {
 /// Tells menus that read the cache (most watch the folder anyway).
 fn refresh() {
     if let Some(dir) = entry_path().and_then(|p| p.parent().map(Path::to_path_buf)) {
-        let _ = std::process::Command::new("update-desktop-database")
-            .arg(dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        // Waited for on a thread of its own, so it doesn't linger as a zombie.
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("update-desktop-database")
+                .arg(dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        });
     }
 }
 
@@ -165,7 +195,7 @@ fn start(st: &mut State) {
         }
         return;
     }
-    let entry_taken = entry_path().is_some_and(|p| p.exists());
+    let entry_taken = entry_path().is_some_and(|p| p.exists()) || other_install().is_some();
     st.desktop_entry.asking = !entry_taken && !data_dir().join(ASKED).exists();
 }
 

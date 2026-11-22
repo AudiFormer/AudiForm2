@@ -2520,6 +2520,10 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::wayland_dnd::stop();
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Without vsync, frames are capped at 240 a second so steady
         // animation does not run the graphics card flat out.
