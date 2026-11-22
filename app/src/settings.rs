@@ -149,6 +149,15 @@ pub struct Prefs {
     pub piano_lane_h: f32,
     /// The level meters' range, response, hold, type and clip lights.
     pub meters: crate::meters::MeterPrefs,
+    /// Linux: the AppImage's menu entry and the theme's icon in the
+    /// taskbar may be written to ~/.local/share (`linux_desktop.rs`).
+    /// Turning it off takes them out.
+    #[cfg(target_os = "linux")]
+    pub desktop_integration: bool,
+    /// Linux: errors and long jobs finishing while the window isn't in
+    /// front go out as desktop notifications.
+    #[cfg(target_os = "linux")]
+    pub desktop_notifications: bool,
 }
 
 /// Settings > Audio Devices and Settings > Channel Routing.
@@ -347,6 +356,10 @@ impl Default for Prefs {
             skip_update_version: String::new(),
             piano_lane_h: crate::pianoroll::LANE_H,
             meters: Default::default(),
+            #[cfg(target_os = "linux")]
+            desktop_integration: true,
+            #[cfg(target_os = "linux")]
+            desktop_notifications: true,
         }
     }
 }
@@ -474,6 +487,11 @@ impl Draft {
                 self.prefs.renderer = d.renderer;
                 self.zoom = ZoomPrefs::default();
                 self.workspace = Workspace::from_key("");
+                #[cfg(target_os = "linux")]
+                {
+                    self.prefs.desktop_integration = d.desktop_integration;
+                    self.prefs.desktop_notifications = d.desktop_notifications;
+                }
             }
             "Appearance" => {
                 self.hues = None;
@@ -717,6 +735,20 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     "Check for a newer version when AudiForm 2 starts",
                 );
                 note(ui, th, "Only GitHub's list of releases is asked; nothing about you or your work is sent. Help > Check for Updates looks any time.");
+            });
+            #[cfg(target_os = "linux")]
+            group(ui, th, "Desktop", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.desktop_notifications,
+                    "Notify me of errors and finished exports, bounces, archives and stem separations while AudiForm 2 isn't in front",
+                );
+                note(ui, th, "Through your desktop's notifications. Other messages (\"Saved ...\") stay in the window.");
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut d.prefs.desktop_integration,
+                    "Desktop integration: the AppImage's applications menu entry, and the theme's icon in the taskbar",
+                );
+                note(ui, th, "Writes a menu entry and icons to ~/.local/share, only for an AppImage. On Wayland the taskbar shows the icon the entry names; the title bar picks up a new theme's icon the next time AudiForm 2 starts. Turning this off takes out everything AudiForm 2 wrote there.");
             });
             group(ui, th, "Windows network prompts", |ui| {
                 note(ui, th, "Windows asks \"Allow access to the network?\" when a program listens for connections. In AudiForm 2 that is usually a plug-in checking its licence, since plug-ins run inside AudiForm 2's plug-in host. A firewall rule for AudiForm 2 stops the question for good, on every kind of network. Plug-ins run from one fixed copy of the plug-in host, so the rule (or your answer to Windows' own question) covers every build of AudiForm 2, and Windows asks for permission to add it only once.");

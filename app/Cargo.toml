@@ -42,6 +42,9 @@ rtrb.workspace = true
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
 futures-util = { version = "0.3", default-features = false }
 pollster = "0.4"
+# Desktop notifications (org.freedesktop.Notifications); already in the
+# tree through ashpd (MIT).
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 # Files dropped from the file manager on Wayland, where winit gives none:
 # a data device on the window's own display connection (MIT; both already
 # in the tree through winit and smithay-clipboard).

@@ -19,6 +19,9 @@
 //! small (title bar) icons are set separately, each from the drawing made
 //! for its size; elsewhere the 256 px picture goes to the window.
 //!
+//! On Wayland a window can't carry its own icon; `linux_desktop.rs`
+//! installs the theme's for the desktop entry to name instead.
+//!
 //! The exe's own icon (Explorer, shortcuts) is the Zero Point one, built
 //! in by `app/build.rs` from `assets/icon/audiform2.ico`.
 
@@ -253,9 +256,15 @@ pub fn build(th: &Theme, size: u32) -> Option<Picture> {
     })
 }
 
+/// The themes' own pictures, by name (`Theme::icon`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn picture_names() -> impl Iterator<Item = &'static str> {
+    PICTURES.iter().map(|(n, _)| *n)
+}
+
 /// What the current icon was made from, so a theme change that leaves it
 /// alone does nothing.
-fn key(th: &Theme) -> String {
+pub fn key(th: &Theme) -> String {
     if PICTURES.iter().any(|(n, _)| *n == th.icon) {
         format!("picture:{}", th.icon)
     } else {

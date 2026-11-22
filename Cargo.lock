@@ -677,6 +677,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "winreg",
+ "zbus 5.19.0",
  "zip",
 ]
 
