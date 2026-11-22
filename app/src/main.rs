@@ -76,6 +76,7 @@ mod transport;
 mod tube_master_ui;
 mod ui;
 mod updater;
+mod video;
 mod visualizer;
 mod wave_channels;
 mod waveform;

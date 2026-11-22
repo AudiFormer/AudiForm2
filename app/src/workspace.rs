@@ -97,7 +97,7 @@ impl Workspace {
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.215, vec![Files, Markers]);
                 let [_files, rack] = s.split_below(left, 0.40, vec![Effects, Properties]);
-                let [_rack, _history] = s.split_below(rack, 0.69, vec![History]);
+                let [_rack, _history] = s.split_below(rack, 0.69, vec![History, Video]);
                 let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
                 let [_editor, right] =
@@ -109,7 +109,7 @@ impl Workspace {
                 let mut d = DockState::new(vec![Mixer, Editor, PianoRoll]);
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.15, vec![Files]);
-                let [_files, _markers] = s.split_below(left, 0.55, vec![Markers, History]);
+                let [_files, _markers] = s.split_below(left, 0.55, vec![Markers, History, Video]);
                 let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.8, vec![Selection]);
                 let [_mixer, _right] = s.split_right(centre, 0.78, vec![Effects, Properties]);
@@ -119,7 +119,7 @@ impl Workspace {
                 let mut d = DockState::new(vec![Editor, Mixer, PianoRoll]);
                 let s = d.main_surface_mut();
                 let [centre, _left] =
-                    s.split_left(NodeIndex::root(), 0.13, vec![Files, Markers, History]);
+                    s.split_left(NodeIndex::root(), 0.13, vec![Files, Markers, History, Video]);
                 let [_editor, bottom] = s.split_below(centre, 0.88, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.8, vec![Selection]);
                 d
@@ -129,7 +129,7 @@ impl Workspace {
                 let s = d.main_surface_mut();
                 let [centre, left] =
                     s.split_left(NodeIndex::root(), 0.18, vec![Effects, Properties]);
-                let [_rack, _files] = s.split_below(left, 0.62, vec![Files, History]);
+                let [_rack, _files] = s.split_below(left, 0.62, vec![Files, History, Video]);
                 let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
                 let [_editor, right] = s.split_right(centre, 0.72, vec![Statistics]);
@@ -141,7 +141,7 @@ impl Workspace {
                 let mut d = DockState::new(vec![Editor, Mixer]);
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.18, vec![Files, Markers]);
-                let [_files, _rack] = s.split_below(left, 0.45, vec![Effects, History]);
+                let [_files, _rack] = s.split_below(left, 0.45, vec![Effects, History, Video]);
                 let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
                 let [_editor, right] = s.split_right(centre, 0.74, vec![Diagnostics]);
@@ -149,6 +149,22 @@ impl Workspace {
                 d
             }
         }
+    }
+}
+
+/// Puts `tab` in the same panel as `beside`, behind it (not brought to
+/// the front); in a window of its own when `beside` isn't there. Nothing
+/// when `tab` is already somewhere.
+pub fn add_behind(d: &mut DockState<Tab>, beside: Tab, tab: Tab) {
+    if d.find_tab(&tab).is_some() {
+        return;
+    }
+    let Some((s, n, _)) = d.find_tab(&beside) else {
+        d.add_window(vec![tab]);
+        return;
+    };
+    if let egui_dock::Node::Leaf { tabs, .. } = &mut d[s][n] {
+        tabs.push(tab);
     }
 }
 
@@ -176,6 +192,29 @@ mod tests {
         assert_eq!(node(Tab::Phase), node(Tab::Spectrum));
         assert_ne!(node(Tab::Space), node(Tab::Phase));
         assert_ne!(node(Tab::AiSeparation), node(Tab::Phase));
+    }
+
+    #[test]
+    fn video_sits_behind_history_in_every_workspace() {
+        for w in Workspace::ALL {
+            let d = w.build();
+            let (vs, vn, _) = d.find_tab(&Tab::Video).expect("video");
+            let (hs, hn, _) = d.find_tab(&Tab::History).expect("history");
+            assert_eq!((vs, vn), (hs, hn), "{}", w.name());
+            // Behind: never the tab in front.
+            if let egui_dock::Node::Leaf { tabs, active, .. } = &d[hs][hn] {
+                assert_ne!(tabs[active.0], Tab::Video, "{}", w.name());
+                assert_eq!(tabs.last(), Some(&Tab::Video), "{}", w.name());
+            }
+        }
+        // An arrangement saved before: added once, behind History.
+        let mut old = DockState::new(vec![Tab::Editor]);
+        let s = old.main_surface_mut();
+        let _ = s.split_left(NodeIndex::root(), 0.2, vec![Tab::History]);
+        add_behind(&mut old, Tab::History, Tab::Video);
+        add_behind(&mut old, Tab::History, Tab::Video);
+        let (s, n, _) = old.find_tab(&Tab::Video).unwrap();
+        assert_eq!(Some((s, n)), old.find_tab(&Tab::History).map(|(s, n, _)| (s, n)));
     }
 
     #[test]

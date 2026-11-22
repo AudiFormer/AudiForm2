@@ -266,6 +266,35 @@ pub fn begin(st: &mut State, target: RecordTarget) -> Vec<RecordSource> {
     }
 }
 
+/// Below this peak a channel counts as silent (-66 dBFS: an unplugged
+/// input's hiss, well under any real signal).
+const SILENT_PEAK: f32 = 0.0005;
+
+/// A two-channel take that holds one signal, as one channel: one side
+/// silent while the other has sound (that side is kept), or both sides
+/// the same. None when it really is stereo (or silent, or not two
+/// channels).
+pub fn mono_if_one_sided(buf: &AudioBuffer) -> Option<AudioBuffer> {
+    if buf.num_channels() != 2 || buf.frames() == 0 {
+        return None;
+    }
+    let peak = |c: &[f32]| c.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let (l, r) = (&buf.channels[0], &buf.channels[1]);
+    let (pl, pr) = (peak(l), peak(r));
+    let keep = if pl.max(pr) < SILENT_PEAK {
+        return None;
+    } else if pr < SILENT_PEAK {
+        l
+    } else if pl < SILENT_PEAK {
+        r
+    } else if l.iter().zip(r).all(|(a, b)| (a - b).abs() <= 1e-6) {
+        l
+    } else {
+        return None;
+    };
+    Some(AudioBuffer { rate: buf.rate, channels: vec![keep.clone()] })
+}
+
 /// `buf` with `channels` channels at `rate`: resampled, and channels
 /// shared out (mono to every channel, several averaged into mono, the rest
 /// taken in order with the last repeated).
@@ -397,6 +426,13 @@ pub fn finish(st: &mut State, takes: Vec<Take>, target: Option<RecordTarget>) {
         }
         let mut buf = take.buf;
         let to_track = matches!(target, Some(RecordTarget::Track(..)));
+        // A mic in one input of a stereo interface: the other side is
+        // silent (or both are the same), so the file is kept mono.
+        if to_track {
+            if let Some(m) = mono_if_one_sided(&buf) {
+                buf = m;
+            }
+        }
         if to_track && buf.rate != st.session.rate && st.session.rate > 0 && buf.frames() > 0 {
             buf = af2_dsp::resample::resample(&buf, st.session.rate);
         }
@@ -652,6 +688,25 @@ pub fn default_input(ui: &mut Ui, inputs: &mut RecordInputs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mic_in_one_input_of_a_stereo_interface_records_mono() {
+        let n = 1000;
+        let sig: Vec<f32> = (0..n).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
+        let hiss: Vec<f32> = (0..n).map(|i| if i % 2 == 0 { 0.0001 } else { -0.0001 }).collect();
+        let b = |l: &Vec<f32>, r: &Vec<f32>| AudioBuffer { rate: 48_000, channels: vec![l.clone(), r.clone()] };
+        // Input 1 only (input 2 open, with a little hiss): the left, mono.
+        assert_eq!(mono_if_one_sided(&b(&sig, &hiss)).unwrap().channels, vec![sig.clone()]);
+        // Input 2 only: the right.
+        assert_eq!(mono_if_one_sided(&b(&hiss, &sig)).unwrap().channels, vec![sig.clone()]);
+        // The same on both sides: one of them.
+        assert_eq!(mono_if_one_sided(&b(&sig, &sig)).unwrap().num_channels(), 1);
+        // Real stereo, silence, and mono takes stay as they are.
+        let other: Vec<f32> = (0..n).map(|i| (i as f32 * 0.07).cos() * 0.3).collect();
+        assert!(mono_if_one_sided(&b(&sig, &other)).is_none());
+        assert!(mono_if_one_sided(&b(&hiss, &hiss)).is_none());
+        assert!(mono_if_one_sided(&AudioBuffer { rate: 48_000, channels: vec![sig] }).is_none());
+    }
     use af2_core::AudioBuffer;
 
     fn app(pid: u32, name: &str, active: bool) -> RecordSource {

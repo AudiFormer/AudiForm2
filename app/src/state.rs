@@ -219,6 +219,8 @@ pub struct Toast {
     pub text: String,
     pub at: Instant,
     pub error: bool,
+    /// A finished file: the message offers to show it.
+    pub reveal: Option<PathBuf>,
 }
 
 pub struct State {
@@ -313,6 +315,8 @@ pub struct State {
     pub archive: crate::archive::ArchiveUi,
     /// Session clips: renders running and what was said.
     pub linked: crate::linked::LinkedUi,
+    /// The Video panel and the video track's pictures.
+    pub video: crate::video::VideoUi,
     /// The last effect applied and its settings, for Repeat Last Effect.
     pub last_effect: Option<(Effect, Vec<f32>)>,
     pub effect: Effect,
@@ -647,6 +651,7 @@ impl State {
             export: Default::default(),
             archive: Default::default(),
             linked: Default::default(),
+            video: Default::default(),
             last_effect: None,
             effect: Effect::Amplify,
             effect_values: HashMap::new(),
@@ -747,6 +752,18 @@ impl State {
             text: text.into(),
             at: Instant::now(),
             error: false,
+            reveal: None,
+        });
+    }
+
+    /// A message about a file just written, with Show File beside it
+    /// (left up longer, so there is time to click).
+    pub fn toast_file(&mut self, text: impl Into<String>, path: PathBuf) {
+        self.toasts.push(Toast {
+            text: text.into(),
+            at: Instant::now(),
+            error: false,
+            reveal: Some(path),
         });
     }
 
@@ -755,6 +772,7 @@ impl State {
             text: text.into(),
             at: Instant::now(),
             error: true,
+            reveal: None,
         });
     }
 
@@ -1013,6 +1031,10 @@ impl State {
     pub fn place_doc(&mut self, doc: DocId, track: af2_core::TrackId, at: f64) {
         let before = self.session.clone();
         if let Some(m) = self.media_for_doc(doc) {
+            // A video's picture goes on the video track, its sound here.
+            if let Some(p) = self.doc_by_id(doc).and_then(|d| d.path.clone()) {
+                crate::video::take_from_placed(self, &p, at);
+            }
             if let Some(c) = self.session.add_clip(track, m, at) {
                 self.selected_clip = Some(c);
                 self.commit_session("Add clip", before);
@@ -1743,6 +1765,7 @@ impl State {
                     text,
                     at,
                     error: true,
+                    reveal: None,
                 });
             }
             // Everything played (or taken in) since the last frame, not
@@ -1839,7 +1862,7 @@ impl State {
         }
         self.settle_track_heights(false);
         self.toasts
-            .retain(|t| t.at.elapsed().as_secs_f32() < if t.error { 8.0 } else { 4.0 });
+            .retain(|t| t.at.elapsed().as_secs_f32() < if t.error { 8.0 } else if t.reveal.is_some() { 12.0 } else { 4.0 });
         self.autosave();
     }
 

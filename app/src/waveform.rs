@@ -1068,6 +1068,13 @@ fn spectrum_menu(ui: &egui::Ui, st: &mut State, resp: &egui::Response, sa: Rect)
             ui.close_menu();
             return;
         };
+        if st.doc().is_some_and(|d| !d.spec_sel.is_empty()) {
+            if ui.button("Play Selected Area").clicked() {
+                crate::spectral_select::play_selected_area(st);
+                ui.close_menu();
+            }
+            ui.separator();
+        }
         let s = &mut st.spec;
         if ui.button("Zoom In (Frequency)").clicked() {
             s.zoom_step(true, Some(at), ny);

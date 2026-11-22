@@ -23,11 +23,19 @@ pub mod meta;
 mod ogg_chain;
 mod opus;
 mod riff;
+mod simple;
 
 /// File extensions the Files panel offers to open.
 pub const EXTENSIONS: &[&str] = &[
     "wav", "wave", "bwf", "rf64", "aif", "aiff", "aifc", "flac", "mp3", "mp2", "ogg", "oga",
     "opus", "mogg", "m4a", "mp4", "m4b", "mov", "aac", "caf", "mka", "mkv", "webm", "dts",
+    // Opened here too: Sun/NeXT, Wave64, MPEG audio layer 1, more video
+    // containers (their audio; the system's decoders or ffmpeg), Windows
+    // Media, Dolby Digital, AMR and 3GP.
+    "au", "snd", "w64", "mp1", "mpa", "m4v", "3gp", "3g2", "avi", "wmv", "wma", "asf", "mpg",
+    "mpeg", "vob", "ts", "m2ts", "mts", "ac3", "eac3", "ec3", "amr",
+    // With ffmpeg installed: WavPack, True Audio, Creative Voice, Flash video.
+    "wv", "tta", "voc", "flv",
 ];
 
 /// A decoded file with what went wrong along the way.
@@ -134,6 +142,18 @@ fn decode_own(path: &Path) -> Result<Decoded, String> {
     }
     if ext == "mogg" {
         return decode_mogg(path);
+    }
+    if matches!(ext.as_str(), "au" | "snd") {
+        return simple::decode_au(path).map(Decoded::clean);
+    }
+    if ext == "w64" {
+        return simple::decode_w64(path).map(Decoded::clean);
+    }
+    // MPEG program and transport streams: the general decoder reads them
+    // as bare MPEG audio and loses packets; the system's (or ffmpeg's)
+    // demuxers read them whole.
+    if matches!(ext.as_str(), "mpg" | "mpeg" | "vob" | "m2p" | "ps") {
+        return Err("An MPEG program stream: left to the system's decoders.".into());
     }
     let mut file =
         File::open(path).map_err(|e| format!("Could not open {}: {e}", path.display()))?;
@@ -535,6 +555,35 @@ pub fn write_wav(path: &Path, buf: &AudioBuffer, fmt: WavFormat) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which files of a folder open, and how: `AF2_DECODE_DIR=<folder>
+    /// cargo test -p af2-io -- --ignored every_file --nocapture` (set
+    /// `AF2_FFMPEG` to a missing path to see what opens without ffmpeg).
+    #[test]
+    #[ignore]
+    fn every_file_in_a_folder() {
+        let dir = std::env::var("AF2_DECODE_DIR").expect("AF2_DECODE_DIR");
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().to_string();
+            match decode_checked(&f) {
+                Ok(d) => eprintln!(
+                    "{name:16} OK  {:.2} s, {} ch, {} Hz, {:.1} dB {}",
+                    d.buf.frames() as f64 / d.buf.rate as f64,
+                    d.buf.num_channels(),
+                    d.buf.rate,
+                    {
+                        let n = d.buf.channels.iter().map(Vec::len).sum::<usize>().max(1) as f64;
+                        let e: f64 = d.buf.channels.iter().flatten().map(|s| (*s as f64).powi(2)).sum();
+                        10.0 * (e / n).max(1e-20).log10()
+                    },
+                    d.notes.join("; ")
+                ),
+                Err(e) => eprintln!("{name:16} ERR {}", e.lines().next().unwrap_or("")),
+            }
+        }
+    }
 
     #[test]
     fn wav_round_trip_float_and_int() {

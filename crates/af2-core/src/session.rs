@@ -808,6 +808,19 @@ pub struct Session {
     /// media's file, kept current as that session is saved.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub linked: std::collections::BTreeMap<MediaId, LinkedSession>,
+    /// The picture to work to: a video file shown along the top of the
+    /// Multitrack and in the Video panel (its sound is an ordinary clip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoTrack>,
+}
+
+/// A session's video: the file and where its first frame sits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoTrack {
+    pub path: std::path::PathBuf,
+    /// Timeline seconds of the video's start.
+    #[serde(default)]
+    pub start: f64,
 }
 
 /// The session a media item's file was rendered from (Audiform's
@@ -861,6 +874,7 @@ impl Session {
             playhead: 0.0,
             bit_depth: 32,
             linked: Default::default(),
+            video: None,
         };
         for _ in 0..tracks {
             s.add_track();

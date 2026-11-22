@@ -252,7 +252,8 @@ mod vzoom_tests {
     /// The lanes' left, width and top for a 1600 x 900 editor.
     fn lanes_geom(st: &State) -> (f32, f32, f32) {
         let metro = if st.session.tempo.metronome { crate::track_views::METRO_H } else { 0.0 };
-        (st.prefs.header_w, 1600.0 - st.prefs.header_w - VBAR_W, crate::overview::STRIP_H + 22.0 + metro)
+        let video = if st.session.video.is_some() { crate::video::ROW_H } else { 0.0 };
+        (st.prefs.header_w, 1600.0 - st.prefs.header_w - VBAR_W, crate::overview::STRIP_H + 22.0 + metro + video)
     }
 
     #[test]
@@ -530,13 +531,20 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         pos2(rect.left(), ruler.bottom()),
         pos2(ruler.right(), ruler.bottom() + metro_h),
     );
+    // The video row, when the session has a video: under the metronome,
+    // over the tracks (it is not a track either).
+    let video_h = if st.session.video.is_some() { crate::video::ROW_H } else { 0.0 };
+    let video_row = Rect::from_min_max(
+        pos2(rect.left(), metro.bottom()),
+        pos2(ruler.right(), metro.bottom() + video_h),
+    );
     // The Master row is pinned to the bottom of the editor.
     let master_band = Rect::from_min_max(
         pos2(rect.left(), rect.bottom() - crate::track_views::MASTER_H),
         pos2(ruler.right(), rect.bottom()),
     );
     let lanes = Rect::from_min_max(
-        pos2(ruler.left(), metro.bottom()),
+        pos2(ruler.left(), video_row.bottom()),
         pos2(ruler.right(), master_band.top()),
     );
     let vbar = Rect::from_min_max(
@@ -546,7 +554,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     st.session_px = lanes.width();
     st.session_lanes_h = lanes.height();
     let headers = Rect::from_min_max(
-        pos2(rect.left(), metro.bottom()),
+        pos2(rect.left(), video_row.bottom()),
         pos2(ruler.left(), master_band.top()),
     );
     // The line between the headers and the lanes: drag it to make every
@@ -1501,6 +1509,11 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 st.live_metronome();
             }
         });
+    }
+    if video_h > 0.0 {
+        let vhead = Rect::from_min_max(video_row.min, pos2(lanes.left(), video_row.bottom()));
+        let vlane = Rect::from_min_max(pos2(lanes.left(), video_row.top()), pos2(lanes.right(), video_row.bottom()));
+        crate::video::row(ui, st, vhead, vlane, &|t| time_to_x(&v, lanes, t), &|x| x_to_time(&v, lanes, x));
     }
     let lane_p = ui.painter_at(lanes);
     let head_p = ui.painter_at(headers);

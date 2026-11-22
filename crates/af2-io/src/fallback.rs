@@ -46,8 +46,149 @@ pub fn codec_name(path: &Path) -> Option<&'static str> {
     .map(|(_, n)| n)
 }
 
+/// The Dolby Digital (AC-3 or E-AC-3) track of a Matroska or WebM file,
+/// written out as a bare stream and decoded by the system. None when the
+/// file has no such track.
+fn dolby_from_matroska(path: &Path) -> Option<Result<af2_osdecode::Decoded, String>> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "mkv" | "mka" | "webm" | "mk3d") {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    let bytes = matroska::dolby_stream(&data)?;
+    let tmp = std::env::temp_dir().join(format!("af2-dolby-{}-{:x}.ac3", std::process::id(), bytes.len()));
+    if std::fs::write(&tmp, &bytes).is_err() {
+        return None;
+    }
+    let r = af2_osdecode::decode(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    Some(r)
+}
+
+/// Just enough Matroska to take one track's frames out.
+mod matroska {
+    const SEGMENT: u32 = 0x1853_8067;
+    const TRACKS: u32 = 0x1654_AE6B;
+    const TRACK_ENTRY: u32 = 0xAE;
+    const TRACK_NUMBER: u32 = 0xD7;
+    const CODEC_ID: u32 = 0x86;
+    const CLUSTER: u32 = 0x1F43_B675;
+    const SIMPLE_BLOCK: u32 = 0xA3;
+    const BLOCK_GROUP: u32 = 0xA0;
+    const BLOCK: u32 = 0xA1;
+
+    /// A variable-length number: (value, its length). `keep` keeps the
+    /// length marker (element ids); None for an unknown size.
+    fn vint(b: &[u8], at: usize, keep: bool) -> Option<(Option<u64>, usize)> {
+        let first = *b.get(at)?;
+        let len = first.leading_zeros() as usize + 1;
+        if len > 8 || at + len > b.len() {
+            return None;
+        }
+        let mut v = if keep { first as u64 } else { (first as u64) & (0xFF >> len) };
+        let mut all_ones = v == (0xFF >> len) as u64;
+        for i in 1..len {
+            v = (v << 8) | b[at + i] as u64;
+            all_ones &= b[at + i] == 0xFF;
+        }
+        Some((if !keep && all_ones { None } else { Some(v) }, len))
+    }
+
+    struct Walk<'a> {
+        b: &'a [u8],
+        dolby: Option<u64>,
+        out: Vec<u8>,
+    }
+
+    impl Walk<'_> {
+        fn elements(&mut self, mut at: usize, end: usize, depth: u32) {
+            while at < end && depth < 8 {
+                let Some((Some(id), il)) = vint(self.b, at, true) else { return };
+                let Some((size, sl)) = vint(self.b, at + il, false) else { return };
+                let body = at + il + sl;
+                // An unknown size runs to the end of what holds it.
+                let stop = size.map_or(end, |n| (body as u64 + n).min(end as u64) as usize);
+                match id as u32 {
+                    SEGMENT | TRACKS | CLUSTER | BLOCK_GROUP => self.elements(body, stop, depth + 1),
+                    TRACK_ENTRY => self.track(body, stop),
+                    SIMPLE_BLOCK | BLOCK => self.block(body, stop),
+                    _ => {}
+                }
+                if stop <= at {
+                    return;
+                }
+                at = stop;
+            }
+        }
+
+        fn track(&mut self, mut at: usize, end: usize) {
+            let (mut number, mut codec) = (None, String::new());
+            while at < end {
+                let Some((Some(id), il)) = vint(self.b, at, true) else { return };
+                let Some((Some(n), sl)) = vint(self.b, at + il, false) else { return };
+                let body = at + il + sl;
+                let stop = (body + n as usize).min(end);
+                match id as u32 {
+                    TRACK_NUMBER => number = Some(self.b[body..stop].iter().fold(0u64, |v, x| (v << 8) | *x as u64)),
+                    CODEC_ID => codec = String::from_utf8_lossy(&self.b[body..stop]).trim_end_matches('\0').to_string(),
+                    _ => {}
+                }
+                at = stop;
+            }
+            if self.dolby.is_none() && matches!(codec.as_str(), "A_AC3" | "A_EAC3") {
+                self.dolby = number;
+            }
+        }
+
+        fn block(&mut self, at: usize, end: usize) {
+            let Some(want) = self.dolby else { return };
+            let Some((Some(track), tl)) = vint(self.b, at, false) else { return };
+            if track != want || at + tl + 3 > end {
+                return;
+            }
+            let flags = self.b[at + tl + 2];
+            let mut p = at + tl + 3;
+            // Laced frames lie one after another after the sizes, so all
+            // that matters is where the sizes end.
+            match (flags >> 1) & 3 {
+                0 => {}
+                1 => {
+                    let Some(&n) = self.b.get(p) else { return };
+                    p += 1;
+                    for _ in 0..n {
+                        while self.b.get(p) == Some(&0xFF) {
+                            p += 1;
+                        }
+                        p += 1;
+                    }
+                }
+                2 => p += 1,
+                _ => {
+                    let Some(&n) = self.b.get(p) else { return };
+                    p += 1;
+                    for _ in 0..n {
+                        let Some((_, l)) = vint(self.b, p, false) else { return };
+                        p += l;
+                    }
+                }
+            }
+            if p < end {
+                self.out.extend_from_slice(&self.b[p..end]);
+            }
+        }
+    }
+
+    /// The first AC-3 or E-AC-3 track's frames, end to end (a bare stream
+    /// any Dolby decoder reads), or None.
+    pub fn dolby_stream(b: &[u8]) -> Option<Vec<u8>> {
+        let mut w = Walk { b, dolby: None, out: Vec::new() };
+        w.elements(0, b.len(), 0);
+        (!w.out.is_empty()).then_some(w.out)
+    }
+}
+
 /// The ffmpeg to use, if the user has one.
-fn ffmpeg() -> Option<PathBuf> {
+pub fn ffmpeg() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("AF2_FFMPEG").map(PathBuf::from) {
         return p.is_file().then_some(p);
     }
@@ -133,7 +274,17 @@ pub fn decode(path: &Path, own: &str) -> Result<(AudioBuffer, String), String> {
                 ));
             }
             Ok(_) => tried.push("Windows gave no audio for it".to_string()),
-            Err(e) => tried.push(e),
+            Err(e) => {
+                tried.push(e);
+                // Dolby Digital in Matroska: Windows reads the stream itself
+                // fine, so the packets are taken out and given to it alone.
+                if let Some(Ok(d)) = dolby_from_matroska(path) {
+                    return Ok((
+                        AudioBuffer { rate: d.rate, channels: d.channels },
+                        "Dolby Digital decoded by Windows".into(),
+                    ));
+                }
+            }
         }
     }
     if let Some(exe) = ffmpeg() {

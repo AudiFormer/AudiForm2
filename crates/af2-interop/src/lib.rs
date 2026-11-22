@@ -16,6 +16,7 @@ pub mod audfrm;
 pub mod aup3;
 mod b64;
 pub mod check;
+pub mod otio;
 pub mod paths;
 pub mod sesx;
 pub mod sesx_out;
@@ -35,7 +36,7 @@ pub struct Imported {
 }
 
 /// The kinds of session file this crate opens, by extension (lower case).
-pub const SESSION_EXTENSIONS: [&str; 5] = ["audfrm", "altaudio", "altemplate", "sesx", "aup3"];
+pub const SESSION_EXTENSIONS: [&str; 6] = ["audfrm", "altaudio", "altemplate", "sesx", "aup3", "otio"];
 
 /// Whether files with this extension (any case) open as sessions here.
 pub fn is_session_ext(ext: &str) -> bool {
@@ -59,6 +60,11 @@ pub fn import_with(path: &Path, surrounds: sesx::Surrounds) -> Result<Imported, 
     match ext.as_str() {
         "sesx" => sesx::import_file(path, surrounds),
         "aup3" => aup3::import(path, &aup3::audio_folder(path)),
+        "otio" => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
+            otio::import(&text, path.parent().unwrap_or(Path::new(".")))
+        }
         "audfrm" | "altaudio" | "altemplate" => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
@@ -75,7 +81,7 @@ pub fn import_with(path: &Path, surrounds: sesx::Surrounds) -> Result<Imported, 
 /// folder that moved, or was copied, uses its own files), then the
 /// absolute path, then a file of that name beside the session. Else the
 /// absolute path (shown as missing media).
-pub(crate) fn resolve(abs: Option<&str>, rel: Option<&str>, base: &Path) -> Option<PathBuf> {
+pub fn resolve(abs: Option<&str>, rel: Option<&str>, base: &Path) -> Option<PathBuf> {
     let a = abs.filter(|s| !s.is_empty()).map(PathBuf::from);
     let r = rel
         .filter(|s| !s.is_empty())

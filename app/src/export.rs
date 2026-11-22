@@ -927,7 +927,7 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
         Then::Files => {
             let n = done.reports.len();
             let bytes: u64 = done.reports.iter().map(|r| r.bytes).sum();
-            st.toast(if n == 1 {
+            let text = if n == 1 {
                 format!(
                     "Exported {} ({})",
                     done.reports[0].path.display(),
@@ -935,11 +935,15 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
                 )
             } else {
                 format!("Exported {n} files ({})", ex::human_bytes(bytes))
-            });
+            };
+            match done.reports.first() {
+                Some(r) => st.toast_file(text, r.path.clone()),
+                None => st.toast(text),
+            }
         }
         Then::Mixdown(path) => {
             let bytes: u64 = done.reports.iter().map(|r| r.bytes).sum();
-            st.toast(format!("Exported {} ({})", path.display(), ex::human_bytes(bytes)));
+            st.toast_file(format!("Exported {} ({})", path.display(), ex::human_bytes(bytes)), path.clone());
             // The mixdown comes up in the Waveform editor to listen to.
             match (st.doc_for_path(&path), done.reload) {
                 (Some(id), Some(buf)) => {
@@ -955,7 +959,8 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
             st.mode = Mode::Waveform;
         }
         Then::Archive(path) => {
-            st.toast(done.note.unwrap_or_else(|| format!("Archived to {}", path.display())));
+            let text = done.note.unwrap_or_else(|| format!("Archived to {}", path.display()));
+            st.toast_file(text, path);
         }
         Then::Bounce { name, at } => {
             if let (Some(buf), Some(rep)) = (done.reload, done.reports.first()) {

@@ -1185,6 +1185,13 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
         out.monitor = listen_from(sp);
     }
 
+    // The video track (Audiform 2's own: `af27_video`).
+    if let Some(vt) = v.get("af27_video").filter(|x| x.is_object()) {
+        if let Some(path) = crate::resolve(vt["path"].as_str(), vt["relative_path"].as_str(), base_dir) {
+            out.video = Some(af2_core::session::VideoTrack { path, start: vt["start"].as_f64().unwrap_or(0.0) });
+        }
+    }
+
     let mut media_ids: HashMap<String, (u64, u32, f64)> = HashMap::new();
     for m in v["media"].as_array().into_iter().flatten() {
         let key = m["id"].as_str().unwrap_or_default().to_string();
@@ -1692,6 +1699,18 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
         }
     }
 
+    match &session.video {
+        Some(vt) => {
+            doc.insert(
+                "af27_video".into(),
+                json!({"path": vt.path.to_string_lossy(), "relative_path": null, "start": vt.start}),
+            );
+        }
+        None => {
+            doc.shift_remove("af27_video");
+        }
+    }
+
     // Media.
     let base_media = base.and_then(|b| b["media"].as_array());
     let linked = session.linked.clone();
@@ -2126,6 +2145,9 @@ pub fn save_relative_to(
 /// session says (a stale absolute path must not overwrite a good relative
 /// one), so an unedited session saves the same.
 fn fill_relative_paths(doc: &mut Value, base: Option<&Value>, dir: &Path) {
+    if let Some(p) = doc["af27_video"]["path"].as_str().map(PathBuf::from) {
+        doc["af27_video"]["relative_path"] = json!(crate::paths::relative(&p, dir));
+    }
     let known: HashMap<&str, &Value> = base
         .and_then(|b| b["media"].as_array())
         .into_iter()

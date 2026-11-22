@@ -36,10 +36,11 @@ pub enum Tab {
     Properties,
     Diagnostics,
     Loudness,
+    Video,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 19] = [
+    pub const ALL: [Tab; 20] = [
         Tab::Properties,
         Tab::Visualizer,
         Tab::Inspector,
@@ -59,6 +60,7 @@ impl Tab {
         Tab::Selection,
         Tab::Diagnostics,
         Tab::Loudness,
+        Tab::Video,
     ];
     /// The title for a crowded tab bar.
     pub fn short_title(self) -> &'static str {
@@ -95,6 +97,7 @@ impl Tab {
             Tab::Visualizer => "Visualizer",
             Tab::Diagnostics => "Diagnostics",
             Tab::Loudness => "Loudness",
+            Tab::Video => "Video",
         }
     }
 }
@@ -177,10 +180,22 @@ fn layout_path(w: crate::workspace::Workspace) -> std::path::PathBuf {
 }
 
 fn load_layout(w: crate::workspace::Workspace) -> DockState<Tab> {
-    std::fs::read_to_string(layout_path(w))
+    let saved: Option<DockState<Tab>> = std::fs::read_to_string(layout_path(w))
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| w.build())
+        .and_then(|s| serde_json::from_str(&s).ok());
+    match saved {
+        Some(mut d) => {
+            // Once: the Video panel joins an arrangement saved before it
+            // existed, behind History (closing it later is kept).
+            let mark = data_dir().join(format!("layout-video-{}", w.key()));
+            if !mark.exists() {
+                crate::workspace::add_behind(&mut d, Tab::History, Tab::Video);
+                let _ = std::fs::write(&mark, b"");
+            }
+            d
+        }
+        None => w.build(),
+    }
 }
 
 impl App {
@@ -383,6 +398,7 @@ impl Viewer<'_> {
             Tab::Visualizer => crate::visualizer::show(ui, self.st),
             Tab::Diagnostics => crate::diagnostics::panel(ui, self.st),
             Tab::Loudness => crate::loudness_meter::panel(ui, self.st),
+            Tab::Video => crate::video::panel(ui, self.st),
         }
     }
 }
@@ -660,13 +676,13 @@ const AUDIO_FILTER: &[&str] = af2_io::EXTENSIONS;
 
 pub fn open_dialog(st: &mut State) {
     let mut all: Vec<&str> = AUDIO_FILTER.to_vec();
-    all.extend(["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3", crate::archive::EXT]);
+    all.extend(["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3", "otio", crate::archive::EXT]);
     if let Some(paths) = crate::file_dialog::FileDialog::new()
         .add_filter("Audio and sessions", &all)
         .add_filter("Audio", AUDIO_FILTER)
         .add_filter(
             "Sessions",
-            &["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3", crate::archive::EXT],
+            &["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3", "otio", crate::archive::EXT],
         )
         .pick_files()
     {
@@ -2461,6 +2477,15 @@ fn status(ui: &mut egui::Ui, st: &State) {
                 c(th.text)
             };
             ui.label(RichText::new(&t.text).color(col));
+            if let Some(p) = &t.reveal {
+                if ui
+                    .small_button("Show File")
+                    .on_hover_text("Show it in the file manager")
+                    .clicked()
+                {
+                    crate::sessions::reveal(p);
+                }
+            }
         } else if let Some(p) = crate::spectral_select::progress(st) {
             ui.spinner();
             ui.label(format!("Spectral edit {:.0}%", p * 100.0));
@@ -2576,6 +2601,17 @@ impl eframe::App for App {
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
                 Ok("multitrack") => self.st.mode = Mode::Multitrack,
                 Ok("overlap-demo") => crate::overlap::demo(&mut self.st),
+                Ok(v) if v.starts_with("video:") => {
+                    // A session with this video dropped on its first track,
+                    // and the Video panel in front, for shots.
+                    let path = std::path::PathBuf::from(&v["video:".len()..]);
+                    self.st.new_session(None);
+                    self.st.mode = Mode::Multitrack;
+                    if let Some(t) = self.st.session.tracks.first().map(|t| t.id) {
+                        self.st.load_file(path, Some((t, 0.0)));
+                    }
+                    self.show_tab(Tab::Video);
+                }
                 Ok("session-clip") => {
                     // The first clip as a session clip, for shots.
                     crate::overlap::demo(&mut self.st);
@@ -3128,6 +3164,7 @@ impl eframe::App for App {
         crate::export::show(ctx, &mut self.st);
         crate::archive::show(ctx, &mut self.st);
         crate::linked::frame(ctx, &mut self.st);
+        crate::video::frame(ctx, &mut self.st);
         crate::tempo::window(ctx, &mut self.st);
         crate::tempo::edit_popup(ctx, &mut self.st);
         crate::tempo::replace_prompt(ctx, &mut self.st);

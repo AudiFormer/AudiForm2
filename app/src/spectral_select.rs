@@ -1104,6 +1104,7 @@ pub fn action_bar(ui: &egui::Ui, st: &mut State, sa: Rect) {
     let y = m.y(0, u1).max(sa.top() + 30.0).min(sa.bottom());
     let mut pick: Option<(Action, &str)> = None;
     let mut clear = false;
+    let mut play_now = false;
     egui::Area::new(egui::Id::new("af2-spec-bar"))
         .order(egui::Order::Foreground)
         .pivot(Align2::RIGHT_BOTTOM)
@@ -1113,6 +1114,13 @@ pub fn action_bar(ui: &egui::Ui, st: &mut State, sa: Rect) {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui
+                        .add(egui::Button::new("▶ Play").small())
+                        .on_hover_text("Play Selected Area: just these sounds, from the selection's start to its end")
+                        .clicked()
+                    {
+                        play_now = true;
+                    }
                     for (label, tip, act, name) in ACTIONS {
                         if ui
                             .add_enabled(!busy, egui::Button::new(label).small())
@@ -1134,6 +1142,9 @@ pub fn action_bar(ui: &egui::Ui, st: &mut State, sa: Rect) {
         });
     if let Some((a, name)) = pick {
         run(st, a, name, false);
+    }
+    if play_now {
+        play_selected_area(st);
     }
     if clear {
         if let Some(d) = st.doc_mut() {
@@ -1174,6 +1185,15 @@ const ACTIONS: [(&str, &str, Action, &str); 4] = [
 pub fn effects_submenu(ui: &mut egui::Ui, st: &mut State) {
     let has = st.doc().is_some_and(|d| !d.spec_sel.is_empty()) && st.spectral_job.is_none();
     let why = "Make a spectral selection first (Box, Lasso or Brush Select)";
+    if ui
+        .add_enabled(has, egui::Button::new("Play Selected Area"))
+        .on_disabled_hover_text(why)
+        .clicked()
+    {
+        play_selected_area(st);
+        ui.close_menu();
+    }
+    ui.separator();
     for (_, _, act, name) in ACTIONS {
         if ui
             .add_enabled(has, egui::Button::new(name))
@@ -1428,6 +1448,21 @@ pub fn isolate(buf: &AudioBuffer, regions: &[Region], fft: usize, on: &[usize]) 
 }
 
 /// The spectral selection's time span in the current file (the play range).
+/// Plays the spectral selection's stretch of time, its sounds alone (as
+/// playback with a spectral selection always is), from its start to its
+/// end. The time selection becomes that stretch.
+pub fn play_selected_area(st: &mut State) {
+    let Some((a, b)) = time_span(st) else { return };
+    if st.is_playing() {
+        st.stop();
+    }
+    if let Some(d) = st.doc_mut() {
+        d.sel = Some((a, b));
+        d.cursor = a;
+    }
+    st.play();
+}
+
 pub fn time_span(st: &State) -> Option<(f64, f64)> {
     let d = st.doc()?;
     let (t0, t1, _, _) = d.spec_sel.bounds()?;

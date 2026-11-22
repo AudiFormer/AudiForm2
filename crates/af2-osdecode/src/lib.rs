@@ -19,6 +19,8 @@
 
 use std::path::Path;
 
+pub mod video;
+
 /// Decoded audio: the rate, and one Vec per channel.
 pub struct Decoded {
     pub rate: u32,
@@ -160,6 +162,25 @@ mod win {
             }
         }
         let frames = inter.len() / ch;
+        // Some splitter and decoder pairs (Dolby Digital in Matroska) hand
+        // back several times the file's length, mostly silence: checked
+        // against the length the file states, and refused when far off,
+        // so the next decoder can try.
+        let stated = unsafe {
+            reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+        }
+        .ok()
+        .and_then(|v| u64::try_from(&v).ok())
+        .map(|hns| hns as f64 / 1e7)
+        .filter(|d| *d > 0.5);
+        if let Some(d) = stated {
+            let got = frames as f64 / rate as f64;
+            if got > d * 1.25 + 0.5 {
+                return Err(format!(
+                    "Windows decoded it wrongly ({got:.1} s of audio from a {d:.1} s file)"
+                ));
+            }
+        }
         let mut channels: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity(frames)).collect();
         for f in inter.chunks_exact(ch) {
             for (c, s) in channels.iter_mut().zip(f) {

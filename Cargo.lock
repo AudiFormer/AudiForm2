@@ -653,6 +653,7 @@ dependencies = [
  "af2-fx",
  "af2-interop",
  "af2-io",
+ "af2-osdecode",
  "af2-separation",
  "af2-space",
  "af2-vst3",
