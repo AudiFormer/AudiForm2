@@ -69,7 +69,7 @@ jobs:
         run: gh release upload "$TAG" AudiForm2-*-linux-x64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
