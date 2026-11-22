@@ -26,6 +26,8 @@ eframe.workspace = true
 egui.workspace = true
 rfd.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Session archives (.audarc) are zips (MIT; already in the tree).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 raw-window-handle = "0.6"
 egui_dock = { version = "0.14", features = ["serde"] }

@@ -115,6 +115,8 @@ struct Row {
     rate: u32,
     ch: usize,
     used: bool,
+    /// Another session's mix, for a session clip.
+    session: bool,
 }
 
 const ROW_H: f32 = 20.0;
@@ -171,10 +173,15 @@ pub fn files(ui: &mut egui::Ui, st: &mut State) {
             rate: d.buf.rate,
             ch: d.buf.num_channels(),
             used: false,
+            session: false,
         })
         .collect();
     for r in &mut rows {
         r.used = st.doc_used(r.id);
+        r.session = st
+            .media_docs
+            .iter()
+            .any(|(m, d)| *d == r.id && st.session.linked.contains_key(m));
     }
     if let Some((col, rev)) = st.files_ui.sort {
         rows.sort_by(|a, b| {
@@ -270,7 +277,7 @@ pub fn files(ui: &mut egui::Ui, st: &mut State) {
                             row.ch.to_string(),
                         ];
                         for (i, (x0, x1)) in cols.iter().enumerate() {
-                            let clip = Rect::from_min_max(
+                            let mut clip = Rect::from_min_max(
                                 pos2(rect.left() + x0 + 4.0, rect.top()),
                                 pos2(rect.left() + x1 - 2.0, rect.bottom()),
                             );
@@ -278,9 +285,23 @@ pub fn files(ui: &mut egui::Ui, st: &mut State) {
                                 c(th.accent)
                             } else if i == 0 {
                                 c(th.text)
+                            } else if i == 1 && row.session {
+                                c(th.accent)
                             } else {
                                 c(th.text_dim)
                             };
+                            if i == 0 && row.session {
+                                // The stack of tracks a session clip shows.
+                                let y = clip.center().y;
+                                for (k, w) in [11.0_f32, 8.5, 6.0].iter().enumerate() {
+                                    p.rect_filled(
+                                        Rect::from_min_size(pos2(clip.left(), y - 5.0 + k as f32 * 3.8), vec2(*w, 2.4)),
+                                        Rounding::same(1.0),
+                                        c(th.accent),
+                                    );
+                                }
+                                clip.min.x += 15.0;
+                            }
                             ui.painter_at(clip).text(
                                 pos2(clip.left(), clip.center().y),
                                 Align2::LEFT_CENTER,
@@ -440,7 +461,9 @@ enum Action {
 }
 
 fn status(r: &Row) -> &'static str {
-    if r.dirty {
+    if r.session {
+        "Session"
+    } else if r.dirty {
         "Edited"
     } else if r.used {
         "In use"

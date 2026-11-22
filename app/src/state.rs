@@ -309,6 +309,10 @@ pub struct State {
     pub clipboard: Option<AudioBuffer>,
     /// The export dialog and any export running.
     pub export: crate::export::ExportUi,
+    /// File > Archive Session.
+    pub archive: crate::archive::ArchiveUi,
+    /// Session clips: renders running and what was said.
+    pub linked: crate::linked::LinkedUi,
     /// The last effect applied and its settings, for Repeat Last Effect.
     pub last_effect: Option<(Effect, Vec<f32>)>,
     pub effect: Effect,
@@ -641,6 +645,8 @@ impl State {
             meter_at: None,
             clipboard: None,
             export: Default::default(),
+            archive: Default::default(),
+            linked: Default::default(),
             last_effect: None,
             effect: Effect::Amplify,
             effect_values: HashMap::new(),
@@ -792,7 +798,12 @@ impl State {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if crate::sessions::is_session_ext(&ext) {
+            if ext == crate::archive::EXT {
+                match crate::archive::unpack(&p) {
+                    Ok(session) => self.open_session(&session),
+                    Err(e) => self.error(e),
+                }
+            } else if crate::sessions::is_session_ext(&ext) {
                 self.open_session(&p);
             } else {
                 self.load_file(p, None);

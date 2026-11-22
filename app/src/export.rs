@@ -166,10 +166,14 @@ enum Then {
     /// A mixdown: when written, it opens in the Waveform editor.
     Mixdown(PathBuf),
     Bounce { name: String, at: f64 },
+    /// A session archive; `note` says what went in.
+    Archive(PathBuf),
 }
 
 struct Done {
     reports: Vec<Report>,
+    /// What to tell the user when it's done, in place of the reports'.
+    note: Option<String>,
     /// The file as written, when the editor should take it (Save As with
     /// a conversion; a bounce).
     reload: Option<AudioBuffer>,
@@ -574,6 +578,41 @@ fn spawn(
     });
 }
 
+/// Runs an archive build as the export job (one at a time, with the same
+/// progress window and Cancel).
+pub fn spawn_archive(
+    st: &mut State,
+    total: u64,
+    out: PathBuf,
+    work: impl FnOnce(&AtomicU64, &AtomicBool) -> Result<crate::archive::Summary, String> + Send + 'static,
+) {
+    let name = prefs_name(&out);
+    spawn(
+        st,
+        format!("Archiving {name}"),
+        total,
+        Then::Archive(out.clone()),
+        false,
+        move |d, c| {
+            let s = work(d, c)?;
+            let mut note = format!("Archived to {} ({}", out.display(), ex::human_bytes(s.bytes));
+            if s.source_bytes > 0 {
+                note.push_str(&format!(", from {} of audio", ex::human_bytes(s.source_bytes)));
+            }
+            note.push(')');
+            if s.committed > 0 {
+                note.push_str(&format!("; {} tracks rendered", s.committed));
+            }
+            if s.bounced > 0 {
+                note.push_str(&format!("; {} buses bounced", s.bounced));
+            }
+            let _ = s.files;
+            Ok(Done { reports: Vec::new(), reload: None, note: Some(note) })
+        },
+        Vec::new(),
+    );
+}
+
 fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, mut opts: Options) {
     if st.export.job.is_some() {
         st.error("An export is still running.");
@@ -625,6 +664,7 @@ fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, mut opts: Options) {
                 None
             };
             Ok(Done {
+                note: None,
                 reports: vec![rep],
                 reload,
             })
@@ -697,6 +737,7 @@ pub fn bounce_track(st: &mut State) {
             )?;
             let buf = af2_io::decode_file(&p2)?;
             Ok(Done {
+                note: None,
                 reports: vec![rep],
                 reload: Some(buf),
             })
@@ -780,6 +821,7 @@ fn start(st: &mut State, paths: Vec<PathBuf>) {
                         None
                     };
                     Ok(Done {
+                        note: None,
                         reports: vec![r],
                         reload,
                     })
@@ -814,6 +856,7 @@ fn start(st: &mut State, paths: Vec<PathBuf>) {
                     Ok(Done {
                         reports,
                         reload: None,
+                        note: None,
                     })
                 },
                 paths,
@@ -910,6 +953,9 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
                 (None, _) => st.load_file(path, None),
             }
             st.mode = Mode::Waveform;
+        }
+        Then::Archive(path) => {
+            st.toast(done.note.unwrap_or_else(|| format!("Archived to {}", path.display())));
         }
         Then::Bounce { name, at } => {
             if let (Some(buf), Some(rep)) = (done.reload, done.reports.first()) {
@@ -1370,7 +1416,7 @@ mod tests {
                 let buf = AudioBuffer::new(48_000, 2, 48_000 * secs);
                 let r = ex::export_buffer(&p2, &buf, &Options::default(), &Meta::default())?;
                 let reload = read_back.then(|| af2_io::open_file(&p2).unwrap().buf);
-                Ok(Done { reports: vec![r], reload })
+                Ok(Done { reports: vec![r], reload, note: None })
             },
             vec![],
         );

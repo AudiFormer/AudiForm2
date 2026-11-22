@@ -5,6 +5,8 @@
 
 mod af1_import;
 mod app_icon;
+mod archive;
+mod linked;
 mod caustics;
 mod chapters;
 mod classic_themes;

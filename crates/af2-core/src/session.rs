@@ -804,6 +804,21 @@ pub struct Session {
     /// float). Recordings are written as FLAC at 24 bits for 32.
     #[serde(default = "default_bit_depth")]
     pub bit_depth: u16,
+    /// Media that stand in for another session: its mix, rendered to the
+    /// media's file, kept current as that session is saved.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub linked: std::collections::BTreeMap<MediaId, LinkedSession>,
+}
+
+/// The session a media item's file was rendered from (Audiform's
+/// `linked` on a media reference).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkedSession {
+    /// The session file.
+    pub path: std::path::PathBuf,
+    /// Its size and modified time (`<bytes>-<unix ms>`) when the file was
+    /// rendered, to tell when it has been saved since.
+    pub stamp: String,
 }
 
 const PALETTE: [[u8; 3]; 8] = [
@@ -845,6 +860,7 @@ impl Session {
             tempo: Default::default(),
             playhead: 0.0,
             bit_depth: 32,
+            linked: Default::default(),
         };
         for _ in 0..tracks {
             s.add_track();

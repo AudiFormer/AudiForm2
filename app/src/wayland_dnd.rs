@@ -93,6 +93,7 @@ pub fn pointer() -> Option<(f32, f32)> {
 
 /// The local files in a `text/uri-list` (comments and other schemes left
 /// out; `file://host/path` keeps the path).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
     text.lines()
         .map(str::trim)
@@ -105,6 +106,7 @@ pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn percent_decode(s: &str) -> std::ffi::OsString {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());

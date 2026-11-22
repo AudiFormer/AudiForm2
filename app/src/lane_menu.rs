@@ -134,6 +134,25 @@ fn clip_items(ui: &mut egui::Ui, st: &mut State, clip: ClipId) {
         return;
     };
     let c = st.session.tracks[ti].clips[ci].clone();
+    if st.session.linked.contains_key(&c.media) {
+        if ui
+            .button("Open Session")
+            .on_hover_text("The session this clip stands in for; saving it updates the clip")
+            .clicked()
+        {
+            crate::linked::open(st, c.media);
+            ui.close_menu();
+        }
+        if ui
+            .button("Render Session Again")
+            .on_hover_text("Renders that session's mix now (as it is here when it's open, unsaved edits included)")
+            .clicked()
+        {
+            crate::linked::render_again(st, c.media);
+            ui.close_menu();
+        }
+        ui.separator();
+    }
     let cursor = st.session_cursor;
     let under = cursor > c.start && cursor < c.end();
     if ui

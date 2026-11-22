@@ -676,6 +676,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "winreg",
+ "zip",
 ]
 
 [[package]]

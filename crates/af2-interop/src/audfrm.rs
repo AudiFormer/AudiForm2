@@ -1203,6 +1203,15 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
             channels: m["channels"].as_u64().unwrap_or(0) as u16,
             ext_id: Some(key.clone()),
         });
+        // A clip standing in for another session.
+        if let Some(l) = m.get("linked").filter(|l| l.is_object()) {
+            if let (Some(p), Some(stamp)) = (l["path"].as_str(), l["stamp"].as_str()) {
+                out.linked.insert(
+                    id,
+                    af2_core::session::LinkedSession { path: PathBuf::from(p), stamp: stamp.into() },
+                );
+            }
+        }
         media_ids.insert(key, (id, mrate, m["length"].as_f64().unwrap_or(0.0)));
     }
 
@@ -1685,6 +1694,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
 
     // Media.
     let base_media = base.and_then(|b| b["media"].as_array());
+    let linked = session.linked.clone();
     let media: Vec<Value> = session
         .media
         .iter_mut()
@@ -1708,6 +1718,19 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
             o.entry("relative_path").or_insert(Value::Null);
             o.insert("sample_rate".into(), json!(m.rate));
             o.insert("channels".into(), json!(m.channels));
+            match linked.get(&m.id) {
+                Some(l) => {
+                    o.insert(
+                        "linked".into(),
+                        json!({"path": l.path.to_string_lossy(), "stamp": l.stamp}),
+                    );
+                }
+                None => {
+                    if o.get("linked").is_some_and(|l| !l.is_null()) {
+                        o.insert("linked".into(), Value::Null);
+                    }
+                }
+            }
             o.insert(
                 "length".into(),
                 json!((m.duration * m.rate as f64).round() as u64),

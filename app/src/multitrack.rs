@@ -849,7 +849,11 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             .then(|| hit(st, pp))
             .flatten()
             {
-                open_clip_source(st, id);
+                let media = st.session.find_clip(id).map(|(ti, ci)| st.session.tracks[ti].clips[ci].media);
+                match media.filter(|m| st.session.linked.contains_key(m)) {
+                    Some(m) => crate::linked::open(st, m),
+                    None => open_clip_source(st, id),
+                }
             } else if let Some(ti) = track_at(st, lanes.top(), scroll, pp.y) {
                 if st.session.tracks[ti].kind == af2_core::TrackKind::Midi && lanes.contains(pp) {
                     let b = tempo.bar_floor(tempo.beats(x_to_time(&v, lanes, pp.x)).max(0.0));
@@ -1580,7 +1584,23 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 }
             }
             lane_p.rect_filled(cr, rnd, ca(ccol, (alpha as f32 * 0.16) as u8));
+            let linked = st.session.linked.contains_key(&clip.media);
             let title = Rect::from_min_size(cr.min, vec2(cr.width(), 15.0));
+            // A session clip: hatched behind its waveform.
+            if linked {
+                let body = cr.intersect(lane_p.clip_rect());
+                let hp = lane_p.with_clip_rect(body);
+                // Dark lines read on every clip colour.
+                let col = Color32::from_black_alpha((alpha as f32 * 0.30) as u8);
+                let rise = cr.height();
+                let mut x = (body.left() - rise).max(cr.left() - rise);
+                // Lines on a fixed grid, so they don't crawl while scrolling.
+                x = x - (x - lanes.left()).rem_euclid(9.0);
+                while x < body.right() {
+                    hp.line_segment([pos2(x, cr.bottom()), pos2(x + rise, cr.top())], egui::Stroke::new(1.0_f32, col));
+                    x += 9.0;
+                }
+            }
             lane_p.rect_filled(
                 title,
                 Rounding {
@@ -1616,13 +1636,72 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     badges.push_str(&format!("{:+.1}st ", s.applied_pitch()));
                 }
             }
+            let mut text_x = title.left() + if stretch_on { 13.0 } else { 5.0 };
+            if linked {
+                let tp = lane_p.with_clip_rect(title.intersect(lane_p.clip_rect()));
+                // Striped title bar.
+                let dark = Color32::from_black_alpha((alpha as f32 * 0.28) as u8);
+                let mut x = title.left() - title.height();
+                x = x - (x - lanes.left()).rem_euclid(10.0);
+                while x < title.right() {
+                    tp.add(egui::Shape::convex_polygon(
+                        vec![
+                            pos2(x, title.bottom()),
+                            pos2(x + 4.0, title.bottom()),
+                            pos2(x + 4.0 + title.height(), title.top()),
+                            pos2(x + title.height(), title.top()),
+                        ],
+                        dark,
+                        egui::Stroke::NONE,
+                    ));
+                    x += 10.0;
+                }
+                // A stack of tracks, then a SESSION tag in the accent.
+                let y = title.center().y;
+                for (k, w) in [10.0_f32, 8.0, 6.0].iter().enumerate() {
+                    let yy = y - 4.0 + k as f32 * 3.5;
+                    tp.rect_filled(
+                        Rect::from_min_size(pos2(text_x, yy - 1.0), vec2(*w, 2.2)),
+                        Rounding::same(1.0),
+                        Color32::WHITE.gamma_multiply(alpha as f32 / 255.0),
+                    );
+                }
+                text_x += 14.0;
+                // Dark with white letters: clear on any clip colour.
+                let white = Color32::WHITE.gamma_multiply(alpha as f32 / 255.0);
+                let tag = tp.layout_no_wrap("SESSION".into(), FontId::proportional(9.0), white);
+                let pill = Rect::from_min_size(
+                    pos2(text_x, y - tag.size().y / 2.0 - 1.0),
+                    tag.size() + vec2(8.0, 2.0),
+                );
+                tp.rect_filled(pill, Rounding::same(3.0), Color32::from_black_alpha((alpha as f32 * 0.78) as u8));
+                tp.galley(pill.min + vec2(4.0, 1.0), tag, white);
+                text_x = pill.right() + 5.0;
+            }
             lane_p.text(
-                title.left_center() + vec2(if stretch_on { 13.0 } else { 5.0 }, 0.0),
+                pos2(text_x, title.center().y),
                 Align2::LEFT_CENTER,
                 format!("{badges}{}", clip.name),
                 FontId::proportional(10.0),
                 c(th.background),
             );
+            if linked {
+                // A black and white dashed frame (like a marquee), clear on
+                // any clip colour and theme: a whole session stands here.
+                let r = cr.shrink(1.0);
+                let dark = egui::Stroke::new(2.0_f32, Color32::from_black_alpha((alpha as f32 * 0.85) as u8));
+                let light = egui::Stroke::new(2.0_f32, Color32::WHITE.gamma_multiply(alpha as f32 / 255.0 * 0.9));
+                let sides = [
+                    (r.left_top(), r.right_top()),
+                    (r.right_top(), r.right_bottom()),
+                    (r.right_bottom(), r.left_bottom()),
+                    (r.left_bottom(), r.left_top()),
+                ];
+                for (a, b) in sides {
+                    lane_p.line_segment([a, b], dark);
+                    lane_p.extend(egui::Shape::dashed_line(&[a, b], light, 5.0, 5.0));
+                }
+            }
             // Waveform of the visible part.
             if let Some(buf) = st.media_buffer(clip.media) {
                 let doc_peaks = st
@@ -2611,8 +2690,12 @@ fn file_drop(
     if on_lanes {
         if let Some(d) = st.sessions.os_drop.take() {
             let (track, at) = land(st, d.pos.unwrap_or_default());
+            let paths = crate::linked::take_dropped(st, d.paths, track, at);
+            if paths.is_empty() {
+                return;
+            }
             st.import_paths(
-                d.paths,
+                paths,
                 Layout::Drop {
                     track,
                     at,

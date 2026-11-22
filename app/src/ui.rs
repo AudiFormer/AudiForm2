@@ -660,13 +660,13 @@ const AUDIO_FILTER: &[&str] = af2_io::EXTENSIONS;
 
 pub fn open_dialog(st: &mut State) {
     let mut all: Vec<&str> = AUDIO_FILTER.to_vec();
-    all.extend(["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"]);
+    all.extend(["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3", crate::archive::EXT]);
     if let Some(paths) = crate::file_dialog::FileDialog::new()
         .add_filter("Audio and sessions", &all)
         .add_filter("Audio", AUDIO_FILTER)
         .add_filter(
             "Sessions",
-            &["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3"],
+            &["af2", "af27", "sesx", "audfrm", "altaudio", "altemplate", "aup3", crate::archive::EXT],
         )
         .pick_files()
     {
@@ -892,6 +892,14 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.close_menu();
                 st.collect_media();
             }
+            if ui
+                .button("Archive Session...")
+                .on_hover_text("The session and all the audio it uses in one small file that opens anywhere")
+                .clicked()
+            {
+                ui.close_menu();
+                st.archive.open = true;
+            }
             if ui.button("Session Properties...").clicked() {
                 open_props(st);
                 ui.close_menu();
@@ -974,6 +982,14 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.menu_button("Multitrack", |ui| {
             crate::lane_menu::multitrack_menu_top(ui, st);
+            if ui
+                .button("Insert Session as Clip...")
+                .on_hover_text("Another session's whole mix as one clip, at the playhead on the picked track. It follows that session's saves.")
+                .clicked()
+            {
+                ui.close_menu();
+                crate::linked::insert_dialog(st);
+            }
             playback_menu_items(ui, st, km, &mut cmd);
             ui.menu_button("Spoken Word", |ui| {
                 if ui
@@ -2550,7 +2566,7 @@ impl eframe::App for App {
         if !self.shown_env_tab {
             self.shown_env_tab = true;
             // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
-            // generate-tones | overlap-demo | spatialize | fx:<effect id>[?key=value&...] |
+            // generate-tones | overlap-demo | archive | spatialize | fx:<effect id>[?key=value&...] |
             // master-fx:<effect id>, for shots. AF2_FX_SET=key=value,... sets
             // the opened effect's controls (by key; `session_tempo` sets the
             // session's tempo); AF2_OPEN_DATA sets the slot's data (such as
@@ -2560,6 +2576,21 @@ impl eframe::App for App {
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
                 Ok("multitrack") => self.st.mode = Mode::Multitrack,
                 Ok("overlap-demo") => crate::overlap::demo(&mut self.st),
+                Ok("session-clip") => {
+                    // The first clip as a session clip, for shots.
+                    crate::overlap::demo(&mut self.st);
+                    if let Some(c) = self.st.session.tracks.iter().flat_map(|t| t.clips.first()).next() {
+                        let m = c.media;
+                        self.st.session.linked.insert(
+                            m,
+                            af2_core::session::LinkedSession { path: "Overdub base.audfrm".into(), stamp: String::new() },
+                        );
+                    }
+                }
+                Ok("archive") => {
+                    crate::overlap::demo(&mut self.st);
+                    self.st.archive.open = true;
+                }
                 Ok(v) if v.starts_with("instrument-menu") => {
                     crate::instruments::shot(&mut self.st, v)
                 }
@@ -3095,6 +3126,8 @@ impl eframe::App for App {
         crate::generate_ui::windows(ctx, &mut self.st);
         crate::export::poll(&mut self.st, ctx);
         crate::export::show(ctx, &mut self.st);
+        crate::archive::show(ctx, &mut self.st);
+        crate::linked::frame(ctx, &mut self.st);
         crate::tempo::window(ctx, &mut self.st);
         crate::tempo::edit_popup(ctx, &mut self.st);
         crate::tempo::replace_prompt(ctx, &mut self.st);
