@@ -352,7 +352,7 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
         tempo,
         key: uid,
     };
-    presets_row(ui, &mut fx, th);
+    presets_row(ui, &mut fx, th, env.tempo);
     ui.add_space(4.0);
     let panel = PANELS
         .iter()
@@ -474,18 +474,10 @@ struct Preset {
     values: std::collections::BTreeMap<String, f32>,
 }
 
-/// The presets an effect comes with (listed under Default).
-fn factory_presets(id: &str) -> &'static [af2_fx::effects::amp::FactoryPreset] {
-    if id == af2_fx::effects::amp::AMP {
-        af2_fx::effects::amp::PRESETS
-    } else {
-        &[]
-    }
-}
-
 /// The effect's presets: Default, the built-in ones, the saved ones, and
-/// Save / Delete.
-fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
+/// Save / Delete. `tempo` is the session's, which a preset that follows
+/// the tempo takes (rather than its default 120).
+fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
     let name_id = fx.uid.with("preset-name");
     let mut name: String = ui.ctx().data(|d| d.get_temp(name_id)).unwrap_or_default();
     let names = preset_names(&fx.id);
@@ -505,8 +497,10 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
                 }
                 // The presets that come with the effect: the defaults with
                 // their own settings on top.
-                for (n, set) in factory_presets(&fx.id) {
-                    if ui.selectable_label(false, *n).clicked() {
+                let factory = af2_fx::presets::factory(&fx.id);
+                for (n, set) in factory {
+                    if ui.selectable_label(*n == name, *n).clicked() {
+                        let tempo = tempo.unwrap_or_else(|| fx.get("tempo"));
                         for k in 0..fx.ctls.len() {
                             let key = fx.ctls[k].key.clone();
                             let d = fx.ctls[k].default;
@@ -515,8 +509,14 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
                         for (k, v) in *set {
                             fx.set(k, *v);
                         }
-                        name.clear();
+                        if fx.on("sync") && fx.k("tempo").is_some() {
+                            fx.set("tempo", tempo);
+                        }
+                        name = (*n).to_string();
                     }
+                }
+                if !factory.is_empty() && !names.is_empty() {
+                    ui.separator();
                 }
                 for n in &names {
                     if ui.selectable_label(*n == name, n).clicked() {

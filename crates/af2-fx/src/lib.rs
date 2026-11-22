@@ -22,6 +22,9 @@ pub mod effects;
 pub mod framework;
 pub mod meters;
 pub mod nam;
+// Tables laid out by hand, a row per band or setting.
+#[rustfmt::skip]
+pub mod presets;
 
 pub use framework::{choice, db_to_gain, num, toggle, EffectInfo, ParamInfo, Params, Processor};
 pub use meters::SlotMeter;
