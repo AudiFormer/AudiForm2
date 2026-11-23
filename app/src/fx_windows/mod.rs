@@ -468,126 +468,229 @@ struct Preset {
     values: std::collections::BTreeMap<String, f32>,
 }
 
-/// The effect's presets: Default, the built-in ones, the saved ones, and
-/// Save / Delete. `tempo` is the session's, which a preset that follows
-/// the tempo takes (rather than its default 120).
+/// One entry of an effect's presets list.
+enum PresetItem {
+    Default,
+    /// A built-in preset: its full name ("Vocal: Clarity") and settings.
+    Factory(&'static str, &'static [(&'static str, f64)]),
+    /// One saved by the user, by name.
+    Saved(String),
+}
+
+impl PresetItem {
+    fn name(&self) -> String {
+        match self {
+            PresetItem::Default => "Default".into(),
+            PresetItem::Factory(n, _) => (*n).to_string(),
+            PresetItem::Saved(n) => n.clone(),
+        }
+    }
+}
+
+/// Sets `fx` to `item`. A tempo-following preset takes `tempo`.
+fn load_preset(fx: &mut Fx, item: &PresetItem, tempo: Option<f64>) -> bool {
+    let tempo = tempo.unwrap_or_else(|| fx.get("tempo"));
+    let defaults = |fx: &mut Fx| {
+        for k in 0..fx.ctls.len() {
+            let key = fx.ctls[k].key.clone();
+            let d = fx.ctls[k].default;
+            fx.set(&key, d);
+        }
+    };
+    match item {
+        PresetItem::Default => defaults(fx),
+        PresetItem::Factory(_, set) => {
+            defaults(fx);
+            for (k, v) in *set {
+                fx.set(k, *v);
+            }
+        }
+        PresetItem::Saved(n) => {
+            let path = presets_dir(&fx.id).join(format!("{n}.json"));
+            let Some(p) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Preset>(&t).ok())
+            else {
+                return false;
+            };
+            for (k, v) in p.values {
+                fx.set(&k, f64::from(v));
+            }
+        }
+    }
+    if fx.on("sync") && fx.k("tempo").is_some() {
+        fx.set("tempo", tempo);
+    }
+    true
+}
+
+/// Whether every control sits at its default.
+fn at_defaults(fx: &Fx) -> bool {
+    fx.ctls
+        .iter()
+        .zip(&fx.vals)
+        .all(|(c, v)| (f64::from(*v) - c.default).abs() <= 1e-4 * (1.0 + c.default.abs()))
+}
+
+/// The effect's presets: a list (Default, the built-in ones under their
+/// headings, the saved ones), the one before and after, and Save. The list
+/// names what the controls hold: the preset loaded, "(edited)" once a
+/// control moves off it, Default at the defaults, Custom otherwise.
+/// `tempo` is the session's, which a preset that follows the tempo takes
+/// (rather than its default 120).
 fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
-    let name_id = fx.uid.with("preset-name");
-    let mut name: String = ui.ctx().data(|d| d.get_temp(name_id)).unwrap_or_default();
+    // (the preset loaded, the values it set).
+    let loaded_id = fx.uid.with("preset-loaded");
+    let mut loaded: Option<(String, Vec<f32>)> = ui.ctx().data(|d| d.get_temp(loaded_id));
+    let save_id = fx.uid.with("preset-save-name");
     let names = preset_names(&fx.id);
+    let mut items = vec![PresetItem::Default];
+    items.extend(af2_fx::presets::factory(&fx.id).iter().map(|(n, set)| PresetItem::Factory(n, set)));
+    items.extend(names.iter().cloned().map(PresetItem::Saved));
+    let shown = match &loaded {
+        Some((n, vals)) if *vals == fx.vals => n.clone(),
+        Some((n, _)) => format!("{n} (edited)"),
+        None if at_defaults(fx) => "Default".into(),
+        None => "Custom".into(),
+    };
+    let current = loaded.as_ref().filter(|(_, v)| *v == fx.vals).map(|(n, _)| n.clone());
+    let at = current.as_ref().and_then(|n| items.iter().position(|i| i.name() == *n));
+    let mut pick: Option<usize> = None;
+    let mut delete: Option<String> = None;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Presets").color(c(th.text_dim)));
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(RichText::new("Preset").color(c(th.text_dim)));
         egui::ComboBox::from_id_salt(fx.uid.with("presets"))
-            .selected_text(if name.is_empty() { "(current)" } else { &name })
-            .width(150.0)
+            .selected_text(RichText::new(&shown).color(if current.is_some() || shown == "Default" { c(th.text) } else { c(th.text_dim) }))
+            .width(210.0)
             .height(440.0)
             .show_ui(ui, |ui| {
                 // Long names stay on one line (the list widens to fit).
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if ui.selectable_label(false, "Default").clicked() {
-                    for k in 0..fx.ctls.len() {
-                        let key = fx.ctls[k].key.clone();
-                        let d = fx.ctls[k].default;
-                        fx.set(&key, d);
-                    }
-                    name.clear();
-                }
-                // The presets that come with the effect: the defaults with
-                // their own settings on top.
-                let factory = af2_fx::presets::factory(&fx.id);
-                // "Vocal: Clarity" is listed as Clarity under a Vocal
-                // heading; the presets come in their groups' order.
                 let mut group = "";
-                for (n, set) in factory {
-                    let (g, short) = n.split_once(": ").unwrap_or(("", n));
-                    if g != group {
-                        group = g;
-                        if !g.is_empty() {
-                            ui.add_space(2.0);
-                            ui.label(RichText::new(g).small().strong().color(c(th.text_dim)));
-                        }
-                    }
-                    let label = if g.is_empty() {
-                        (*n).to_string()
-                    } else {
-                        format!("   {short}")
-                    };
-                    if ui.selectable_label(*n == name, label).clicked() {
-                        let tempo = tempo.unwrap_or_else(|| fx.get("tempo"));
-                        for k in 0..fx.ctls.len() {
-                            let key = fx.ctls[k].key.clone();
-                            let d = fx.ctls[k].default;
-                            fx.set(&key, d);
-                        }
-                        for (k, v) in *set {
-                            fx.set(k, *v);
-                        }
-                        if fx.on("sync") && fx.k("tempo").is_some() {
-                            fx.set("tempo", tempo);
-                        }
-                        name = (*n).to_string();
-                    }
-                }
-                if !factory.is_empty() && !names.is_empty() {
-                    ui.separator();
-                }
-                for n in &names {
-                    if ui.selectable_label(*n == name, n).clicked() {
-                        let path = presets_dir(&fx.id).join(format!("{n}.json"));
-                        if let Some(p) = std::fs::read_to_string(path)
-                            .ok()
-                            .and_then(|t| serde_json::from_str::<Preset>(&t).ok())
-                        {
-                            for (k, v) in p.values {
-                                fx.set(&k, f64::from(v));
+                let mut saved_head = false;
+                for (k, it) in items.iter().enumerate() {
+                    let on = Some(k) == at;
+                    match it {
+                        PresetItem::Default => {
+                            if ui.selectable_label(on || (current.is_none() && shown == "Default"), "Default").clicked() {
+                                pick = Some(k);
                             }
-                            name = n.clone();
+                        }
+                        PresetItem::Factory(n, _) => {
+                            // "Vocal: Clarity" is listed as Clarity under a
+                            // Vocal heading.
+                            let (g, short) = n.split_once(": ").unwrap_or(("", n));
+                            if g != group {
+                                group = g;
+                                if !g.is_empty() {
+                                    ui.add_space(3.0);
+                                    ui.label(RichText::new(g.to_uppercase()).small().strong().color(c(th.text_dim)));
+                                }
+                            }
+                            let label = if g.is_empty() { (*n).to_string() } else { format!("  {short}") };
+                            if ui.selectable_label(on, label).clicked() {
+                                pick = Some(k);
+                            }
+                        }
+                        PresetItem::Saved(n) => {
+                            if !saved_head {
+                                saved_head = true;
+                                ui.add_space(3.0);
+                                ui.label(RichText::new("YOURS").small().strong().color(c(th.text_dim)));
+                            }
+                            let r = ui
+                                .selectable_label(on, format!("  {n}"))
+                                .on_hover_text("Right-click to delete");
+                            if r.clicked() {
+                                pick = Some(k);
+                            }
+                            r.context_menu(|ui| {
+                                if ui.button(format!("Delete \u{201c}{n}\u{201d}")).clicked() {
+                                    delete = Some(n.clone());
+                                    ui.close_menu();
+                                }
+                            });
                         }
                     }
                 }
             });
-        ui.add(
-            egui::TextEdit::singleline(&mut name)
-                .hint_text("Name")
-                .desired_width(90.0),
-        );
-        let clean: String = name
-            .chars()
-            .map(|ch| if r#"\/:*?"<>|"#.contains(ch) { '_' } else { ch })
-            .collect::<String>()
-            .trim()
-            .to_string();
-        if widgets::button(ui, "Save", false)
-            .on_hover_text("Save these settings as a preset of this effect")
-            .clicked()
-            && !clean.is_empty()
-        {
-            let p = Preset {
-                effect: fx.id.clone(),
-                values: fx
-                    .ctls
-                    .iter()
-                    .zip(&fx.vals)
-                    .map(|(c, v)| (c.key.clone(), *v))
-                    .collect(),
-            };
-            let dir = presets_dir(&fx.id);
-            let _ = std::fs::create_dir_all(&dir);
-            if let Ok(t) = serde_json::to_string_pretty(&p) {
-                let _ = std::fs::write(dir.join(format!("{clean}.json")), t);
-            }
-            crate::dir_cache::forget(&dir);
+        // The preset before and after this one.
+        let n = items.len();
+        let from = at.unwrap_or(0);
+        if widgets::button(ui, "\u{25c0}", false).on_hover_text("Previous preset").clicked() && n > 0 {
+            pick = Some(if at.is_some() { (from + n - 1) % n } else { n - 1 });
         }
-        if names.contains(&clean)
-            && widgets::button(ui, "Delete", false)
-                .on_hover_text("Delete this saved preset")
-                .clicked()
-        {
-            let _ = std::fs::remove_file(presets_dir(&fx.id).join(format!("{clean}.json")));
-            crate::dir_cache::forget(&presets_dir(&fx.id));
+        if widgets::button(ui, "\u{25b6}", false).on_hover_text("Next preset").clicked() && n > 0 {
+            pick = Some(if at.is_some() { (from + 1) % n } else { 0 });
+        }
+        // Save: a name, in a small box under the button.
+        let save = widgets::button(ui, "Save\u{2026}", false).on_hover_text("Save these settings as a preset of this effect");
+        let pop = ui.make_persistent_id(fx.uid.with("preset-save-pop"));
+        if save.clicked() {
+            let start = current.clone().filter(|n| names.contains(n)).unwrap_or_default();
+            ui.ctx().data_mut(|d| d.insert_temp(save_id, start));
+            ui.memory_mut(|m| m.toggle_popup(pop));
+        }
+        egui::popup_below_widget(ui, pop, &save, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            ui.set_min_width(220.0);
+            let mut name: String = ui.ctx().data(|d| d.get_temp(save_id)).unwrap_or_default();
+            ui.label(RichText::new("Save preset as").color(c(th.text_dim)));
+            let te = ui.add(egui::TextEdit::singleline(&mut name).hint_text("Name").desired_width(200.0));
+            te.request_focus();
+            let clean: String = name
+                .chars()
+                .map(|ch| if r#"\/:*?"<>|"#.contains(ch) { '_' } else { ch })
+                .collect::<String>()
+                .trim()
+                .to_string();
+            let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                let label = if names.contains(&clean) { "Replace" } else { "Save" };
+                if (ui.add_enabled(!clean.is_empty(), egui::Button::new(label)).clicked() || enter) && !clean.is_empty() {
+                    let p = Preset {
+                        effect: fx.id.clone(),
+                        values: fx.ctls.iter().zip(&fx.vals).map(|(c, v)| (c.key.clone(), *v)).collect(),
+                    };
+                    let dir = presets_dir(&fx.id);
+                    let _ = std::fs::create_dir_all(&dir);
+                    if let Ok(t) = serde_json::to_string_pretty(&p) {
+                        let _ = std::fs::write(dir.join(format!("{clean}.json")), t);
+                    }
+                    crate::dir_cache::forget(&dir);
+                    loaded = Some((clean.clone(), fx.vals.clone()));
+                    ui.memory_mut(|m| m.close_popup());
+                }
+                if ui.button("Cancel").clicked() {
+                    ui.memory_mut(|m| m.close_popup());
+                }
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(save_id, name));
+        });
+    });
+    if let Some(k) = pick {
+        if let Some(it) = items.get(k) {
+            if load_preset(fx, it, tempo) {
+                loaded = match it {
+                    PresetItem::Default => None,
+                    _ => Some((it.name(), fx.vals.clone())),
+                };
+            }
+        }
+    }
+    if let Some(n) = delete {
+        let _ = std::fs::remove_file(presets_dir(&fx.id).join(format!("{n}.json")));
+        crate::dir_cache::forget(&presets_dir(&fx.id));
+        if loaded.as_ref().is_some_and(|(l, _)| *l == n) {
+            loaded = None;
+        }
+    }
+    ui.ctx().data_mut(|d| match loaded {
+        Some(l) => d.insert_temp(loaded_id, l),
+        None => {
+            d.remove::<(String, Vec<f32>)>(loaded_id);
         }
     });
-    ui.ctx().data_mut(|d| d.insert_temp(name_id, name));
 }
 
 // ------------------------------------------------------------ columns

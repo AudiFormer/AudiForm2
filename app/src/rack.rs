@@ -1003,12 +1003,21 @@ pub fn apply_file_rack(st: &mut State) {
     let seg = d.chans.fit_len(seg, r.len());
     let mut b = (*d.buf).clone();
     b.replace(r, &seg);
-    d.set_buffer_on("Effects Rack", b);
-    // The file is played through the rack, so once applied the rack goes
-    // off (its settings kept) rather than being heard a second time.
-    st.file_rack.bypass = true;
-    st.toast("Applied. The rack is switched off so it isn't heard twice; its settings are kept.");
+    d.set_buffer_on(APPLIED, b);
+    let doc = d.id;
+    // Applied, the effects leave the rack (they're in the file now); Undo
+    // puts them back with the sound as it was, Redo takes them out again.
+    st.file_rack_undo.entry(doc).or_default().0.push((chain, rack));
+    if let Some((_, redo)) = st.file_rack_undo.get_mut(&doc) {
+        redo.clear();
+    }
+    st.file_chain.clear();
+    st.file_rack = af2_core::Rack { bypass: false, ..rack };
+    st.toast("Applied: the effects are in the file and the rack is empty. Undo brings them back.");
 }
+
+/// The undo step Apply makes in the Waveform editor.
+pub const APPLIED: &str = "Effects Rack";
 
 // ------------------------------------------------------------ presets
 

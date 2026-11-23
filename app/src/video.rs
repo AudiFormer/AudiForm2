@@ -40,7 +40,7 @@ pub fn is_video_path(p: &Path) -> bool {
 }
 
 /// The row's height in the Multitrack.
-pub const ROW_H: f32 = 46.0;
+pub const ROW_H: f32 = 30.0;
 
 // ---------------------------------------------------------------- reading
 
@@ -499,9 +499,14 @@ pub fn frame(ctx: &egui::Context, st: &mut State) {
 
 /// The session's video, from a file just placed on a track (as Audition
 /// does): its picture goes on the video track at the clip's start.
+/// Whether the session's video row shows in the Multitrack.
+pub fn row_shown(st: &State) -> bool {
+    st.session.video.as_ref().is_some_and(|v| v.shown)
+}
+
 pub fn take_from_placed(st: &mut State, path: &Path, at: f64) {
     if st.session.video.is_none() && is_video_path(path) {
-        st.session.video = Some(af2_core::session::VideoTrack { path: path.to_path_buf(), start: at });
+        st.session.video = Some(af2_core::session::VideoTrack { path: path.to_path_buf(), start: at, shown: true });
     }
 }
 
@@ -600,10 +605,13 @@ pub fn row(
     p.rect_filled(Rect::from_min_size(head.min, vec2(4.0, head.height())), Rounding::ZERO, ca(th.accent_alt, 255));
     p.line_segment([head.left_bottom(), lane.right_bottom()], Stroke::new(1.0_f32, c(th.border)));
     let name = v.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    p.text(head.left_top() + vec2(12.0, 6.0), egui::Align2::LEFT_TOP, "VIDEO", egui::FontId::proportional(10.0), c(th.text_dim));
-    p.text(head.left_top() + vec2(12.0, 21.0), egui::Align2::LEFT_TOP, &name, egui::FontId::proportional(12.0), c(th.text));
+    let mid = head.center().y;
+    p.text(pos2(head.left() + 12.0, mid), egui::Align2::LEFT_CENTER, "VIDEO", egui::FontId::proportional(10.0), c(th.text_dim));
+    let name_x = head.left() + 52.0;
+    let name_clip = Rect::from_min_max(pos2(name_x, head.top()), pos2(head.right() - 26.0, head.bottom()));
+    ui.painter_at(name_clip).text(pos2(name_x, mid), egui::Align2::LEFT_CENTER, &name, egui::FontId::proportional(12.0), c(th.text));
     // Remove.
-    let x = Rect::from_min_size(pos2(head.right() - 24.0, head.top() + 4.0), vec2(18.0, 18.0));
+    let x = Rect::from_center_size(pos2(head.right() - 15.0, mid), vec2(18.0, 18.0));
     let xr = ui.interact(x, ui.id().with("af2-video-remove"), Sense::click()).on_hover_text("Take the video out of the session (its sound stays)");
     p.text(x.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(14.0), if xr.hovered() { c(th.text) } else { c(th.text_dim) });
     if xr.clicked() {
@@ -626,7 +634,7 @@ pub fn row(
     let lp = ui.painter_at(lane);
     lp.rect_filled(lane, Rounding::ZERO, c(th.wave_background));
     let g = thumbs.lock().unwrap_or_else(|e| e.into_inner());
-    let pic_h = lane.height() - 6.0;
+    let pic_h = lane.height() - 4.0;
     let mut drawn_to = f32::MIN;
     for (i, (t, f)) in g.pics.iter().enumerate() {
         let x0 = time_to_x(v.start + t);
@@ -645,7 +653,7 @@ pub fn row(
             .entry(key)
             .or_insert_with(|| texture_of(ui.ctx(), format!("af2-thumb-{i}"), f))
             .clone();
-        let r = Rect::from_min_size(pos2(x0, lane.top() + 3.0), vec2(w, pic_h));
+        let r = Rect::from_min_size(pos2(x0, lane.top() + 2.0), vec2(w, pic_h));
         lp.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         drawn_to = x0 + w + 1.0;
     }

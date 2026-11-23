@@ -70,7 +70,7 @@ pub struct LinkedUi {
     last_key: u64,
 }
 
-fn is_session_file(p: &Path) -> bool {
+pub fn is_session_file(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
         .is_some_and(crate::sessions::is_session_ext)
@@ -186,6 +186,25 @@ pub fn insert(st: &mut State, path: &Path, track: Option<TrackId>, at: f64) {
     }
     let track = track.filter(|t| st.session.tracks.iter().any(|x| x.id == *t && x.kind == TrackKind::Audio));
     spawn(st, path.to_path_buf(), Then::Place { track, at }, None);
+}
+
+/// A session set aside in the Files panel (`parked[i]`), dragged onto a
+/// track: its mix as it is now (unsaved edits included) goes in, linked to
+/// its file so it renders again when that is saved.
+pub fn insert_parked(st: &mut State, i: usize, track: Option<TrackId>, at: f64) {
+    let Some(parked) = st.sessions.parked.get(i) else { return };
+    let Some(path) = parked.path.clone().or_else(|| parked.source.clone()) else {
+        st.error("Save that session first: a session clip follows its session's file.");
+        return;
+    };
+    let s = parked.session.clone();
+    let bufs: HashMap<MediaId, Arc<AudioBuffer>> = parked
+        .media_docs
+        .iter()
+        .filter_map(|(m, d)| st.doc_by_id(*d).map(|d| (*m, d.buf.clone())))
+        .collect();
+    let track = track.filter(|t| st.session.tracks.iter().any(|x| x.id == *t && x.kind == TrackKind::Audio));
+    spawn(st, path, Then::Place { track, at }, Some((s, bufs)));
 }
 
 /// Multitrack > Insert Session as Clip...

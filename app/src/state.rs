@@ -383,6 +383,9 @@ pub struct State {
     /// The Waveform editor's rack (applied to the file).
     pub file_chain: Vec<af2_core::EffectSlot>,
     pub file_rack: af2_core::Rack,
+    /// The file rack as it was before each Apply on a file (undo, redo), so
+    /// undoing an Apply brings its effects back to the rack.
+    pub file_rack_undo: HashMap<DocId, (Vec<(Vec<af2_core::EffectSlot>, af2_core::Rack)>, Vec<(Vec<af2_core::EffectSlot>, af2_core::Rack)>)>,
     /// Track or master rack in the Effects panel.
     pub rack_tab: crate::rack::RackTab,
     /// A rack preset being named.
@@ -697,6 +700,7 @@ impl State {
             open_slot: None,
             fx_windows: Vec::new(),
             file_chain: Vec::new(),
+            file_rack_undo: HashMap::new(),
             file_rack: Default::default(),
             rack_tab: Default::default(),
             rack_preset_name: None,
@@ -1894,7 +1898,9 @@ impl State {
             // at full scale for half a second is a howl; monitoring stops.
             let monitoring = self.session.tracks.iter().any(|t| t.monitor && t.armed);
             // (It is acted on at the start of the next tick.)
-            self.howl_secs = howl_step(self.howl_secs, monitoring, l.max(r), meter_dt);
+            // The louder side's mean square, for how tonal it is.
+            let pms = ms.map(|(a, b)| if l >= r { a } else { b });
+            self.howl_secs = howl_step(self.howl_secs, monitoring, l.max(r), pms, meter_dt);
             // A surround file: each channel before the fold.
             let src = e.take_source_peaks();
             let n = match self.mode {
@@ -2310,7 +2316,23 @@ impl State {
         match self.mode {
             Mode::Waveform => {
                 if let Some(d) = self.doc_mut() {
-                    d.undo();
+                    let applied = d.history.undo_label().is_some_and(|l| l.starts_with(crate::rack::APPLIED));
+                    let id = d.id;
+                    if d.undo() && applied {
+                        // The rack's effects come back with the dry sound.
+                        let now = (std::mem::take(&mut self.file_chain), self.file_rack);
+                        if let Some((undo, redo)) = self.file_rack_undo.get_mut(&id) {
+                            if let Some((chain, rack)) = undo.pop() {
+                                redo.push(now);
+                                self.file_chain = chain;
+                                self.file_rack = rack;
+                            } else {
+                                self.file_chain = now.0;
+                            }
+                        } else {
+                            self.file_chain = now.0;
+                        }
+                    }
                 }
             }
             Mode::Multitrack => {
@@ -2328,7 +2350,18 @@ impl State {
         match self.mode {
             Mode::Waveform => {
                 if let Some(d) = self.doc_mut() {
-                    d.redo();
+                    let applied = d.history.redo_label().is_some_and(|l| l.starts_with(crate::rack::APPLIED));
+                    let id = d.id;
+                    if d.redo() && applied {
+                        // Applied again: the effects leave the rack again.
+                        if let Some((undo, redo)) = self.file_rack_undo.get_mut(&id) {
+                            if let Some((chain, rack)) = redo.pop() {
+                                undo.push((std::mem::take(&mut self.file_chain), self.file_rack));
+                                self.file_chain = chain;
+                                self.file_rack = rack;
+                            }
+                        }
+                    }
                 }
             }
             Mode::Multitrack => {
@@ -2977,9 +3010,16 @@ fn decode_turn() -> impl Drop {
 pub const HOWL_SECS: f32 = 0.5;
 
 /// The feedback guard's clock: grows while an input is monitored and the
-/// output peak sits at full scale, falls back twice as fast otherwise.
-pub fn howl_step(secs: f32, monitoring: bool, peak: f32, dt: f32) -> f32 {
-    if monitoring && peak >= 0.97 {
+/// output howls, falls back twice as fast otherwise. A howl is either the
+/// output at full scale, or a loud near-pure tone: feedback rings at one
+/// frequency, so its peak is close to a sine's (peak² about twice its mean
+/// square), where voices and instruments run three to ten times. A howl
+/// clipping at the input can come out well under full scale (a centred
+/// mono track's pan law alone takes 3 dB), hence the tone test. `ms` is the
+/// mean square of the frame's sound, when the meter had any.
+pub fn howl_step(secs: f32, monitoring: bool, peak: f32, ms: Option<f32>, dt: f32) -> f32 {
+    let tone = ms.is_some_and(|m| m > 0.0 && peak >= 0.1 && peak * peak / m <= 2.6);
+    if monitoring && (peak >= 0.97 || tone) {
         secs + dt
     } else {
         (secs - 2.0 * dt).max(0.0)
@@ -2995,17 +3035,52 @@ mod howl_tests {
         // Half a second at full scale while monitoring: trips.
         let mut s = 0.0;
         for _ in 0..32 {
-            s = howl_step(s, true, 1.0, 1.0 / 60.0);
+            s = howl_step(s, true, 1.0, None, 1.0 / 60.0);
         }
         assert!(s >= HOWL_SECS);
         // Loud drum hits (a frame at full scale now and then) never add up.
         let mut s = 0.0;
         for k in 0..600 {
-            s = howl_step(s, true, if k % 6 == 0 { 1.0 } else { 0.5 }, 1.0 / 60.0);
+            let pk = if k % 6 == 0 { 1.0 } else { 0.5 };
+            // Drums: peaks far above their mean.
+            s = howl_step(s, true, pk, Some(pk * pk / 8.0), 1.0 / 60.0);
         }
         assert!(s < HOWL_SECS);
         // Not monitoring: full-scale playback is not a howl.
-        assert_eq!(howl_step(0.0, false, 1.0, 1.0), 0.0);
+        assert_eq!(howl_step(0.0, false, 1.0, None, 1.0), 0.0);
+    }
+
+    /// The mean square and peak of a frame of `f`.
+    fn frame(f: impl Fn(f32) -> f32) -> (f32, f32) {
+        let xs: Vec<f32> = (0..800).map(|i| f(i as f32 / 48_000.0)).collect();
+        let pk = xs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let ms = xs.iter().map(|v| v * v).sum::<f32>() / xs.len() as f32;
+        (pk, ms)
+    }
+
+    #[test]
+    fn a_ringing_tone_under_full_scale_trips_but_a_voice_does_not() {
+        use std::f32::consts::TAU;
+        // A howl at 2.7 kHz, 3 dB under full scale (a centred mono track).
+        let (pk, ms) = frame(|t| 0.7 * (TAU * 2_700.0 * t).sin());
+        let mut s = 0.0;
+        for _ in 0..32 {
+            s = howl_step(s, true, pk, Some(ms), 1.0 / 60.0);
+        }
+        assert!(s >= HOWL_SECS, "tone {pk} {ms}");
+        // A loud sung vowel: a fundamental and strong harmonics.
+        let (pk, ms) = frame(|t| {
+            let f = 220.0;
+            0.35 * (TAU * f * t).sin() + 0.25 * (TAU * 2.0 * f * t).sin() + 0.2 * (TAU * 3.0 * f * t).sin() + 0.12 * (TAU * 5.0 * f * t).sin()
+        });
+        let mut s = 0.0;
+        for _ in 0..120 {
+            s = howl_step(s, true, pk, Some(ms), 1.0 / 60.0);
+        }
+        assert!(s < HOWL_SECS, "voice {pk} {ms} crest² {}", pk * pk / ms);
+        // A quiet tone (a tuner's beep in the room) is no howl either.
+        let (pk, ms) = frame(|t| 0.05 * (TAU * 440.0 * t).sin());
+        assert_eq!(howl_step(0.0, true, pk, Some(ms), 1.0), 0.0);
     }
 }
 
@@ -3049,5 +3124,36 @@ mod file_rack_tests {
         for (a, b) in out.channels[0].iter().zip(&buf.channels[0]).skip(100).take(4_000) {
             assert!((a - b * 0.5).abs() < 2e-3, "{a} vs {}", b * 0.5);
         }
+    }
+}
+
+#[cfg(test)]
+mod apply_rack_tests {
+    use super::*;
+
+    #[test]
+    fn apply_empties_the_rack_and_undo_brings_it_back() {
+        crate::fx::register();
+        let mut st = State::new();
+        st.mode = Mode::Waveform;
+        let mut b = AudioBuffer::new(48_000, 1, 4_800);
+        b.channels[0].iter_mut().for_each(|s| *s = 0.5);
+        let doc = st.add_doc("a.wav".into(), None, b);
+        st.current = Some(doc);
+        let mut gain = crate::rack::new_slot(af2_fx::effects::dynamics::GAIN);
+        gain.values = crate::fx_windows::values_for(gain.effect.as_str(), &[("gain".into(), -6.0206)]);
+        st.file_chain.push(gain);
+        let level = |st: &State| st.doc().unwrap().buf.channels[0][2_000];
+        crate::rack::apply_file_rack(&mut st);
+        assert!((level(&st) - 0.25).abs() < 1e-3, "applied: {}", level(&st));
+        assert!(st.file_chain.is_empty(), "applied effects leave the rack");
+        st.undo();
+        assert!((level(&st) - 0.5).abs() < 1e-6);
+        assert_eq!(st.file_chain.len(), 1, "undo puts the effect back");
+        st.redo();
+        assert!((level(&st) - 0.25).abs() < 1e-3);
+        assert!(st.file_chain.is_empty(), "redo takes it out again");
+        st.undo();
+        assert_eq!(st.file_chain.len(), 1);
     }
 }

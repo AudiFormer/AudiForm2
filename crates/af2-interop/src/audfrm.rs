@@ -1188,7 +1188,7 @@ fn import_value(v: Value, base_dir: &Path) -> Result<Imported, String> {
     // The video track (Audiform 2's own: `af27_video`).
     if let Some(vt) = v.get("af27_video").filter(|x| x.is_object()) {
         if let Some(path) = crate::resolve(vt["path"].as_str(), vt["relative_path"].as_str(), base_dir) {
-            out.video = Some(af2_core::session::VideoTrack { path, start: vt["start"].as_f64().unwrap_or(0.0) });
+            out.video = Some(af2_core::session::VideoTrack { path, start: vt["start"].as_f64().unwrap_or(0.0), shown: vt["shown"].as_bool().unwrap_or(true) });
         }
     }
 
@@ -1703,7 +1703,7 @@ pub fn export(session: &mut Session, base: Option<&Value>) -> Value {
         Some(vt) => {
             doc.insert(
                 "af27_video".into(),
-                json!({"path": vt.path.to_string_lossy(), "relative_path": null, "start": vt.start}),
+                json!({"path": vt.path.to_string_lossy(), "relative_path": null, "start": vt.start, "shown": vt.shown}),
             );
         }
         None => {

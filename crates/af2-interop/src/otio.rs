@@ -119,7 +119,7 @@ pub fn import(text: &str, base_dir: &Path) -> Result<Imported, String> {
                         "Clip" => {
                             if let Some(p) = media_of(ch).and_then(|(u, _)| url_to_path(u, base_dir)) {
                                 let (start, _) = range(&ch["source_range"]).unwrap_or((0.0, 0.0));
-                                s.video = Some(VideoTrack { path: p, start: (at - start).max(0.0) });
+                                s.video = Some(VideoTrack { path: p, start: (at - start).max(0.0), shown: true });
                                 break;
                             }
                             at += dur;

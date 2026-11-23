@@ -3121,8 +3121,17 @@ impl eframe::App for App {
             self.show_tab(t);
         }
         // Dropped files the Multitrack did not take open (folders searched).
+        let mt_area = self.st.sessions.mt_area.take();
         if let Some(d) = self.st.sessions.os_drop.take() {
             let (audio, sessions) = crate::sessions::expand_paths(&d.paths);
+            // On the Multitrack, outside its lanes: session clips still.
+            let on_mt = d.pos.zip(mt_area).is_some_and(|(p, r)| r.contains(p));
+            let sessions = if on_mt {
+                let at = self.st.session_cursor;
+                crate::linked::take_dropped(&mut self.st, sessions, None, at)
+            } else {
+                sessions
+            };
             for s in sessions {
                 self.st.open_session(&s);
             }

@@ -747,6 +747,9 @@ pub struct Sessions {
     pub batches: Vec<ImportBatch>,
     pub next_batch: u64,
     pub os_drop: Option<OsDrop>,
+    /// Where the Multitrack was drawn last frame (for files dropped on it
+    /// outside its lanes).
+    pub mt_area: Option<egui::Rect>,
     pub props: Option<PropsDraft>,
     pub recovery: Vec<Recoverable>,
     pub last_lock: Option<Instant>,
@@ -765,6 +768,7 @@ impl Default for Sessions {
             batches: Vec::new(),
             next_batch: 1,
             os_drop: None,
+            mt_area: None,
             props: None,
             recovery: Vec::new(),
             last_lock: None,
@@ -1535,6 +1539,10 @@ impl State {
                 }
             };
             if let Some(m) = self.media_for_doc(doc) {
+                // A video's picture goes on the video track, its sound here.
+                if let Some(p) = self.doc_by_id(doc).and_then(|d| d.path.clone()) {
+                    crate::video::take_from_placed(self, &p, pl.start);
+                }
                 last = self.session.add_clip(track, m, pl.start).or(last);
             }
         }

@@ -821,6 +821,18 @@ pub struct VideoTrack {
     /// Timeline seconds of the video's start.
     #[serde(default)]
     pub start: f64,
+    /// Whether its row shows along the top of the Multitrack (the Video
+    /// panel plays it either way).
+    #[serde(default = "shown_default", skip_serializing_if = "is_shown")]
+    pub shown: bool,
+}
+
+fn shown_default() -> bool {
+    true
+}
+
+fn is_shown(b: &bool) -> bool {
+    *b
 }
 
 /// The session a media item's file was rendered from (Audiform's

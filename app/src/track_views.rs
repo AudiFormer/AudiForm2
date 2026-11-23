@@ -546,6 +546,7 @@ enum Glyph {
     Routing,
     Effects,
     Metronome,
+    Video,
     Snap,
     Stretch,
 }
@@ -618,6 +619,16 @@ fn glyph(p: &egui::Painter, g: Glyph, r: Rect, col: egui::Color32) {
                 [pos2(ctr.x, ctr.y + 4.0), pos2(ctr.x + 5.0, ctr.y - 5.0)],
                 s,
             );
+        }
+        Glyph::Video => {
+            // A strip of film.
+            let f = Rect::from_center_size(ctr, vec2(13.0, 10.0));
+            p.rect_stroke(f, Rounding::same(1.5), s);
+            for k in 0..3 {
+                let x = f.left() + 3.0 + k as f32 * 3.5;
+                p.line_segment([pos2(x, f.top()), pos2(x, f.top() + 2.0)], s);
+                p.line_segment([pos2(x, f.bottom() - 2.0), pos2(x, f.bottom())], s);
+            }
         }
         Glyph::Snap => {
             // A magnet.
@@ -756,6 +767,23 @@ pub fn strip(ui: &mut egui::Ui, st: &mut State, rect: Rect) {
                 {
                     st.session.tempo.metronome = !m;
                     st.live_metronome();
+                }
+                if let Some(shown) = st.session.video.as_ref().map(|v| v.shown) {
+                    if strip_button(
+                        ui,
+                        Glyph::Video,
+                        shown,
+                        "Video track (shows its row above the tracks; the Video panel plays it either way)",
+                        &th,
+                    )
+                    .clicked()
+                    {
+                        let before = st.session.clone();
+                        if let Some(v) = &mut st.session.video {
+                            v.shown = !shown;
+                        }
+                        st.commit_session(if shown { "Hide Video Track" } else { "Show Video Track" }, before);
+                    }
                 }
                 if strip_button(ui, Glyph::Snap, st.prefs.snap_ruler, "Snapping", &th).clicked() {
                     st.prefs.snap_ruler = !st.prefs.snap_ruler;

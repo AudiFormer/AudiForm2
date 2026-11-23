@@ -1400,8 +1400,8 @@ fn audio_devices(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
             note(ui, th, "The device list came back empty just now (a driver busy for a moment?), so the last list found is shown. Press Refresh Devices to look again.");
         }
         note(ui, th, match a.host {
-            HostKind::System => "If a chosen device is unplugged, the system default plays instead, and the chosen one is used again once it is back and you press Apply. Tracks pick their own inputs, down to single channels, in the track header.",
-            HostKind::Asio => "Only the chosen ASIO driver is loaded. Most drivers serve one program at a time: if the driver is busy, AudiForm 2 plays through the system driver and says so. Tracks pick the driver's channels in the track header.",
+            HostKind::System => "If a chosen device is unplugged, the system default plays instead, and the chosen one is used again once it is back and you press Apply. Which inputs new tracks record from (say input 1 alone, for one mic) is set once with the ⏷ beside the Record button, and kept; a track can still pick its own in its header.",
+            HostKind::Asio => "Only the chosen ASIO driver is loaded. Most drivers serve one program at a time: if the driver is busy, AudiForm 2 plays through the system driver and says so. Which of the driver's inputs new tracks record from (say input 1 alone, for one mic) is set once with the ⏷ beside the Record button, and kept; a track can still pick its own in its header.",
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {

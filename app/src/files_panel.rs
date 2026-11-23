@@ -27,6 +27,11 @@ use af2_core::time::format_time;
 #[derive(Debug, Clone)]
 pub struct DragFiles(pub Vec<DocId>);
 
+/// A set-aside session dragged from the Files panel (its index among the
+/// parked sessions), to go in as a session clip.
+#[derive(Clone, Copy)]
+pub struct DragSession(pub usize);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Col {
     Name,
@@ -523,9 +528,18 @@ fn sessions(ui: &mut egui::Ui, st: &mut State) {
         .chain(parked.into_iter().enumerate().map(|(i, p)| (Some(i), p)));
     for (which, (name, dirty, dur, rate)) in rows {
         let w = ui.available_width();
-        let (rect, r) = ui.allocate_exact_size(vec2(w, ROW_H + 2.0), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(vec2(w, ROW_H + 2.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
         let in_front = which.is_none();
+        // A set-aside session drags onto the tracks as a session clip.
+        if let Some(i) = which {
+            if r.drag_started() {
+                egui::DragAndDrop::set_payload(ui.ctx(), DragSession(i));
+            }
+            if r.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+        }
         if in_front {
             p.rect_filled(rect, Rounding::same(3.0), ca(th.accent, 28));
         }
@@ -575,7 +589,7 @@ fn sessions(ui: &mut egui::Ui, st: &mut State) {
         let r = r.on_hover_text(if in_front {
             "The session in the Multitrack. Double-click to show it."
         } else {
-            "Set aside with its unsaved changes. Double-click to bring it to the front."
+            "Set aside with its unsaved changes. Double-click to bring it to the front, or drag it onto a track to put its mix in as a session clip."
         });
         if r.double_clicked() {
             act = Some((which, SessionAct::Switch));

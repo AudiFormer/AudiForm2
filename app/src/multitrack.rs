@@ -252,7 +252,7 @@ mod vzoom_tests {
     /// The lanes' left, width and top for a 1600 x 900 editor.
     fn lanes_geom(st: &State) -> (f32, f32, f32) {
         let metro = if st.session.tempo.metronome { crate::track_views::METRO_H } else { 0.0 };
-        let video = if st.session.video.is_some() { crate::video::ROW_H } else { 0.0 };
+        let video = if crate::video::row_shown(st) { crate::video::ROW_H } else { 0.0 };
         (st.prefs.header_w, 1600.0 - st.prefs.header_w - VBAR_W, crate::overview::STRIP_H + 22.0 + metro + video)
     }
 
@@ -505,6 +505,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     #[allow(non_snake_case)]
     let HEADER_W = st.prefs.header_w.clamp(HEADER_MIN, HEADER_MAX.min(full.width() * 0.6).max(HEADER_MIN));
     let (rect, resp) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
+    st.sessions.mt_area = Some(rect);
     let p = ui.painter_at(rect);
     p.rect_filled(rect, Rounding::ZERO, c(th.wave_background));
     // The overview strip, then the ruler, over the lanes.
@@ -533,7 +534,7 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     );
     // The video row, when the session has a video: under the metronome,
     // over the tracks (it is not a track either).
-    let video_h = if st.session.video.is_some() { crate::video::ROW_H } else { 0.0 };
+    let video_h = if crate::video::row_shown(st) { crate::video::ROW_H } else { 0.0 };
     let video_row = Rect::from_min_max(
         pos2(rect.left(), metro.bottom()),
         pos2(ruler.right(), metro.bottom() + video_h),
@@ -2681,6 +2682,17 @@ fn file_drop(
         (track, at)
     };
 
+    // A set-aside session from the Files panel.
+    if let Some(s) = resp.dnd_release_payload::<crate::files_panel::DragSession>() {
+        if let Some(pos) = ui
+            .input(|i| i.pointer.interact_pos())
+            .filter(|pp| lanes.contains(*pp))
+        {
+            let (track, at) = land(st, pos);
+            crate::linked::insert_parked(st, s.0, track, at);
+        }
+        return;
+    }
     // Let go of Files panel rows.
     if let Some(files) = resp.dnd_release_payload::<DragFiles>() {
         if let Some(pos) = ui
@@ -2725,7 +2737,16 @@ fn file_drop(
     let modifiers_alt = ui.input(|i| i.modifiers.alt);
     // (name, length when known) for each file coming in.
     type Items = Vec<(String, Option<f64>)>;
-    let (items, pos, alt): (Items, Option<egui::Pos2>, bool) = if let Some(f) =
+    let (items, pos, alt): (Items, Option<egui::Pos2>, bool) = if let Some(d) =
+        egui::DragAndDrop::payload::<crate::files_panel::DragSession>(ui.ctx())
+    {
+        let item = st
+            .sessions
+            .parked
+            .get(d.0)
+            .map(|p| (p.session.name.clone(), Some(p.session.duration().max(0.1))));
+        (item.into_iter().collect(), ui.input(|i| i.pointer.hover_pos()), false)
+    } else if let Some(f) =
         egui::DragAndDrop::payload::<DragFiles>(ui.ctx())
     {
         let items =
@@ -2748,7 +2769,11 @@ fn file_drop(
         // Loose files only: folders are searched once they land.
         let loose: Vec<std::path::PathBuf> = hovered.into_iter().filter(|p| !p.is_dir()).collect();
         let (audio, _) = crate::sessions::expand_paths(&loose);
-        let items = audio
+        // Session files go in as session clips: shown landing too.
+        let sessions = loose.iter().filter(|p| crate::linked::is_session_file(p)).cloned();
+        let items = sessions
+            .chain(audio)
+            .collect::<Vec<_>>()
             .iter()
             .map(|p| {
                 let name = p

@@ -70,7 +70,7 @@ impl RecordInputs {
         let default = match saved.trim() {
             "system" if support.loopback => RecordSource::SystemExceptSelf,
             "system-all" if support.loopback => RecordSource::System(None),
-            _ => RecordSource::Input,
+            other => parse_channels(other).map_or(RecordSource::Input, RecordSource::Channels),
         };
         RecordInputs {
             default,
@@ -89,10 +89,14 @@ impl RecordInputs {
 
     fn save_default(&self) {
         let v = match &self.default {
-            RecordSource::SystemExceptSelf => "system",
-            RecordSource::System(None) => "system-all",
-            // Devices and applications change between runs.
-            _ => "input",
+            RecordSource::SystemExceptSelf => "system".to_string(),
+            RecordSource::System(None) => "system-all".to_string(),
+            // Input channels (a mic on input 1 of a four-input interface)
+            // are kept: every track that follows the Record button records
+            // them from then on. If the device is gone, recording says so.
+            RecordSource::Channels(p) => channels_line(p),
+            // Applications change between runs.
+            _ => "input".to_string(),
         };
         let _ = std::fs::create_dir_all(data_dir());
         let _ = std::fs::write(prefs_path(), v);
@@ -641,6 +645,26 @@ fn source_menu(
     pick
 }
 
+/// The saved form of an input-channels pick: `channels<TAB>device<TAB>0,1`
+/// (an empty device is the one in Settings).
+fn channels_line(p: &InputPick) -> String {
+    let ch: Vec<String> = p.channels.iter().map(|c| c.to_string()).collect();
+    format!("channels\t{}\t{}", p.device.clone().unwrap_or_default(), ch.join(","))
+}
+
+fn parse_channels(line: &str) -> Option<InputPick> {
+    let mut it = line.split('\t');
+    if it.next()? != "channels" {
+        return None;
+    }
+    let device = it.next()?.to_string();
+    let channels: Vec<u16> = it.next()?.split(',').filter_map(|c| c.trim().parse().ok()).collect();
+    if channels.is_empty() || channels.len() > 2 {
+        return None;
+    }
+    Some(InputPick { device: (!device.is_empty()).then_some(device), channels })
+}
+
 /// A track's input chooser, for the track header.
 pub fn track_input(ui: &mut Ui, inputs: &mut RecordInputs, track: TrackId) {
     let own = inputs.per_track.get(&track).cloned();
@@ -688,6 +712,16 @@ pub fn default_input(ui: &mut Ui, inputs: &mut RecordInputs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_input_channels_default_is_kept_between_runs() {
+        let p = InputPick { device: Some("SSL 2+ (ASIO)".into()), channels: vec![0] };
+        assert_eq!(parse_channels(&channels_line(&p)), Some(p));
+        let q = InputPick { device: None, channels: vec![2, 3] };
+        assert_eq!(parse_channels(&channels_line(&q)), Some(q));
+        assert_eq!(parse_channels("input"), None);
+        assert_eq!(parse_channels("channels\tx\t"), None);
+    }
 
     #[test]
     fn a_mic_in_one_input_of_a_stereo_interface_records_mono() {
