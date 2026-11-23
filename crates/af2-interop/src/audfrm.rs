@@ -2462,6 +2462,29 @@ mod tests {
     }
 
     #[test]
+    fn a_converted_audiform_1_effect_saves_as_the_new_effect_only() {
+        let mut v = sample_clip_fx();
+        v["tracks"][0]["clips"][0]["effects"]["slots"][1]["effect"] = json!("altaudio.shaped_noise_reducer");
+        let (mut s, base) = reload(&v);
+        assert_eq!(
+            crate::closest::census(&s).silent,
+            vec!["Shaped Noise Reducer".to_string()]
+        );
+        let r = crate::closest::convert(&mut s);
+        assert_eq!(r.replaced.len(), 1);
+        let out = saved(&mut s, &base);
+        let slots = out["tracks"][0]["clips"][0]["effects"]["slots"].as_array().unwrap();
+        let ids: Vec<&str> = slots.iter().map(|x| x["effect"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["altaudio.dynamics", "altaudio.noise_reducer"]);
+        // The new slot carries none of the old effect's settings.
+        assert!(slots[1]["params"].get("x").is_none());
+        assert_ne!(slots[1]["id"], json!("cfx2"));
+        // Opened again, nothing is left to convert.
+        let (s2, _) = reload(&out);
+        assert!(crate::closest::census(&s2).silent.is_empty());
+    }
+
+    #[test]
     fn clip_automation_effects_and_source_channels_read_and_round_trip() {
         let (mut s, base) = reload(&sample_clip_fx());
         let c = &s.tracks[0].clips[0];

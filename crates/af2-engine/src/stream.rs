@@ -267,6 +267,7 @@ impl Core {
         fault: &AtomicBool,
         stats: &CallbackStats,
     ) {
+        crate::denormal::flush_to_zero();
         stats.tick(data.len() / self.channels);
         if hush.silenced(data, T::EQUILIBRIUM) {
             return;

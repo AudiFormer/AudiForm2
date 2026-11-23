@@ -16,6 +16,7 @@ mod clip_props;
 mod corners;
 mod desktop_entry;
 mod diagnostics;
+mod dir_cache;
 mod eq_editor;
 mod export;
 mod file_dialog;

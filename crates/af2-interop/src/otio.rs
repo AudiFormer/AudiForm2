@@ -38,6 +38,8 @@ fn range(v: &Value) -> Option<(f64, f64)> {
 
 /// A `file://` URL or a plain path, as a path.
 fn url_to_path(url: &str, base: &Path) -> Option<PathBuf> {
+    // A file URL is always absolute, a Windows one (file:///C:/x) too,
+    // which elsewhere would read as relative.
     let p = match url.strip_prefix("file://") {
         Some(rest) => {
             let rest = percent_decode(rest);
@@ -48,7 +50,7 @@ fn url_to_path(url: &str, base: &Path) -> Option<PathBuf> {
                 None => rest,
             };
             let win_drive = rest.len() > 2 && rest.as_bytes()[0] == b'/' && rest.as_bytes()[2] == b':';
-            PathBuf::from(if win_drive { &rest[1..] } else { rest.as_str() })
+            return Some(PathBuf::from(if win_drive { &rest[1..] } else { rest.as_str() }));
         }
         None if url.contains("://") => return None,
         None => PathBuf::from(url),

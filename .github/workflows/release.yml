@@ -1,10 +1,16 @@
-name: Release builds (Linux, macOS)
+name: Release builds (Linux, macOS, Windows)
 
-# Builds the Linux and macOS programs for a release and attaches them to
-# it. Runs when a release is published, or by hand for an existing tag
-# (Actions > Release builds > Run workflow, or
-# `gh workflow run release.yml -f tag=v2.1.0`). The Windows program (with
-# ASIO) is built on the lead's machine and attached by hand.
+# Builds the Linux, macOS and Windows programs for a release and attaches
+# them to it. Runs when a release is published, or by hand for an existing
+# tag (Actions > Release builds > Run workflow, or
+# `gh workflow run release.yml -f tag=v2.1.0`).
+#
+# The Windows job builds the ordinary program (the system driver, WASAPI;
+# no ASIO) as a .zip. The Windows program with ASIO is still built on the
+# lead's machine and attached by hand as AudiForm2-<version>-windows-x64.exe:
+# that is the file in-app updates install (any asset ending
+# `-windows-x64.exe`, see app/src/updater.rs), so this job's file must never
+# end that way, and it never overwrites it.
 
 on:
   release:
@@ -19,7 +25,11 @@ on:
         required: false
         default: ""
       skip_macos:
-        description: "Leave out the macOS build (Linux and Flatpak only)"
+        description: "Leave out the macOS build"
+        type: boolean
+        default: false
+      skip_windows:
+        description: "Leave out the Windows build"
         type: boolean
         default: false
 
@@ -201,3 +211,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" AudiForm2-*-macos-universal.zip --clobber --repo "$GITHUB_REPOSITORY"
+
+  windows:
+    if: ${{ !inputs.skip_windows }}
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SRC }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The icon and version go into the .exe (app/build.rs, through the
+      # Windows SDK the runner has).
+      - run: cargo build --release -p audiform2
+      - name: Package
+        run: |
+          $V = $env:TAG -replace '^v', ''
+          $D = "AudiForm2-$V-windows-x64-wasapi"
+          New-Item -ItemType Directory -Force -Path $D | Out-Null
+          Copy-Item target/release/audiform2.exe "$D/AudiForm2.exe"
+          Copy-Item LICENSE "$D/LICENSE.txt"
+          @"
+          AudiForm 2 for Windows (x64), without ASIO
+
+          Run AudiForm2.exe from this folder; nothing needs installing. It plays
+          and records through Windows' own audio (WASAPI). Settings are kept in
+          %APPDATA%\Audiform2.
+
+          For ASIO drivers, download AudiForm2-$V-windows-x64.exe from the same
+          release page instead (that is also the build in-app updates install).
+
+          Please report problems at https://github.com/AudiFormer/AudiForm2/issues
+          "@ | Set-Content -Encoding utf8 "$D/README.txt"
+          Compress-Archive -Path $D -DestinationPath "$D.zip" -Force
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$env:TAG" (Get-Item AudiForm2-*-windows-x64-wasapi.zip).Name --clobber --repo "$env:GITHUB_REPOSITORY"

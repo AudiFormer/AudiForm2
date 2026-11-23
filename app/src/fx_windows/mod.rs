@@ -331,7 +331,7 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
         uid,
     };
     let playing = st.is_playing();
-    let levels = (target != FILE).then(|| st.rack_levels(target));
+    let levels = (target != FILE || st.file_live).then(|| st.rack_levels(target));
     let spatial = if target == FILE {
         st.doc().is_some_and(|d| d.buf.num_channels() > 2)
     } else {
@@ -352,7 +352,7 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
         tempo,
         key: uid,
     };
-    presets_row(ui, &mut fx, th);
+    presets_row(ui, &mut fx, th, env.tempo);
     ui.add_space(4.0);
     let panel = PANELS
         .iter()
@@ -409,6 +409,11 @@ fn finish(ui: &egui::Ui, st: &mut State, target: u16, i: usize, slot: &EffectSlo
                 st.commit_live(&crate::fx::name(&slot.effect), before);
                 st.gesture = down && !data_changed;
             }
+        } else {
+            // The Waveform editor plays through the file's rack: the
+            // change is heard now, and the mix is rebuilt on release.
+            st.live_file_slot(i);
+            st.gesture = ui.input(|i| i.pointer.any_down()) && !data_changed;
         }
     }
     if fx.released || data_changed {
@@ -451,18 +456,7 @@ fn presets_dir(id: &str) -> std::path::PathBuf {
 }
 
 fn preset_names(id: &str) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(presets_dir(id))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension()? != "json" {
-                return None;
-            }
-            Some(p.file_stem()?.to_string_lossy().into_owned())
-        })
-        .collect();
+    let mut v = crate::dir_cache::json_stems(&presets_dir(id));
     v.sort();
     v
 }
@@ -474,18 +468,10 @@ struct Preset {
     values: std::collections::BTreeMap<String, f32>,
 }
 
-/// The presets an effect comes with (listed under Default).
-fn factory_presets(id: &str) -> &'static [af2_fx::effects::amp::FactoryPreset] {
-    if id == af2_fx::effects::amp::AMP {
-        af2_fx::effects::amp::PRESETS
-    } else {
-        &[]
-    }
-}
-
 /// The effect's presets: Default, the built-in ones, the saved ones, and
-/// Save / Delete.
-fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
+/// Save / Delete. `tempo` is the session's, which a preset that follows
+/// the tempo takes (rather than its default 120).
+fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
     let name_id = fx.uid.with("preset-name");
     let mut name: String = ui.ctx().data(|d| d.get_temp(name_id)).unwrap_or_default();
     let names = preset_names(&fx.id);
@@ -494,7 +480,10 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
         egui::ComboBox::from_id_salt(fx.uid.with("presets"))
             .selected_text(if name.is_empty() { "(current)" } else { &name })
             .width(150.0)
+            .height(440.0)
             .show_ui(ui, |ui| {
+                // Long names stay on one line (the list widens to fit).
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if ui.selectable_label(false, "Default").clicked() {
                     for k in 0..fx.ctls.len() {
                         let key = fx.ctls[k].key.clone();
@@ -505,8 +494,26 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
                 }
                 // The presets that come with the effect: the defaults with
                 // their own settings on top.
-                for (n, set) in factory_presets(&fx.id) {
-                    if ui.selectable_label(false, *n).clicked() {
+                let factory = af2_fx::presets::factory(&fx.id);
+                // "Vocal: Clarity" is listed as Clarity under a Vocal
+                // heading; the presets come in their groups' order.
+                let mut group = "";
+                for (n, set) in factory {
+                    let (g, short) = n.split_once(": ").unwrap_or(("", n));
+                    if g != group {
+                        group = g;
+                        if !g.is_empty() {
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(g).small().strong().color(c(th.text_dim)));
+                        }
+                    }
+                    let label = if g.is_empty() {
+                        (*n).to_string()
+                    } else {
+                        format!("   {short}")
+                    };
+                    if ui.selectable_label(*n == name, label).clicked() {
+                        let tempo = tempo.unwrap_or_else(|| fx.get("tempo"));
                         for k in 0..fx.ctls.len() {
                             let key = fx.ctls[k].key.clone();
                             let d = fx.ctls[k].default;
@@ -515,8 +522,14 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
                         for (k, v) in *set {
                             fx.set(k, *v);
                         }
-                        name.clear();
+                        if fx.on("sync") && fx.k("tempo").is_some() {
+                            fx.set("tempo", tempo);
+                        }
+                        name = (*n).to_string();
                     }
+                }
+                if !factory.is_empty() && !names.is_empty() {
+                    ui.separator();
                 }
                 for n in &names {
                     if ui.selectable_label(*n == name, n).clicked() {
@@ -563,6 +576,7 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
             if let Ok(t) = serde_json::to_string_pretty(&p) {
                 let _ = std::fs::write(dir.join(format!("{clean}.json")), t);
             }
+            crate::dir_cache::forget(&dir);
         }
         if names.contains(&clean)
             && widgets::button(ui, "Delete", false)
@@ -570,6 +584,7 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme) {
                 .clicked()
         {
             let _ = std::fs::remove_file(presets_dir(&fx.id).join(format!("{clean}.json")));
+            crate::dir_cache::forget(&presets_dir(&fx.id));
         }
     });
     ui.ctx().data_mut(|d| d.insert_temp(name_id, name));

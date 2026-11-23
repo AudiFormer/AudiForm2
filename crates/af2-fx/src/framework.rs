@@ -214,6 +214,19 @@ impl Params {
     pub fn set(&mut self, key: &'static str, value: f64) {
         self.0.insert(key, value);
     }
+
+    /// Takes `other`'s values in place: no allocation when both hold the
+    /// same keys (as an effect's stored and new settings do), so it is fit
+    /// for `Processor::update` on the audio thread.
+    pub fn assign_from(&mut self, other: &Params) {
+        if self.0.len() != other.0.len() || !self.0.keys().eq(other.0.keys()) {
+            self.0.clone_from(&other.0);
+            return;
+        }
+        for (v, o) in self.0.values_mut().zip(other.0.values()) {
+            *v = *o;
+        }
+    }
 }
 
 /// Decibels to a linear gain.

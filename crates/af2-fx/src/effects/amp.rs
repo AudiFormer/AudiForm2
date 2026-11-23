@@ -441,8 +441,10 @@ impl AmpModel {
             delay_at: 0,
             room: Room::new(rate, p.get("room") / 100.0, p.get("room_size") / 100.0),
             double: Doubler::new(rate, p.get("double") / 100.0),
-            mono: Vec::new(),
-            right: Vec::new(),
+            // Room for any block the engine sends, so the first one after a
+            // rebuild does not allocate on the audio thread.
+            mono: Vec::with_capacity(8_192),
+            right: Vec::with_capacity(8_192),
             rate,
         };
         a.set(p);

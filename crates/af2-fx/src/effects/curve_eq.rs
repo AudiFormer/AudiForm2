@@ -65,11 +65,13 @@ pub fn info() -> EffectInfo {
 }
 
 /// The curve's points, lowest frequency first, as (Hz, dB).
-pub fn points(p: &Params) -> Vec<(f64, f64)> {
-    let mut pts: Vec<(f64, f64)> = (0..POINTS)
+/// Kept inline (no allocation), as the gains are worked out again on the
+/// audio thread when a control moves.
+pub fn points(p: &Params) -> crate::biquad::Fixed<(f64, f64), POINTS> {
+    let mut pts: crate::biquad::Fixed<(f64, f64), POINTS> = (0..POINTS)
         .map(|i| (p.get(FREQ_KEYS[i]).max(1.0), p.get(GAIN_KEYS[i])))
         .collect();
-    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    pts.sort_stable_by(|a, b| a.0 < b.0);
     pts
 }
 

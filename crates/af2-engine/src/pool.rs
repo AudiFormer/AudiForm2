@@ -174,6 +174,7 @@ fn claim(s: &Shared, gen: u64) {
 
 fn worker(s: Arc<Shared>, k: usize) {
     raise_priority();
+    crate::denormal::flush_to_zero();
     // Generation 0 is "no job yet": a worker that starts late still sees
     // the first job as new.
     let mut seen = 0;

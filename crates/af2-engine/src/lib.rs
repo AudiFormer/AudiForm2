@@ -14,6 +14,7 @@
 
 mod asio;
 pub mod capture;
+pub mod denormal;
 pub mod devices;
 pub mod health;
 mod meter;
@@ -1818,6 +1819,7 @@ pub fn mix_program(
 }
 
 fn render_with(program: Program, rate: u32, from: f64, to: f64, bed_out: bool) -> AudioBuffer {
+    crate::denormal::flush_to_zero();
     let channels = match (&program, bed_out) {
         (Program::Mix(m), true) => m.channels_out(),
         (Program::Buffer { head: Some(h), .. }, true) if h.is_direct() => h.speakers(),

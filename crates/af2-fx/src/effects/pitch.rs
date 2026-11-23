@@ -82,10 +82,14 @@ fn cubic(g: &[f32], x: f64) -> f32 {
 
 pub struct PitchShift {
     factor: f64,
+    /// Built to shift (a factor other than 1): its latency, kept while
+    /// the factor is retuned live, even through 1.
+    active: bool,
     n: usize,
     hop: usize,
-    /// The last `n` input frames.
+    /// The last `n` input frames, a ring whose oldest frame is at `inw`.
     input: [Vec<f32>; 2],
+    inw: usize,
     /// Frames since the last hop.
     since: usize,
     seen: usize,
@@ -111,6 +115,10 @@ pub struct PitchShift {
     mag: Vec<f32>,
     phase: Vec<f32>,
     turn: Vec<f32>,
+    /// Each frame's peaks (the bins leading a region) and the borders
+    /// between them, kept so a frame does not allocate.
+    leaders: Vec<usize>,
+    borders: Vec<usize>,
 }
 
 impl PitchShift {
@@ -123,11 +131,14 @@ impl PitchShift {
         let window = (0..n)
             .map(|i| (0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / n as f64).cos()) as f32)
             .collect();
+        let factor = factor(p);
         Self {
-            factor: factor(p),
+            factor,
+            active: (factor - 1.0).abs() >= 1e-9,
             n,
             hop: n / 8,
             input: [vec![0.0; n], vec![0.0; n]],
+            inw: 0,
             since: 0,
             seen: 0,
             acc: [vec![0.0; 4 * n], vec![0.0; 4 * n]],
@@ -149,11 +160,13 @@ impl PitchShift {
             mag: vec![0.0; bins],
             phase: vec![0.0; bins],
             turn: vec![0.0; bins],
+            leaders: Vec::with_capacity(bins),
+            borders: Vec::with_capacity(bins),
         }
     }
 
     fn bypass(&self) -> bool {
-        (self.factor - 1.0).abs() < 1e-9
+        !self.active
     }
 
     /// One frame: analyse the last `n` inputs, stretch, read back and add
@@ -162,8 +175,9 @@ impl PitchShift {
         let n = self.n;
         let bins = n / 2 + 1;
         for ch in 0..2 {
+            let w = self.inw;
             for i in 0..n {
-                self.time[i] = self.input[ch][i] * self.window[i];
+                self.time[i] = self.input[ch][(w + i) % n] * self.window[i];
             }
             let _ = self.fwd.process_with_scratch(&mut self.time, &mut self.spec[ch], &mut self.scratch_f);
         }
@@ -199,19 +213,23 @@ impl PitchShift {
         let tau = std::f32::consts::TAU;
         // Peaks, and each bin's peak (the nearer one, split at the dip).
         let floor = peak * 1e-5;
-        let peaks: Vec<usize> = (1..bins - 1)
-            .filter(|&k| self.mag[k] > self.mag[k - 1] && self.mag[k] >= self.mag[k + 1] && self.mag[k] > floor)
-            .collect();
-        let leaders: Vec<usize> = if peaks.is_empty() {
-            (0..bins).collect()
-        } else {
-            peaks
-        };
+        let mut leaders = std::mem::take(&mut self.leaders);
+        let mut borders = std::mem::take(&mut self.borders);
+        leaders.clear();
+        leaders.extend(
+            (1..bins - 1)
+                .filter(|&k| self.mag[k] > self.mag[k - 1] && self.mag[k] >= self.mag[k + 1] && self.mag[k] > floor),
+        );
+        if leaders.is_empty() {
+            leaders.extend(0..bins);
+        }
         // The border between two peaks: the lowest bin between them.
-        let borders: Vec<usize> = leaders
-            .windows(2)
-            .map(|w| (w[0]..=w[1]).min_by(|x, y| self.mag[*x].total_cmp(&self.mag[*y])).unwrap_or(w[0]))
-            .collect();
+        borders.clear();
+        borders.extend(
+            leaders
+                .windows(2)
+                .map(|w| (w[0]..=w[1]).min_by(|x, y| self.mag[*x].total_cmp(&self.mag[*y])).unwrap_or(w[0])),
+        );
         let mut j = 0;
         for k in 0..bins {
             while j < borders.len() && k > borders[j] {
@@ -236,6 +254,8 @@ impl PitchShift {
         }
         self.last_phase.copy_from_slice(&self.phase);
         self.first = false;
+        self.leaders = leaders;
+        self.borders = borders;
 
         // Read each stretched frame back at the factor's speed.
         let f = self.factor;
@@ -281,9 +301,9 @@ impl Processor for PitchShift {
             self.acc[0][at] = 0.0;
             self.acc[1][at] = 0.0;
             for ch in 0..2 {
-                self.input[ch].copy_within(1.., 0);
-                self.input[ch][n - 1] = fr[ch];
+                self.input[ch][self.inw] = fr[ch];
             }
+            self.inw = (self.inw + 1) % n;
             fr[0] = out[0];
             fr[1] = out[1];
             self.t += 1;
@@ -313,11 +333,25 @@ impl Processor for PitchShift {
         }
         self.since = 0;
         self.seen = 0;
+        self.inw = 0;
         self.last_phase.fill(0.0);
         self.out_phase.fill(0.0);
         self.last_mag.fill(0.0);
         self.flux_avg = 0.0;
         self.first = true;
+    }
+
+    /// Retunes in place, so a drag or automation is heard as it moves. One
+    /// built at a factor of 1 passes the sound straight through with no
+    /// latency, so shifting it needs a rebuild; one already shifting keeps
+    /// its latency even when brought back to 1.
+    fn update(&mut self, p: &Params) -> bool {
+        let f = factor(p);
+        if !self.active && (f - 1.0).abs() >= 1e-9 {
+            return false;
+        }
+        self.factor = f;
+        true
     }
 }
 
@@ -394,5 +428,19 @@ mod tests {
         let b = factor(&params(&[("semitones", 1.0)]));
         assert!((a - b).abs() < 1e-12);
         assert_eq!(factor(&params(&[("semitones", 12.0), ("cents", 100.0)])), 2.0);
+    }
+
+    #[test]
+    fn retunes_live_and_rebuilds_only_to_start_shifting() {
+        let mut p = PitchShift::new(&params(&[("semitones", 3.0)]), R);
+        assert!(p.update(&params(&[("semitones", 5.0)])));
+        assert_eq!(p.factor, factor(&params(&[("semitones", 5.0)])));
+        // Back to no shift: still running, same latency.
+        assert!(p.update(&params(&[])));
+        assert_eq!(p.latency(), 2 * p.n);
+        // Built with no shift: shifting needs a rebuild (latency changes).
+        let mut q = PitchShift::new(&params(&[]), R);
+        assert!(!q.update(&params(&[("semitones", 2.0)])));
+        assert_eq!(q.latency(), 0);
     }
 }

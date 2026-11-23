@@ -16,6 +16,7 @@ pub mod audfrm;
 pub mod aup3;
 mod b64;
 pub mod check;
+pub mod closest;
 pub mod otio;
 pub mod paths;
 pub mod sesx;

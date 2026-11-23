@@ -29,7 +29,11 @@ use std::f64::consts::PI;
 use realfft::num_complex::Complex64;
 
 use super::{choice, num, toggle, EffectInfo, ParamInfo, Params, Processor};
-use crate::biquad::{butterworth_qs, Coeffs, Shape, StereoBiquad};
+use crate::biquad::{butterworth_qs, Coeffs, Fixed, Shape, StereoBiquad};
+
+/// A filter's sections, worked out without allocating (Hum Cut has at
+/// most 10, a Precision Filter band 8).
+type Sections = Fixed<Coeffs, 16>;
 
 pub const NOTCH: &str = "af.notch";
 pub const HUM: &str = "af.hum_cut";
@@ -141,7 +145,7 @@ pub fn dc_info() -> EffectInfo {
 // Section lists
 
 /// The Notch Filter's sections: one peaking dip per notch that is on.
-fn notch_sections(p: &Params, rate: u32) -> Vec<Coeffs> {
+fn notch_sections(p: &Params, rate: u32) -> Sections {
     let q = p.get("width");
     notch_keys()
         .filter(|(_, [on, _, _])| p.on(on))
@@ -150,7 +154,7 @@ fn notch_sections(p: &Params, rate: u32) -> Vec<Coeffs> {
 }
 
 /// Hum Cut's sections: a notch on each overtone below 0.45 of the rate.
-fn hum_sections(p: &Params, rate: u32) -> Vec<Coeffs> {
+fn hum_sections(p: &Params, rate: u32) -> Sections {
     let base = if p.index("mains") == 1 { 50.0 } else { 60.0 };
     let count = p.get("harmonics").round().max(1.0) as usize;
     let q = p.get("q");
@@ -166,9 +170,9 @@ fn hum_sections(p: &Params, rate: u32) -> Vec<Coeffs> {
 /// band-stop, `low` and `high` run side by side and are added.
 #[derive(Debug, Clone, Default)]
 struct Plan {
-    series: Vec<Coeffs>,
-    low: Vec<Coeffs>,
-    high: Vec<Coeffs>,
+    series: Sections,
+    low: Sections,
+    high: Sections,
 }
 
 /// Published Bessel sections (natural frequency, Q), -3 dB at 1 rad/s,
@@ -194,7 +198,7 @@ fn one_side(
     ripple: f64,
     stop: f64,
     rate: u32,
-) -> Vec<Coeffs> {
+) -> Sections {
     let shape = if high { Shape::HighPass } else { Shape::LowPass };
     // A section at `f` scaled by a prototype natural frequency `w0`.
     let at = |w0: f64| if high { f / w0 } else { f * w0 };
@@ -247,7 +251,7 @@ fn precision_plan(p: &Params, rate: u32) -> Plan {
             }
         }
         3 => Plan {
-            series: Vec::new(),
+            series: Sections::new(),
             low: side(false, lo),
             high: side(true, hi),
         },
@@ -266,14 +270,14 @@ fn precision_plan(p: &Params, rate: u32) -> Plan {
 /// Landen's descending transformation, the degree equation for the
 /// selectivity, zeros and poles from `cd`, and `v0` from the inverse `sn`.
 mod elliptic {
-    use super::{Coeffs, PI};
+    use super::{Coeffs, Fixed, Sections, PI};
     use realfft::num_complex::Complex64 as C;
 
     /// The descending Landen moduli of `k`, given with its complement
     /// `kp = sqrt(1 - k^2)` so moduli near 1 keep their precision. Stops
     /// once a modulus is negligible.
-    fn landen(k: f64, kp: f64) -> Vec<f64> {
-        let mut v = Vec::new();
+    fn landen(k: f64, kp: f64) -> Fixed<f64, 64> {
+        let mut v = Fixed::new();
         let (mut k, mut kp) = (k, kp);
         for _ in 0..64 {
             if k <= 1e-16 {
@@ -319,14 +323,14 @@ mod elliptic {
     /// its DC gain, its selectivity k (the stopband starts at 1/k rad/s)
     /// and, per second-order section, the zero frequency and the pole
     /// (upper half plane).
-    pub(super) fn prototype(order: usize, ripple: f64, stop: f64) -> (f64, f64, Vec<(f64, C)>) {
+    pub(super) fn prototype(order: usize, ripple: f64, stop: f64) -> (f64, f64, Fixed<(f64, C), 8>) {
         let order = order.max(2) & !1;
         let ep = (10f64.powf(ripple / 10.0) - 1.0).sqrt();
         let es = (10f64.powf(stop / 10.0) - 1.0).sqrt();
         let k1 = (ep / es).min(1.0 - 1e-12);
         let k1p = ((1.0 - k1) * (1.0 + k1)).sqrt();
         let half = order / 2;
-        let u: Vec<f64> = (1..=half)
+        let u: Fixed<f64, 8> = (1..=half)
             .map(|i| (2 * i - 1) as f64 / order as f64)
             .collect();
         // Degree equation: the selectivity k from the order and k1.
@@ -384,7 +388,7 @@ mod elliptic {
         f: f64,
         rate: u32,
         high: bool,
-    ) -> Vec<Coeffs> {
+    ) -> Sections {
         let fs = f64::from(rate.max(1));
         let f = f.clamp(1e-3, 0.49 * fs);
         let wc = 2.0 * fs * (PI * f / fs).tan();
@@ -500,10 +504,11 @@ impl Series {
             sections: Vec::new(),
         };
         s.sections = s.coeffs(p).into_iter().map(StereoBiquad::new).collect();
+        // (Built off the audio thread; `update` reuses these.)
         s
     }
 
-    fn coeffs(&self, p: &Params) -> Vec<Coeffs> {
+    fn coeffs(&self, p: &Params) -> Sections {
         match self.kind {
             Kind::Notch => notch_sections(p, self.rate),
             Kind::Hum => hum_sections(p, self.rate),
@@ -555,7 +560,7 @@ pub struct Precision {
 impl Precision {
     pub fn new(p: &Params, rate: u32) -> Self {
         let plan = precision_plan(p, rate);
-        let make = |v: Vec<Coeffs>| v.into_iter().map(StereoBiquad::new).collect();
+        let make = |v: Sections| v.into_iter().map(StereoBiquad::new).collect();
         Precision {
             rate,
             series: make(plan.series),

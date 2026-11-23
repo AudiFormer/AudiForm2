@@ -317,6 +317,129 @@ No: beside me",
     af2_interop::import_with(path, surrounds)
 }
 
+/// Why a session was not opened after [`convert_foreign`].
+pub enum NotOpened {
+    /// The user cancelled (nothing to report as an error).
+    Cancelled,
+    /// The copy of the original could not be made.
+    Failed(String),
+}
+
+/// An AudiForm 1 or `.sesx` session's effects, before it opens: asks
+/// whether to turn them into their closest AudiForm 2 effects. Yes: a copy
+/// of the file as it is goes beside it first (`Show (original).sesx`),
+/// then the effects AudiForm 2 cannot run are replaced. No: it opens as it
+/// is, those effects silent but kept, so they save back unchanged. Cancel:
+/// it is not opened. Returns the lines to tell the user.
+///
+/// Asked for a `.sesx` session with any effects (they are another
+/// program's, some converted by estimate), and for an Audiform session
+/// holding effects AudiForm 2 does not have. An Audiform session whose
+/// effects all exist here (AudiForm 2's own saves among them) opens as
+/// before.
+pub fn convert_foreign(path: &Path, session: &mut af2_core::Session) -> Result<Vec<String>, NotOpened> {
+    use af2_interop::closest;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let sesx = ext == "sesx";
+    if !sesx && !matches!(ext.as_str(), "audfrm" | "altaudio" | "altemplate") {
+        return Ok(Vec::new());
+    }
+    let census = closest::census(session);
+    if census.silent.is_empty() && !(sesx && census.effects > 0) {
+        return Ok(Vec::new());
+    }
+    let name = file_name(path);
+    let backup = backup_path(path);
+    let backup_name = file_name(&backup);
+    // What will happen to each effect AudiForm 2 cannot run.
+    let plan: Vec<String> = census
+        .silent
+        .iter()
+        .map(|n| match closest::closest(n).and_then(|(id, _)| af2_fx::info(id)) {
+            Some(i) => format!("{n} → {}", i.name),
+            None => format!("{n} → (no close match; stays silent)"),
+        })
+        .collect();
+    let mut shown: Vec<String> = Vec::new();
+    for p in &plan {
+        if !shown.contains(p) {
+            shown.push(p.clone());
+        }
+    }
+    let more = shown.len().saturating_sub(8);
+    shown.truncate(8);
+    let mut list = shown.iter().map(|l| format!("  • {l}")).collect::<Vec<_>>().join("\n");
+    if more > 0 {
+        list += &format!("\n  • …and {more} more");
+    }
+    let what = if sesx {
+        "a .sesx session from another editor"
+    } else {
+        "an Audiform 1 session"
+    };
+    let body = if census.silent.is_empty() {
+        format!(
+            "All {} of its effects have been converted to AudiForm 2 effects (some settings are estimates).",
+            census.effects
+        )
+    } else {
+        format!(
+            "{} of its {} effects have no AudiForm 2 version. Converted, each becomes the closest AudiForm 2 effect at its default settings:\n\n{list}",
+            census.silent.len(),
+            census.effects
+        )
+    };
+    let text = format!(
+        "“{name}” is {what}.\n\n{body}\n\nBefore anything changes, a copy of the original is kept as “{backup_name}”.\n\nConvert the effects? (Yes converts them; No opens it unchanged, those effects kept but silent.)"
+    );
+    let reply = crate::file_dialog::ask(
+        "Convert Effects",
+        &text,
+        &["Convert and Open", "Open Unchanged", "Cancel"],
+        true,
+        false,
+    );
+    match reply {
+        crate::file_dialog::Reply::Yes => {}
+        crate::file_dialog::Reply::No => return Ok(Vec::new()),
+        crate::file_dialog::Reply::Cancel => return Err(NotOpened::Cancelled),
+    }
+    std::fs::copy(path, &backup).map_err(|e| {
+        NotOpened::Failed(format!(
+            "Could not keep a copy of “{name}” as “{backup_name}”, so it was not opened: {e}"
+        ))
+    })?;
+    let done = closest::convert(session);
+    let mut notes = done.notices();
+    notes.push(format!("The original is kept as “{backup_name}”."));
+    Ok(notes)
+}
+
+/// Where the copy of `path` goes before its effects are converted:
+/// `Show (original).sesx` beside it, numbered when that name is taken.
+pub fn backup_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "session".into());
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let dir = path.parent().unwrap_or(Path::new("."));
+    (1..)
+        .map(|n| {
+            let label = if n == 1 { "original".to_string() } else { format!("original {n}") };
+            dir.join(format!("{stem} ({label}){ext}"))
+        })
+        .find(|p| !p.exists())
+        .expect("a free name")
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -2121,6 +2244,33 @@ mod tests {
             backup_stamp("Show 2026-11-19 14-03-2x.audfrm", "Show"),
             None
         );
+    }
+
+    #[test]
+    fn the_copy_before_converting_never_overwrites_an_earlier_one() {
+        let dir = std::env::temp_dir().join(format!("af2-original-{}", new_key()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Show.sesx");
+        std::fs::write(&file, "<sesx/>").unwrap();
+        let first = backup_path(&file);
+        assert_eq!(first, dir.join("Show (original).sesx"));
+        std::fs::write(&first, "earlier").unwrap();
+        assert_eq!(backup_path(&file), dir.join("Show (original 2).sesx"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_with_nothing_to_convert_opens_without_asking() {
+        // AudiForm 2's own .audfrm (every effect runs here): no question.
+        let mut s = af2_core::Session::new("s", 48_000, 0);
+        let t = s.add_track_of(af2_core::TrackKind::Audio);
+        s.track_mut(t).unwrap().chain.push(crate::rack::new_slot("af.dynamics"));
+        let notes = convert_foreign(Path::new("/nowhere/Mine.audfrm"), &mut s);
+        assert!(matches!(notes, Ok(ref n) if n.is_empty()));
+        // A .sesx with no effects: nothing to ask either.
+        let mut empty = af2_core::Session::new("s", 48_000, 0);
+        let notes = convert_foreign(Path::new("/nowhere/Show.sesx"), &mut empty);
+        assert!(matches!(notes, Ok(ref n) if n.is_empty()));
     }
 
     #[test]
