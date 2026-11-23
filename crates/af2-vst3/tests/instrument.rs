@@ -5,6 +5,9 @@
 //! sine per held note, 16 samples late, taking the sustain pedal, pitch
 //! bend and mod wheel by its MIDI mapping) scanned, played note by note,
 //! from a MIDI track in an export, and from the keys.
+// Plug-ins are hosted on Windows only for now (the scanner says so
+// elsewhere), so these run there.
+#![cfg(windows)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;

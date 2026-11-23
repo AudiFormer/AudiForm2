@@ -4,6 +4,9 @@
 //! End-to-end: the test plug-in (crates/af2-vst3-testplug) is built into
 //! a bundle, scanned, hosted in real host processes and played through
 //! chains.
+// Plug-ins are hosted on Windows only for now (the scanner says so
+// elsewhere), so these run there.
+#![cfg(windows)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
