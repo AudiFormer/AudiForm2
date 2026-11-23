@@ -58,6 +58,7 @@ const S24: f64 = 1.0;
 const S48: f64 = 2.0;
 
 const PARAMETRIC_EQ: &[FactoryPreset] = &[
+    // Vocals
     (
         "Vocal: Clarity",
         &[
@@ -79,7 +80,67 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Speech / Podcast",
+        "Vocal: Air and Sparkle",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 100.0), ("hp_slope", S12),
+            ("b1_freq", 300.0), ("b1_gain", -1.5),
+            ("b4_freq", 5000.0), ("b4_gain", 1.0),
+            ("hs_freq", 12000.0), ("hs_gain", 4.0), ("hs_q", 0.7),
+            ("gain", -1.5),
+        ],
+    ),
+    (
+        "Vocal: Lower Voice Body",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 75.0), ("hp_slope", S12),
+            ("b1_freq", 130.0), ("b1_gain", 1.5),
+            ("b2_freq", 400.0), ("b2_gain", -2.0), ("b2_q", 1.2),
+            ("b4_freq", 3000.0), ("b4_gain", 2.0),
+            ("hs_freq", 10000.0), ("hs_gain", 1.5), ("hs_q", 0.7),
+            ("gain", -1.5),
+        ],
+    ),
+    (
+        "Vocal: Higher Voice Presence",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 120.0), ("hp_slope", S12),
+            ("b1_freq", 250.0), ("b1_gain", -2.0),
+            ("b4_freq", 4000.0), ("b4_gain", 2.0),
+            ("b5_freq", 8000.0), ("b5_gain", -1.0), ("b5_q", 2.0),
+            ("hs_freq", 12000.0), ("hs_gain", 2.5), ("hs_q", 0.7),
+            ("gain", -1.5),
+        ],
+    ),
+    (
+        "Vocal: Rap Upfront",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 90.0), ("hp_slope", S12),
+            ("b1_freq", 220.0), ("b1_gain", -2.0), ("b1_q", 1.2),
+            ("b3_freq", 1500.0), ("b3_gain", 1.5),
+            ("b4_freq", 3500.0), ("b4_gain", 3.0),
+            ("hs_freq", 11000.0), ("hs_gain", 2.0), ("hs_q", 0.7),
+            ("gain", -2.0),
+        ],
+    ),
+    (
+        "Vocal: Backing (Thin and Bright)",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 200.0), ("hp_slope", S24),
+            ("b2_freq", 500.0), ("b2_gain", -2.0),
+            ("hs_freq", 9000.0), ("hs_gain", 3.0), ("hs_q", 0.7),
+            ("gain", -1.0),
+        ],
+    ),
+    (
+        "Vocal: Tame Harshness",
+        &[
+            ("b4_freq", 2800.0), ("b4_gain", -3.0), ("b4_q", 2.0),
+            ("b5_freq", 6500.0), ("b5_gain", -2.0), ("b5_q", 3.0),
+        ],
+    ),
+    // Speech
+    (
+        "Speech: Podcast",
         &[
             ("hp_on", 1.0), ("hp_freq", 80.0), ("hp_slope", S24),
             ("b1_freq", 200.0), ("b1_gain", -2.0),
@@ -90,7 +151,37 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Kick Drum",
+        "Speech: Broadcast Voice-Over",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 70.0), ("hp_slope", S24),
+            ("ls_freq", 120.0), ("ls_gain", 2.0), ("ls_q", 0.8),
+            ("b2_freq", 400.0), ("b2_gain", -2.0), ("b2_q", 1.4),
+            ("b4_freq", 3000.0), ("b4_gain", 2.5),
+            ("hs_freq", 10000.0), ("hs_gain", 2.0), ("hs_q", 0.7),
+            ("gain", -2.0),
+        ],
+    ),
+    (
+        "Speech: Laptop or Headset Mic",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 120.0), ("hp_slope", S24),
+            ("b1_freq", 250.0), ("b1_gain", -3.0),
+            ("b2_freq", 700.0), ("b2_gain", -2.0), ("b2_q", 1.5),
+            ("b4_freq", 3500.0), ("b4_gain", 2.0),
+            ("hs_freq", 9000.0), ("hs_gain", 2.0), ("hs_q", 0.7),
+            ("gain", -1.0),
+        ],
+    ),
+    (
+        "Speech: Too Close to the Mic",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 100.0), ("hp_slope", S24),
+            ("ls_freq", 200.0), ("ls_gain", -4.0), ("ls_q", 0.7),
+        ],
+    ),
+    // Drums
+    (
+        "Drums: Kick",
         &[
             ("hp_on", 1.0), ("hp_freq", 30.0), ("hp_slope", S12),
             ("b1_freq", 60.0), ("b1_gain", 4.0), ("b1_q", 1.2),
@@ -100,7 +191,17 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Snare Drum",
+        "Drums: Kick (Clicky)",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 35.0), ("hp_slope", S12),
+            ("b1_freq", 55.0), ("b1_gain", 3.0),
+            ("b2_freq", 400.0), ("b2_gain", -6.0), ("b2_q", 2.0),
+            ("b4_freq", 5000.0), ("b4_gain", 5.0), ("b4_q", 1.5),
+            ("gain", -3.0),
+        ],
+    ),
+    (
+        "Drums: Snare",
         &[
             ("hp_on", 1.0), ("hp_freq", 80.0), ("hp_slope", S12),
             ("b1_freq", 200.0), ("b1_gain", 2.5), ("b1_q", 1.5),
@@ -111,7 +212,44 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Bass Guitar",
+        "Drums: Toms",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 60.0), ("hp_slope", S12),
+            ("b1_freq", 100.0), ("b1_gain", 3.0), ("b1_q", 1.2),
+            ("b2_freq", 450.0), ("b2_gain", -4.0), ("b2_q", 2.0),
+            ("b4_freq", 4000.0), ("b4_gain", 2.5),
+            ("gain", -2.0),
+        ],
+    ),
+    (
+        "Drums: Overheads",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 150.0), ("hp_slope", S24),
+            ("b2_freq", 400.0), ("b2_gain", -2.0),
+            ("hs_freq", 10000.0), ("hs_gain", 3.0), ("hs_q", 0.7),
+            ("gain", -1.0),
+        ],
+    ),
+    (
+        "Drums: Hi-Hat",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 300.0), ("hp_slope", S24),
+            ("b3_freq", 1000.0), ("b3_gain", -2.0),
+            ("hs_freq", 12000.0), ("hs_gain", 2.0), ("hs_q", 0.7),
+        ],
+    ),
+    (
+        "Drums: Room Mics",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 60.0), ("hp_slope", S12),
+            ("b2_freq", 500.0), ("b2_gain", -3.0),
+            ("b5_freq", 7000.0), ("b5_gain", -2.0),
+            ("lp_on", 1.0), ("lp_freq", 12000.0), ("lp_slope", S12),
+        ],
+    ),
+    // Bass
+    (
+        "Bass: Guitar",
         &[
             ("hp_on", 1.0), ("hp_freq", 35.0), ("hp_slope", S24),
             ("b1_freq", 80.0), ("b1_gain", 2.5),
@@ -122,7 +260,28 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Acoustic Guitar",
+        "Bass: Pick Attack",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 35.0), ("hp_slope", S24),
+            ("b2_freq", 300.0), ("b2_gain", -2.0),
+            ("b4_freq", 2500.0), ("b4_gain", 3.0), ("b4_q", 1.2),
+            ("hs_freq", 6000.0), ("hs_gain", 1.0), ("hs_q", 0.7),
+            ("gain", -1.5),
+        ],
+    ),
+    (
+        "Bass: Synth Sub Focus",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 25.0), ("hp_slope", S24),
+            ("b1_freq", 50.0), ("b1_gain", 3.0),
+            ("b2_freq", 250.0), ("b2_gain", -3.0),
+            ("lp_on", 1.0), ("lp_freq", 8000.0), ("lp_slope", S12),
+            ("gain", -2.0),
+        ],
+    ),
+    // Guitar
+    (
+        "Guitar: Acoustic",
         &[
             ("hp_on", 1.0), ("hp_freq", 80.0), ("hp_slope", S12),
             ("b1_freq", 200.0), ("b1_gain", -3.0),
@@ -132,7 +291,17 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Electric Guitar: Sit in Mix",
+        "Guitar: Acoustic Strumming in a Mix",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 120.0), ("hp_slope", S24),
+            ("b1_freq", 250.0), ("b1_gain", -3.0),
+            ("b4_freq", 5000.0), ("b4_gain", 2.0),
+            ("hs_freq", 12000.0), ("hs_gain", 2.0), ("hs_q", 0.7),
+            ("gain", -1.0),
+        ],
+    ),
+    (
+        "Guitar: Electric Sit in Mix",
         &[
             ("hp_on", 1.0), ("hp_freq", 90.0), ("hp_slope", S12),
             ("b1_freq", 250.0), ("b1_gain", -2.0),
@@ -142,7 +311,29 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Piano",
+        "Guitar: Electric Lead",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 100.0), ("hp_slope", S12),
+            ("b3_freq", 1200.0), ("b3_gain", 2.5),
+            ("b4_freq", 3000.0), ("b4_gain", 1.5),
+            ("b5_freq", 6000.0), ("b5_gain", -2.0),
+            ("lp_on", 1.0), ("lp_freq", 11000.0), ("lp_slope", S12),
+            ("gain", -1.5),
+        ],
+    ),
+    (
+        "Guitar: Distorted Rhythm",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 90.0), ("hp_slope", S24),
+            ("b1_freq", 200.0), ("b1_gain", -1.5),
+            ("b4_freq", 3500.0), ("b4_gain", 1.0),
+            ("b5_freq", 6500.0), ("b5_gain", -3.0), ("b5_q", 2.0),
+            ("lp_on", 1.0), ("lp_freq", 10000.0), ("lp_slope", S12),
+        ],
+    ),
+    // Keys
+    (
+        "Keys: Piano",
         &[
             ("hp_on", 1.0), ("hp_freq", 40.0), ("hp_slope", S12),
             ("b1_freq", 300.0), ("b1_gain", -2.0),
@@ -152,14 +343,54 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "De-Mud (Low Mids)",
+        "Keys: Piano in a Busy Mix",
         &[
-            ("b1_freq", 300.0), ("b1_gain", -4.0), ("b1_q", 1.4),
-            ("b2_freq", 500.0), ("b2_gain", -2.0),
+            ("hp_on", 1.0), ("hp_freq", 100.0), ("hp_slope", S24),
+            ("b1_freq", 300.0), ("b1_gain", -3.0),
+            ("b4_freq", 3000.0), ("b4_gain", 2.0),
+            ("hs_freq", 9000.0), ("hs_gain", 1.5), ("hs_q", 0.7),
+            ("gain", -1.0),
         ],
     ),
     (
-        "Master: Gentle Smile",
+        "Keys: Electric Piano",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 60.0), ("hp_slope", S12),
+            ("b1_freq", 200.0), ("b1_gain", 1.0),
+            ("b3_freq", 1000.0), ("b3_gain", 1.5),
+            ("hs_freq", 8000.0), ("hs_gain", -1.0), ("hs_q", 0.7),
+            ("gain", -1.0),
+        ],
+    ),
+    (
+        "Keys: Pad (Make Room for Vocals)",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 150.0), ("hp_slope", S24),
+            ("b2_freq", 500.0), ("b2_gain", -2.0),
+            ("b4_freq", 3000.0), ("b4_gain", -2.0), ("b4_q", 0.8),
+            ("lp_on", 1.0), ("lp_freq", 12000.0), ("lp_slope", S12),
+        ],
+    ),
+    // Strings and brass
+    (
+        "Strings: Smooth",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 80.0), ("hp_slope", S12),
+            ("b4_freq", 3000.0), ("b4_gain", -1.5), ("b4_q", 1.2),
+            ("hs_freq", 10000.0), ("hs_gain", 1.0), ("hs_q", 0.7),
+        ],
+    ),
+    (
+        "Brass: Tame the Bite",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 100.0), ("hp_slope", S12),
+            ("b2_freq", 400.0), ("b2_gain", 1.0),
+            ("b4_freq", 2500.0), ("b4_gain", -2.0), ("b4_q", 1.5),
+        ],
+    ),
+    // Mix and master
+    (
+        "Mix: Gentle Smile",
         &[
             ("hp_on", 1.0), ("hp_freq", 25.0), ("hp_slope", S24),
             ("ls_freq", 80.0), ("ls_gain", 1.5), ("ls_q", 0.7),
@@ -169,14 +400,22 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Rumble and Hiss Cut",
+        "Mix: De-Mud (Low Mids)",
+        &[
+            ("b1_freq", 300.0), ("b1_gain", -4.0), ("b1_q", 1.4),
+            ("b2_freq", 500.0), ("b2_gain", -2.0),
+        ],
+    ),
+    (
+        "Mix: Rumble and Hiss Cut",
         &[
             ("hp_on", 1.0), ("hp_freq", 60.0), ("hp_slope", S24),
             ("lp_on", 1.0), ("lp_freq", 16000.0), ("lp_slope", S12),
         ],
     ),
+    // Creative
     (
-        "Telephone",
+        "Creative: Telephone",
         &[
             ("hp_on", 1.0), ("hp_freq", 400.0), ("hp_slope", S48),
             ("lp_on", 1.0), ("lp_freq", 3400.0), ("lp_slope", S48),
@@ -185,12 +424,30 @@ const PARAMETRIC_EQ: &[FactoryPreset] = &[
         ],
     ),
     (
-        "AM Radio",
+        "Creative: AM Radio",
         &[
             ("hp_on", 1.0), ("hp_freq", 200.0), ("hp_slope", S24),
             ("lp_on", 1.0), ("lp_freq", 5000.0), ("lp_slope", S24),
             ("b3_freq", 1800.0), ("b3_gain", 3.0), ("b3_q", 0.8),
             ("gain", 1.0),
+        ],
+    ),
+    (
+        "Creative: Megaphone",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 600.0), ("hp_slope", S48),
+            ("lp_on", 1.0), ("lp_freq", 4000.0), ("lp_slope", S48),
+            ("b3_freq", 2000.0), ("b3_gain", 6.0), ("b3_q", 1.5),
+            ("gain", 1.0),
+        ],
+    ),
+    (
+        "Creative: Walkie-Talkie",
+        &[
+            ("hp_on", 1.0), ("hp_freq", 800.0), ("hp_slope", S48),
+            ("lp_on", 1.0), ("lp_freq", 2800.0), ("lp_slope", S48),
+            ("b3_freq", 1500.0), ("b3_gain", 5.0),
+            ("gain", 2.0),
         ],
     ),
 ];
@@ -213,62 +470,89 @@ macro_rules! octaves {
 }
 
 const BAND_EQ: &[FactoryPreset] = &[
-    //                       31    63   125   250   500    1k    2k    4k    8k   16k
-    octaves!("Bass Boost", [6.0, 5.0, 3.5, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], -4.0),
-    octaves!("Bass Cut", [-8.0, -6.0, -3.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0),
-    octaves!("Treble Boost", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0], -4.0),
-    octaves!("Treble Cut", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, -3.0, -6.0, -8.0], 0.0),
-    octaves!("Loudness", [5.0, 4.0, 2.0, 0.0, -1.0, -1.0, 0.0, 2.0, 4.0, 5.0], -3.0),
-    octaves!("Vocal Boost", [-2.0, -2.0, -1.0, 0.0, 1.5, 3.0, 3.5, 2.5, 1.0, 0.0], -2.5),
-    octaves!("Spoken Word", [-6.0, -3.0, -1.0, 0.0, 1.0, 2.0, 3.0, 2.0, 0.0, -2.0], -1.5),
-    octaves!("Rock", [4.0, 3.0, 1.0, -1.0, -2.0, -1.0, 1.0, 3.0, 4.0, 4.0], -3.0),
-    octaves!("Pop", [-1.0, 1.0, 3.0, 3.5, 2.0, 0.0, -1.0, -1.0, 0.0, 1.0], -2.5),
-    octaves!("Electronic", [5.0, 4.0, 1.0, 0.0, -1.5, -1.0, 0.0, 1.5, 3.0, 3.5], -3.5),
-    octaves!("Hip-Hop", [5.0, 4.5, 2.0, 1.0, -1.0, -1.0, 0.5, 0.0, 1.0, 2.0], -3.5),
-    octaves!("Jazz", [3.0, 2.0, 1.0, 1.5, -1.0, -1.0, 0.0, 1.5, 2.5, 3.0], -2.0),
-    octaves!("Classical", [2.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.5, 2.0], -1.5),
-    octaves!("Acoustic", [2.5, 2.0, 1.0, 0.5, 1.0, 1.0, 2.0, 2.5, 2.0, 1.0], -2.0),
-    octaves!("Small Speakers", [-6.0, -3.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0], -1.0),
+    //                              31    63   125   250   500    1k    2k    4k    8k   16k
+    octaves!("Tone: Bass Boost", [6.0, 5.0, 3.5, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], -4.0),
+    octaves!("Tone: Bass Cut", [-8.0, -6.0, -3.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0),
+    octaves!("Tone: Treble Boost", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0], -4.0),
+    octaves!("Tone: Treble Cut", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, -3.0, -6.0, -8.0], 0.0),
+    octaves!("Tone: Loudness", [5.0, 4.0, 2.0, 0.0, -1.0, -1.0, 0.0, 2.0, 4.0, 5.0], -3.0),
+    octaves!("Tone: Mid Scoop", [1.0, 1.0, 0.0, -2.0, -4.0, -4.0, -2.0, 0.0, 1.0, 1.0], 0.0),
+    octaves!("Tone: Mid Forward", [-1.0, -1.0, 0.0, 1.0, 3.0, 3.5, 2.0, 0.0, -1.0, -1.0], -2.5),
+    octaves!("Voice: Vocal Boost", [-2.0, -2.0, -1.0, 0.0, 1.5, 3.0, 3.5, 2.5, 1.0, 0.0], -2.5),
+    octaves!("Voice: Spoken Word", [-6.0, -3.0, -1.0, 0.0, 1.0, 2.0, 3.0, 2.0, 0.0, -2.0], -1.5),
+    octaves!("Voice: Duck Vocals (Karaoke Feel)", [0.0, 0.0, 0.0, -1.0, -3.0, -4.0, -4.0, -2.0, 0.0, 0.0], 0.0),
+    octaves!("Genre: Rock", [4.0, 3.0, 1.0, -1.0, -2.0, -1.0, 1.0, 3.0, 4.0, 4.0], -3.0),
+    octaves!("Genre: Metal", [4.0, 3.0, 1.0, -2.0, -3.0, -2.0, 1.0, 3.5, 3.0, 2.0], -3.0),
+    octaves!("Genre: Pop", [-1.0, 1.0, 3.0, 3.5, 2.0, 0.0, -1.0, -1.0, 0.0, 1.0], -2.5),
+    octaves!("Genre: Electronic", [5.0, 4.0, 1.0, 0.0, -1.5, -1.0, 0.0, 1.5, 3.0, 3.5], -3.5),
+    octaves!("Genre: Hip-Hop", [5.0, 4.5, 2.0, 1.0, -1.0, -1.0, 0.5, 0.0, 1.0, 2.0], -3.5),
+    octaves!("Genre: R&B", [4.0, 3.5, 2.0, 0.0, -1.0, 0.0, 1.0, 1.5, 2.0, 2.5], -3.0),
+    octaves!("Genre: Jazz", [3.0, 2.0, 1.0, 1.5, -1.0, -1.0, 0.0, 1.5, 2.5, 3.0], -2.0),
+    octaves!("Genre: Classical", [2.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.5, 2.0], -1.5),
+    octaves!("Genre: Acoustic", [2.5, 2.0, 1.0, 0.5, 1.0, 1.0, 2.0, 2.5, 2.0, 1.0], -2.0),
+    octaves!("Genre: Country", [1.0, 1.0, 0.0, -1.0, 0.0, 1.0, 2.5, 3.0, 2.0, 1.5], -2.5),
+    octaves!("Genre: Reggae / Dub", [5.0, 4.0, 2.0, 0.0, -2.0, -1.0, 0.0, 0.0, -1.0, -2.0], -3.5),
+    octaves!("Playback: Small Speakers", [-6.0, -3.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0], -1.0),
+    octaves!("Playback: Late Night (Quiet Lows)", [-8.0, -5.0, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0),
+    octaves!("Playback: Headphones (Ease Treble)", [1.0, 0.5, 0.0, 0.0, 0.0, 0.0, -0.5, -1.5, -2.0, -1.0], 0.0),
 ];
 
 const CURVE_EQ: &[FactoryPreset] = &[
     // The points keep their default frequencies (40, 100, 250, 600 Hz,
     // 1.5, 3.5, 8, 16 kHz) unless a preset moves them.
     (
-        "Smile",
+        "Tone: Smile",
         &[
             ("p1_gain", 4.0), ("p2_gain", 3.0), ("p3_gain", 0.5), ("p4_gain", -1.0),
             ("p5_gain", -1.0), ("p6_gain", 0.5), ("p7_gain", 3.0), ("p8_gain", 4.0),
         ],
     ),
     (
-        "Warm",
+        "Tone: Warm",
         &[
             ("p1_gain", 1.0), ("p2_gain", 2.0), ("p3_gain", 1.5), ("p4_gain", 0.5),
             ("p6_gain", -1.0), ("p7_gain", -2.0), ("p8_gain", -3.0),
         ],
     ),
     (
-        "Bright and Airy",
+        "Tone: Bright and Airy",
         &[("p5_gain", 0.5), ("p6_gain", 1.5), ("p7_gain", 3.0), ("p8_gain", 5.0)],
     ),
     (
-        "Bass Boost",
+        "Tone: Bass Boost",
         &[("p1_gain", 6.0), ("p2_gain", 4.0), ("p3_gain", 1.0)],
     ),
     (
-        "Speech Intelligibility",
+        "Tone: Dark Lo-Fi",
+        &[("p1_gain", -6.0), ("p6_gain", -2.0), ("p7_gain", -12.0), ("p8_gain", -24.0)],
+    ),
+    (
+        "Vocal: Presence Lift",
+        &[
+            ("p1_gain", -6.0), ("p2_gain", -2.0),
+            ("p5_gain", 1.0), ("p6_gain", 3.0), ("p7_gain", 2.0), ("p8_gain", 1.0),
+        ],
+    ),
+    (
+        "Speech: Intelligibility",
         &[
             ("p1_gain", -12.0), ("p2_gain", -4.0), ("p3_gain", -1.0), ("p4_gain", -1.0),
             ("p6_gain", 3.0), ("p7_gain", 1.5),
         ],
     ),
     (
-        "Dark Lo-Fi",
-        &[("p1_gain", -6.0), ("p6_gain", -2.0), ("p7_gain", -12.0), ("p8_gain", -24.0)],
+        "Guitar: Acoustic Sparkle",
+        &[("p1_gain", -4.0), ("p3_gain", -2.0), ("p7_gain", 2.0), ("p8_gain", 3.0)],
     ),
     (
-        "Telephone",
+        "Drums: Overheads Air",
+        &[
+            ("p1_gain", -12.0), ("p2_gain", -6.0), ("p3_gain", -2.0),
+            ("p7_gain", 2.0), ("p8_gain", 3.0),
+        ],
+    ),
+    (
+        "Creative: Telephone",
         &[
             ("p1_freq", 150.0), ("p1_gain", -40.0),
             ("p2_freq", 350.0), ("p2_gain", 0.0),
@@ -323,31 +607,67 @@ const DYNAMICS: &[FactoryPreset] = &[
         &[("threshold", -24.0), ("ratio", 4.0), ("attack", 4.0), ("release", 80.0), ("knee", 4.0), ("makeup", 6.0)],
     ),
     (
-        "Speech / Podcast",
+        "Vocal: Ballad (Smooth)",
+        &[("threshold", -20.0), ("ratio", 2.0), ("attack", 15.0), ("release", 250.0), ("knee", 10.0), ("makeup", 3.0)],
+    ),
+    (
+        "Vocal: Rap (Tight)",
+        &[("threshold", -26.0), ("ratio", 6.0), ("attack", 2.0), ("release", 60.0), ("knee", 2.0), ("makeup", 8.0)],
+    ),
+    (
+        "Vocal: Backing (Even)",
+        &[("threshold", -28.0), ("ratio", 5.0), ("attack", 5.0), ("release", 120.0), ("makeup", 7.0)],
+    ),
+    (
+        "Speech: Podcast",
         &[("threshold", -24.0), ("ratio", 3.5), ("attack", 5.0), ("release", 150.0), ("knee", 8.0), ("makeup", 6.0)],
     ),
     (
-        "Drum Punch",
+        "Speech: Dense Voice-Over",
+        &[("threshold", -28.0), ("ratio", 4.0), ("attack", 3.0), ("release", 100.0), ("knee", 6.0), ("makeup", 8.0)],
+    ),
+    (
+        "Drums: Punch",
         &[("threshold", -20.0), ("ratio", 4.0), ("attack", 25.0), ("release", 80.0), ("knee", 2.0), ("makeup", 4.0)],
     ),
     (
-        "Drum Bus Glue",
+        "Drums: Kick Tighten",
+        &[("threshold", -18.0), ("ratio", 4.0), ("attack", 10.0), ("release", 60.0), ("makeup", 3.0)],
+    ),
+    (
+        "Drums: Bus Glue",
         &[("threshold", -16.0), ("ratio", 2.0), ("attack", 30.0), ("release", 150.0), ("makeup", 2.0)],
+    ),
+    (
+        "Drums: Room Crush",
+        &[("threshold", -40.0), ("ratio", 15.0), ("attack", 1.0), ("release", 50.0), ("knee", 0.0), ("makeup", 18.0)],
     ),
     (
         "Bass: Even Out",
         &[("threshold", -22.0), ("ratio", 4.0), ("attack", 15.0), ("release", 200.0), ("makeup", 4.0)],
     ),
     (
-        "Acoustic Guitar",
+        "Bass: Slap Control",
+        &[("threshold", -24.0), ("ratio", 6.0), ("attack", 1.0), ("release", 100.0), ("knee", 2.0), ("makeup", 5.0)],
+    ),
+    (
+        "Guitar: Acoustic",
         &[("threshold", -20.0), ("ratio", 3.0), ("attack", 15.0), ("release", 150.0), ("makeup", 3.0)],
     ),
     (
-        "Master Bus: Gentle",
+        "Guitar: Clean Sustain",
+        &[("threshold", -30.0), ("ratio", 4.0), ("attack", 20.0), ("release", 400.0), ("makeup", 8.0)],
+    ),
+    (
+        "Keys: Piano (Gentle)",
+        &[("threshold", -16.0), ("ratio", 2.0), ("attack", 25.0), ("release", 200.0), ("makeup", 2.0)],
+    ),
+    (
+        "Mix: Master Bus (Gentle)",
         &[("threshold", -12.0), ("ratio", 1.5), ("attack", 30.0), ("release", 300.0), ("knee", 12.0), ("makeup", 1.5)],
     ),
     (
-        "Heavy Squash",
+        "Creative: Heavy Squash",
         &[("threshold", -35.0), ("ratio", 10.0), ("attack", 1.0), ("release", 60.0), ("knee", 0.0), ("makeup", 12.0)],
     ),
 ];
@@ -366,27 +686,36 @@ const LIMITER: &[FactoryPreset] = &[
 ];
 
 const DEESSER: &[FactoryPreset] = &[
-    ("Lower Voice", &[("freq", 5000.0), ("reduction", 6.0)]),
-    ("Higher Voice", &[("freq", 7000.0), ("reduction", 6.0)]),
-    ("Gentle", &[("threshold", -24.0), ("reduction", 4.0)]),
-    ("Heavy", &[("freq", 6500.0), ("threshold", -40.0), ("reduction", 12.0)]),
+    ("Vocal: Lower Voice", &[("freq", 5000.0), ("reduction", 6.0)]),
+    ("Vocal: Higher Voice", &[("freq", 7000.0), ("reduction", 6.0)]),
+    ("Vocal: Bright Mic", &[("freq", 8500.0), ("threshold", -32.0), ("reduction", 8.0)]),
+    ("Vocal: Gentle", &[("threshold", -24.0), ("reduction", 4.0)]),
+    ("Vocal: Heavy", &[("freq", 6500.0), ("threshold", -40.0), ("reduction", 12.0)]),
+    ("Speech: Podcast", &[("freq", 6000.0), ("threshold", -28.0), ("reduction", 6.0)]),
+    ("Drums: Tame Cymbals", &[("freq", 10000.0), ("threshold", -30.0), ("reduction", 6.0)]),
 ];
 
 const OPTO: &[FactoryPreset] = &[
     // Peak Reduction sets the threshold (0.6 dB lower per step), Gain the
     // makeup (half a dB per step above 40).
-    ("Vocal Leveling", &[("peak", 45.0), ("gain", 48.0), ("emphasis", 20.0)]),
-    ("Bass", &[("peak", 50.0), ("gain", 50.0), ("tube", 40.0)]),
-    ("Gentle Bus", &[("peak", 30.0), ("gain", 44.0), ("tube", 20.0)]),
-    ("Parallel Crush", &[("peak", 75.0), ("gain", 60.0), ("mix", 40.0)]),
-    ("Limit", &[("mode", 1.0), ("peak", 60.0), ("gain", 54.0)]),
+    ("Vocal: Leveling", &[("peak", 45.0), ("gain", 48.0), ("emphasis", 20.0)]),
+    ("Vocal: Smooth Ballad", &[("peak", 35.0), ("gain", 45.0), ("tube", 40.0)]),
+    ("Vocal: Limit", &[("mode", 1.0), ("peak", 60.0), ("gain", 54.0)]),
+    ("Speech: Even Voice", &[("peak", 55.0), ("gain", 52.0), ("emphasis", 30.0)]),
+    ("Bass: Smooth", &[("peak", 50.0), ("gain", 50.0), ("tube", 40.0)]),
+    ("Drums: Parallel Crush", &[("peak", 75.0), ("gain", 60.0), ("mix", 40.0)]),
+    ("Guitar: Acoustic", &[("peak", 40.0), ("gain", 46.0), ("tube", 25.0)]),
+    ("Mix: Gentle Bus", &[("peak", 30.0), ("gain", 44.0), ("tube", 20.0)]),
 ];
 
 const PREAMP: &[FactoryPreset] = &[
-    ("Warmth", &[("drive", 25.0), ("low", 1.5), ("high", -1.0)]),
-    ("Bright Tube", &[("drive", 30.0), ("high", 2.0)]),
-    ("Saturated", &[("drive", 65.0), ("output", -4.0)]),
-    ("Parallel Grit", &[("drive", 80.0), ("mix", 35.0)]),
+    ("Vocal: Warmth", &[("drive", 25.0), ("low", 1.5), ("high", -1.0)]),
+    ("Vocal: Bright Tube", &[("drive", 30.0), ("high", 2.0)]),
+    ("Bass: Grit", &[("drive", 55.0), ("low", 2.0), ("mix", 70.0), ("output", -2.0)]),
+    ("Drums: Parallel Grit", &[("drive", 80.0), ("mix", 35.0)]),
+    ("Guitar: Saturated", &[("drive", 65.0), ("output", -4.0)]),
+    ("Keys: Warm Electric Piano", &[("drive", 40.0), ("low", 1.0), ("high", -2.0), ("output", -1.0)]),
+    ("Mix: Subtle Glue", &[("drive", 15.0), ("mix", 60.0)]),
 ];
 
 // Tube Master's picks are by position: Threshold -30 dB + 3 dB a step;
@@ -417,14 +746,7 @@ const TUBE_MASTER: &[FactoryPreset] = &[
 
 const VOX_STRIP: &[FactoryPreset] = &[
     (
-        "Podcast Host",
-        &[
-            ("low_cut", 1.0), ("comp", 45.0), ("deess", 30.0),
-            ("low", -1.0), ("high", 1.5), ("air", 20.0),
-        ],
-    ),
-    (
-        "Pop Vocal",
+        "Singing: Pop",
         &[
             ("low_cut", 1.0), ("comp", 55.0), ("deess", 35.0),
             ("tone_style", 2.0), ("high", 2.0), ("air", 35.0),
@@ -432,14 +754,45 @@ const VOX_STRIP: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Rap Vocal",
+        "Singing: Ballad",
+        &[
+            ("low_cut", 1.0), ("comp", 35.0), ("deess", 25.0),
+            ("low", 0.5), ("high", 1.0), ("air", 30.0),
+            ("fx_on", 1.0), ("fx_style", 4.0), ("fx", 20.0),
+        ],
+    ),
+    (
+        "Singing: Rap",
         &[
             ("low_cut", 1.0), ("comp", 65.0), ("deess", 30.0),
             ("tone_style", 2.0), ("mid", 1.5), ("high", 2.0), ("air", 25.0),
         ],
     ),
     (
-        "Warm Vintage",
+        "Singing: Rock",
+        &[
+            ("low_cut", 1.0), ("dyn_style", 2.0), ("comp", 60.0), ("deess", 25.0),
+            ("tone_style", 1.0), ("mid", 2.0), ("high", 1.0),
+            ("fx_on", 1.0), ("fx_style", 2.0), ("fx", 20.0),
+        ],
+    ),
+    (
+        "Singing: Backing Vocals",
+        &[
+            ("low_cut", 1.0), ("comp", 60.0), ("deess", 40.0),
+            ("low", -3.0), ("high", 2.0), ("air", 30.0),
+            ("fx_on", 1.0), ("fx_style", 4.0), ("fx", 50.0),
+        ],
+    ),
+    (
+        "Singing: Doubled",
+        &[
+            ("low_cut", 1.0), ("comp", 50.0), ("deess", 30.0),
+            ("fx_on", 1.0), ("fx_style", 1.0), ("fx", 45.0),
+        ],
+    ),
+    (
+        "Singing: Warm Vintage",
         &[
             ("dyn_style", 2.0), ("comp", 40.0), ("tone_style", 1.0),
             ("low", 1.5), ("high", -1.0),
@@ -447,8 +800,36 @@ const VOX_STRIP: &[FactoryPreset] = &[
         ],
     ),
     (
-        "Radio Voice",
+        "Speech: Podcast Host",
+        &[
+            ("low_cut", 1.0), ("comp", 45.0), ("deess", 30.0),
+            ("low", -1.0), ("high", 1.5), ("air", 20.0),
+        ],
+    ),
+    (
+        "Speech: Audiobook",
+        &[
+            ("low_cut", 1.0), ("dyn_style", 1.0), ("comp", 40.0), ("deess", 25.0),
+            ("low", -0.5), ("high", 1.0), ("air", 10.0),
+        ],
+    ),
+    (
+        "Speech: Radio Announcer",
+        &[
+            ("low_cut", 1.0), ("comp", 70.0), ("deess", 35.0),
+            ("tone_style", 2.0), ("low", 2.0), ("high", 2.0), ("air", 20.0),
+        ],
+    ),
+    (
+        "Creative: Radio Voice",
         &[("low_cut", 1.0), ("comp", 50.0), ("fx_on", 1.0), ("fx_style", 3.0), ("fx", 70.0)],
+    ),
+    (
+        "Creative: Lo-Fi Saturated",
+        &[
+            ("comp", 55.0), ("tone_style", 1.0), ("high", -3.0),
+            ("fx_on", 1.0), ("fx_style", 2.0), ("fx", 60.0),
+        ],
     ),
 ];
 
@@ -503,46 +884,68 @@ const DOTTED_QUARTER: f64 = 11.0;
 
 const ECHO: &[FactoryPreset] = &[
     (
-        "Slapback",
+        "Vocal: Slapback",
         &[("kind", 1.0), ("time", 110.0), ("feedback", 0.0), ("tone", 5000.0), ("low_cut", 100.0)],
     ),
     (
-        "Quarter Note",
-        &[("sync", 1.0), ("note", QUARTER), ("feedback", 30.0), ("wet", 25.0), ("low_cut", 150.0)],
+        "Vocal: Quarter-Note Throw",
+        &[
+            ("sync", 1.0), ("note", QUARTER), ("feedback", 25.0), ("wet", 20.0),
+            ("low_cut", 300.0), ("tone", 4500.0),
+        ],
     ),
     (
-        "Dotted Eighth",
+        "Vocal: Dotted Eighth",
         &[
             ("sync", 1.0), ("note", DOTTED_EIGHTH), ("feedback", 40.0), ("wet", 25.0),
             ("low_cut", 200.0), ("tone", 5000.0),
         ],
     ),
     (
-        "Ping-Pong Eighths",
+        "Vocal: Ping-Pong Eighths",
         &[("sync", 1.0), ("note", EIGHTH), ("pingpong", 1.0), ("feedback", 45.0), ("wet", 25.0)],
     ),
     (
-        "Tape Echo",
+        "Guitar: Rockabilly Slapback",
+        &[("kind", 1.0), ("time", 90.0), ("feedback", 10.0), ("tone", 4000.0), ("wet", 35.0)],
+    ),
+    (
+        "Guitar: Dotted-Eighth Lead",
+        &[
+            ("sync", 1.0), ("note", DOTTED_EIGHTH), ("feedback", 45.0), ("wet", 30.0),
+            ("low_cut", 150.0), ("tone", 5000.0), ("depth", 10.0), ("rate", 0.4),
+        ],
+    ),
+    (
+        "Guitar: Tape Echo",
         &[
             ("kind", 1.0), ("time", 380.0), ("feedback", 50.0), ("depth", 20.0), ("rate", 0.5),
             ("drive", 25.0), ("tone", 3500.0), ("low_cut", 150.0),
         ],
     ),
     (
-        "Analog Dub",
+        "Drums: Snare Eighth",
+        &[("sync", 1.0), ("note", EIGHTH), ("feedback", 20.0), ("wet", 20.0), ("low_cut", 400.0)],
+    ),
+    (
+        "Keys: Wide Quarter",
+        &[("sync", 1.0), ("note", QUARTER), ("pingpong", 1.0), ("feedback", 35.0), ("wet", 22.0), ("tone", 5000.0)],
+    ),
+    (
+        "Creative: Analog Dub",
         &[
             ("kind", 2.0), ("sync", 1.0), ("note", DOTTED_QUARTER), ("feedback", 75.0),
             ("tone", 2500.0), ("low_cut", 200.0), ("drive", 30.0), ("wet", 35.0),
         ],
     ),
     (
-        "Ambient Wash",
+        "Creative: Ambient Wash",
         &[
             ("time", 700.0), ("feedback", 60.0), ("depth", 25.0), ("rate", 0.3),
             ("tone", 4000.0), ("low_cut", 250.0), ("wet", 25.0),
         ],
     ),
-    ("Send (100% Wet)", &[("dry", 0.0), ("wet", 100.0), ("low_cut", 150.0)]),
+    ("Utility: Send (100% Wet)", &[("dry", 0.0), ("wet", 100.0), ("low_cut", 150.0)]),
 ];
 
 // Reverb types.
@@ -554,82 +957,132 @@ const STUDIO: f64 = 5.0;
 
 const REVERB: &[FactoryPreset] = &[
     (
-        "Vocal Plate",
+        "Vocal: Plate",
         &[
             ("kind", PLATE), ("decay", 1800.0), ("predelay", 30.0), ("damping", 40.0),
             ("diffusion", 70.0), ("low_cut", 200.0), ("high_cut", 9000.0), ("wet", 22.0),
         ],
     ),
     (
-        "Snare Plate",
+        "Vocal: Ballad Hall",
+        &[
+            ("kind", HALL), ("size", 70.0), ("decay", 2600.0), ("predelay", 50.0),
+            ("low_cut", 200.0), ("high_cut", 8000.0), ("wet", 22.0),
+        ],
+    ),
+    (
+        "Vocal: Short Room (Rap)",
+        &[
+            ("kind", ROOM), ("size", 20.0), ("decay", 400.0), ("predelay", 10.0),
+            ("low_cut", 250.0), ("wet", 12.0),
+        ],
+    ),
+    (
+        "Drums: Snare Plate",
         &[
             ("kind", PLATE), ("size", 45.0), ("decay", 1300.0), ("predelay", 15.0),
             ("low_cut", 250.0), ("wet", 25.0),
         ],
     ),
     (
-        "Small Room",
-        &[
-            ("kind", ROOM), ("size", 25.0), ("decay", 500.0), ("predelay", 5.0),
-            ("early", 40.0), ("damping", 60.0), ("wet", 20.0),
-        ],
-    ),
-    (
-        "Drum Room",
+        "Drums: Room",
         &[
             ("kind", ROOM), ("size", 40.0), ("decay", 800.0), ("predelay", 3.0),
             ("early", 50.0), ("damping", 45.0), ("low_cut", 120.0), ("wet", 25.0),
         ],
     ),
     (
-        "Subtle Ambience",
-        &[("kind", STUDIO), ("size", 30.0), ("decay", 600.0), ("early", 50.0), ("wet", 12.0)],
-    ),
-    (
-        "Concert Hall",
+        "Drums: Big Room",
         &[
-            ("kind", HALL), ("size", 85.0), ("decay", 3200.0), ("predelay", 35.0), ("early", 25.0),
-            ("damping", 40.0), ("diffusion", 75.0), ("low_cut", 80.0), ("wet", 28.0),
+            ("kind", ROOM), ("size", 70.0), ("decay", 1500.0), ("early", 60.0),
+            ("low_cut", 120.0), ("wet", 25.0),
         ],
     ),
     (
-        "Cathedral",
-        &[
-            ("kind", HALL), ("size", 100.0), ("decay", 7000.0), ("predelay", 60.0),
-            ("damping", 30.0), ("modulation", 40.0), ("wet", 35.0),
-        ],
-    ),
-    (
-        "Spring Tank",
+        "Guitar: Spring Tank",
         &[
             ("kind", SPRING), ("size", 40.0), ("decay", 2000.0), ("low_cut", 300.0),
             ("high_cut", 6000.0), ("wet", 30.0),
         ],
     ),
     (
-        "Huge Ambient",
+        "Guitar: Ambient Lead",
+        &[
+            ("kind", HALL), ("size", 90.0), ("decay", 5000.0), ("predelay", 40.0),
+            ("modulation", 50.0), ("low_cut", 200.0), ("wet", 30.0),
+        ],
+    ),
+    (
+        "Keys: Piano Hall",
+        &[
+            ("kind", HALL), ("size", 75.0), ("decay", 2200.0), ("predelay", 20.0),
+            ("damping", 45.0), ("wet", 20.0),
+        ],
+    ),
+    (
+        "Strings: Lush Hall",
+        &[
+            ("kind", HALL), ("size", 90.0), ("decay", 3500.0), ("predelay", 30.0),
+            ("diffusion", 80.0), ("wet", 30.0),
+        ],
+    ),
+    (
+        "Space: Small Room",
+        &[
+            ("kind", ROOM), ("size", 25.0), ("decay", 500.0), ("predelay", 5.0),
+            ("early", 40.0), ("damping", 60.0), ("wet", 20.0),
+        ],
+    ),
+    (
+        "Space: Subtle Ambience",
+        &[("kind", STUDIO), ("size", 30.0), ("decay", 600.0), ("early", 50.0), ("wet", 12.0)],
+    ),
+    (
+        "Space: Concert Hall",
+        &[
+            ("kind", HALL), ("size", 85.0), ("decay", 3200.0), ("predelay", 35.0), ("early", 25.0),
+            ("damping", 40.0), ("diffusion", 75.0), ("low_cut", 80.0), ("wet", 28.0),
+        ],
+    ),
+    (
+        "Space: Cathedral",
+        &[
+            ("kind", HALL), ("size", 100.0), ("decay", 7000.0), ("predelay", 60.0),
+            ("damping", 30.0), ("modulation", 40.0), ("wet", 35.0),
+        ],
+    ),
+    (
+        "Space: Huge Ambient",
         &[
             ("kind", HALL), ("size", 100.0), ("decay", 12000.0), ("predelay", 80.0),
             ("modulation", 60.0), ("high_cut", 7000.0), ("wet", 40.0),
         ],
     ),
-    ("Send (100% Wet)", &[("dry", 0.0), ("wet", 100.0), ("low_cut", 150.0)]),
+    ("Utility: Send (100% Wet)", &[("dry", 0.0), ("wet", 100.0), ("low_cut", 150.0)]),
 ];
 
 const STUDIO_REVERB: &[FactoryPreset] = &[
     (
-        "Vocal Room",
+        "Vocal: Room",
         &[("size", 35.0), ("decay", 900.0), ("early", 30.0), ("low_cut", 200.0), ("high_cut", 10000.0), ("wet", 20.0)],
     ),
     (
-        "Drum Room",
+        "Drums: Room",
         &[("size", 40.0), ("decay", 700.0), ("early", 50.0), ("damping", 45.0), ("low_cut", 120.0), ("wet", 25.0)],
     ),
     (
-        "Large Hall",
+        "Guitar: Acoustic Room",
+        &[("size", 35.0), ("decay", 900.0), ("early", 35.0), ("low_cut", 150.0), ("wet", 18.0)],
+    ),
+    (
+        "Keys: Piano Room",
+        &[("size", 50.0), ("decay", 1400.0), ("early", 25.0), ("damping", 50.0), ("wet", 20.0)],
+    ),
+    (
+        "Space: Large Hall",
         &[("size", 90.0), ("decay", 3500.0), ("early", 15.0), ("damping", 35.0), ("diffusion", 75.0), ("wet", 28.0)],
     ),
-    ("Send (100% Wet)", &[("dry", 0.0), ("wet", 100.0), ("low_cut", 150.0)]),
+    ("Utility: Send (100% Wet)", &[("dry", 0.0), ("wet", 100.0), ("low_cut", 150.0)]),
 ];
 
 // ------------------------------------------------------------ modulation and stereo
@@ -642,36 +1095,44 @@ const DOUBLE: f64 = 3.0;
 
 const MODULATION: &[FactoryPreset] = &[
     (
-        "Subtle Chorus",
+        "Vocal: Wide Double Track",
+        &[("kind", DOUBLE), ("adt_offset", 15.0), ("src_pan", -70.0), ("adt_pan", 70.0)],
+    ),
+    (
+        "Vocal: Subtle Chorus",
         &[("kind", CHORUS), ("rate", 0.4), ("depth", 25.0), ("voices", 2.0), ("chorus_delay", 15.0), ("wet", 35.0)],
     ),
     (
-        "Lush Chorus",
-        &[("kind", CHORUS), ("rate", 0.8), ("depth", 60.0), ("voices", 4.0), ("chorus_delay", 22.0)],
-    ),
-    (
-        "Clean Guitar Chorus",
+        "Guitar: Clean Chorus",
         &[("kind", CHORUS), ("rate", 1.2), ("depth", 45.0), ("voices", 2.0), ("chorus_delay", 12.0)],
     ),
     (
-        "Subtle Flanger",
-        &[("kind", FLANGER), ("rate", 0.3), ("depth", 40.0), ("feedback", 30.0), ("wet", 40.0)],
-    ),
-    (
-        "Jet Flanger",
+        "Guitar: Jet Flanger",
         &[("kind", FLANGER), ("rate", 0.15), ("depth", 80.0), ("feedback", 70.0), ("flange_delay", 2.0)],
     ),
     (
-        "Classic Phaser",
+        "Guitar: Classic Phaser",
         &[("kind", PHASER), ("rate", 0.5), ("depth", 70.0), ("stages", 1.0), ("feedback", 40.0), ("center", 800.0)],
     ),
     (
-        "Deep Phaser",
+        "Bass: Subtle Chorus",
+        &[("kind", CHORUS), ("rate", 0.5), ("depth", 20.0), ("voices", 2.0), ("chorus_delay", 10.0), ("wet", 30.0)],
+    ),
+    (
+        "Keys: Electric Piano Phaser",
+        &[("kind", PHASER), ("rate", 0.4), ("depth", 60.0), ("stages", 1.0), ("feedback", 20.0)],
+    ),
+    (
+        "Keys: Lush Chorus",
+        &[("kind", CHORUS), ("rate", 0.8), ("depth", 60.0), ("voices", 4.0), ("chorus_delay", 22.0)],
+    ),
+    (
+        "Synth: Deep Phaser",
         &[("kind", PHASER), ("rate", 0.25), ("depth", 85.0), ("stages", 3.0), ("feedback", 60.0), ("center", 600.0)],
     ),
     (
-        "Wide Double Track",
-        &[("kind", DOUBLE), ("adt_offset", 15.0), ("src_pan", -70.0), ("adt_pan", 70.0)],
+        "Synth: Subtle Flanger",
+        &[("kind", FLANGER), ("rate", 0.3), ("depth", 40.0), ("feedback", 30.0), ("wet", 40.0)],
     ),
 ];
 
@@ -734,6 +1195,22 @@ mod tests {
             }
         }
         assert!(count > 100, "{count} presets");
+    }
+
+    #[test]
+    fn each_group_is_listed_together() {
+        // The window heads each group once ("Vocal: Clarity" sits under
+        // Vocal), so a group's presets must not be split up.
+        for info in crate::registry() {
+            let mut seen: Vec<&str> = Vec::new();
+            for (name, _) in factory(info.id) {
+                let g = name.split_once(": ").map_or("", |(g, _)| g);
+                if seen.last() != Some(&g) {
+                    assert!(!seen.contains(&g), "{}: group {g:?} split", info.id);
+                    seen.push(g);
+                }
+            }
+        }
     }
 
     #[test]

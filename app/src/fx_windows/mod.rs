@@ -480,7 +480,10 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
         egui::ComboBox::from_id_salt(fx.uid.with("presets"))
             .selected_text(if name.is_empty() { "(current)" } else { &name })
             .width(150.0)
+            .height(440.0)
             .show_ui(ui, |ui| {
+                // Long names stay on one line (the list widens to fit).
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if ui.selectable_label(false, "Default").clicked() {
                     for k in 0..fx.ctls.len() {
                         let key = fx.ctls[k].key.clone();
@@ -492,8 +495,24 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
                 // The presets that come with the effect: the defaults with
                 // their own settings on top.
                 let factory = af2_fx::presets::factory(&fx.id);
+                // "Vocal: Clarity" is listed as Clarity under a Vocal
+                // heading; the presets come in their groups' order.
+                let mut group = "";
                 for (n, set) in factory {
-                    if ui.selectable_label(*n == name, *n).clicked() {
+                    let (g, short) = n.split_once(": ").unwrap_or(("", n));
+                    if g != group {
+                        group = g;
+                        if !g.is_empty() {
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(g).small().strong().color(c(th.text_dim)));
+                        }
+                    }
+                    let label = if g.is_empty() {
+                        (*n).to_string()
+                    } else {
+                        format!("   {short}")
+                    };
+                    if ui.selectable_label(*n == name, label).clicked() {
                         let tempo = tempo.unwrap_or_else(|| fx.get("tempo"));
                         for k in 0..fx.ctls.len() {
                             let key = fx.ctls[k].key.clone();
