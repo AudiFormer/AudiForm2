@@ -1110,7 +1110,25 @@ impl State {
                 .and_then(|t| Session::from_json(&t))
                 .map(|s| (s, Vec::new(), None))
         } else {
-            crate::sessions::import_session(path).map(|i| (i.session, i.notices, i.base))
+            match crate::sessions::import_session(path) {
+                // Another program's effects: converted (after a copy of
+                // the file is kept), or the session is not opened.
+                Ok(mut i) => match crate::sessions::convert_foreign(path, &mut i.session) {
+                    Ok(notes) => {
+                        i.notices.extend(notes);
+                        Ok((i.session, i.notices, i.base))
+                    }
+                    Err(crate::sessions::NotOpened::Declined) => {
+                        self.toast(format!(
+                            "Did not open {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                        return;
+                    }
+                    Err(crate::sessions::NotOpened::Failed(e)) => Err(e),
+                },
+                Err(e) => Err(e),
+            }
         };
         match result {
             Ok((session, notices, base)) => {
