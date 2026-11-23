@@ -1118,7 +1118,7 @@ impl State {
                         i.notices.extend(notes);
                         Ok((i.session, i.notices, i.base))
                     }
-                    Err(crate::sessions::NotOpened::Declined) => {
+                    Err(crate::sessions::NotOpened::Cancelled) => {
                         self.toast(format!(
                             "Did not open {}",
                             path.file_name().unwrap_or_default().to_string_lossy()
@@ -2890,8 +2890,6 @@ mod view_tests {
     }
 }
 
-/// The session with everything that does not change the sound cleared, to
-/// tell whether an edit needs a new mix.
 /// The Waveform editor's file as a mix of one track carrying the file's
 /// rack: the effects run live, as a Multitrack track's do. The track and
 /// master are left at unity (fader 0 dB, centred), so with the rack
@@ -2937,6 +2935,8 @@ fn file_mix_program(
     af2_engine::mix_program(&s, &|m| (m == media).then(|| buf.clone()), rate)
 }
 
+/// The session with everything that does not change the sound cleared, to
+/// tell whether an edit needs a new mix.
 fn audio_view(s: &Session) -> Session {
     let mut s = s.clone();
     s.name.clear();

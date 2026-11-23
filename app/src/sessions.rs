@@ -319,17 +319,18 @@ No: beside me",
 
 /// Why a session was not opened after [`convert_foreign`].
 pub enum NotOpened {
-    /// The user chose not to convert (nothing to report as an error).
-    Declined,
+    /// The user cancelled (nothing to report as an error).
+    Cancelled,
     /// The copy of the original could not be made.
     Failed(String),
 }
 
 /// An AudiForm 1 or `.sesx` session's effects, before it opens: asks
-/// whether to turn them into their closest AudiForm 2 effects. No: the
-/// session is not opened. Yes: a copy of the file as it is goes beside it
-/// first (`Show (original).sesx`), then the effects AudiForm 2 cannot run
-/// are replaced. Returns the lines to tell the user.
+/// whether to turn them into their closest AudiForm 2 effects. Yes: a copy
+/// of the file as it is goes beside it first (`Show (original).sesx`),
+/// then the effects AudiForm 2 cannot run are replaced. No: it opens as it
+/// is, those effects silent but kept, so they save back unchanged. Cancel:
+/// it is not opened. Returns the lines to tell the user.
 ///
 /// Asked for a `.sesx` session with any effects (they are another
 /// program's, some converted by estimate), and for an Audiform session
@@ -393,17 +394,19 @@ pub fn convert_foreign(path: &Path, session: &mut af2_core::Session) -> Result<V
         )
     };
     let text = format!(
-        "“{name}” is {what}.\n\n{body}\n\nBefore anything changes, a copy of the original is kept as “{backup_name}”.\n\nConvert the effects and open it? (Not converting leaves it unopened.)"
+        "“{name}” is {what}.\n\n{body}\n\nBefore anything changes, a copy of the original is kept as “{backup_name}”.\n\nConvert the effects? (Yes converts them; No opens it unchanged, those effects kept but silent.)"
     );
     let reply = crate::file_dialog::ask(
         "Convert Effects",
         &text,
-        &["Convert and Open", "Don't Open"],
-        false,
+        &["Convert and Open", "Open Unchanged", "Cancel"],
+        true,
         false,
     );
-    if reply != crate::file_dialog::Reply::Yes {
-        return Err(NotOpened::Declined);
+    match reply {
+        crate::file_dialog::Reply::Yes => {}
+        crate::file_dialog::Reply::No => return Ok(Vec::new()),
+        crate::file_dialog::Reply::Cancel => return Err(NotOpened::Cancelled),
     }
     std::fs::copy(path, &backup).map_err(|e| {
         NotOpened::Failed(format!(
