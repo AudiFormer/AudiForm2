@@ -20,3 +20,17 @@ jobs:
         with:
           name: AudiForm2-windows
           path: target/release/audiform2.exe
+
+  # The same tests on Linux, where contributors work too: path handling,
+  # the desktop integration and the plug-in host differ there.
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev libwayland-dev libudev-dev
+      - run: cargo test --workspace

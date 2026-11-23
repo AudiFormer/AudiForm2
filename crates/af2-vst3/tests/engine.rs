@@ -3,6 +3,9 @@
 
 //! Plug-ins inside the engine's mix: an export (an offline render) through
 //! a session whose tracks hold the test plug-in.
+// Plug-ins are hosted on Windows only for now (the scanner says so
+// elsewhere), so these run there.
+#![cfg(windows)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
