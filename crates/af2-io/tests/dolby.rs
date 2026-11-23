@@ -5,6 +5,10 @@
 //! (Windows). Each test file (made with ffmpeg from sine tones) has a
 //! different tone on each speaker; the expected order is ffmpeg's own
 //! decode of the same file.
+//!
+//! The Dolby decoders aren't on every copy of Windows (not on Windows
+//! Server, so not on GitHub's CI runners); where Windows says it has
+//! none, those two tests are skipped. Any other failure still fails.
 
 #![cfg(windows)]
 
@@ -37,14 +41,31 @@ fn tones(f: &str) -> (u32, Vec<u32>) {
     (rate, hz)
 }
 
+/// Whether Windows has a decoder for `f` (the Dolby ones are optional).
+fn decodable(f: &str) -> bool {
+    match af2_io::open_file(&media(f)) {
+        Err(e) if e.contains("Windows has no decoder for it") => {
+            eprintln!("{f}: no decoder on this copy of Windows, skipped ({e})");
+            false
+        }
+        _ => true,
+    }
+}
+
 #[test]
 fn dolby_digital_51_opens_with_every_speaker() {
+    if !decodable("ac3_51.m4a") {
+        return;
+    }
     assert_eq!(tones("ac3_51.m4a"), (48_000, vec![300, 400, 200, 500, 600, 700]));
 }
 
 #[test]
 fn dolby_digital_plus_51_opens_with_every_speaker() {
     // How Dolby Atmos music comes: its bed decodes like this.
+    if !decodable("eac3_51.m4a") {
+        return;
+    }
     assert_eq!(tones("eac3_51.m4a"), (48_000, vec![300, 400, 200, 500, 600, 700]));
 }
 
