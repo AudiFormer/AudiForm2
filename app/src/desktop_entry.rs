@@ -8,6 +8,10 @@
 //! Menu (or Remove) does it any time. An entry made here follows the
 //! AppImage when it is moved or a newer one is started, and `TryExec` hides
 //! it from the menu once the file is gone.
+//!
+//! The entry's `Icon=` follows the theme (`linux_desktop.rs`), and
+//! Preferences > General > Desktop (or `AF2_NO_DESKTOP_ENTRY`) turns all of
+//! this off; unticking it there also takes the entry out.
 
 use std::path::{Path, PathBuf};
 
@@ -154,7 +158,44 @@ pub fn add(app: &Path) -> Result<(), String> {
     write(&icon, crate::app_icon::DEFAULT_256)?;
     write(&entry, entry_text(app, &icon).as_bytes())?;
     refresh();
+    crate::linux_desktop::entry_added();
     Ok(())
+}
+
+/// Points our entry's `Icon=` at the installed icon `name` (the theme's).
+/// Called off the UI thread.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn set_icon(name: &str) -> Result<(), String> {
+    let text = ours().ok_or("No entry of ours.")?;
+    let path = entry_path().ok_or("No home folder.")?;
+    let want = with_icon(&text, name);
+    if want == text {
+        return Ok(());
+    }
+    let tmp = path.with_extension("desktop.af2-tmp");
+    std::fs::write(&tmp, want.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    refresh();
+    Ok(())
+}
+
+/// `text` with its main group's `Icon=` line naming `icon`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn with_icon(text: &str, icon: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut main = false;
+    for line in text.lines() {
+        if line.starts_with('[') {
+            main = line.trim() == "[Desktop Entry]";
+        }
+        if main && line.starts_with("Icon=") {
+            out.push_str(&format!("Icon={}\n", value(icon)));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Removes this program's entry and icon (never another install's).
@@ -168,6 +209,7 @@ pub fn remove() -> Result<(), String> {
         let _ = std::fs::remove_file(icon);
     }
     refresh();
+    crate::linux_desktop::entry_removed();
     Ok(())
 }
 
@@ -188,6 +230,9 @@ fn refresh() {
 /// Once, at start: point an existing entry at this AppImage, or ask.
 fn start(st: &mut State) {
     let Some(app) = appimage() else { return };
+    if !crate::linux_desktop::integration_allowed(st) {
+        return;
+    }
     if let Some(text) = ours() {
         let want = format!("Exec={} %F", exec_arg(&app));
         if !text.lines().any(|l| l == want) {
@@ -219,6 +264,9 @@ pub fn menu_item(ui: &mut egui::Ui, st: &mut State) {
             });
             ui.close_menu();
         }
+    } else if !crate::linux_desktop::integration_allowed(st) {
+        ui.add_enabled(false, egui::Button::new("Add to Applications Menu"))
+            .on_disabled_hover_text("Turned off in Preferences > General > Desktop.");
     } else if ui
         .button("Add to Applications Menu")
         .on_hover_text("Lists AudiForm 2 in your desktop's applications menu, starting this AppImage from where it is.")
@@ -256,6 +304,10 @@ pub fn ui(ctx: &egui::Context, st: &mut State) {
         return;
     }
     if !st.desktop_entry.asking {
+        return;
+    }
+    if !crate::linux_desktop::integration_allowed(st) {
+        st.desktop_entry.asking = false;
         return;
     }
     let Some(app) = appimage() else {
@@ -329,6 +381,19 @@ mod tests {
         assert!(t.contains("\nIcon=/home/me/.local/share/icons/x.png\n"));
         assert!(t.starts_with("[Desktop Entry]\n"));
         assert!(t.ends_with(&format!("{MARK}\n")));
+    }
+
+    #[test]
+    fn the_icon_follows_the_theme() {
+        let t = entry_text(Path::new("/a/b.AppImage"), Path::new("/i/x.png"));
+        let u = with_icon(&t, "io.github.audiformer.AudiForm2-theme-pastel");
+        assert!(u.contains("\nIcon=io.github.audiformer.AudiForm2-theme-pastel\n"));
+        assert!(!u.contains("Icon=/i/x.png"));
+        assert_eq!(u.lines().count(), t.lines().count());
+        assert!(u.ends_with(&format!("{MARK}\n")));
+        // Icon lines of other groups (actions) stay as they are.
+        let a = with_icon("[Desktop Entry]\nIcon=a\n[Desktop Action x]\nIcon=b\n", "c");
+        assert_eq!(a, "[Desktop Entry]\nIcon=c\n[Desktop Action x]\nIcon=b\n");
     }
 
     #[test]

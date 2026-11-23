@@ -480,11 +480,13 @@ fn finished(st: &mut State, req: Request, outputs: Vec<(String, PathBuf)>) {
         st.load_file(p.clone(), None);
     }
     let names: Vec<&str> = outputs.iter().map(|(n, _)| n.as_str()).collect();
-    st.toast(format!(
+    let msg = format!(
         "Separated {} into {}; the results are in the Files panel.",
         req.source.label,
         names.join(", ")
-    ));
+    );
+    crate::linux_desktop::job_done(&msg);
+    st.toast(msg);
     if let (false, Some(media)) = (req.source.clips.is_empty(), req.source.media) {
         st.separation.ask = Some(Ask::AddTracks {
             clips: req.source.clips,

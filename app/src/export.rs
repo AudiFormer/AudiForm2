@@ -936,6 +936,7 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
             } else {
                 format!("Exported {n} files ({})", ex::human_bytes(bytes))
             };
+            crate::linux_desktop::job_done(&text);
             match done.reports.first() {
                 Some(r) => st.toast_file(text, r.path.clone()),
                 None => st.toast(text),
@@ -943,7 +944,9 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
         }
         Then::Mixdown(path) => {
             let bytes: u64 = done.reports.iter().map(|r| r.bytes).sum();
-            st.toast_file(format!("Exported {} ({})", path.display(), ex::human_bytes(bytes)), path.clone());
+            let text = format!("Exported {} ({})", path.display(), ex::human_bytes(bytes));
+            crate::linux_desktop::job_done(&text);
+            st.toast_file(text, path.clone());
             // The mixdown comes up in the Waveform editor to listen to.
             match (st.doc_for_path(&path), done.reload) {
                 (Some(id), Some(buf)) => {
@@ -960,6 +963,7 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
         }
         Then::Archive(path) => {
             let text = done.note.unwrap_or_else(|| format!("Archived to {}", path.display()));
+            crate::linux_desktop::job_done(&text);
             st.toast_file(text, path);
         }
         Then::Bounce { name, at } => {
@@ -971,7 +975,9 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
                 }
                 st.place_doc(id, t, at);
                 st.mode = Mode::Multitrack;
-                st.toast(format!("Bounced to new track {name}"));
+                let msg = format!("Bounced to new track {name}");
+                crate::linux_desktop::job_done(&msg);
+                st.toast(msg);
             }
         }
     }

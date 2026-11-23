@@ -31,6 +31,7 @@ mod inspector;
 mod instruments;
 mod keymap;
 mod lane_menu;
+mod linux_desktop;
 mod loudness_meter;
 mod memstat;
 mod meters;

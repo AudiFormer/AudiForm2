@@ -2768,6 +2768,7 @@ impl eframe::App for App {
             self.st.theme_changed = false;
         }
         crate::app_icon::frame();
+        crate::linux_desktop::frame(ctx, &self.st);
         crate::wayland_dnd::frame(ctx);
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
