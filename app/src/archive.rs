@@ -522,7 +522,10 @@ enum Task {
 
 struct Render {
     task: Task,
-    program: af2_engine::Program,
+    /// What feeds the track or bus, alone; its program is built on the
+    /// worker that renders it (building one loads its effects and
+    /// plug-ins, slow on a heavy session, so not on the UI thread).
+    session: Session,
     from: f64,
     to: f64,
 }
@@ -580,21 +583,18 @@ fn plan_with(
         .filter_map(|m| m.path.as_ref().and_then(|p| std::fs::metadata(p).ok()))
         .map(|m| m.len())
         .sum();
-    let rate = session.rate;
     let mut renders = Vec::new();
     if opts.commit {
         for id in commit_targets(&session) {
             let Some(t) = session.tracks.iter().find(|t| t.id == id) else { continue };
             let Some((a, b)) = extent(t) else { continue };
-            let program = af2_engine::mix_program(&isolate(&session, id), get, rate);
-            renders.push(Render { task: Task::Commit(id), program, from: a, to: b + TAIL });
+            renders.push(Render { task: Task::Commit(id), session: isolate(&session, id), from: a, to: b + TAIL });
         }
         if opts.bounce_buses {
             for id in bounce_targets(&session) {
-                let program = af2_engine::mix_program(&isolate(&session, id), get, rate);
                 renders.push(Render {
                     task: Task::Bounce(id),
-                    program,
+                    session: isolate(&session, id),
                     from: 0.0,
                     to: session.duration() + TAIL,
                 });
@@ -612,10 +612,18 @@ fn plan_with(
     })
 }
 
-/// Renders a program to a stereo buffer; None when cancelled.
-fn render(r: Render, rate: u32, cancel: &AtomicBool) -> Option<AudioBuffer> {
-    let mut inter: Vec<f32> = Vec::new();
-    let ch = af2_engine::render_each(r.program, rate, r.from, r.to, false, |b| {
+/// Renders a track or bus to a stereo buffer; None when cancelled.
+fn render(
+    r: &Render,
+    media: &HashMap<MediaId, Arc<AudioBuffer>>,
+    rate: u32,
+    cancel: &AtomicBool,
+) -> Option<AudioBuffer> {
+    // Tails decaying into silence: no slow subnormal arithmetic.
+    af2_engine::denormal::flush_to_zero();
+    let program = af2_engine::mix_program(&r.session, &|m| media.get(&m).cloned(), rate);
+    let mut inter: Vec<f32> = Vec::with_capacity(((r.to - r.from).max(0.0) * rate as f64) as usize * 2);
+    let ch = af2_engine::render_each(program, rate, r.from, r.to, false, |b| {
         inter.extend_from_slice(b);
         !cancel.load(Ordering::Relaxed)
     });
@@ -663,21 +671,33 @@ fn build(p: Plan, done: &AtomicU64, cancel: &AtomicBool) -> Result<Summary, Stri
         done.fetch_add(n, Ordering::Relaxed);
     };
     let cancelled = || cancel.load(Ordering::Relaxed);
+    let trace = std::env::var_os("AF2_TRACE").is_some();
+    let t_start = std::time::Instant::now();
+    let lap = |what: &str| {
+        if trace {
+            eprintln!("archive: {what} at {:.1} s", t_start.elapsed().as_secs_f64());
+        }
+    };
 
-    // 1. Renders, from the session as it was.
+    // 1. Renders, from the session as it was: several at once (each
+    // track or bus is independent), then put in, in order.
     let mut committed = 0;
     let mut bounced = 0;
-    for r in renders {
+    let outs = parallel(renders.len(), render_workers(&renders, rate), |i| {
         if cancelled() {
-            return Err("Cancelled.".into());
+            return None;
         }
+        let b = render(&renders[i], &media, rate, cancel);
+        step(100);
+        b
+    });
+    for (r, buf) in renders.iter().zip(outs) {
+        let buf = buf.ok_or("Cancelled.")?;
         let from = r.from;
         let task = match r.task {
             Task::Commit(t) => Task::Commit(t),
             Task::Bounce(t) => Task::Bounce(t),
         };
-        let buf = render(r, rate, cancel).ok_or("Cancelled.")?;
-        step(100);
         let trimmed = trim_silence(buf);
         match task {
             Task::Commit(id) => {
@@ -747,6 +767,7 @@ fn build(p: Plan, done: &AtomicU64, cancel: &AtomicBool) -> Result<Summary, Stri
         }
     }
 
+    lap("renders done");
     // 2. Media: what clips play, cut to size, each as its own file.
     if opts.trim && opts.drop_hidden {
         drop_hidden(&mut session, opts.handles.max(0.0));
@@ -763,47 +784,88 @@ fn build(p: Plan, done: &AtomicU64, cancel: &AtomicBool) -> Result<Summary, Stri
     let mut moves: HashMap<MediaId, Vec<(f64, f64, MediaId)>> = HashMap::new();
     let mut ids: Vec<MediaId> = spans.keys().copied().collect();
     ids.sort_unstable();
-    for mid in ids {
-        if cancelled() {
-            return Err("Cancelled.".into());
-        }
-        let Some(item) = session.media(mid).cloned() else { continue };
-        let Some(buf) = media.get(&mid).cloned() else { continue };
+    // What each file keeps, named in order; then all encoded at once.
+    struct Part {
+        mid: MediaId,
+        k: usize,
+        a: f64,
+        b: f64,
+        label: String,
+        file: String,
+        whole: bool,
+        last: bool,
+    }
+    let mut parts: Vec<Part> = Vec::new();
+    for &mid in &ids {
+        let Some(item) = session.media(mid) else { continue };
+        let Some(buf) = media.get(&mid) else { continue };
         let dur = buf.frames() as f64 / buf.rate as f64;
         let keep = if opts.trim {
             keep_spans(spans[&mid].clone(), opts.handles.max(0.0), JOIN_GAP, dur)
         } else {
             vec![(0.0, dur)]
         };
-        for (k, (a, b)) in keep.iter().copied().enumerate() {
-            let part = if a <= 0.0 && b >= dur { (*buf).clone() } else { slice(&buf, a, b) };
-            let (container, format, ext) = storage(&part, opts.exact_float);
-            let label = if keep.len() > 1 { format!("{} part {}", item.name, k + 1) } else { item.name.clone() };
+        let n = keep.len();
+        // FLAC or WAV is decided by the file's samples, the same for
+        // every part of it.
+        let (_, _, ext) = storage(buf, opts.exact_float);
+        for (k, (a, b)) in keep.into_iter().enumerate() {
+            let label = if n > 1 { format!("{} part {}", item.name, k + 1) } else { item.name.clone() };
             let file = file_name(&label, &mut names, ext);
-            let path = tmp.join("Audio").join(&file);
-            let eo = af2_io::export::Options {
-                container,
-                format,
-                dither: false,
-                flac_level: 8,
-                ..Default::default()
-            };
-            af2_io::export::export_buffer(&path, &part, &eo, &Default::default())?;
-            entries.push((format!("Audio/{file}"), path, container == af2_io::export::Container::Wav));
-            let mut it = item.clone();
-            if k > 0 {
-                it.id = session.alloc_id();
-                it.ext_id = None;
-            }
-            it.name = label;
-            it.path = Some(PathBuf::from(format!("Audio/{file}")));
-            it.rate = part.rate;
-            it.channels = part.num_channels() as u16;
-            it.duration = part.frames() as f64 / part.rate as f64;
-            moves.entry(mid).or_default().push((a, b, it.id));
-            new_items.push(it);
+            parts.push(Part { mid, k, a, b, label, file, whole: a <= 0.0 && b >= dur, last: k + 1 == n });
         }
-        step(20);
+    }
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 8);
+    // Each part: (container, rate, channels, frames), or an error.
+    type Wrote = Result<(af2_io::export::Container, u32, usize, usize), String>;
+    let written: Vec<Option<Wrote>> = parallel(parts.len(), workers, |i| {
+        if cancelled() {
+            return None;
+        }
+        let pt = &parts[i];
+        let buf = media.get(&pt.mid)?;
+        let cut;
+        let part: &AudioBuffer = if pt.whole {
+            buf
+        } else {
+            cut = slice(buf, pt.a, pt.b);
+            &cut
+        };
+        let (container, format, _) = storage(part, opts.exact_float);
+        let eo = af2_io::export::Options {
+            container,
+            format,
+            dither: false,
+            // Within about 1% of the smallest, several times faster.
+            flac_level: 5,
+            ..Default::default()
+        };
+        let r = af2_io::export::export_buffer(&tmp.join("Audio").join(&pt.file), part, &eo, &Default::default())
+            .map(|_| (container, part.rate, part.num_channels(), part.frames()));
+        if pt.last {
+            step(20);
+        }
+        Some(r)
+    });
+    if cancelled() {
+        return Err("Cancelled.".into());
+    }
+    for (pt, w) in parts.iter().zip(written) {
+        let (container, prate, pch, pframes) = w.ok_or("Cancelled.")??;
+        let Some(item) = session.media(pt.mid).cloned() else { continue };
+        entries.push((format!("Audio/{}", pt.file), tmp.join("Audio").join(&pt.file), container == af2_io::export::Container::Wav));
+        let mut it = item;
+        if pt.k > 0 {
+            it.id = session.alloc_id();
+            it.ext_id = None;
+        }
+        it.name = pt.label.clone();
+        it.path = Some(PathBuf::from(format!("Audio/{}", pt.file)));
+        it.rate = prate;
+        it.channels = pch as u16;
+        it.duration = pframes as f64 / prate.max(1) as f64;
+        moves.entry(pt.mid).or_default().push((pt.a, pt.b, it.id));
+        new_items.push(it);
     }
     for t in &mut session.tracks {
         for c in &mut t.clips {
@@ -819,6 +881,7 @@ fn build(p: Plan, done: &AtomicU64, cancel: &AtomicBool) -> Result<Summary, Stri
         }
     }
     session.media = new_items;
+    lap("audio encoded");
 
     // 3. Other files the session reads.
     let mut files: HashMap<PathBuf, String> = HashMap::new();
@@ -914,6 +977,7 @@ fn build(p: Plan, done: &AtomicU64, cancel: &AtomicBool) -> Result<Summary, Stri
     }
     z.finish().map_err(zerr)?.flush().map_err(ioerr)?;
     std::fs::rename(&part, &out).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
+    lap("zip written");
     drop(cleanup);
     step(50);
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
@@ -924,6 +988,39 @@ fn build(p: Plan, done: &AtomicU64, cancel: &AtomicBool) -> Result<Summary, Stri
         committed,
         bounced,
     })
+}
+
+/// Runs `f(0..n)` on up to `workers` threads, results in index order.
+fn parallel<T: Send>(n: usize, workers: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: Vec<std::sync::Mutex<Option<T>>> = (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|sc| {
+        for _ in 0..workers.clamp(1, n.max(1)) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                let v = f(i);
+                *out[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+            });
+        }
+    });
+    out.into_iter()
+        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("every index ran"))
+        .collect()
+}
+
+/// How many renders run at once: the processor's cores, up to four, and
+/// fewer for long sessions so their buffers (stereo float, the length of
+/// the render) stay under about 2 GB together.
+fn render_workers(renders: &[Render], rate: u32) -> usize {
+    let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+    let longest = renders.iter().map(|r| (r.to - r.from).max(0.0)).fold(0.0, f64::max);
+    // Interleaved while rendering, then split: about twice the stereo size.
+    let bytes = longest * rate as f64 * 2.0 * 4.0 * 2.0;
+    let by_memory = if bytes > 0.0 { (2.0e9 / bytes).floor() as usize } else { 4 };
+    cores.min(4).min(by_memory).max(1)
 }
 
 /// Removes the working folder however the build ends.
@@ -1134,6 +1231,46 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
 
 #[cfg(test)]
 mod tests {
+    /// Times archiving a real session: `AF2_ARCHIVE_SESSION=<file>
+    /// AF2_TRACE=1 cargo test --release -p audiform2 -- --ignored
+    /// archive_a_real_session --nocapture` (the archive goes to the temp
+    /// folder; the session is only read).
+    #[test]
+    #[ignore]
+    fn archive_a_real_session() {
+        use std::time::Instant;
+        crate::fx::register();
+        let path = PathBuf::from(std::env::var("AF2_ARCHIVE_SESSION").expect("AF2_ARCHIVE_SESSION"));
+        let t = Instant::now();
+        let im = af2_interop::import_with(&path, af2_interop::sesx::Surrounds::Behind).expect("import");
+        let s = im.session;
+        eprintln!("imported in {:.1} s: {} tracks, {} clips, {} media, {} Hz, {:.0} s long",
+            t.elapsed().as_secs_f64(), s.tracks.len(), s.tracks.iter().map(|t| t.clips.len()).sum::<usize>(),
+            s.media.len(), s.rate, s.duration());
+        let t = Instant::now();
+        let used: Vec<MediaId> = used_spans(&s).keys().copied().collect();
+        let bufs: HashMap<MediaId, Arc<AudioBuffer>> = parallel(used.len(), 8, |i| {
+            let m = s.media(used[i])?;
+            let b = af2_io::decode_file(m.path.as_ref()?).ok()?;
+            Some((used[i], Arc::new(b)))
+        })
+        .into_iter()
+        .flatten()
+        .collect();
+        let bytes: usize = bufs.values().map(|b| b.frames() * b.num_channels() * 4).sum();
+        eprintln!("decoded {} of {} used files in {:.1} s ({:.0} MB in memory)", bufs.len(), used.len(), t.elapsed().as_secs_f64(), bytes as f64 / 1e6);
+        let out = std::env::temp_dir().join("af2-real-archive.audarc");
+        let opts = Options::default();
+        let t = Instant::now();
+        let p = plan_with(s, None, &|m| bufs.get(&m).cloned(), opts, out.clone()).expect("plan");
+        eprintln!("planned in {:.1} s: {} renders", t.elapsed().as_secs_f64(), p.renders.len());
+        let t = Instant::now();
+        let r = build(p, &AtomicU64::new(0), &AtomicBool::new(false)).expect("build");
+        eprintln!("built in {:.1} s: {:.0} MB from {:.0} MB, {} files, {} bounced",
+            t.elapsed().as_secs_f64(), r.bytes as f64 / 1e6, r.source_bytes as f64 / 1e6, r.files, r.bounced);
+        let _ = std::fs::remove_file(&out);
+    }
+
     use super::*;
     use af2_core::session::Send;
 

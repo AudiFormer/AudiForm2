@@ -39,8 +39,11 @@ use crate::state::State;
 
 /// Seconds rendered past the track's last sound, for effect tails.
 const TAIL: f64 = 6.0;
-/// How many renders the cache folder keeps, newest first.
+/// How many renders the cache folder keeps at least, newest first...
 const KEEP: usize = 24;
+/// ...and beyond that, as many more as fit in this many bytes (a session
+/// with many pre-rendered tracks keeps every track's render).
+const KEEP_BYTES: u64 = 3_000_000_000;
 /// Frames per chunk in a render's cache file.
 const CHUNK: usize = 65_536;
 
@@ -414,6 +417,8 @@ impl State {
             let path = cache_dir().join(format!("{key:016x}.afr"));
             if let Ok(r) = open_render(&path) {
                 if r.stream.rate == self.session.rate {
+                    // Used again: it counts as new, so tidying keeps it.
+                    touch(&path);
                     e.ready = Some((key, r));
                     moved = true;
                     continue;
@@ -430,6 +435,11 @@ impl State {
                 .collect();
             let tx = self.prerender.tx.clone();
             std::thread::spawn(move || {
+                // A few at a time: a session opening with every track
+                // pre-rendered would otherwise render them all at once
+                // (every core busy, and each render's buffer in memory).
+                let _turn = render_turn();
+                af2_engine::denormal::flush_to_zero();
                 let done = render(&job, &media, &path, &progress);
                 prune(&cache_dir());
                 let _ = tx.send((id, key, done));
@@ -512,18 +522,51 @@ fn render(
     open_render(path)
 }
 
-/// Removes all but the newest [`KEEP`] renders.
+/// Marks a render file as just used.
+fn touch(path: &Path) {
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// A turn to render: at most half the processor's cores (one to four)
+/// render at once; the rest wait.
+fn render_turn() -> impl Drop {
+    use std::sync::{Condvar, Mutex, OnceLock};
+    static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    let gate = GATE.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let most = std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(1, 4);
+    let mut busy = gate.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *busy >= most {
+        busy = gate.1.wait(busy).unwrap_or_else(|e| e.into_inner());
+    }
+    *busy += 1;
+    struct Turn(&'static (Mutex<usize>, Condvar));
+    impl Drop for Turn {
+        fn drop(&mut self) {
+            let mut busy = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+            *busy = busy.saturating_sub(1);
+            self.0 .1.notify_one();
+        }
+    }
+    Turn(gate)
+}
+
+/// Removes old renders: the newest [`KEEP`] stay, and more while they fit
+/// in [`KEEP_BYTES`].
 fn prune(dir: &Path) {
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = Vec::new();
     for e in read.flatten() {
         let p = e.path();
         match p.extension().and_then(|x| x.to_str()) {
             Some("afr") => {
-                if let Some(t) = e.metadata().ok().and_then(|m| m.modified().ok()) {
-                    files.push((t, p));
+                if let Some(m) = e.metadata().ok() {
+                    if let Ok(t) = m.modified() {
+                        files.push((t, p, m.len()));
+                    }
                 }
             }
             // Renders from before they streamed (32-bit float WAV).
@@ -534,8 +577,12 @@ fn prune(dir: &Path) {
         }
     }
     files.sort_by_key(|a| std::cmp::Reverse(a.0));
-    for (_, path) in files.into_iter().skip(KEEP) {
-        let _ = std::fs::remove_file(path);
+    let mut total = 0u64;
+    for (k, (_, path, len)) in files.into_iter().enumerate() {
+        total += len;
+        if k >= KEEP && total > KEEP_BYTES {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

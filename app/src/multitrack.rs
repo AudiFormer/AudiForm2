@@ -1735,9 +1735,20 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                     };
                     let wave =
                         Rect::from_min_max(pos2(vis0, title.bottom()), pos2(vis1, cr.bottom()));
-                    let n = buf.num_channels().min(2);
+                    // Every channel, stacked (a four-input take shows all
+                    // four), up to eight.
+                    let n = buf.num_channels().clamp(1, 8);
                     let h = wave.height() / n as f32;
                     let tint = if alpha == 255 { ccol } else { [90, 90, 100] };
+                    // Channels that aren't heard are dimmed: those its
+                    // Source Channels mix leaves out, or (a wide file
+                    // folded as a surround bed) the fourth, the LFE.
+                    let heard = |k: usize| -> bool {
+                        match &clip.props.channel_map {
+                            Some(map) => map.get(k).is_none_or(|m| m.left != 0.0 || m.right != 0.0),
+                            None => !(buf.num_channels() >= 4 && k == 3),
+                        }
+                    };
                     // Drawn at the clip's gain and along its volume line,
                     // as it plays (+6 dB twice as tall, -12 dB a quarter).
                     let level = af2_core::time::db_to_gain(clip.gain_db);
@@ -1766,6 +1777,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                             pos2(wave.left(), wave.top() + h * ch as f32),
                             vec2(wave.width(), h),
                         );
+                        let on = heard(ch);
+                        let tint = if on { tint } else { [70, 70, 78] };
                         draw_channel_gained(
                             &lane_p,
                             lane,
@@ -1779,6 +1792,22 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                             st.session_amp,
                             Some(&gain),
                         );
+                        if n > 2 && h >= 12.0 {
+                            if ch > 0 {
+                                lane_p.line_segment(
+                                    [lane.left_top(), lane.right_top()],
+                                    egui::Stroke::new(1.0_f32, Color32::from_black_alpha(70)),
+                                );
+                            }
+                            let label = if on { format!("{}", ch + 1) } else { format!("{} (silent)", ch + 1) };
+                            lane_p.text(
+                                pos2(x0.max(lanes.left()) + 4.0, lane.top() + 1.0),
+                                Align2::LEFT_TOP,
+                                label,
+                                FontId::proportional(9.0),
+                                Color32::from_white_alpha(if on { 150 } else { 110 }),
+                            );
+                        }
                     }
                 }
             } else {
