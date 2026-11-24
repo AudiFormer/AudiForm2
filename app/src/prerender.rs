@@ -438,6 +438,7 @@ impl State {
                 // A few at a time: a session opening with every track
                 // pre-rendered would otherwise render them all at once
                 // (every core busy, and each render's buffer in memory).
+                af2_engine::pool::background_priority();
                 let _turn = render_turn();
                 af2_engine::denormal::flush_to_zero();
                 let done = render(&job, &media, &path, &progress);

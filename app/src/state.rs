@@ -394,6 +394,8 @@ pub struct State {
     pub want_effects: bool,
     /// The Effects menu's apply window is open.
     pub effect_dialog: bool,
+    /// A command a click in the Favorites panel asked for.
+    pub favorites_cmd: Option<crate::keymap::Cmd>,
     /// File > New Audio File / New Multitrack Session dialogs.
     pub new_file_ui: Option<crate::new_dialogs::NewFileDraft>,
     pub new_session_ui: Option<crate::new_dialogs::NewSessionDraft>,
@@ -602,7 +604,10 @@ impl State {
             t.color = theme.track_colors[i % theme.track_colors.len().max(1)];
         }
         State {
-            mode: Mode::Waveform,
+            mode: match prefs.start_view {
+                crate::settings::StartView::Waveform => Mode::Waveform,
+                crate::settings::StartView::Multitrack => Mode::Multitrack,
+            },
             docs: Vec::new(),
             current: None,
             next_doc: 1,
@@ -706,6 +711,7 @@ impl State {
             rack_preset_name: None,
             want_effects: false,
             effect_dialog: false,
+            favorites_cmd: None,
             new_file_ui: None,
             new_session_ui: None,
             af1_prompt: None,
@@ -3155,5 +3161,36 @@ mod apply_rack_tests {
         assert!(st.file_chain.is_empty(), "redo takes it out again");
         st.undo();
         assert_eq!(st.file_chain.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod video_drop_tests {
+    use super::*;
+
+    /// `AF2_VIDEO=<file> cargo test -p audiform2 -- --ignored a_dropped_video --nocapture`
+    #[test]
+    #[ignore]
+    fn a_dropped_video_lands_with_its_picture() {
+        let path = PathBuf::from(std::env::var("AF2_VIDEO").expect("AF2_VIDEO"));
+        let mut st = State::new();
+        st.mode = Mode::Multitrack;
+        let track = st.session.tracks.first().map(|t| t.id);
+        st.import_paths(
+            vec![path],
+            crate::sessions::Layout::Drop { track, at: 0.0, alt: false },
+        );
+        for _ in 0..600 {
+            st.poll_jobs();
+            if st.jobs.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let clips: usize = st.session.tracks.iter().map(|t| t.clips.len()).sum();
+        let msgs: Vec<String> = st.toasts.iter().map(|t| t.text.clone()).collect();
+        eprintln!("clips {clips}, video {:?}, docs {}, messages {msgs:?}", st.session.video, st.docs.len());
+        assert_eq!(clips, 1, "{msgs:?}");
+        assert!(st.session.video.is_some());
     }
 }

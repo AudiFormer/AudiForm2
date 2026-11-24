@@ -22,6 +22,7 @@ mod export;
 mod file_dialog;
 mod files_panel;
 mod fx;
+mod favorites;
 mod fx_menu;
 mod fx_windows;
 mod generate_ui;

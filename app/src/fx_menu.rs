@@ -19,6 +19,9 @@ pub enum Item {
     Spatialize,
     /// A Diagnostics scan, in the Diagnostics panel.
     Diagnose(crate::diagnostics::Kind),
+    /// A VST3 plug-in: (id, name). Only among Favorite Effects; the menu
+    /// lists plug-ins under VST 3.
+    Plugin(String, String),
 }
 
 impl Item {
@@ -29,6 +32,36 @@ impl Item {
             Item::Stems => "AI Stem Separation...".to_string(),
             Item::Spatialize => "Spatialize to Surround...".to_string(),
             Item::Diagnose(k) => format!("{}...", k.name()),
+            Item::Plugin(_, n) => n.clone(),
+        }
+    }
+
+    /// What Favorite Effects keeps it as (with its name).
+    pub fn key(&self) -> String {
+        match self {
+            Item::Builtin(e) => format!("dsp:{}", e.id()),
+            Item::Fx(id, _) | Item::Plugin(id, _) => id.clone(),
+            Item::Stems => "af2:stems".into(),
+            Item::Spatialize => "af2:spatialize".into(),
+            Item::Diagnose(k) => format!("diag:{}", k.name()),
+        }
+    }
+
+    /// The item kept as `key`; None for one no longer offered.
+    pub fn from_key(key: &str, name: &str) -> Option<Item> {
+        if let Some(id) = key.strip_prefix("dsp:") {
+            return Effect::from_id(id).map(Item::Builtin);
+        }
+        if let Some(k) = key.strip_prefix("diag:") {
+            return crate::diagnostics::Kind::ALL.into_iter().find(|x| x.name() == k).map(Item::Diagnose);
+        }
+        if key.starts_with(af2_vst3::PREFIX) {
+            return Some(Item::Plugin(key.to_string(), name.to_string()));
+        }
+        match key {
+            "af2:stems" => Some(Item::Stems),
+            "af2:spatialize" => Some(Item::Spatialize),
+            _ => af2_fx::info(key).map(|i| Item::Fx(key.to_string(), i.name.to_string())),
         }
     }
 }
@@ -171,6 +204,17 @@ pub fn categories() -> Vec<(&'static str, Vec<Item>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_item_comes_back_from_its_key() {
+        let mut all: Vec<Item> = categories().into_iter().flat_map(|(_, v)| v).collect();
+        all.extend(TOP_LEVEL.map(Item::Builtin));
+        all.push(Item::Plugin(format!("{}0123", af2_vst3::PREFIX), "Some Plug-In".into()));
+        for item in all {
+            assert_eq!(Item::from_key(&item.key(), &item.name()), Some(item.clone()), "{}", item.name());
+        }
+        assert_eq!(Item::from_key("af.no_such_effect", "Gone"), None);
+    }
 
     #[test]
     fn every_effect_has_a_place() {

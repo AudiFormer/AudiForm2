@@ -674,9 +674,24 @@ pub fn track_input(ui: &mut Ui, inputs: &mut RecordInputs, track: TrackId) {
         None => format!("{} (default)", short(&current)),
     };
     ui.label(RichText::new("In").size(10.0).weak());
+    let is_default = own.as_ref().is_none_or(|o| same_source(o, &inputs.default));
+    let mut make_default = false;
     let r = ui.menu_button(RichText::new(text).size(10.0), |ui| {
         ui.set_min_width(220.0);
-        source_menu(ui, inputs, &current, true)
+        let pick = source_menu(ui, inputs, &current, true);
+        // This track's input for every track that follows the default,
+        // new ones included (kept between runs).
+        ui.separator();
+        if ui
+            .add_enabled(!is_default, egui::Button::new(format!("Make \u{201c}{}\u{201d} the Default", short(&current))))
+            .on_hover_text("Every track without its own input, and every new track, records from this; kept when AudiForm 2 restarts")
+            .on_disabled_hover_text("This is the default input already")
+            .clicked()
+        {
+            make_default = true;
+            ui.close_menu();
+        }
+        pick
     });
     r.response
         .on_hover_text(format!("Records from: {}", current.label()));
@@ -688,6 +703,12 @@ pub fn track_input(ui: &mut Ui, inputs: &mut RecordInputs, track: TrackId) {
             inputs.per_track.remove(&track);
         }
         None => {}
+    }
+    if make_default {
+        inputs.default = current;
+        inputs.save_default();
+        // Following the default now, like the rest.
+        inputs.per_track.remove(&track);
     }
 }
 

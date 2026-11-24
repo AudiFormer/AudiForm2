@@ -159,13 +159,23 @@ fn slider_row(ui: &mut egui::Ui, fx: &mut Fx, env: &Env, r: Rect, row: &Row) {
     p.circle_filled(knob, 2.0, if hot { c(th.accent) } else { Color32::TRANSPARENT });
     // The value, in a small well at the end.
     let well = Rect::from_min_size(pos2(r.right() - VALUE_W - 6.0, r.center().y - 4.0), vec2(VALUE_W, 18.0));
-    p.rect_filled(well, Rounding::same(3.0), ca(th.background, 200));
-    let shown = if row.unit.is_empty() {
-        format!("{}", v.round())
-    } else {
-        format!("{} {}", v.round(), row.unit)
-    };
-    p.text(pos2(well.right() - 6.0, well.center().y), Align2::RIGHT_CENTER, shown, FontId::monospace(11.5), c(th.accent));
+    // A value box: drag it, or double-click it to type a value.
+    if let Some(ctl) = fx.ctl(row.key).cloned() {
+        let mut bv = v;
+        let unit = row.unit.to_string();
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(well));
+        let b = crate::widgets::value_box(&mut child, fx.uid.with(("studio-box", row.key)), &mut bv, ctl.min, ctl.max, ctl.log, VALUE_W, &|x| {
+            if unit.is_empty() {
+                format!("{}", x.round())
+            } else {
+                format!("{} {}", x.round(), unit)
+            }
+        });
+        if b.changed() {
+            fx.set_live(row.key, bv);
+        }
+        fx.track(&b);
+    }
 
     if resp.double_clicked() {
         if let Some(d) = fx.ctl(row.key).map(|c| c.default) {

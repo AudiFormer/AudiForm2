@@ -93,7 +93,15 @@ fn slider(
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(name).color(c(th.text)));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(text(v)).monospace().color(c(th.accent)));
+            // A value box: drag it, or double-click it to type a value.
+            if let Some(ctl) = fx.ctl(key).cloned() {
+                let mut bv = v;
+                let b = crate::widgets::value_box(ui, fx.uid.with(("width-box", key)), &mut bv, ctl.min, ctl.max, false, 76.0, &|x| text(x));
+                if b.changed() {
+                    fx.set_live(key, bv);
+                }
+                fx.track(&b);
+            }
         });
     });
     let w = ui.available_width().max(120.0);

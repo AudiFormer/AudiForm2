@@ -37,10 +37,11 @@ pub enum Tab {
     Diagnostics,
     Loudness,
     Video,
+    Favorites,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 20] = [
+    pub const ALL: [Tab; 21] = [
         Tab::Properties,
         Tab::Visualizer,
         Tab::Inspector,
@@ -61,6 +62,7 @@ impl Tab {
         Tab::Diagnostics,
         Tab::Loudness,
         Tab::Video,
+        Tab::Favorites,
     ];
     /// The title for a crowded tab bar.
     pub fn short_title(self) -> &'static str {
@@ -98,6 +100,7 @@ impl Tab {
             Tab::Diagnostics => "Diagnostics",
             Tab::Loudness => "Loudness",
             Tab::Video => "Video",
+            Tab::Favorites => "Favorites",
         }
     }
 }
@@ -190,6 +193,12 @@ fn load_layout(w: crate::workspace::Workspace) -> DockState<Tab> {
             let mark = data_dir().join(format!("layout-video-{}", w.key()));
             if !mark.exists() {
                 crate::workspace::add_behind(&mut d, Tab::History, Tab::Video);
+                let _ = std::fs::write(&mark, b"");
+            }
+            // Likewise Favorites, behind Levels.
+            let mark = data_dir().join(format!("layout-favorites-{}", w.key()));
+            if !mark.exists() {
+                crate::workspace::add_behind(&mut d, Tab::Levels, Tab::Favorites);
                 let _ = std::fs::write(&mark, b"");
             }
             d
@@ -399,6 +408,7 @@ impl Viewer<'_> {
             Tab::Diagnostics => crate::diagnostics::panel(ui, self.st),
             Tab::Loudness => crate::loudness_meter::panel(ui, self.st),
             Tab::Video => crate::video::panel(ui, self.st),
+            Tab::Favorites => crate::favorites::panel(ui, self.st, self.open_tab),
         }
     }
 }
@@ -492,6 +502,14 @@ impl App {
                     st.toast("Select clips to duplicate first");
                 }
             }
+            Cmd::CopyClipsUp | Cmd::CopyClipsDown if st.mode == Mode::Multitrack => {
+                match crate::clip_ops::copy_to_next_track(st, cmd == Cmd::CopyClipsDown) {
+                    None => st.toast("Select clips to copy first"),
+                    Some(false) => st.toast("There's no track above to copy to"),
+                    Some(true) => {}
+                }
+            }
+            Cmd::CopyClipsUp | Cmd::CopyClipsDown => {}
             Cmd::Invert => apply_now(st, Effect::Invert),
             Cmd::Reverse => apply_now(st, Effect::Reverse),
             Cmd::Silence => apply_now(st, Effect::Silence),
@@ -1115,6 +1133,12 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
         ui.menu_button("Effects", |ui| {
             effects_menu(ui, st, km, &mut cmd, &mut open_tab);
         });
+        ui.menu_button("Favorites", |ui| {
+            let mut asked = crate::favorites::Asked::default();
+            crate::favorites::menu(ui, st, &mut asked);
+            cmd = cmd.or(asked.cmd);
+            open_tab = open_tab.or(asked.tab);
+        });
         ui.menu_button("View", |ui| {
             for (c, m) in [
                 (Cmd::WaveformView, Mode::Waveform),
@@ -1474,34 +1498,7 @@ fn effects_menu(
         ui.menu_button(cat, |ui| {
             for item in items {
                 if ui.button(item.name()).clicked() {
-                    match item {
-                        crate::fx_menu::Item::Builtin(e) => {
-                            if !add_to_track_rack(st, e.realtime().then(|| e.id().to_string())) {
-                                st.effect = e;
-                                if show {
-                                    st.effect_dialog = true;
-                                }
-                            }
-                        }
-                        crate::fx_menu::Item::Fx(id, _) => {
-                            if !add_to_track_rack(st, Some(id.clone())) {
-                                st.fx_pick = Some(id);
-                                if show {
-                                    st.effect_dialog = true;
-                                }
-                            }
-                        }
-                        crate::fx_menu::Item::Stems => *open_tab = Some(Tab::AiSeparation),
-                        crate::fx_menu::Item::Spatialize => st.spatialize.open = true,
-                        crate::fx_menu::Item::Diagnose(k) => {
-                            if st.diag.kind != k {
-                                st.diag.kind = k;
-                                st.diag.found.clear();
-                                st.diag.scanned = None;
-                            }
-                            *open_tab = Some(Tab::Diagnostics);
-                        }
-                    }
+                    pick_effect(st, item, show, open_tab, cmd);
                     ui.close_menu();
                 }
             }
@@ -1511,7 +1508,59 @@ fn effects_menu(
     disabled_submenu(ui, "VST", PLUGIN_NOTE);
     ui.menu_button("VST 3", |ui| {
         if let Some(id) = crate::plugins::picker_items(ui) {
-            if !add_to_track_rack(st, Some(id.clone())) && st.file_chain.len() < 16 {
+            let name = crate::plugins::name(&id);
+            pick_effect(st, crate::fx_menu::Item::Plugin(id, name), show, open_tab, cmd);
+        }
+    });
+    if ui.button("Audio Plug-In Manager...").clicked() {
+        crate::plugins::open_manager();
+        ui.close_menu();
+    }
+}
+
+/// What picking an Effects menu item (or a favorite) does. `show` brings
+/// the effect's window up in the Waveform editor.
+pub(crate) fn pick_effect(
+    st: &mut State,
+    item: crate::fx_menu::Item,
+    show: bool,
+    open_tab: &mut Option<Tab>,
+    cmd: &mut Option<Cmd>,
+) {
+    use crate::fx_menu::Item;
+    match item {
+        Item::Builtin(e) => {
+            // The ones with their own menu items do what those do.
+            let own = match e {
+                af2_dsp::Effect::Invert => Some(Cmd::Invert),
+                af2_dsp::Effect::Reverse => Some(Cmd::Reverse),
+                af2_dsp::Effect::Silence => Some(Cmd::Silence),
+                af2_dsp::Effect::MatchLoudness => Some(Cmd::MatchLoudness),
+                _ => None,
+            };
+            if let Some(c) = own {
+                *cmd = Some(c);
+            } else if !add_to_track_rack(st, e.realtime().then(|| e.id().to_string())) {
+                st.effect = e;
+                if show {
+                    st.effect_dialog = true;
+                }
+            }
+        }
+        Item::Fx(id, _) => {
+            if !add_to_track_rack(st, Some(id.clone())) {
+                st.fx_pick = Some(id);
+                if show {
+                    st.effect_dialog = true;
+                }
+            }
+        }
+        Item::Plugin(id, _) => {
+            if !add_to_track_rack(st, Some(id.clone())) {
+                if st.file_chain.len() >= 16 {
+                    st.toast("The file's rack is full (16 effects).");
+                    return;
+                }
                 // The Waveform editor: into the file's rack.
                 st.file_chain.push(crate::rack::new_slot(&id));
                 let at = st.file_chain.len() - 1;
@@ -1519,10 +1568,16 @@ fn effects_menu(
                 st.want_effects = true;
             }
         }
-    });
-    if ui.button("Audio Plug-In Manager...").clicked() {
-        crate::plugins::open_manager();
-        ui.close_menu();
+        Item::Stems => *open_tab = Some(Tab::AiSeparation),
+        Item::Spatialize => st.spatialize.open = true,
+        Item::Diagnose(k) => {
+            if st.diag.kind != k {
+                st.diag.kind = k;
+                st.diag.found.clear();
+                st.diag.scanned = None;
+            }
+            *open_tab = Some(Tab::Diagnostics);
+        }
     }
 }
 
@@ -2590,7 +2645,7 @@ impl eframe::App for App {
         // panel once at start.
         if !self.shown_env_tab {
             self.shown_env_tab = true;
-            // AF2_OPEN=new-file | new-session | multitrack | generate-noise |
+            // AF2_OPEN=new-file | new-session | multitrack | favorites | generate-noise |
             // generate-tones | overlap-demo | archive | spatialize | fx:<effect id>[?key=value&...] |
             // master-fx:<effect id>, for shots. AF2_FX_SET=key=value,... sets
             // the opened effect's controls (by key; `session_tempo` sets the
@@ -2600,6 +2655,7 @@ impl eframe::App for App {
                 Ok("new-file") => crate::new_dialogs::open_new_file(&mut self.st),
                 Ok("new-session") => crate::new_dialogs::open_new_session(&mut self.st, None),
                 Ok("multitrack") => self.st.mode = Mode::Multitrack,
+                Ok("favorites") => self.show_tab(Tab::Favorites),
                 Ok("overlap-demo") => crate::overlap::demo(&mut self.st),
                 Ok(v) if v.starts_with("video:") => {
                     // A session with this video dropped on its first track,
@@ -2735,6 +2791,15 @@ impl eframe::App for App {
                 }
             }
         }
+        // For shots: AF2_SELECT=a,b selects a..b seconds in the open file
+        // (until it is set by hand).
+        if let Ok(v) = std::env::var("AF2_SELECT") {
+            if let Some((a, b)) = v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))) {
+                if let Some(d) = self.st.doc_mut().filter(|d| d.sel.is_none()) {
+                    d.sel = Some((a, b));
+                }
+            }
+        }
         let __t0 = std::time::Instant::now();
         struct TraceGuard(std::time::Instant, egui::Rect);
         impl Drop for TraceGuard {
@@ -2787,6 +2852,9 @@ impl eframe::App for App {
                 .map(|(x, y)| egui::pos2(x / ppp, y / ppp))
                 .or(ctx.input(|i| i.pointer.hover_pos()));
             let alt = crate::hwcursor::alt_down() || ctx.input(|i| i.modifiers.alt);
+            if std::env::var_os("AF2_TRACE").is_some() {
+                eprintln!("drop: {dropped:?} at {pos:?}");
+            }
             self.st.sessions.os_drop = Some(crate::sessions::OsDrop {
                 paths: dropped,
                 pos,
@@ -3122,8 +3190,12 @@ impl eframe::App for App {
         }
         // Dropped files the Multitrack did not take open (folders searched).
         let mt_area = self.st.sessions.mt_area.take();
+        if self.st.sessions.os_drop.is_some() && std::env::var_os("AF2_TRACE").is_some() {
+            eprintln!("drop not taken by the Multitrack; its area {mt_area:?}");
+        }
         if let Some(d) = self.st.sessions.os_drop.take() {
             let (audio, sessions) = crate::sessions::expand_paths(&d.paths);
+            self.st.say_unreadable(&d.paths);
             // On the Multitrack, outside its lanes: session clips still.
             let on_mt = d.pos.zip(mt_area).is_some_and(|(p, r)| r.contains(p));
             let sessions = if on_mt {
@@ -3168,6 +3240,9 @@ impl eframe::App for App {
         crate::spatialize_ui::show(ctx, &mut self.st);
         crate::af1_import::window(ctx, &mut self.st);
         crate::plugins::windows(ctx, &mut self.st);
+        if let Some(c) = self.st.favorites_cmd.take() {
+            self.run_cmd(c);
+        }
         effect_dialog(ctx, &mut self.st);
         crate::generate_ui::windows(ctx, &mut self.st);
         crate::export::poll(&mut self.st, ctx);

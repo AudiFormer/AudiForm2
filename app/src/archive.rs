@@ -619,8 +619,10 @@ fn render(
     rate: u32,
     cancel: &AtomicBool,
 ) -> Option<AudioBuffer> {
-    // Tails decaying into silence: no slow subnormal arithmetic.
+    // Tails decaying into silence: no slow subnormal arithmetic; and the
+    // interface keeps going while it renders.
     af2_engine::denormal::flush_to_zero();
+    af2_engine::pool::background_priority();
     let program = af2_engine::mix_program(&r.session, &|m| media.get(&m).cloned(), rate);
     let mut inter: Vec<f32> = Vec::with_capacity(((r.to - r.from).max(0.0) * rate as f64) as usize * 2);
     let ch = af2_engine::render_each(program, rate, r.from, r.to, false, |b| {

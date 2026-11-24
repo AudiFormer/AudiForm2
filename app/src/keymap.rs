@@ -31,6 +31,8 @@ pub enum Cmd {
     Preferences,
     SplitAtPlayhead,
     DuplicateClips,
+    CopyClipsUp,
+    CopyClipsDown,
     Invert,
     Reverse,
     Silence,
@@ -82,6 +84,8 @@ impl Cmd {
         Cmd::Preferences,
         Cmd::SplitAtPlayhead,
         Cmd::DuplicateClips,
+        Cmd::CopyClipsUp,
+        Cmd::CopyClipsDown,
         Cmd::Invert,
         Cmd::Reverse,
         Cmd::Silence,
@@ -133,6 +137,8 @@ impl Cmd {
             Cmd::Preferences => "Settings...",
             Cmd::SplitAtPlayhead => "Split at Playhead",
             Cmd::DuplicateClips => "Duplicate Selected Clips",
+            Cmd::CopyClipsUp => "Copy Clips to Track Above",
+            Cmd::CopyClipsDown => "Copy Clips to Track Below",
             Cmd::Invert => "Invert",
             Cmd::Reverse => "Reverse",
             Cmd::Silence => "Silence",
@@ -186,7 +192,11 @@ impl Cmd {
             | Cmd::ClearSelection
             | Cmd::KeyboardShortcuts
             | Cmd::Preferences => "Edit",
-            Cmd::SplitAtPlayhead | Cmd::DuplicateClips | Cmd::BounceTrack => "Multitrack",
+            Cmd::SplitAtPlayhead
+            | Cmd::DuplicateClips
+            | Cmd::CopyClipsUp
+            | Cmd::CopyClipsDown
+            | Cmd::BounceTrack => "Multitrack",
             Cmd::Invert
             | Cmd::Reverse
             | Cmd::Silence
@@ -252,6 +262,14 @@ impl Cmd {
             }],
             Cmd::SplitAtPlayhead => vec![c(K::K)],
             Cmd::DuplicateClips => vec![c(K::D)],
+            Cmd::CopyClipsUp => vec![Binding {
+                alt: true,
+                ..p(K::ArrowUp)
+            }],
+            Cmd::CopyClipsDown => vec![Binding {
+                alt: true,
+                ..p(K::ArrowDown)
+            }],
             Cmd::AutoHeal => vec![c(K::U)],
             Cmd::PlayStop => vec![p(K::Space)],
             Cmd::Record => vec![Binding {

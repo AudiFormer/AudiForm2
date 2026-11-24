@@ -98,7 +98,7 @@ impl Workspace {
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.215, vec![Files, Markers]);
                 let [_files, rack] = s.split_below(left, 0.40, vec![Effects, Properties]);
                 let [_rack, _history] = s.split_below(rack, 0.69, vec![History, Video]);
-                let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
+                let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels, Favorites]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
                 let [_editor, right] =
                     s.split_right(centre, 0.77, vec![Phase, Visualizer, Spectrum, Statistics]);
@@ -110,7 +110,7 @@ impl Workspace {
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.15, vec![Files]);
                 let [_files, _markers] = s.split_below(left, 0.55, vec![Markers, History, Video]);
-                let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
+                let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels, Favorites]);
                 let [_levels, _range] = s.split_right(bottom, 0.8, vec![Selection]);
                 let [_mixer, _right] = s.split_right(centre, 0.78, vec![Effects, Properties]);
                 d
@@ -120,7 +120,7 @@ impl Workspace {
                 let s = d.main_surface_mut();
                 let [centre, _left] =
                     s.split_left(NodeIndex::root(), 0.13, vec![Files, Markers, History, Video]);
-                let [_editor, bottom] = s.split_below(centre, 0.88, vec![Levels]);
+                let [_editor, bottom] = s.split_below(centre, 0.88, vec![Levels, Favorites]);
                 let [_levels, _range] = s.split_right(bottom, 0.8, vec![Selection]);
                 d
             }
@@ -130,7 +130,7 @@ impl Workspace {
                 let [centre, left] =
                     s.split_left(NodeIndex::root(), 0.18, vec![Effects, Properties]);
                 let [_rack, _files] = s.split_below(left, 0.62, vec![Files, History, Video]);
-                let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels]);
+                let [centre, bottom] = s.split_below(centre, 0.8, vec![Levels, Favorites]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
                 let [_editor, right] = s.split_right(centre, 0.72, vec![Statistics]);
                 let [_stats, lower] = s.split_below(right, 0.42, vec![Spectrum]);
@@ -142,7 +142,7 @@ impl Workspace {
                 let s = d.main_surface_mut();
                 let [centre, left] = s.split_left(NodeIndex::root(), 0.18, vec![Files, Markers]);
                 let [_files, _rack] = s.split_below(left, 0.45, vec![Effects, History, Video]);
-                let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels]);
+                let [centre, bottom] = s.split_below(centre, 0.85, vec![Levels, Favorites]);
                 let [_levels, _range] = s.split_right(bottom, 0.76, vec![Selection]);
                 let [_editor, right] = s.split_right(centre, 0.74, vec![Diagnostics]);
                 let [_diag, _loud] = s.split_below(right, 0.55, vec![Loudness, Statistics]);
@@ -192,6 +192,15 @@ mod tests {
         assert_eq!(node(Tab::Phase), node(Tab::Spectrum));
         assert_ne!(node(Tab::Space), node(Tab::Phase));
         assert_ne!(node(Tab::AiSeparation), node(Tab::Phase));
+    }
+
+    #[test]
+    fn favorites_sit_behind_levels_in_every_workspace() {
+        for w in Workspace::ALL {
+            let d = w.build();
+            let f = d.find_tab(&Tab::Favorites).map(|(s, n, _)| (s, n));
+            assert_eq!(f, d.find_tab(&Tab::Levels).map(|(s, n, _)| (s, n)), "{}", w.name());
+        }
     }
 
     #[test]

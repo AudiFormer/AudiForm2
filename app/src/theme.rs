@@ -122,6 +122,10 @@ pub struct Theme {
     pub clock: Option<[Rgb; 2]>,
     /// A transport button that is on.
     pub button_on: Option<Rgb>,
+    /// The Waveform editor shows a selection inverted, as editors of the
+    /// mid-1990s did (the lane's colours turned over), not as a wash.
+    #[serde(skip_serializing_if = "is_false")]
+    pub invert_selection: bool,
     /// Columns and tiles as real marble and glazed ceramic, rather than
     /// the flat drawings.
     pub realistic: bool,
@@ -144,6 +148,10 @@ pub struct Theme {
     /// the theme's colours.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub icon: String,
+}
+
+fn is_false(x: &bool) -> bool {
+    !*x
 }
 
 fn is_zero(x: &f32) -> bool {
@@ -257,6 +265,7 @@ impl Theme {
             tab_active: None,
             clock: None,
             button_on: None,
+            invert_selection: false,
             realistic: true,
             splash: String::new(),
             pointers: String::new(),

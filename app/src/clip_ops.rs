@@ -300,6 +300,51 @@ pub fn duplicate(st: &mut State) -> bool {
     true
 }
 
+/// Alt+Up / Alt+Down: copies of the selected clips on the next track up
+/// or down that takes them (bus tracks, and MIDI for audio clips and the
+/// other way round, are passed over), at the same time; the originals
+/// stay. Below the last track a new, plain track opens for them. The
+/// copies are then selected, so pressing again copies on. None when there
+/// is nothing selected; Some(false) when there is no track above.
+pub fn copy_to_next_track(st: &mut State, down: bool) -> Option<bool> {
+    let found: Vec<_> = selected(st)
+        .into_iter()
+        .filter_map(|id| locate(&st.session, id))
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    let n = st.session.tracks.len();
+    let takes = |ti: usize, item: &Item, s: &Session| match item.kind() {
+        TrackKind::Midi => s.tracks[ti].kind == TrackKind::Midi,
+        _ => s.tracks[ti].kind == TrackKind::Audio,
+    };
+    let mut items = Vec::with_capacity(found.len());
+    for (ti, start, _, item) in found {
+        let row = if down {
+            (ti + 1..n).find(|&r| takes(r, &item, &st.session)).unwrap_or(n)
+        } else {
+            match (0..ti).rev().find(|&r| takes(r, &item, &st.session)) {
+                Some(r) => r,
+                None => return Some(false),
+            }
+        };
+        items.push((row, ti, start, item));
+    }
+    let before = st.session.clone();
+    let ids = place(&mut st.session, items, true, None);
+    color_new_tracks(st, n);
+    let label = match (down, ids.len() > 1) {
+        (true, true) => "Copy clips to track below",
+        (true, false) => "Copy clip to track below",
+        (false, true) => "Copy clips to track above",
+        (false, false) => "Copy clip to track above",
+    };
+    select(st, ids);
+    st.commit_session(label, before);
+    Some(true)
+}
+
 // ------------------------------------------------------------ moving
 
 /// Selected clips being dragged together (kept in the editor's drag).
@@ -488,6 +533,31 @@ mod tests {
         assert_eq!(st.session.tracks.len(), n + 1);
         assert_eq!(st.session.tracks[n].kind, TrackKind::Midi);
         assert_eq!(st.session.tracks[n].midi.len(), 1);
+    }
+
+    #[test]
+    fn alt_down_copies_to_the_next_track_and_opens_one_past_the_last() {
+        let (mut st, a, _) = setup();
+        select(&mut st, vec![a]);
+        let audio_tracks = |st: &State| st.session.tracks.iter().filter(|t| t.kind == TrackKind::Audio).count();
+        let before = audio_tracks(&st);
+        assert_eq!(copy_to_next_track(&mut st, true), Some(true));
+        // The original stays on track 0; a copy at the same time on the next
+        // audio track (or a new one).
+        assert!(locate(&st.session, a).is_some_and(|f| f.0 == 0));
+        let copy = selected(&st)[0];
+        let (ti, start, _, _) = locate(&st.session, copy).unwrap();
+        assert!(ti > 0 && st.session.tracks[ti].kind == TrackKind::Audio);
+        assert_eq!(start, 2.0);
+        // Again and again: down the tracks, opening new ones past the last.
+        let tracks = st.session.tracks.len();
+        for _ in 0..tracks + 1 {
+            copy_to_next_track(&mut st, true);
+        }
+        assert!(audio_tracks(&st) > before);
+        // Up from the top: nothing to copy to.
+        select(&mut st, vec![a]);
+        assert_eq!(copy_to_next_track(&mut st, false), Some(false));
     }
 
     #[test]

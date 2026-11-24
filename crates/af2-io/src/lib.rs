@@ -36,6 +36,8 @@ pub const EXTENSIONS: &[&str] = &[
     "mpeg", "vob", "ts", "m2ts", "mts", "ac3", "eac3", "ec3", "amr",
     // With ffmpeg installed: WavPack, True Audio, Creative Voice, Flash video.
     "wv", "tta", "voc", "flv",
+    // Ogg video (its Vorbis or Opus sound).
+    "ogv",
 ];
 
 /// A decoded file with what went wrong along the way.

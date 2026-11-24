@@ -1413,12 +1413,19 @@ impl State {
     /// once they have all loaded. Sessions among them are opened.
     pub fn import_paths(&mut self, paths: Vec<PathBuf>, layout: Layout) {
         let (audio, sessions) = expand_paths(&paths);
+        self.say_unreadable(&paths);
         for s in sessions {
             self.open_session(&s);
         }
         if audio.is_empty() {
             return;
         }
+        // Big files (a video) take a while to read: say they're coming.
+        let names: Vec<String> = audio.iter().map(|p| file_name(p)).collect();
+        self.toast(match names.as_slice() {
+            [one] => format!("Adding {one}..."),
+            many => format!("Adding {} files...", many.len()),
+        });
         let copy = self.import_copy_target(audio.len());
         let id = self.sessions.next_batch;
         self.sessions.next_batch += 1;
@@ -1436,6 +1443,27 @@ impl State {
             .batches
             .push(ImportBatch { id, layout, slots });
         self.finish_batches();
+    }
+
+    /// Dropped or chosen files that are neither audio nor a session (and
+    /// not folders, which are searched): said, rather than left out
+    /// silently.
+    pub fn say_unreadable(&mut self, paths: &[PathBuf]) {
+        let skipped: Vec<String> = paths
+            .iter()
+            .filter(|p| p.is_file())
+            .filter(|p| {
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                !is_session_ext(&ext) && !af2_io::EXTENSIONS.contains(&ext.as_str())
+            })
+            .map(|p| file_name(p))
+            .collect();
+        if !skipped.is_empty() {
+            self.error(format!(
+                "AudiForm 2 can't open {}: not an audio, video or session format it reads.",
+                skipped.join(", ")
+            ));
+        }
     }
 
     /// Puts open documents into the session in one step.

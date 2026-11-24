@@ -156,6 +156,9 @@ fn queue() -> &'static Arc<Queue> {
 }
 
 fn worker(q: &Queue) {
+    // Background work: the interface and audio come first.
+    crate::pool::background_priority();
+    crate::denormal::flush_to_zero();
     loop {
         let job = {
             let mut jobs = q.jobs.lock().unwrap_or_else(|e| e.into_inner());

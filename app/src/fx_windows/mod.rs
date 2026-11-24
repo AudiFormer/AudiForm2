@@ -367,6 +367,42 @@ pub fn custom(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &The
     true
 }
 
+/// Only the presets bar of slot `i`, for the effects that draw their own
+/// face (the graphic EQs, Tube Master) or have no dial columns.
+pub fn presets_only(ui: &mut egui::Ui, st: &mut State, target: u16, i: usize, th: &Theme) {
+    let Some(slot) = slot_at(st, target, i) else { return };
+    if af2_core::plugin::is_plugin(&slot.effect) {
+        return;
+    }
+    let ctls = ctls(&slot.effect);
+    if ctls.is_empty() {
+        return;
+    }
+    let mut vals = slot.values.clone();
+    vals.resize(ctls.len(), 0.0);
+    let uid = egui::Id::new(("fxw", target, i, slot.effect.as_str()));
+    let mut fx = Fx {
+        id: slot.effect.clone(),
+        ctls,
+        vals,
+        data: slot.data.clone(),
+        new_data: None,
+        new_effect: None,
+        changed: false,
+        released: false,
+        uid,
+    };
+    let tempo = (target != FILE).then(|| st.session.tempo.bpm);
+    let before = fx.vals.clone();
+    presets_row(ui, &mut fx, th, tempo);
+    if fx.vals != before {
+        fx.changed = true;
+        fx.released = true;
+    }
+    ui.add_space(4.0);
+    finish(ui, st, target, i, &slot, fx);
+}
+
 /// Takes a panel's changes into the slot: live while dragging, one undo
 /// step per gesture, a rebuild when a change is done for effects that
 /// cannot retune while playing.
@@ -524,12 +560,20 @@ fn load_preset(fx: &mut Fx, item: &PresetItem, tempo: Option<f64>) -> bool {
     true
 }
 
-/// Whether every control sits at its default.
+/// Whether every control sits at its default (hidden ones, which the
+/// effect keeps for itself, aside).
 fn at_defaults(fx: &Fx) -> bool {
     fx.ctls
         .iter()
         .zip(&fx.vals)
+        .filter(|(c, _)| !c.hidden)
         .all(|(c, v)| (f64::from(*v) - c.default).abs() <= 1e-4 * (1.0 + c.default.abs()))
+}
+
+/// The values a preset is told apart by: the hidden ones (a meter's
+/// own state) left out.
+fn shown_vals(fx: &Fx) -> Vec<f32> {
+    fx.ctls.iter().zip(&fx.vals).map(|(c, v)| if c.hidden { 0.0 } else { *v }).collect()
 }
 
 /// The effect's presets: a list (Default, the built-in ones under their
@@ -548,12 +592,12 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
     items.extend(af2_fx::presets::factory(&fx.id).iter().map(|(n, set)| PresetItem::Factory(n, set)));
     items.extend(names.iter().cloned().map(PresetItem::Saved));
     let shown = match &loaded {
-        Some((n, vals)) if *vals == fx.vals => n.clone(),
+        Some((n, vals)) if *vals == shown_vals(fx) => n.clone(),
         Some((n, _)) => format!("{n} (edited)"),
         None if at_defaults(fx) => "Default".into(),
         None => "Custom".into(),
     };
-    let current = loaded.as_ref().filter(|(_, v)| *v == fx.vals).map(|(n, _)| n.clone());
+    let current = loaded.as_ref().filter(|(_, v)| *v == shown_vals(fx)).map(|(n, _)| n.clone());
     let at = current.as_ref().and_then(|n| items.iter().position(|i| i.name() == *n));
     let mut pick: Option<usize> = None;
     let mut delete: Option<String> = None;
@@ -658,7 +702,7 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
                         let _ = std::fs::write(dir.join(format!("{clean}.json")), t);
                     }
                     crate::dir_cache::forget(&dir);
-                    loaded = Some((clean.clone(), fx.vals.clone()));
+                    loaded = Some((clean.clone(), shown_vals(fx)));
                     ui.memory_mut(|m| m.close_popup());
                 }
                 if ui.button("Cancel").clicked() {
@@ -673,7 +717,7 @@ fn presets_row(ui: &mut egui::Ui, fx: &mut Fx, th: &Theme, tempo: Option<f64>) {
             if load_preset(fx, it, tempo) {
                 loaded = match it {
                     PresetItem::Default => None,
-                    _ => Some((it.name(), fx.vals.clone())),
+                    _ => Some((it.name(), shown_vals(fx))),
                 };
             }
         }

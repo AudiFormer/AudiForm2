@@ -221,6 +221,26 @@ fn raise_priority() {
     }
 }
 
+/// Sets the calling thread below normal priority: background work
+/// (stretching clips, pre-renders, archive renders) then gives way to the
+/// interface and the audio, so a heavy session stays responsive while it
+/// finishes. Windows only; elsewhere nothing changes.
+pub fn background_priority() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+        }
+        const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+        // SAFETY: changes only this thread's own scheduling priority.
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        }
+    }
+}
+
 /// How many helper threads to start: one fewer than the cores (the audio
 /// thread works too), at most 15, or `AF2_THREADS - 1` when set.
 fn workers_wanted() -> usize {

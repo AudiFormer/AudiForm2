@@ -1235,10 +1235,15 @@ pub fn windows(ctx: &egui::Context, st: &mut State) {
             if af2_core::plugin::is_plugin(&slot.effect) {
                 crate::plugins::slot_controls(ui, st, target, i, &th);
             } else if eq {
+                crate::fx_windows::presets_only(ui, st, target, i, &th);
                 crate::eq_editor::show(ui, st, target, i, &th);
+            } else if slot.effect == af2_fx::effects::tube_master::ID {
+                crate::fx_windows::presets_only(ui, st, target, i, &th);
+                crate::tube_master_ui::ui(ui, st, target, i);
             } else if crate::tube_master_ui::ui(ui, st, target, i) {
                 // Tube Master draws its own hardware panel.
             } else if !crate::fx_windows::custom(ui, st, target, i, &th) {
+                crate::fx_windows::presets_only(ui, st, target, i, &th);
                 slot_controls(ui, st, target, i, &th);
             }
             if !eq {

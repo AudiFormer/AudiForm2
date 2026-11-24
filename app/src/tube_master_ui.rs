@@ -1057,12 +1057,26 @@ pub fn ui(ui: &mut egui::Ui, st: &mut State, target: u16, slot: usize) -> bool {
         }
         let t = (v - s.min) / (s.max - s.min);
         knob_pointer(&painter, cen, SMALL_R, t, &th, true);
-        let g = text(ui, &(s.read)(v), 9.5, c(th.text));
-        painter.galley(
-            cen + vec2(-g.size().x / 2.0, SMALL_R + 18.0),
-            g,
-            Color32::WHITE,
+        // The value under the knob, in a box: double-click it to type.
+        let well = Rect::from_center_size(cen + vec2(0.0, SMALL_R + 20.0), vec2(62.0, 18.0));
+        let mut bv = f64::from(v);
+        let read = s.read;
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(well));
+        let b = crate::widgets::value_box(
+            &mut child,
+            base.with(("small-box", k)),
+            &mut bv,
+            f64::from(s.min),
+            f64::from(s.max),
+            false,
+            62.0,
+            &|x| read(x as f32),
         );
+        if b.changed() {
+            let nv = ((bv as f32 / s.step).round() * s.step).clamp(s.min, s.max);
+            ed.set(i, nv);
+        }
+        ed.released |= b.drag_stopped() || b.lost_focus();
     }
 
     // ---- the switches

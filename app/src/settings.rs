@@ -54,6 +54,14 @@ impl ColorOverrides {
     }
 }
 
+/// The editor AudiForm 2 opens in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StartView {
+    #[default]
+    Waveform,
+    Multitrack,
+}
+
 /// Settings saved in `prefs.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -121,6 +129,11 @@ pub struct Prefs {
     pub new_session: crate::new_dialogs::NewSessionDefaults,
     /// The start-up offer to import from Audiform 1 was made.
     pub af1_import_asked: bool,
+    /// The editor AudiForm 2 opens in.
+    pub start_view: StartView,
+    /// The Favorites bar's effects and plug-ins, in order (also the
+    /// Favorites menu).
+    pub favorites: Vec<crate::favorites::Favorite>,
     /// Draw without waiting for the screen's refresh (less lag between the
     /// pointer and what follows it; frames capped at 240 a second).
     pub low_latency: bool,
@@ -345,6 +358,8 @@ impl Default for Prefs {
             new_file: Default::default(),
             new_session: Default::default(),
             af1_import_asked: false,
+            start_view: StartView::Waveform,
+            favorites: Vec::new(),
             low_latency: true,
             firewall: None,
             firewall_paths: Vec::new(),
@@ -485,6 +500,7 @@ impl Draft {
         match page {
             "General" => {
                 self.prefs.renderer = d.renderer;
+                self.prefs.start_view = d.start_view;
                 self.zoom = ZoomPrefs::default();
                 self.workspace = Workspace::from_key("");
                 #[cfg(target_os = "linux")]
@@ -568,6 +584,7 @@ impl Draft {
         prefs.new_file = st.prefs.new_file.clone();
         prefs.new_session = st.prefs.new_session.clone();
         prefs.af1_import_asked = st.prefs.af1_import_asked;
+        prefs.favorites = st.prefs.favorites.clone();
         if prefs != st.prefs {
             let reopen = prefs.audio != st.prefs.audio;
             st.prefs = prefs;
@@ -783,6 +800,14 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     }
                     note(ui, th, "Settings and the VST3 plug-in scan.");
                 });
+            });
+            group(ui, th, "Start-up", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Open in");
+                    ui.radio_value(&mut d.prefs.start_view, StartView::Waveform, "Waveform Editor");
+                    ui.radio_value(&mut d.prefs.start_view, StartView::Multitrack, "Multitrack Editor");
+                });
+                note(ui, th, "The editor in front when AudiForm 2 starts. Opening a session still brings up the Multitrack.");
             });
             group(ui, th, "Workspace", |ui| {
                 egui::ComboBox::from_id_salt("settings-workspace")

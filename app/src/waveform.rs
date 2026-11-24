@@ -545,6 +545,30 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             None,
             d.amp,
         );
+        // A theme that shows selections inverted: the selected part of the
+        // lane drawn again with its colours turned over.
+        if let Some((a, b)) = d.sel.filter(|_| th.invert_selection) {
+            let x0 = time_to_x(&v, lane, a).max(lane.left());
+            let x1 = time_to_x(&v, lane, b).min(lane.right());
+            if x1 > x0 {
+                let r = Rect::from_min_max(pos2(x0, lane.top()), pos2(x1, lane.bottom()));
+                let turn = |c: crate::theme::Rgb| c.map(|x| 255 - x);
+                let ip = p.with_clip_rect(r.intersect(p.clip_rect()));
+                ip.rect_filled(r, Rounding::ZERO, c(turn(th.wave_background)));
+                draw_channel(
+                    &ip,
+                    lane,
+                    &d.buf.channels[ch],
+                    &d.peaks,
+                    ch,
+                    d.buf.rate,
+                    &v,
+                    &th,
+                    Some(turn(th.wave_centre)),
+                    d.amp,
+                );
+            }
+        }
         // dB scale at the right edge, following the amplitude zoom:
         // zoomed in, the quieter marks get room and show.
         let mut last_label = f32::NEG_INFINITY;
@@ -656,7 +680,15 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         let x1 = time_to_x(&v, body, b).min(body.right());
         if x1 > x0 {
             let r = Rect::from_min_max(pos2(x0, body.top()), pos2(x1, body.bottom()));
-            p.rect_filled(r, Rounding::ZERO, ca(th.selection, th.selection_alpha));
+            // Inverted in the waveform lanes (above); washed elsewhere.
+            let wash = match (th.invert_selection, spec_area) {
+                (false, _) => Some(r),
+                (true, Some(sa)) => Some(r.intersect(sa)),
+                (true, None) => None,
+            };
+            if let Some(w) = wash.filter(|w| w.is_positive()) {
+                p.rect_filled(w, Rounding::ZERO, ca(th.selection, th.selection_alpha));
+            }
             for x in [x0, x1] {
                 p.line_segment(
                     [pos2(x, body.top()), pos2(x, body.bottom())],
