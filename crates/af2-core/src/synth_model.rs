@@ -40,8 +40,9 @@ pub enum SynthModel {
     // Work-in-progress models matched from reference recordings. They are
     // named after where each was heard so they are easy to tell apart
     // while being tuned; rename them before release.
-    /// A bright quarter-width pulse with its fundamental reinforced by a
-    /// sine, chorused, with a quarter-note echo (verse and chorus alike).
+    /// A struck chime: a quarter-width pulse and a sine, bright on the
+    /// strike and ringing away, chorused, with a quarter-note echo (verse
+    /// and chorus alike).
     AtlantisVerseLead,
     /// Two beating sines with a faint partial three octaves up that
     /// fades as the note decays.
@@ -109,7 +110,7 @@ impl SynthModel {
             SynthModel::StringMachine => "String ensemble: stacked saws in a deep ensemble chorus",
             SynthModel::SyncLead => "Hard-sync lead whose second oscillator sweeps on every note",
             SynthModel::AtlantisVerseLead => {
-                "Bright 25% pulse with a sine under it, chorus and a quarter-note echo"
+                "Struck chime: bright strike that rings away, chorus and a quarter-note echo"
             }
             SynthModel::WildHorsesDemoPad => {
                 "Beating sines with a faint high partial and an airy shimmer on top"
@@ -301,27 +302,39 @@ impl SynthModel {
             }
             SynthModel::AtlantisVerseLead => {
                 // Measured in the verse (B4) and the chorus (C#4, the same
-                // patch): every harmonic but each fourth (a 25% pulse),
-                // bright out past 7 kHz, all rising together in about
-                // 90 ms; each note comes back at full brightness about
-                // 0.49 s later (a quarter at ~122 BPM) and again, fading.
+                // patch): every harmonic but each fourth (a 25% pulse
+                // under the strike), struck fast and ringing off like a
+                // chime: the fundamental some 10 dB down in 0.4 s, the
+                // upper harmonics gone far sooner. Each note comes back
+                // about 0.49 s later (a quarter at ~122 BPM), fading.
                 i.wave = Wave::Pulse;
                 i.detune = 0.0;
-                i.attack = 0.08;
-                i.decay = 0.6;
-                i.sustain = 0.8;
-                i.release = 0.3;
-                i.cutoff = 12_000.0;
+                i.attack = 0.003;
+                i.decay = 0.8;
+                i.sustain = 0.06;
+                i.release = 0.8;
+                i.cutoff = 900.0;
                 i.resonance = 0.1;
-                i.gain_db = -19.0;
+                i.gain_db = -16.0;
                 x.pw = 0.25;
                 x.osc2_wave = Some(Wave::Sine);
-                x.osc2_level = 0.45;
-                x.voices = 8;
-                x.velocity = 0.5;
-                x.chorus = 0.55;
+                x.osc2_level = 0.6;
+                // A bell's strike: a quick FM shimmer that rings away.
+                x.fm = 1.2;
+                x.fm_ratio = 1.0;
+                x.fm_decay = 0.25;
+                x.key_track = 1.0;
+                x.filter_env = 3.0;
+                x.f_attack = 0.001;
+                x.f_decay = 0.5;
+                x.f_sustain = 0.25;
+                x.f_release = 0.8;
+                x.voices = 10;
+                x.velocity = 0.6;
+                x.vel_filter = 0.8;
+                x.chorus = 0.5;
                 x.chorus_rate = 0.4;
-                x.chorus_depth = 0.45;
+                x.chorus_depth = 0.4;
                 x.echo = 0.7;
                 x.echo_time = 0.49;
                 x.echo_feedback = 0.4;
@@ -347,7 +360,7 @@ impl SynthModel {
                 x.fm = 0.5;
                 x.fm_ratio = 1.0;
                 x.fm_decay = 2.5;
-                x.air = 0.55;
+                x.air = 0.12;
                 x.unison = 2;
                 x.spread = 10.0;
                 x.width = 0.25;
@@ -355,7 +368,7 @@ impl SynthModel {
                 x.velocity = 0.6;
                 x.chorus = 0.5;
                 x.chorus_rate = 0.45;
-                x.chorus_depth = 0.45;
+                x.chorus_depth = 0.65;
             }
             SynthModel::WildHorsesIntroLead => {
                 // Measured: a sine with a partial at 5.37 times it (not a
