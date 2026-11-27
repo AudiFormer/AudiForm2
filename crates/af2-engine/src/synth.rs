@@ -990,13 +990,21 @@ mod tests {
                 .iter()
                 .map(|&(a, b, p, v, pan)| note(a, b, p, v, pan))
                 .collect();
-            let mut s = Synth::new(m.preset(), notes, RATE);
-            let (l, r) = render_all(&mut s, 3.5);
+            let inst = m.preset();
+            // An echo rings on: allow for its repeats to fall 60 dB.
+            let echo = if inst.ext.echo > 0.0 {
+                let fb = inst.ext.echo_feedback.clamp(0.05, 0.9) as f64;
+                inst.ext.echo_time as f64 * (-3.0 / fb.log10()).ceil()
+            } else {
+                0.0
+            };
+            let mut s = Synth::new(inst, notes, RATE);
+            let (l, r) = render_all(&mut s, 3.5 + echo);
             assert!(l.iter().chain(&r).all(|v| v.is_finite()), "{m:?}");
             let p = peak(&l).max(peak(&r));
             assert!(p > 0.02 && p < 2.0, "{m:?} peaks at {p}");
             // Silent once everything has let go (the chorus tail too).
-            let tail = &l[(3.3 * RATE as f64) as usize..];
+            let tail = &l[((3.3 + echo) * RATE as f64) as usize..];
             assert!(peak(tail) < 1e-3, "{m:?} still sounds: {}", peak(tail));
         }
     }
@@ -1025,12 +1033,19 @@ mod tests {
         assert_ne!(a, off);
         assert_eq!(a, render(warm));
         assert!(a.0.iter().chain(&a.1).all(|v| v.is_finite()));
-        let p = peak(&a.0).max(peak(&a.1));
-        let q = peak(&off.0).max(peak(&off.1));
-        assert!(
-            (p / q - 1.0).abs() < 0.35,
-            "analog moved the level: {p} vs {q}"
-        );
+        // On one oscillator the loudness (RMS) is all but unchanged:
+        // Analog colours, it does not turn the patch up or down. (With two,
+        // their drifting apart changes how they add, as on hardware.)
+        let rms = |x: (Vec<f32>, Vec<f32>)| {
+            (x.0.iter().chain(&x.1).map(|v| v * v).sum::<f32>() / x.0.len() as f32).sqrt()
+        };
+        let mut one = base;
+        one.ext.osc2_level = 0.0;
+        one.ext.sub = 0.0;
+        let mut one_warm = one;
+        one_warm.ext.analog = 1.0;
+        let db = 20.0 * (rms(render(one_warm)) / rms(render(one))).log10();
+        assert!(db.abs() < 1.5, "analog moved the level {db:.1} dB");
     }
 
     #[test]
@@ -1064,6 +1079,34 @@ mod tests {
         lv.sort_unstable();
         lv.dedup();
         assert!(lv.len() <= 9, "{} levels", lv.len());
+    }
+
+    #[test]
+    fn the_echo_repeats_and_dies_away_and_air_and_tremolo_stay_off_unless_set() {
+        let mut inst = Instrument {
+            wave: Wave::Sine,
+            detune: 0.0,
+            attack: 0.001,
+            release: 0.01,
+            sustain: 1.0,
+            cutoff: 18_000.0,
+            resonance: 0.0,
+            ..Instrument::default()
+        };
+        // New controls at their defaults: the instrument stays classic.
+        assert!(inst.is_classic());
+        inst.ext.echo = 1.0;
+        inst.ext.echo_time = 0.25;
+        inst.ext.echo_feedback = 0.5;
+        let (l, r) = render_all(&mut Synth::new(inst, vec![note(0.0, 0.05, 69, 127, 0.0)], RATE), 4.0);
+        let win = |x: &[f32], a: f64, b: f64| peak(&x[(a * RATE as f64) as usize..(b * RATE as f64) as usize]);
+        // Silent between the note and its first repeat; the first repeat
+        // on the left, the second on the right (ping-pong).
+        assert!(win(&l, 0.1, 0.24) < 1e-3);
+        assert!(win(&l, 0.25, 0.3) > 0.01);
+        assert!(win(&r, 0.5, 0.55) > 0.005);
+        assert!(win(&r, 0.5, 0.55) < win(&l, 0.25, 0.3));
+        assert!(peak(&l[(3.8 * RATE as f64) as usize..]) < 1e-3);
     }
 
     /// Zero crossings upward per second over `x` (a pitch estimate).

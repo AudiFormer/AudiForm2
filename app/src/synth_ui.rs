@@ -146,7 +146,7 @@ fn body(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit) {
 
     // The sound, in the order it is built: the source and what it looks like…
     let w_osc = sec_w(PICK, 4);
-    let w_tone = sec_w(0.0, 4);
+    let w_tone = sec_w(0.0, 5);
     let w_scope = WIDTH - w_osc - w_tone - 2.0 * GAP;
     band(ui, "src", |ui| {
         section(ui, th, "1", "Oscillators", w_osc, "src", 0, |ui, iw| {
@@ -175,7 +175,7 @@ fn body(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit) {
         });
     });
     // …then the LFO, how notes take voices, and the effect after it all.
-    let w_lfo = sec_w(0.0, 6);
+    let w_lfo = sec_w(0.0, 7);
     let w_voice = sec_w(0.0, 6);
     let w_fx = WIDTH - w_lfo - w_voice - 2.0 * GAP;
     band(ui, "play", |ui| {
@@ -652,7 +652,7 @@ fn oscillators(
 /// What colours the oscillators: pulse width, sub, noise, sync and FM.
 fn tone(ui: &mut egui::Ui, inst: &mut Instrument, ed: &mut Edit, iw: f32, kh: f32) {
     let def = af2_core::synth_model::SynthControls::default();
-    let cw = iw / 4.0;
+    let cw = iw / 5.0;
     let x = &mut inst.ext;
     row(ui, |ui| {
         cell(ui, cw, |ui| {
@@ -670,6 +670,20 @@ fn tone(ui: &mut egui::Ui, inst: &mut Instrument, ed: &mut Edit, iw: f32, kh: f3
                 "noise",
                 "Noise",
                 &mut x.noise,
+                0.0,
+                1.0,
+                0.0,
+                false,
+                &pct,
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "air",
+                "Air",
+                &mut x.air,
                 0.0,
                 1.0,
                 0.0,
@@ -1081,7 +1095,7 @@ fn lfo(ui: &mut egui::Ui, inst: &mut Instrument, ed: &mut Edit, iw: f32, _kh: f3
             "Sample and hold: a new random level each cycle",
         ],
     );
-    let cw = iw / 6.0;
+    let cw = iw / 7.0;
     row(ui, |ui| {
         cell(ui, cw, |ui| {
             knob(
@@ -1162,6 +1176,20 @@ fn lfo(ui: &mut egui::Ui, inst: &mut Instrument, ed: &mut Edit, iw: f32, _kh: f3
                 &mut x.lfo_pwm,
                 0.0,
                 0.45,
+                0.0,
+                false,
+                &pct,
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "lamp",
+                "Amp",
+                &mut x.lfo_amp,
+                0.0,
+                1.0,
                 0.0,
                 false,
                 &pct,
@@ -1321,6 +1349,51 @@ fn effects(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit, 
                 0.0,
                 1.0,
                 0.5,
+                false,
+                &pct,
+            )
+        });
+    });
+    caption_line(ui, th, "echo");
+    row(ui, |ui| {
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "echo",
+                "Mix",
+                &mut x.echo,
+                0.0,
+                1.0,
+                0.0,
+                false,
+                &|v| if v <= 0.0 { "Off".into() } else { pct(v) },
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "etime",
+                "Time",
+                &mut x.echo_time,
+                0.02,
+                2.0,
+                0.375,
+                true,
+                &secs,
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "efb",
+                "Feedback",
+                &mut x.echo_feedback,
+                0.0,
+                0.9,
+                0.35,
                 false,
                 &pct,
             )

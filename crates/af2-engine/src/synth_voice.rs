@@ -10,8 +10,8 @@
 //! sync, FM, a sub and noise), its own filter (the original 2-pole
 //! state-variable filter or a driven 4-pole ladder, low-, high- or
 //! band-pass) and its envelopes. One LFO and the pitch bend and mod
-//! wheel are shared, as on most classic polysynths. A bit-crusher and a
-//! chorus follow.
+//! wheel are shared, as on most classic polysynths. A bit-crusher, a
+//! chorus and a ping-pong echo follow.
 //!
 //! Analog (off unless set) gives each voice what a hardware synth's has:
 //! its own small pitch, brightness and level offsets, oscillators that
@@ -38,6 +38,8 @@ const MAXU: usize = MAX_UNISON as usize;
 const CTRL: usize = 16;
 /// Longest chorus delay, seconds.
 const CHORUS_MAX: f32 = 0.03;
+/// Longest echo time, seconds.
+pub(crate) const ECHO_MAX: f32 = 2.0;
 
 /// A held key in Mono and Legato (for going back to it when a later key
 /// comes up).
@@ -96,6 +98,8 @@ struct Voice {
     dr: [f32; 2],
     drt: [f32; 2],
     rng: u32,
+    /// Air: its two high-pass stages per side (last input, output).
+    air: [[f32; 4]; 2],
 }
 
 impl Voice {
@@ -126,6 +130,7 @@ impl Voice {
             dr: [0.0; 2],
             drt: [0.0; 2],
             rng: 1,
+            air: [[0.0; 4]; 2],
         }
     }
 
@@ -140,6 +145,8 @@ impl Voice {
     /// A fresh voice's analog character (amount `amt`), seeded from its
     /// note so the same note always comes out the same.
     fn analog_seed(&mut self, n: &Note, amt: f32) {
+        let b = n.start.to_bits();
+        self.rng = (n.freq.to_bits() ^ b as u32 ^ (b >> 32) as u32).wrapping_mul(0x9E37_79B9) | 1;
         if amt <= 0.0 {
             self.ap = 0.0;
             self.ap2 = 1.0;
@@ -147,8 +154,6 @@ impl Voice {
             self.again = 1.0;
             return;
         }
-        let b = n.start.to_bits();
-        self.rng = (n.freq.to_bits() ^ b as u32 ^ (b >> 32) as u32).wrapping_mul(0x9E37_79B9) | 1;
         for _ in 0..3 {
             self.rand();
         }
@@ -157,9 +162,13 @@ impl Voice {
         self.a_osc2 = self.rand() * 3.0 * amt;
         self.acut = self.rand() * 0.2 * amt;
         self.again = 1.0 + self.rand() * 0.07 * amt;
+        // Free-running: each note starts somewhere in the cycle, the two
+        // oscillators together (so the patch's blend holds), drifting
+        // apart from there.
+        let p = self.rand() * 0.5 + 0.5;
         for u in 0..MAXU {
-            self.ph1[u] = self.rand() * 0.5 + 0.5;
-            self.ph2[u] = self.rand() * 0.5 + 0.5;
+            self.ph1[u] = (self.ph1[u] + p).fract();
+            self.ph2[u] = (self.ph2[u] + p).fract();
         }
         self.dr = [self.rand(), self.rand()];
         self.drt = self.dr;
@@ -196,6 +205,7 @@ impl Voice {
         }
         self.sub = 0.0;
         self.flt = [FState::default(); 2];
+        self.air = [[0.0; 4]; 2];
     }
 }
 
@@ -230,6 +240,7 @@ pub(crate) struct Engine {
     last: Option<f32>,
     crush: Crush,
     chorus: Chorus,
+    echo: Echo,
 }
 
 impl Engine {
@@ -246,6 +257,7 @@ impl Engine {
             last: None,
             crush: Crush::default(),
             chorus: Chorus::new(rate),
+            echo: Echo::new(rate),
         };
         e.set(inst);
         e
@@ -305,6 +317,7 @@ impl Engine {
         self.last = None;
         self.crush = Crush::default();
         self.chorus.clear();
+        self.echo.clear();
     }
 
     /// Starts note `n` (its key `id`) at time `t`, its envelopes from
@@ -546,6 +559,9 @@ impl Engine {
         if self.x.chorus > 0.0 {
             self.chorus.run(l, r, &self.x, self.dt);
         }
+        if self.x.echo > 0.0 {
+            self.echo.run(l, r, &self.x);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -576,7 +592,12 @@ impl Engine {
         let (w1, w2) = (inst.wave, d.wave2);
         let (l1, l2) = (x.osc1_level, x.osc2_level);
         let analog = x.analog.clamp(0.0, 1.0);
-        let sat = 1.0 + 1.5 * analog;
+        // A gentle cubic bend: some 3rd harmonic on loud parts, the level
+        // all but unchanged.
+        let sat = 0.08 * analog;
+        // Air's high-pass (two one-pole stages near 5 kHz) and level.
+        let air_a = 1.0 / (1.0 + TAU * 5000.0 * dtf);
+        let air_g = x.air.clamp(0.0, 1.0);
         for i in 0..l.len() {
             let tl = (t - v.start + dt * i as f64) as f32;
             let env = envelope(&inst, tl, held);
@@ -641,7 +662,8 @@ impl Engine {
                         // A faint noise floor, and the circuit's soft
                         // saturation into the filter.
                         s += analog * 0.003 * v.rand();
-                        s = soft(s * sat) / sat;
+                        let c = s.clamp(-1.5, 1.5);
+                        s = c - sat * c * c * c;
                     }
                 }
                 if d.stereo {
@@ -651,7 +673,10 @@ impl Engine {
                     sl += s;
                 }
             }
-            let g = env * gain * d.uni_gain * v.again;
+            let mut g = env * gain * d.uni_gain * v.again;
+            if x.lfo_amp > 0.0 {
+                g *= 1.0 - x.lfo_amp.min(1.0) * 0.5 * (1.0 - lfo[i]);
+            }
             if d.stereo {
                 let a = filt(
                     &v.co,
@@ -682,6 +707,19 @@ impl Engine {
                 ) * g;
                 l[i] += a * v.note.pl;
                 r[i] += a * v.note.pr;
+            }
+            if air_g > 0.0 {
+                for c in 0..2 {
+                    let w = v.rand();
+                    let h = &mut v.air[c];
+                    h[1] = air_a * (h[1] + w - h[0]);
+                    h[0] = w;
+                    h[3] = air_a * (h[3] + h[1] - h[2]);
+                    h[2] = h[1];
+                }
+                let k = g * air_g;
+                l[i] += v.air[0][3] * k * v.note.pl;
+                r[i] += v.air[1][3] * k * v.note.pr;
             }
         }
     }
@@ -885,6 +923,63 @@ impl Crush {
             }
             l[i] = self.hold[0];
             r[i] = self.hold[1];
+        }
+    }
+}
+
+/// A ping-pong echo: the left repeats into the right and back, each
+/// repeat a little darker.
+struct Echo {
+    buf: [Vec<f32>; 2],
+    pos: usize,
+    lp: [f32; 2],
+    rate: f32,
+}
+
+impl Echo {
+    fn new(rate: f32) -> Echo {
+        let n = (rate * ECHO_MAX) as usize + 4;
+        Echo {
+            buf: [vec![0.0; n], vec![0.0; n]],
+            pos: 0,
+            lp: [0.0; 2],
+            rate,
+        }
+    }
+
+    fn clear(&mut self) {
+        for b in &mut self.buf {
+            b.fill(0.0);
+        }
+        self.lp = [0.0; 2];
+    }
+
+    fn run(&mut self, l: &mut [f32], r: &mut [f32], x: &SynthControls) {
+        let len = self.buf[0].len();
+        let dly = ((x.echo_time.clamp(0.02, ECHO_MAX) * self.rate) as usize).clamp(1, len - 1);
+        let fb = x.echo_feedback.clamp(0.0, 0.9);
+        let mix = x.echo.clamp(0.0, 1.0);
+        // A gentle one-pole low-pass in the loop (about 7 kHz at 48 kHz).
+        let k = 0.6;
+        for i in 0..l.len() {
+            let rp = (self.pos + len - dly) % len;
+            let (el, er) = (self.buf[0][rp], self.buf[1][rp]);
+            let ins = [l[i], r[i]];
+            let mono = 0.5 * (ins[0] + ins[1]);
+            // Left takes the input and the right's repeats; right the left's.
+            let wl = mono + fb * er;
+            let wr = fb * el;
+            self.lp[0] += (wl - self.lp[0]) * k;
+            self.lp[1] += (wr - self.lp[1]) * k;
+            for (c, v) in self.lp.iter_mut().enumerate() {
+                if v.abs() < 1e-20 {
+                    *v = 0.0;
+                }
+                self.buf[c][self.pos] = *v;
+            }
+            l[i] = ins[0] + el * mix;
+            r[i] = ins[1] + er * mix;
+            self.pos = (self.pos + 1) % len;
         }
     }
 }
