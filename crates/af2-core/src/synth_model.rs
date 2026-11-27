@@ -37,10 +37,30 @@ pub enum SynthModel {
     StringMachine,
     /// A hard-sync lead whose second oscillator sweeps on each note.
     SyncLead,
+    // Work-in-progress models matched from reference recordings. They are
+    // named after where each was heard so they are easy to tell apart
+    // while being tuned; rename them before release.
+    /// A bright quarter-width pulse with its fundamental reinforced by a
+    /// sine, gently chorused.
+    AtlantisVerseLead,
+    /// A wide, stacked saw-and-pulse poly with a little glide.
+    AtlantisChorusPoly,
+    /// Two beating sines with a faint partial three octaves up that
+    /// fades as the note decays.
+    WildHorsesDemoPad,
+    /// A glassy lead: a sine plus an inharmonic partial about 5.37 times
+    /// the note, slow to swell.
+    WildHorsesIntroLead,
+    /// A low buzzing drone, band-passed, pulsed by a square LFO and
+    /// bit-crushed.
+    WildHorsesCrushDrone,
+    /// A crystal bell lead: a bright FM attack over a sine and a glassy
+    /// inharmonic partial.
+    IceQueen,
 }
 
 impl SynthModel {
-    pub const ALL: [SynthModel; 8] = [
+    pub const ALL: [SynthModel; 14] = [
         SynthModel::Default,
         SynthModel::MonoLadder,
         SynthModel::PolyChorus,
@@ -49,6 +69,12 @@ impl SynthModel {
         SynthModel::FmKeys,
         SynthModel::StringMachine,
         SynthModel::SyncLead,
+        SynthModel::AtlantisVerseLead,
+        SynthModel::AtlantisChorusPoly,
+        SynthModel::WildHorsesDemoPad,
+        SynthModel::WildHorsesIntroLead,
+        SynthModel::WildHorsesCrushDrone,
+        SynthModel::IceQueen,
     ];
 
     pub fn name(self) -> &'static str {
@@ -61,6 +87,12 @@ impl SynthModel {
             SynthModel::FmKeys => "FM Keys",
             SynthModel::StringMachine => "String Machine",
             SynthModel::SyncLead => "Sync Lead",
+            SynthModel::AtlantisVerseLead => "Atlantis Verse Lead (WIP)",
+            SynthModel::AtlantisChorusPoly => "Atlantis Chorus Poly (WIP)",
+            SynthModel::WildHorsesDemoPad => "Wild Horses Demo Pad (WIP)",
+            SynthModel::WildHorsesIntroLead => "Wild Horses Intro Lead (WIP)",
+            SynthModel::WildHorsesCrushDrone => "Wild Horses Crush Drone (WIP)",
+            SynthModel::IceQueen => "Ice Queen (WIP)",
         }
     }
 
@@ -80,6 +112,22 @@ impl SynthModel {
             SynthModel::FmKeys => "2-operator FM electric piano: bright bell attack, mellow body",
             SynthModel::StringMachine => "String ensemble: stacked saws in a deep ensemble chorus",
             SynthModel::SyncLead => "Hard-sync lead whose second oscillator sweeps on every note",
+            SynthModel::AtlantisVerseLead => {
+                "Bright 25% pulse with a sine under it, open filter, phasey chorus"
+            }
+            SynthModel::AtlantisChorusPoly => {
+                "Wide stacked saw and pulse poly with a touch of glide"
+            }
+            SynthModel::WildHorsesDemoPad => {
+                "Beating sines with a faint high partial that fades as notes decay"
+            }
+            SynthModel::WildHorsesIntroLead => {
+                "Glassy lead: sine plus an inharmonic partial, slow swell"
+            }
+            SynthModel::WildHorsesCrushDrone => {
+                "Low band-passed buzz, pulsed in eighths and bit-crushed"
+            }
+            SynthModel::IceQueen => "Crystal bell lead: bright FM strike over a glassy partial",
         }
     }
 
@@ -258,6 +306,172 @@ impl SynthModel {
                 x.glide = 0.04;
                 x.velocity = 0.5;
             }
+            SynthModel::AtlantisVerseLead => {
+                // Measured: every harmonic but each fourth (a 25% pulse),
+                // the fundamental about 12 dB over the rest, all of them
+                // rising together in about 90 ms (no filter sweep).
+                i.wave = Wave::Pulse;
+                i.detune = 0.0;
+                i.attack = 0.08;
+                i.decay = 0.6;
+                i.sustain = 0.8;
+                i.release = 0.35;
+                // A resonant peak riding about the 10th harmonic lifts the
+                // upper partials as in the recording, then rolls off.
+                i.cutoff = 1900.0;
+                i.resonance = 0.8;
+                i.gain_db = -12.0;
+                x.key_track = 1.0;
+                x.pw = 0.25;
+                x.osc2_wave = Some(Wave::Sine);
+                x.osc2_level = 0.45;
+                x.voices = 8;
+                x.velocity = 0.4;
+                x.chorus = 0.55;
+                x.chorus_rate = 0.4;
+                x.chorus_depth = 0.45;
+            }
+            SynthModel::AtlantisChorusPoly => {
+                // Measured: a full harmonic series well past the tenth,
+                // mostly in the sides (wide), notes leaning into pitch.
+                i.wave = Wave::Saw;
+                i.detune = 6.0;
+                i.attack = 0.12;
+                i.decay = 0.8;
+                i.sustain = 0.85;
+                i.release = 0.5;
+                i.cutoff = 5000.0;
+                i.resonance = 0.1;
+                i.gain_db = -15.0;
+                x.osc2_wave = Some(Wave::Pulse);
+                x.osc2_level = 0.7;
+                x.pw = 0.4;
+                x.key_track = 0.3;
+                x.unison = 3;
+                x.spread = 14.0;
+                x.width = 0.9;
+                x.glide = 0.05;
+                x.voices = 8;
+                x.velocity = 0.5;
+                x.chorus = 0.5;
+                x.chorus_rate = 0.5;
+                x.chorus_depth = 0.5;
+            }
+            SynthModel::WildHorsesDemoPad => {
+                // Measured: nearly a pure sine, the 2nd harmonic 11-23 dB
+                // down, the 8th 21-26 dB down and dying faster than the
+                // note; the note beats about 3.4 times a second (two
+                // copies some 10 cents apart); 60 ms in, ~3 s to fade.
+                i.wave = Wave::Sine;
+                i.detune = 0.0;
+                i.attack = 0.05;
+                i.decay = 3.5;
+                i.sustain = 0.25;
+                i.release = 0.6;
+                i.cutoff = 2000.0;
+                i.resonance = 0.0;
+                i.gain_db = -8.0;
+                x.osc2_wave = Some(Wave::Sine);
+                x.osc2_octave = 3;
+                x.osc2_level = 0.09;
+                x.fm = 0.5;
+                x.fm_ratio = 1.0;
+                x.fm_decay = 2.5;
+                x.key_track = 1.0;
+                x.filter_env = 1.3;
+                x.f_attack = 0.005;
+                x.f_decay = 2.5;
+                x.f_sustain = 0.0;
+                x.f_release = 0.6;
+                x.unison = 2;
+                x.spread = 10.0;
+                x.width = 0.25;
+                x.voices = 8;
+                x.velocity = 0.5;
+                x.chorus = 0.2;
+                x.chorus_rate = 0.4;
+                x.chorus_depth = 0.3;
+            }
+            SynthModel::WildHorsesIntroLead => {
+                // Measured: a sine with a partial at 5.37 times it (not a
+                // harmonic: a glassy, bell-like edge) about 9 dB down and
+                // the 2nd harmonic about 19 dB down; ~250 ms to swell.
+                // Oscillator 2 sits 2 octaves, 5 semitones and 12 cents up
+                // (x5.37).
+                i.wave = Wave::Sine;
+                i.detune = 12.0;
+                i.attack = 0.22;
+                i.decay = 0.5;
+                i.sustain = 0.85;
+                i.release = 0.35;
+                i.cutoff = 16_000.0;
+                i.resonance = 0.0;
+                i.gain_db = -9.0;
+                x.osc2_wave = Some(Wave::Sine);
+                x.osc2_octave = 2;
+                x.osc2_semi = 5;
+                x.osc2_level = 0.35;
+                x.fm = 0.25;
+                x.fm_ratio = 1.0;
+                x.fm_decay = 5.0;
+                x.voices = 8;
+                x.velocity = 0.4;
+                x.chorus = 0.4;
+                x.chorus_rate = 0.6;
+                x.chorus_depth = 0.35;
+            }
+            SynthModel::WildHorsesCrushDrone => {
+                // Measured: a low drone whose 4th to 12th harmonics carry
+                // it (a band round 300-650 Hz), pulsing about 2.8 times a
+                // second (eighths at 83 BPM), with a gritty, crushed edge.
+                i.wave = Wave::Saw;
+                i.detune = 0.0;
+                i.attack = 0.01;
+                i.decay = 0.3;
+                i.sustain = 1.0;
+                i.release = 0.25;
+                i.cutoff = 450.0;
+                i.resonance = 0.35;
+                i.gain_db = -8.0;
+                x.osc2_wave = Some(Wave::Square);
+                x.osc2_octave = -1;
+                x.osc2_level = 0.6;
+                x.filter_type = FilterType::BandPass;
+                x.lfo_shape = LfoShape::Square;
+                x.lfo_rate = 2.78;
+                x.lfo_depth = 1.0;
+                x.lfo_pitch = 0.0;
+                x.lfo_filter = 1.0;
+                x.voices = 8;
+                x.velocity = 0.3;
+                x.crush_bits = 6.0;
+                x.crush_down = 6.0;
+            }
+            SynthModel::IceQueen => {
+                // A sine with the same glassy x5.37 partial, struck
+                // brighter: an FM edge that rings off over a second.
+                i.wave = Wave::Sine;
+                i.detune = 12.0;
+                i.attack = 0.008;
+                i.decay = 1.2;
+                i.sustain = 0.6;
+                i.release = 0.5;
+                i.cutoff = 16_000.0;
+                i.resonance = 0.0;
+                i.gain_db = -9.0;
+                x.osc2_wave = Some(Wave::Sine);
+                x.osc2_octave = 2;
+                x.osc2_semi = 5;
+                x.osc2_level = 0.45;
+                x.fm = 1.2;
+                x.fm_ratio = 1.0;
+                x.fm_decay = 0.8;
+                x.voices = 8;
+                x.velocity = 0.6;
+                x.chorus = 0.3;
+                x.chorus_rate = 0.5;
+                x.chorus_depth = 0.3;
+            }
         }
         i
     }
@@ -401,6 +615,15 @@ pub struct SynthControls {
     pub chorus_rate: f32,
     /// 0..1.
     pub chorus_depth: f32,
+    /// Hardware imperfection, 0..1 (0 = off): each note a little off
+    /// pitch and brightness, oscillators drifting, free-running phases,
+    /// a soft saturation and a faint noise floor.
+    pub analog: f32,
+    /// Bit-crusher depth in bits, 1..16 (0 = off).
+    pub crush_bits: f32,
+    /// Bit-crusher sample-rate reduction: hold every sample this many
+    /// times, 1..32 (1 = off).
+    pub crush_down: f32,
 }
 
 impl Default for SynthControls {
@@ -452,6 +675,9 @@ impl Default for SynthControls {
             chorus: 0.0,
             chorus_rate: 0.5,
             chorus_depth: 0.5,
+            analog: 0.0,
+            crush_bits: 0.0,
+            crush_down: 1.0,
         }
     }
 }

@@ -1059,6 +1059,56 @@ const REVERB: &[FactoryPreset] = &[
         ],
     ),
     ("Utility: Send (100% Wet)", &[("dry", 0.0), ("wet", 100.0), ("low_cut", 150.0)]),
+    // Late-80s digital reverbs for synths: bright, dense, long and
+    // smooth, with the pre-delay that kept them off the notes.
+    (
+        "80s Synth: Bright Plate",
+        &[
+            ("kind", PLATE), ("size", 60.0), ("decay", 2400.0), ("predelay", 25.0),
+            ("damping", 20.0), ("diffusion", 85.0), ("modulation", 35.0),
+            ("low_cut", 180.0), ("high_cut", 12_000.0), ("wet", 28.0),
+        ],
+    ),
+    (
+        "80s Synth: Digital Hall",
+        &[
+            ("kind", HALL), ("size", 85.0), ("decay", 3800.0), ("predelay", 60.0),
+            ("early", 30.0), ("damping", 30.0), ("diffusion", 80.0), ("modulation", 45.0),
+            ("low_cut", 200.0), ("high_cut", 10_000.0), ("wet", 30.0),
+        ],
+    ),
+    (
+        "80s Synth: Shimmer Wash",
+        &[
+            ("kind", HALL), ("size", 100.0), ("decay", 7500.0), ("predelay", 80.0),
+            ("damping", 15.0), ("diffusion", 90.0), ("modulation", 70.0),
+            ("low_cut", 300.0), ("high_cut", 14_000.0), ("wet", 38.0),
+        ],
+    ),
+    (
+        "80s Synth: Lead Ambience",
+        &[
+            ("kind", ROOM), ("size", 45.0), ("decay", 1100.0), ("predelay", 35.0),
+            ("early", 55.0), ("damping", 35.0), ("diffusion", 75.0), ("modulation", 25.0),
+            ("low_cut", 250.0), ("high_cut", 11_000.0), ("wet", 22.0),
+        ],
+    ),
+    (
+        "80s Synth: Big Short Room",
+        &[
+            ("kind", ROOM), ("size", 70.0), ("decay", 450.0), ("predelay", 8.0),
+            ("early", 85.0), ("damping", 25.0), ("diffusion", 90.0), ("modulation", 10.0),
+            ("low_cut", 200.0), ("high_cut", 9000.0), ("wet", 32.0),
+        ],
+    ),
+    (
+        "80s Synth: Pad Cathedral",
+        &[
+            ("kind", HALL), ("size", 100.0), ("decay", 10_000.0), ("predelay", 100.0),
+            ("damping", 40.0), ("diffusion", 85.0), ("modulation", 55.0),
+            ("low_cut", 250.0), ("high_cut", 8000.0), ("wet", 35.0),
+        ],
+    ),
 ];
 
 const STUDIO_REVERB: &[FactoryPreset] = &[

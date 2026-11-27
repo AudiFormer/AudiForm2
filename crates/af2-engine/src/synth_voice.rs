@@ -10,7 +10,14 @@
 //! sync, FM, a sub and noise), its own filter (the original 2-pole
 //! state-variable filter or a driven 4-pole ladder, low-, high- or
 //! band-pass) and its envelopes. One LFO and the pitch bend and mod
-//! wheel are shared, as on most classic polysynths. A chorus follows.
+//! wheel are shared, as on most classic polysynths. A bit-crusher and a
+//! chorus follow.
+//!
+//! Analog (off unless set) gives each voice what a hardware synth's has:
+//! its own small pitch, brightness and level offsets, oscillators that
+//! wander slowly and apart, free-running phases, a soft saturation into
+//! the filter and a faint noise floor. Its randomness is seeded from each
+//! note, so a clip plays and exports the same every time.
 //!
 //! Envelopes are worked out from each voice's own times, so a jump
 //! starts the notes sounding there at the right level. Filters are tuned
@@ -77,6 +84,18 @@ struct Voice {
     noise: u32,
     flt: [FState; 2],
     co: Coefs,
+    /// Analog: pitch offset (octaves), oscillator 2's extra ratio,
+    /// cutoff offset (octaves) and level, the drift now and where it is
+    /// heading (pitch, oscillator 2), and the voice's random state.
+    ap: f32,
+    ap2: f32,
+    acut: f32,
+    again: f32,
+    a_pitch: f32,
+    a_osc2: f32,
+    dr: [f32; 2],
+    drt: [f32; 2],
+    rng: u32,
 }
 
 impl Voice {
@@ -98,7 +117,67 @@ impl Voice {
             noise: 1,
             flt: [FState::default(); 2],
             co: Coefs::default(),
+            ap: 0.0,
+            ap2: 1.0,
+            acut: 0.0,
+            again: 1.0,
+            a_pitch: 0.0,
+            a_osc2: 0.0,
+            dr: [0.0; 2],
+            drt: [0.0; 2],
+            rng: 1,
         }
+    }
+
+    /// -1..1 from the voice's own random state.
+    fn rand(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        self.rng as f32 / u32::MAX as f32 * 2.0 - 1.0
+    }
+
+    /// A fresh voice's analog character (amount `amt`), seeded from its
+    /// note so the same note always comes out the same.
+    fn analog_seed(&mut self, n: &Note, amt: f32) {
+        if amt <= 0.0 {
+            self.ap = 0.0;
+            self.ap2 = 1.0;
+            self.acut = 0.0;
+            self.again = 1.0;
+            return;
+        }
+        let b = n.start.to_bits();
+        self.rng = (n.freq.to_bits() ^ b as u32 ^ (b >> 32) as u32).wrapping_mul(0x9E37_79B9) | 1;
+        for _ in 0..3 {
+            self.rand();
+        }
+        // Cents and octaves at full amount.
+        self.a_pitch = self.rand() * 5.0 * amt;
+        self.a_osc2 = self.rand() * 3.0 * amt;
+        self.acut = self.rand() * 0.2 * amt;
+        self.again = 1.0 + self.rand() * 0.07 * amt;
+        for u in 0..MAXU {
+            self.ph1[u] = self.rand() * 0.5 + 0.5;
+            self.ph2[u] = self.rand() * 0.5 + 0.5;
+        }
+        self.dr = [self.rand(), self.rand()];
+        self.drt = self.dr;
+        self.ap = self.a_pitch / 1200.0;
+        self.ap2 = 1.0;
+    }
+
+    /// Every 16 samples: the slow drift moves on (amount `amt`).
+    fn analog_drift(&mut self, amt: f32) {
+        for k in 0..2 {
+            // A new heading now and then (about every 0.2 s at 48 kHz).
+            if self.rand() > 0.9985 {
+                self.drt[k] = self.rand();
+            }
+            self.dr[k] += (self.drt[k] - self.dr[k]) * 0.0015;
+        }
+        self.ap = (self.a_pitch + self.dr[0] * 6.0 * amt) / 1200.0;
+        self.ap2 = ((self.a_osc2 + self.dr[1] * 4.0 * amt) / 1200.0).exp2();
     }
 
     /// Fresh oscillators and filter (a new note on a free voice).
@@ -149,6 +228,7 @@ pub(crate) struct Engine {
     seq: u64,
     /// The pitch the last note played (log2 Hz), to glide from.
     last: Option<f32>,
+    crush: Crush,
     chorus: Chorus,
 }
 
@@ -164,6 +244,7 @@ impl Engine {
             held: [None; MAXV],
             seq: 0,
             last: None,
+            crush: Crush::default(),
             chorus: Chorus::new(rate),
         };
         e.set(inst);
@@ -222,6 +303,7 @@ impl Engine {
         }
         self.held = [None; MAXV];
         self.last = None;
+        self.crush = Crush::default();
         self.chorus.clear();
     }
 
@@ -269,6 +351,7 @@ impl Engine {
                 v.accent = accent;
                 v.seq = seq;
                 v.noise = (seq as u32).wrapping_mul(0x9E37_79B9) | 1;
+                v.analog_seed(&n, self.x.analog);
             }
             mode => {
                 // Remember the key (the oldest goes when all are taken).
@@ -289,6 +372,7 @@ impl Engine {
                         _ => target,
                     };
                     v.noise = (seq as u32).wrapping_mul(0x9E37_79B9) | 1;
+                    v.analog_seed(&n, self.x.analog);
                 } else if mode == VoiceMode::Mono || !overlap {
                     // Envelopes start again; the oscillators and filter
                     // run on.
@@ -380,6 +464,9 @@ impl Engine {
                 v.on = false;
                 continue;
             }
+            if x.analog > 0.0 {
+                v.analog_drift(x.analog);
+            }
             let held = (v.end - v.start).max(0.0) as f32;
             let fe = adsr(
                 x.f_attack,
@@ -393,7 +480,9 @@ impl Engine {
             let mut oct = x.filter_env * fe
                 + x.key_track * key / 12.0
                 + x.lfo_filter * lfo
-                + x.vel_filter * v.note.vel;
+                + x.vel_filter * v.note.vel
+                + v.acut
+                + v.dr[0] * 0.1 * x.analog;
             if v.accent {
                 oct += x.accent * (1.0 + 2.5 * fe);
             }
@@ -451,6 +540,9 @@ impl Engine {
             }
             i += m;
         }
+        if self.x.crush_bits > 0.0 || self.x.crush_down > 1.0 {
+            self.crush.run(l, r, &self.x);
+        }
         if self.x.chorus > 0.0 {
             self.chorus.run(l, r, &self.x, self.dt);
         }
@@ -483,6 +575,8 @@ impl Engine {
         let sync_env = x.osc2_env != 0.0;
         let (w1, w2) = (inst.wave, d.wave2);
         let (l1, l2) = (x.osc1_level, x.osc2_level);
+        let analog = x.analog.clamp(0.0, 1.0);
+        let sat = 1.0 + 1.5 * analog;
         for i in 0..l.len() {
             let tl = (t - v.start + dt * i as f64) as f32;
             let env = envelope(&inst, tl, held);
@@ -490,13 +584,13 @@ impl Engine {
                 continue;
             }
             v.log_f += (v.target - v.log_f) * d.glide_k;
-            let f = v.log_f.exp2() * pf[i];
+            let f = (v.log_f + v.ap).exp2() * pf[i];
             let pw = (x.pw + x.lfo_pwm * lfo[i]).clamp(0.05, 0.95);
             let r2 = if sync_env {
                 let fe = adsr(x.f_attack, x.f_decay, x.f_sustain, x.f_release, tl, held);
-                d.r2 * (x.osc2_env * fe / 12.0).exp2()
+                d.r2 * v.ap2 * (x.osc2_env * fe / 12.0).exp2()
             } else {
-                d.r2
+                d.r2 * v.ap2
             };
             let fm_i = if fm_on {
                 x.fm * fm_vel * (-tl / x.fm_decay.max(0.01)).exp() / TAU
@@ -543,6 +637,12 @@ impl Engine {
                         v.noise ^= v.noise << 5;
                         s += x.noise * 0.5 * (v.noise as f32 / u32::MAX as f32 * 2.0 - 1.0);
                     }
+                    if analog > 0.0 {
+                        // A faint noise floor, and the circuit's soft
+                        // saturation into the filter.
+                        s += analog * 0.003 * v.rand();
+                        s = soft(s * sat) / sat;
+                    }
                 }
                 if d.stereo {
                     sl += s * d.pan_l[u];
@@ -551,7 +651,7 @@ impl Engine {
                     sl += s;
                 }
             }
-            let g = env * gain * d.uni_gain;
+            let g = env * gain * d.uni_gain * v.again;
             if d.stereo {
                 let a = filt(
                     &v.co,
@@ -750,6 +850,41 @@ fn filt(c: &Coefs, st: &mut FState, x: f32, ty: FilterType, kind: FilterKind, dr
                 FilterType::HighPass => u - 4.0 * y[0] + 6.0 * y[1] - 4.0 * y[2] + y[3],
             };
             out * c.comp
+        }
+    }
+}
+
+/// A bit-crusher: fewer levels (`crush_bits`) and each sample held
+/// `crush_down` times (a lower sample rate, aliasing and all).
+#[derive(Debug, Clone, Copy, Default)]
+struct Crush {
+    hold: [f32; 2],
+    ph: f32,
+}
+
+impl Crush {
+    fn run(&mut self, l: &mut [f32], r: &mut [f32], x: &SynthControls) {
+        let step = 1.0 / x.crush_down.clamp(1.0, 32.0);
+        let levels = if x.crush_bits > 0.0 {
+            2f32.powf(x.crush_bits.clamp(1.0, 16.0) - 1.0)
+        } else {
+            0.0
+        };
+        for i in 0..l.len() {
+            self.ph += step;
+            if self.ph >= 1.0 - 1e-6 {
+                self.ph -= 1.0;
+                let q = |v: f32| {
+                    if levels > 0.0 {
+                        (v * levels).round() / levels
+                    } else {
+                        v
+                    }
+                };
+                self.hold = [q(l[i]), q(r[i])];
+            }
+            l[i] = self.hold[0];
+            r[i] = self.hold[1];
         }
     }
 }

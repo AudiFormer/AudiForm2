@@ -1326,6 +1326,67 @@ fn effects(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit, 
             )
         });
     });
+    caption_line(ui, th, "analog · crush");
+    row(ui, |ui| {
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "analog",
+                "Analog",
+                &mut x.analog,
+                0.0,
+                1.0,
+                0.0,
+                false,
+                &|v| if v <= 0.0 { "Off".into() } else { pct(v) },
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "cbits",
+                "Bits",
+                &mut x.crush_bits,
+                0.0,
+                16.0,
+                0.0,
+                false,
+                &|v| {
+                    if v < 1.0 {
+                        "Off".into()
+                    } else {
+                        format!("{v:.0} bit")
+                    }
+                },
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "cdown",
+                "Downsample",
+                &mut x.crush_down,
+                1.0,
+                32.0,
+                1.0,
+                true,
+                &|v| {
+                    if v <= 1.01 {
+                        "Off".into()
+                    } else {
+                        format!("÷{v:.1}")
+                    }
+                },
+            )
+        });
+    });
+    // Below one bit means off.
+    if x.crush_bits > 0.0 && x.crush_bits < 1.0 {
+        x.crush_bits = 0.0;
+    }
 }
 
 // ---------------------------------------------------------------------

@@ -1001,6 +1001,71 @@ mod tests {
         }
     }
 
+    fn phrase() -> Vec<Note> {
+        PHRASE
+            .iter()
+            .map(|&(a, b, p, v, pan)| note(a, b, p, v, pan))
+            .collect()
+    }
+
+    #[test]
+    fn analog_is_off_unless_set_and_plays_the_same_every_time() {
+        use af2_core::synth_model::SynthModel;
+        let base = SynthModel::PolyChorus.preset();
+        let render = |inst: Instrument| render_all(&mut Synth::new(inst, phrase(), RATE), 2.0);
+        // Off: the model as it always was.
+        assert_eq!(base.ext.analog, 0.0);
+        let off = render(base);
+        assert_eq!(off, render(base));
+        // On: different from off, the same on every render (an export
+        // matches playback), and clean.
+        let mut warm = base;
+        warm.ext.analog = 1.0;
+        let a = render(warm);
+        assert_ne!(a, off);
+        assert_eq!(a, render(warm));
+        assert!(a.0.iter().chain(&a.1).all(|v| v.is_finite()));
+        let p = peak(&a.0).max(peak(&a.1));
+        let q = peak(&off.0).max(peak(&off.1));
+        assert!(
+            (p / q - 1.0).abs() < 0.35,
+            "analog moved the level: {p} vs {q}"
+        );
+    }
+
+    #[test]
+    fn the_crusher_holds_samples_and_uses_few_levels() {
+        let mut inst = Instrument {
+            wave: Wave::Sine,
+            detune: 0.0,
+            sustain: 1.0,
+            cutoff: 18_000.0,
+            resonance: 0.0,
+            ..Instrument::default()
+        };
+        inst.ext.crush_down = 4.0;
+        inst.ext.crush_bits = 3.0;
+        let (l, _) = render_all(
+            &mut Synth::new(inst, vec![note(0.0, 0.5, 69, 127, 0.0)], RATE),
+            0.4,
+        );
+        let body = &l[4800..14_400];
+        // Each sample held four times: a change at most every fourth.
+        let changes: Vec<usize> = (1..body.len())
+            .filter(|&i| body[i] != body[i - 1])
+            .collect();
+        assert!(changes.len() > 100);
+        assert!(
+            changes.windows(2).all(|w| (w[1] - w[0]) % 4 == 0),
+            "uneven holds"
+        );
+        // 3 bits: a handful of levels (the output gain scales the grid).
+        let mut lv: Vec<u32> = body.iter().map(|v| v.to_bits()).collect();
+        lv.sort_unstable();
+        lv.dedup();
+        assert!(lv.len() <= 9, "{} levels", lv.len());
+    }
+
     /// Zero crossings upward per second over `x` (a pitch estimate).
     fn freq_of(x: &[f32]) -> f64 {
         let ups = x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
