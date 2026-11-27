@@ -1109,6 +1109,32 @@ mod tests {
         assert!(peak(&l[(3.8 * RATE as f64) as usize..]) < 1e-3);
     }
 
+    #[test]
+    fn fm_2_bends_oscillator_2_from_the_shared_modulator() {
+        let mut inst = Instrument {
+            wave: Wave::Sine,
+            detune: 0.0,
+            sustain: 1.0,
+            cutoff: 18_000.0,
+            resonance: 0.0,
+            ..Instrument::default()
+        };
+        inst.ext.osc2_wave = Some(Wave::Sine);
+        inst.ext.fm_ratio = 4.0;
+        let render = |i: Instrument| render_all(&mut Synth::new(i, vec![note(0.0, 0.5, 69, 100, 0.0)], RATE), 0.4).0;
+        let plain = render(inst);
+        // Oscillator 2 is the same as 1 here: FM 2 alone still changes it.
+        let mut fm2 = inst;
+        fm2.ext.fm2 = 2.0;
+        let bent = render(fm2);
+        assert_ne!(plain, bent);
+        assert!(bent.iter().all(|v| v.is_finite()));
+        // And at 0 it is off: the instrument is unchanged.
+        let mut off = inst;
+        off.ext.fm2 = 0.0;
+        assert_eq!(render(off), plain);
+    }
+
     /// Zero crossings upward per second over `x` (a pitch estimate).
     fn freq_of(x: &[f32]) -> f64 {
         let ups = x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();

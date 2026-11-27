@@ -290,7 +290,8 @@ impl Engine {
             wave2: x.osc2_wave.unwrap_or(inst.wave),
             ..Derived::default()
         };
-        d.osc2_same = (d.r2 - d.r1).abs() < 1e-7 && d.wave2 == inst.wave && !x.sync;
+        d.osc2_same =
+            (d.r2 - d.r1).abs() < 1e-7 && d.wave2 == inst.wave && !x.sync && x.fm2 <= 0.0;
         for u in 0..MAXU {
             let f = if n > 1 {
                 u as f32 / (n - 1) as f32 - 0.5
@@ -586,7 +587,7 @@ impl Engine {
         if v.accent {
             gain *= 1.0 + 0.6 * x.accent;
         }
-        let fm_on = x.fm > 0.0;
+        let fm_on = x.fm > 0.0 || x.fm2 > 0.0;
         let fm_vel = (1.0 - vs) + vs * v.note.vel;
         let sync_env = x.osc2_env != 0.0;
         let (w1, w2) = (inst.wave, d.wave2);
@@ -613,20 +614,24 @@ impl Engine {
             } else {
                 d.r2 * v.ap2
             };
-            let fm_i = if fm_on {
-                x.fm * fm_vel * (-tl / x.fm_decay.max(0.01)).exp() / TAU
+            let fm_env = if fm_on {
+                fm_vel * (-tl / x.fm_decay.max(0.01)).exp() / TAU
             } else {
                 0.0
             };
+            let (fm_i, fm2_i) = (x.fm * fm_env, x.fm2 * fm_env);
             let (mut sl, mut sr) = (0.0f32, 0.0f32);
             for u in 0..d.uni_n {
                 let fu = f * d.uni[u];
                 let inc1 = (fu * d.r1 * dtf).min(0.49);
                 let mut p1 = v.ph1[u];
+                // The modulator's swing (oscillator 2 takes it too, at its
+                // own amount).
+                let mut ms = 0.0;
                 if fm_on {
                     let incm = (fu * d.r1 * x.fm_ratio * dtf).min(0.49);
-                    let m = (TAU * v.phm[u]).sin() * fm_i;
-                    p1 = (p1 + m).rem_euclid(1.0);
+                    ms = (TAU * v.phm[u]).sin();
+                    p1 = (p1 + ms * fm_i).rem_euclid(1.0);
                     v.phm[u] = wrap(v.phm[u] + incm);
                 }
                 let o1 = wave(w1, p1, inc1, pw);
@@ -634,7 +639,12 @@ impl Engine {
                     o1
                 } else {
                     let inc2 = (fu * r2 * dtf).min(0.49);
-                    let o = wave(w2, v.ph2[u], inc2, pw);
+                    let p2m = if fm2_i != 0.0 {
+                        (v.ph2[u] + ms * fm2_i).rem_euclid(1.0)
+                    } else {
+                        v.ph2[u]
+                    };
+                    let o = wave(w2, p2m, inc2, pw);
                     let mut p2 = v.ph2[u] + inc2;
                     if x.sync && v.ph1[u] + inc1 >= 1.0 {
                         // Restart with oscillator 1's new cycle.

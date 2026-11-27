@@ -722,6 +722,20 @@ fn tone(ui: &mut egui::Ui, inst: &mut Instrument, ed: &mut Edit, iw: f32, kh: f3
             knob(
                 ui,
                 ed,
+                "fm2",
+                "FM 2",
+                &mut x.fm2,
+                0.0,
+                8.0,
+                0.0,
+                false,
+                &plain,
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
                 "fmd",
                 "FM Decay",
                 &mut x.fm_decay,

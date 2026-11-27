@@ -40,9 +40,9 @@ pub enum SynthModel {
     // Work-in-progress models matched from reference recordings. They are
     // named after where each was heard so they are easy to tell apart
     // while being tuned; rename them before release.
-    /// A struck chime: a quarter-width pulse and a sine, bright on the
-    /// strike and ringing away, chorused, with a quarter-note echo (verse
-    /// and chorus alike).
+    /// An FM chime: two carriers an octave apart on one modulator at 4x,
+    /// a three-voice ensemble and a quarter-note echo (verse and chorus
+    /// alike).
     AtlantisVerseLead,
     /// Two beating sines with a faint partial three octaves up that
     /// fades as the note decays.
@@ -110,7 +110,7 @@ impl SynthModel {
             SynthModel::StringMachine => "String ensemble: stacked saws in a deep ensemble chorus",
             SynthModel::SyncLead => "Hard-sync lead whose second oscillator sweeps on every note",
             SynthModel::AtlantisVerseLead => {
-                "Struck chime: bright strike that rings away, chorus and a quarter-note echo"
+                "FM chime: two carriers on one modulator, ensemble shimmer, quarter-note echo"
             }
             SynthModel::WildHorsesDemoPad => {
                 "Beating sines with a faint high partial and an airy shimmer on top"
@@ -301,40 +301,36 @@ impl SynthModel {
                 x.velocity = 0.5;
             }
             SynthModel::AtlantisVerseLead => {
-                // Measured in the verse (B4) and the chorus (C#4, the same
-                // patch): every harmonic but each fourth (a 25% pulse
-                // under the strike), struck fast and ringing off like a
-                // chime: the fundamental some 10 dB down in 0.4 s, the
-                // upper harmonics gone far sooner. Each note comes back
-                // about 0.49 s later (a quarter at ~122 BPM), fading.
-                i.wave = Wave::Pulse;
+                // Measured (B4 at 0:15, alone in the right channel): two
+                // FM carriers, at the note and an octave up, sharing one
+                // modulator at 4x the note. The lower carrier, lightly
+                // modulated, gives the odd harmonics 1-9 (none past); the
+                // upper, driven hard, gives 2, 6, 10, 14 and 18; every
+                // fourth harmonic is missing. Each harmonic is split three
+                // ways about 10 cents apart (an ensemble shimmer). Notes
+                // are short, ~50 ms to speak, and come back about 0.49 s
+                // later (a quarter at ~122 BPM), fading.
+                i.wave = Wave::Sine;
                 i.detune = 0.0;
-                i.attack = 0.003;
+                i.attack = 0.04;
                 i.decay = 0.8;
-                i.sustain = 0.06;
-                i.release = 0.8;
-                i.cutoff = 900.0;
-                i.resonance = 0.1;
-                i.gain_db = -16.0;
-                x.pw = 0.25;
+                i.sustain = 0.6;
+                i.release = 0.25;
+                i.cutoff = 16_000.0;
+                i.resonance = 0.0;
+                i.gain_db = -17.5;
                 x.osc2_wave = Some(Wave::Sine);
+                x.osc2_octave = 1;
                 x.osc2_level = 0.6;
-                // A bell's strike: a quick FM shimmer that rings away.
-                x.fm = 1.2;
-                x.fm_ratio = 1.0;
-                x.fm_decay = 0.25;
-                x.key_track = 1.0;
-                x.filter_env = 3.0;
-                x.f_attack = 0.001;
-                x.f_decay = 0.5;
-                x.f_sustain = 0.25;
-                x.f_release = 0.8;
-                x.voices = 10;
-                x.velocity = 0.6;
-                x.vel_filter = 0.8;
-                x.chorus = 0.5;
-                x.chorus_rate = 0.4;
-                x.chorus_depth = 0.4;
+                x.fm = 1.0;
+                x.fm2 = 4.0;
+                x.fm_ratio = 4.0;
+                x.fm_decay = 1.2;
+                x.unison = 3;
+                x.spread = 20.0;
+                x.width = 0.5;
+                x.voices = 8;
+                x.velocity = 0.5;
                 x.echo = 0.7;
                 x.echo_time = 0.49;
                 x.echo_feedback = 0.4;
@@ -546,6 +542,9 @@ pub struct SynthControls {
     pub fm: f32,
     /// The modulator's frequency over oscillator 1's.
     pub fm_ratio: f32,
+    /// FM on oscillator 2 from the same modulator (0 = off): two
+    /// carriers sharing one modulator, as on classic FM chimes.
+    pub fm2: f32,
     /// Seconds for the FM amount to fall to about a third.
     pub fm_decay: f32,
     // Filter (cutoff and resonance are the instrument's).
@@ -641,6 +640,7 @@ impl Default for SynthControls {
             air: 0.0,
             fm: 0.0,
             fm_ratio: 1.0,
+            fm2: 0.0,
             fm_decay: 1.0,
             filter_type: FilterType::LowPass,
             filter_kind: FilterKind::Classic,
