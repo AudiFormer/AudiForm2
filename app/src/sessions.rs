@@ -1240,6 +1240,18 @@ impl State {
     /// Saves the session in front: to its file, or asking where (always
     /// with `save_as`). True when it was saved.
     pub fn save_front(&mut self, save_as: bool) -> bool {
+        // Saved before and not Save As: straight to its file. Otherwise the
+        // Save As dialog asks (and saves when OK is pressed).
+        if self.session_path.is_some() && !save_as {
+            return self.save_front_native(false);
+        }
+        crate::session_save::open(self);
+        false
+    }
+
+    /// As [`State::save_front`], asking where with the system's dialog (for
+    /// a session saved while set aside, which the in-app dialog can't do).
+    pub fn save_front_native(&mut self, save_as: bool) -> bool {
         let path = match (&self.session_path, save_as) {
             (Some(p), false) => Some(p.clone()),
             _ => {
@@ -1247,15 +1259,28 @@ impl State {
                     .set_file_name(format!("{}.audfrm", self.session.name))
                     .add_filter("Audiform session", &["audfrm"])
                     .add_filter("AudiForm 2 model dump", &["af2", "af27"]);
-                if let Some(dir) = self.session_path.as_ref().and_then(|p| p.parent()) {
+                // The session's own folder, else where one was last saved.
+                let dir = self
+                    .session_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_path_buf())
+                    .or_else(|| self.prefs.session_folder.clone().filter(|f| f.is_dir()));
+                if let Some(dir) = dir {
                     d = d.set_directory(dir);
                 }
                 d.save_file()
             }
         };
         let Some(path) = path else { return false };
+        let folder = path.parent().map(|p| p.to_path_buf());
         self.save_session_to(path);
-        !self.session_dirty
+        let saved = !self.session_dirty;
+        if saved && folder.is_some() && self.prefs.session_folder != folder {
+            self.prefs.session_folder = folder;
+            self.prefs.save();
+        }
+        saved
     }
 
     /// File > Save All: every open session with changes, and any never
@@ -1268,7 +1293,7 @@ impl State {
             let p = &self.sessions.parked[i];
             if p.dirty || p.path.is_none() {
                 self.with_parked(i, |st| {
-                    st.save_front(false);
+                    st.save_front_native(false);
                 });
             }
         }

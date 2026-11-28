@@ -140,6 +140,15 @@ fn full_tab_width(ctx: &egui::Context, title: &str) -> f32 {
 pub struct App {
     /// When the last frame started (the low-latency frame cap).
     frame_started: Option<std::time::Instant>,
+    /// The window's size and place, kept for next time.
+    window: crate::window_memory::Tracker,
+    /// What is open (file, session, how many files), to bring the Editor
+    /// forward when that changes while the Piano Roll is in front.
+    opened: Option<(Option<crate::state::DocId>, Option<std::path::PathBuf>, usize)>,
+    /// Closing with unsaved work: the prompts in progress.
+    quit: Option<crate::quit_flow::QuitFlow>,
+    /// Everything answered and saved: the window may close.
+    quit_ok: bool,
     pub st: State,
     dock: DockState<Tab>,
     pub viewer: Caches,
@@ -230,6 +239,10 @@ impl App {
         let dock = load_layout(st.workspace);
         App {
             frame_started: None,
+            window: crate::window_memory::Tracker::new(),
+            opened: None,
+            quit: None,
+            quit_ok: false,
             st,
             dock,
             viewer: Caches::default(),
@@ -264,6 +277,23 @@ impl App {
         self.st.workspace = w;
         self.dock = load_layout(w);
         let _ = std::fs::write(data_dir().join("workspace.txt"), w.key());
+    }
+
+    /// A file or session opened (or switched to) while the Piano Roll is the
+    /// tab in front of its panel: the Editor comes forward to show it.
+    fn editor_on_open(&mut self) {
+        let now = (self.st.current, self.st.session_path.clone(), self.st.docs.len());
+        let was = self.opened.replace(now.clone());
+        let Some(was) = was else { return };
+        if was == now {
+            return;
+        }
+        let piano_in_front = self.dock.find_tab(&Tab::PianoRoll).is_some_and(|(s, n, t)| {
+            matches!(&self.dock[s][n], egui_dock::Node::Leaf { active, .. } if *active == t)
+        });
+        if piano_in_front {
+            self.show_tab(Tab::Editor);
+        }
     }
 
     fn show_tab(&mut self, tab: Tab) {
@@ -430,6 +460,26 @@ impl App {
         {
             self.st.piano_cmd = Some(crate::pianoroll::PianoCmd::Duplicate);
         }
+        // The Piano Roll has the keys: its note keys play notes rather
+        // than run shortcuts (with no Ctrl, Alt or Command held).
+        if !typing && self.st.piano_typing && self.st.piano_clip.is_some() {
+            let mut typed = Vec::new();
+            ctx.input_mut(|i| {
+                i.events.retain(|e| match e {
+                    egui::Event::Key { key, pressed, repeat, modifiers, .. }
+                        if !(modifiers.ctrl || modifiers.alt || modifiers.command)
+                            && crate::pianoroll::typed_key(*key).is_some() =>
+                    {
+                        if !*repeat {
+                            typed.push((*key, *pressed));
+                        }
+                        false
+                    }
+                    _ => true,
+                })
+            });
+            self.st.piano_keys.extend(typed);
+        }
         for cmd in self.keymap.pressed(ctx, typing) {
             self.run_cmd(cmd);
         }
@@ -528,6 +578,10 @@ impl App {
             Cmd::Record => {
                 if st.is_recording() {
                     st.stop_recording();
+                } else if let Some(clip) = st.piano_clip.filter(|_| st.piano_hover || st.piano_typing) {
+                    // The Piano Roll has the pointer or the keys: record
+                    // into its clip, as its own Record button does.
+                    st.piano_record_start(clip);
                 } else {
                     st.start_recording();
                 }
@@ -553,7 +607,7 @@ impl App {
             Cmd::MoveTool => st.tool = Tool::Move,
             Cmd::RazorTool => st.tool = Tool::Razor,
             Cmd::TimeSelectTool => st.tool = Tool::TimeSelect,
-            Cmd::SaveAs => crate::export::open_save_as(st),
+            Cmd::SaveAs => save_as(st),
             Cmd::ExportMixdown => crate::export::open_mixdown(st),
             Cmd::ExportStems => crate::export::open_stems(st),
             Cmd::BounceTrack => crate::export::bounce_track(st),
@@ -572,6 +626,42 @@ impl App {
                 }
                 None => st.toast("No effect to repeat yet"),
             },
+            Cmd::SaveSelectionAs => crate::export::open_save_selection(st),
+            Cmd::SelStartLeft => st.adjust_selection(false, -1.0),
+            Cmd::SelStartRight => st.adjust_selection(false, 1.0),
+            Cmd::SelEndLeft => st.adjust_selection(true, -1.0),
+            Cmd::SelEndRight => st.adjust_selection(true, 1.0),
+            Cmd::Clipboard1 | Cmd::Clipboard2 | Cmd::Clipboard3 | Cmd::Clipboard4 | Cmd::Clipboard5 => {
+                let n = match cmd {
+                    Cmd::Clipboard1 => 0,
+                    Cmd::Clipboard2 => 1,
+                    Cmd::Clipboard3 => 2,
+                    Cmd::Clipboard4 => 3,
+                    _ => 4,
+                };
+                st.clip_slot = n;
+                st.toast(format!("Clipboard {}", n + 1));
+            }
+            Cmd::NudgeLeft | Cmd::NudgeRight | Cmd::NudgeLeft5 | Cmd::NudgeRight5 => {
+                let steps = match cmd {
+                    Cmd::NudgeLeft => -1.0,
+                    Cmd::NudgeRight => 1.0,
+                    Cmd::NudgeLeft5 => -5.0,
+                    _ => 5.0,
+                };
+                if st.mode == Mode::Multitrack {
+                    crate::clip_ops::nudge(st, steps);
+                }
+            }
+            Cmd::StopAtSelectionEnd => {
+                st.prefs.stop_at_sel_end = !st.prefs.stop_at_sel_end;
+                st.prefs.save();
+                st.toast(if st.prefs.stop_at_sel_end {
+                    "Stop at End of Selection: on"
+                } else {
+                    "Stop at End of Selection: off (plays on to the end)"
+                });
+            }
         }
     }
 }
@@ -717,8 +807,15 @@ fn save(st: &mut State) {
     }
 }
 
-fn save_session_as(st: &mut State) {
-    st.save_front(true);
+/// File > Save As: the open file's Save As in the Waveform editor, the
+/// session's in the Multitrack.
+fn save_as(st: &mut State) {
+    match st.mode {
+        Mode::Waveform => crate::export::open_save_as(st),
+        Mode::Multitrack => {
+            st.save_front(true);
+        }
+    }
 }
 
 /// Multitrack > Insert Files as Tracks.
@@ -869,12 +966,13 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.separator();
             cmd_item(ui, km, Cmd::Save, "Save", true, &mut cmd);
-            let has_doc = st.doc().is_some();
-            cmd_item(ui, km, Cmd::SaveAs, "Save Audio As...", has_doc, &mut cmd);
-            if ui.button("Save Session As...").clicked() {
-                ui.close_menu();
-                save_session_as(st);
-            }
+            // One Save As: the open file in the Waveform editor, the
+            // session in the Multitrack.
+            let can = st.mode == Mode::Multitrack || st.doc().is_some();
+            let what = if st.mode == Mode::Multitrack { "Saves the session under a new name" } else { "Saves the open file under a new name or format" };
+            cmd_item(ui, km, Cmd::SaveAs, "Save As...", can, &mut cmd).on_hover_text(what);
+            let has_sel = st.mode == Mode::Waveform && st.doc().is_some_and(|d| d.sel.is_some());
+            cmd_item(ui, km, Cmd::SaveSelectionAs, "Save Selection As...", has_sel, &mut cmd);
             if ui
                 .button("Save All")
                 .on_hover_text("Every open session with unsaved changes")
@@ -1003,6 +1101,30 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
             ] {
                 cmd_item(ui, km, c, c.label(), true, &mut cmd);
             }
+            ui.menu_button("Set Current Clipboard", |ui| {
+                for (n, c) in [Cmd::Clipboard1, Cmd::Clipboard2, Cmd::Clipboard3, Cmd::Clipboard4, Cmd::Clipboard5]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let what = match &st.clipboards[n] {
+                        Some(b) => format!("Clipboard {} ({:.2} s)", n + 1, b.duration_secs()),
+                        None => format!("Clipboard {} (empty)", n + 1),
+                    };
+                    let b = egui::Button::new(what)
+                        .selected(st.clip_slot == n)
+                        .shortcut_text(km.text(c));
+                    if ui.add(b).on_hover_text("Copy and Paste in the Waveform editor use this one").clicked() {
+                        cmd = Some(c);
+                        ui.close_menu();
+                    }
+                }
+            });
+            ui.menu_button("Adjust Selection", |ui| {
+                for c in [Cmd::SelStartLeft, Cmd::SelStartRight, Cmd::SelEndLeft, Cmd::SelEndRight] {
+                    cmd_item(ui, km, c, c.label(), true, &mut cmd)
+                        .on_hover_text("One pixel at the zoom on screen");
+                }
+            });
             ui.separator();
             cmd_item(
                 ui,
@@ -1024,6 +1146,13 @@ fn menus(app: &mut App, ui: &mut egui::Ui) {
                 ui.close_menu();
                 crate::linked::insert_dialog(st);
             }
+            let has_clips = !crate::clip_ops::selected(st).is_empty();
+            ui.menu_button("Nudge", |ui| {
+                for c in [Cmd::NudgeLeft, Cmd::NudgeRight, Cmd::NudgeLeft5, Cmd::NudgeRight5] {
+                    cmd_item(ui, km, c, c.label(), has_clips, &mut cmd)
+                        .on_hover_text("Selected clips, a step being one pixel at the zoom on screen");
+                }
+            });
             playback_menu_items(ui, st, km, &mut cmd);
             ui.menu_button("Spoken Word", |ui| {
                 if ui
@@ -2104,6 +2233,17 @@ fn playback_menu_items(ui: &mut egui::Ui, st: &mut State, km: &Keymap, cmd: &mut
         ui.close_menu();
     }
     play_mode_items(ui, st, km);
+    let stop = egui::Button::new("Stop at End of Selection")
+        .selected(st.prefs.stop_at_sel_end)
+        .shortcut_text(km.text(Cmd::StopAtSelectionEnd));
+    if ui
+        .add(stop)
+        .on_hover_text("Normal playback started inside the selection stops at its end")
+        .clicked()
+    {
+        *cmd = Some(Cmd::StopAtSelectionEnd);
+        ui.close_menu();
+    }
     let ret = egui::Button::new("Return to Start on Stop")
         .selected(st.return_on_stop)
         .shortcut_text(km.text(Cmd::ReturnOnStop));
@@ -2617,6 +2757,7 @@ fn about_window(ctx: &egui::Context, st: &mut State) {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.window.flush();
         crate::wayland_dnd::stop();
     }
 
@@ -2699,6 +2840,52 @@ impl eframe::App for App {
                 // synth: the built-in synth's window on the first MIDI
                 // track (one is added when there is none);
                 // AF2_SYNTH_MODEL=<model name> picks its model.
+                // piano: a MIDI clip with a few notes open in the Piano
+                // Roll, the metronome on (for shots of both rulers).
+                Ok("piano") => {
+                    self.st.mode = Mode::Multitrack;
+                    self.st.session.tempo.metronome = true;
+                    let t = self.st.add_track_kind(af2_core::TrackKind::Midi);
+                    crate::pianoroll::new_clip(&mut self.st, t, 0.0);
+                    self.st.selected_track = Some(t);
+                    self.st.rack_tab = crate::rack::RackTab::Track;
+                    if let Some((ti, ci)) = self.st.piano_clip.and_then(|id| self.st.session.find_midi(id)) {
+                        let notes = &mut self.st.session.tracks[ti].midi[ci].notes;
+                        for (k, p) in [60u8, 64, 67, 72, 67, 64, 62, 65].into_iter().enumerate() {
+                            notes.push(af2_core::midi::MidiNote {
+                                pitch: p,
+                                start: k as f64,
+                                length: 0.9,
+                                velocity: 100,
+                                channel: 0,
+                                pan: 0.0,
+                            });
+                        }
+                    }
+                    if std::env::var_os("AF2_SHOW_TAB").is_none() {
+                        self.show_tab(Tab::PianoRoll);
+                    } else {
+                        self.st.piano_clip = None;
+                    }
+                    self.st.session_dirty = false;
+                }
+                // Shots of the session's Save As and of the close prompt.
+                Ok("session-save") => {
+                    self.st.mode = Mode::Multitrack;
+                    crate::session_save::open(&mut self.st);
+                }
+                Ok("quit-ask") => {
+                    let id = self.st.add_doc("Untitled 2".into(), None, af2_core::AudioBuffer::new(48_000, 2, 48_000));
+                    self.st.current = Some(id);
+                    if let Some(d) = self.st.docs.iter_mut().find(|d| d.id == id) {
+                        d.dirty = true;
+                    }
+                    self.st.session_dirty = true;
+                    self.st.session.name = "Mix Session".into();
+                    let t = self.st.add_track_kind(af2_core::TrackKind::Audio);
+                    let _ = t;
+                    self.quit = crate::quit_flow::QuitFlow::start(&self.st);
+                }
                 Ok("synth") => {
                     self.st.mode = Mode::Multitrack;
                     let id = match self
@@ -2861,24 +3048,45 @@ impl eframe::App for App {
                 alt,
             });
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.st.may_quit() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        // Closing: with unsaved files or sessions, ask about each first
+        // (crate::quit_flow); the window closes once that is done.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_ok {
+            if self.quit.is_none() {
+                match crate::quit_flow::QuitFlow::start(&self.st) {
+                    Some(flow) => {
+                        self.quit = Some(flow);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    }
+                    None => {
+                        crate::sessions::clean_exit();
+                        self.quit_ok = true;
+                    }
+                }
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
         }
         let tick_t = std::time::Instant::now();
         self.st.tick();
         if std::env::var_os("AF2_TRACE").is_some() {
             eprintln!("tick total {:.1} ms", tick_t.elapsed().as_secs_f64() * 1e3);
         }
+        self.window.tick(ctx);
+        self.editor_on_open();
         self.keys(ctx);
-        // The Piano Roll says again this frame whether the pointer is on it.
+        // The Piano Roll says again this frame whether the pointer is on it
+        // and whether it has the keys.
         self.st.piano_hover = false;
+        self.st.piano_typing = false;
         // How fast frames really arrive (CPU and GPU together). In Auto, a
         // device that keeps missing the HUD's pace gets the lighter look.
         let now = ctx.input(|i| i.time);
         let gap = (now - self.last_frame).clamp(0.0, 1.0) as f32;
         self.last_frame = now;
         let busy_ms = self.frame_cpu_ms;
-        let animating = self.st.theme.motion > 0.0 && self.st.visuals_mode != 2;
+        let animating = (self.st.theme.motion > 0.0 || self.st.theme.wind > 0.0)
+            && self.st.prefs.theme_motion
+            && self.st.visuals_mode != 2;
         if animating && gap < 0.5 {
             self.pace = self.pace * 0.97 + gap.max(busy_ms / 1000.0) * 0.03;
             self.paced_frames += 1;
@@ -2886,7 +3094,9 @@ impl eframe::App for App {
         if self.st.visuals_mode == 0
             && !self.st.visuals_lite
             && self.paced_frames > 120
-            && self.pace > 0.055
+            // Slow next to the frame rate asked for (a low one is no sign
+            // of a slow device).
+            && self.pace > 0.055_f32.max(1.25 * anim_gap(self.st.prefs.anim_fps).as_secs_f32())
         {
             self.st.visuals_lite = true;
             self.st
@@ -2899,7 +3109,18 @@ impl eframe::App for App {
             th.scanlines = 0.0;
             th.motion = 0.0;
             th.caustics = 0.0;
+            th.wind = 0.0;
             th.glow = th.glow.min(0.6);
+        }
+        // The splash keeps its animation whatever the backdrop does; with
+        // splashes off, there is none.
+        let mut th_splash = th.clone();
+        if !self.st.prefs.splashes {
+            th_splash.intro = false;
+        }
+        if !self.st.prefs.theme_motion {
+            th.motion = 0.0;
+            th.wind = 0.0;
         }
         crate::widgets::set_theme(ctx, &th);
         let peak = self.st.meter.0.max(self.st.meter.1);
@@ -3258,6 +3479,21 @@ impl eframe::App for App {
         crate::updater::ui(ctx, &mut self.st);
         crate::desktop_entry::ui(ctx, &mut self.st);
         self.settings.show(ctx, &mut self.st);
+        crate::session_save::show(ctx, &mut self.st);
+        // Closing with unsaved work: one question at a time, then close.
+        if let Some(mut flow) = self.quit.take() {
+            use crate::quit_flow::Outcome;
+            match crate::quit_flow::run(ctx, &mut self.st, &mut flow) {
+                Outcome::Asking => self.quit = Some(flow),
+                Outcome::Cancelled => {}
+                Outcome::Done => {
+                    crate::sessions::clean_exit();
+                    self.quit_ok = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            ctx.request_repaint();
+        }
         let th_now = self.st.theme.clone();
         self.shortcuts.show(ctx, &mut self.keymap, &th_now);
         {
@@ -3267,7 +3503,7 @@ impl eframe::App for App {
             ));
             crate::hud::scanlines(&top, screen, &th, &fx);
         }
-        crate::hud::boot(ctx, &th, &fx, &mut self.boot_skipped);
+        crate::hud::boot(ctx, &th_splash, &fx, &mut self.boot_skipped);
         crate::pointers::draw(ctx, &self.st.theme.pointers);
         if crate::retro::on(&self.st.theme) {
             crate::retro::restyle(ctx, tab_shift.as_ref());
@@ -3286,12 +3522,23 @@ impl eframe::App for App {
                 i.viewport().focused.unwrap_or(true) && !i.viewport().minimized.unwrap_or(false)
             })
         {
-            // The HUD keeps moving at a gentle 30 frames a second when idle,
-            // only while the window has focus: in the background it rests.
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            // The theme keeps moving at the frame rate chosen in Settings
+            // when idle, only while the window has focus: in the background
+            // it rests.
+            ctx.request_repaint_after(anim_gap(self.st.prefs.anim_fps));
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
+    }
+}
+
+/// The time between frames of a theme's animation at `fps` (0: the
+/// screen's own pace).
+fn anim_gap(fps: u16) -> std::time::Duration {
+    if fps == 0 {
+        std::time::Duration::ZERO
+    } else {
+        std::time::Duration::from_secs_f64(1.0 / fps as f64)
     }
 }
 

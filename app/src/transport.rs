@@ -94,6 +94,17 @@ pub fn plan_for(
     (plan.start_at(from), plan)
 }
 
+/// Moves one edge of the time selection `a..b` by `by` seconds (the end
+/// with `end`, else the start), within 0..`max`; an edge stops at the
+/// other one rather than passing it.
+pub fn adjust_edge((a, b): (f64, f64), end: bool, by: f64, max: f64) -> (f64, f64) {
+    if end {
+        (a, (b + by).clamp(a, max.max(a)))
+    } else {
+        ((a + by).clamp(0.0, b), b)
+    }
+}
+
 /// Where Stop leaves the playhead: where playback reached, or back at the
 /// start marker with Return to Start on Stop.
 pub fn stop_position(reached: f64, start_marker: Option<f64>, return_on_stop: bool) -> f64 {
@@ -448,6 +459,16 @@ mod tests {
     use super::*;
 
     const LEN: f64 = 1000.0;
+
+    #[test]
+    fn a_selection_edge_moves_but_never_past_the_other() {
+        assert_eq!(adjust_edge((2.0, 5.0), false, -1.0, 10.0), (1.0, 5.0));
+        assert_eq!(adjust_edge((2.0, 5.0), true, 1.0, 10.0), (2.0, 6.0));
+        assert_eq!(adjust_edge((2.0, 5.0), false, 9.0, 10.0), (5.0, 5.0));
+        assert_eq!(adjust_edge((2.0, 5.0), true, -9.0, 10.0), (2.0, 2.0));
+        assert_eq!(adjust_edge((0.5, 5.0), false, -1.0, 10.0), (0.0, 5.0));
+        assert_eq!(adjust_edge((2.0, 9.5), true, 1.0, 10.0), (2.0, 10.0));
+    }
 
     #[test]
     fn normal_play_stops_at_the_selection_end_only_when_starting_inside() {

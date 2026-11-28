@@ -45,7 +45,409 @@ const LANE_MIN: f32 = 40.0;
 const LANE_MAX: f32 = 600.0;
 /// The bar between the roll and the lane, dragged to resize the lane.
 const SPLIT_H: f32 = 7.0;
-const EDGE_PX: f32 = 5.0;
+/// How far into a note its ends grab for stretching (at most a third of
+/// the note, so its middle still moves it).
+const EDGE_IN: f32 = 10.0;
+/// How far past a note's ends they still grab for stretching.
+const EDGE_OUT: f32 = 6.0;
+/// The time ruler across the top of the roll: click or drag on it to move
+/// the playhead.
+const RULER_H: f32 = 18.0;
+/// The transport bar along the bottom.
+const TRANSPORT_H: f32 = 34.0;
+/// The scroll and zoom bar over the ruler.
+const TBAR_H: f32 = 12.0;
+
+/// The bar over the ruler: the whole clip across it, its thumb the part in
+/// view. Drag the thumb to scroll, its ends to zoom; a click elsewhere
+/// jumps there; double-click shows the whole clip.
+fn time_bar(ui: &mut egui::Ui, ps: &mut PianoState, bar: Rect, grid_w: f32, clip_len: f64, th: &crate::theme::Theme) {
+    let resp = ui.interact(bar, ui.id().with("piano-time-bar"), Sense::click_and_drag());
+    let visible = (grid_w / ps.zoom) as f64;
+    let total = clip_len.max(ps.scroll_x + visible).max(1e-6);
+    let w = bar.width().max(1.0) as f64;
+    let x_of = |b: f64| bar.left() + (b / total * w) as f32;
+    let b_of = |x: f32| ((x - bar.left()) as f64 / w * total).clamp(0.0, total);
+    let (t0, t1) = (x_of(ps.scroll_x), x_of(ps.scroll_x + visible));
+    let thumb = Rect::from_min_max(pos2(t0, bar.top() + 2.0), pos2(t1.max(t0 + 6.0), bar.bottom() - 2.0));
+    let set_span = |ps: &mut PianoState, a: f64, b: f64| {
+        let len = (b - a).max(1e-3);
+        ps.zoom = (grid_w / len as f32).clamp(20.0, 400.0);
+        ps.scroll_x = a.max(0.0);
+    };
+    if resp.double_clicked() {
+        set_span(ps, 0.0, clip_len.max(1e-3));
+    } else if resp.drag_started() {
+        if let Some(q) = ui.input(|i| i.pointer.press_origin()) {
+            // 0 move, 1 the start, 2 the end.
+            let grab = if (q.x - thumb.left()).abs() <= 5.0 {
+                1
+            } else if (q.x - thumb.right()).abs() <= 5.0 {
+                2
+            } else if thumb.contains(q) {
+                0
+            } else {
+                // Outside it: the thumb jumps there first.
+                ps.scroll_x = (b_of(q.x) - visible / 2.0).max(0.0);
+                0
+            };
+            ps.tbar_grab = Some((grab, ps.scroll_x, ps.scroll_x + visible));
+        }
+    } else if resp.clicked() {
+        if let Some(q) = resp.interact_pointer_pos() {
+            if !thumb.contains(q) {
+                ps.scroll_x = (b_of(q.x) - visible / 2.0).max(0.0);
+            }
+        }
+    }
+    if let (Some((grab, a0, b0)), true) = (ps.tbar_grab, resp.dragged()) {
+        let dx = ui.input(|i| match (i.pointer.press_origin(), i.pointer.latest_pos()) {
+            (Some(a), Some(b)) => b.x - a.x,
+            _ => 0.0,
+        });
+        let moved = dx as f64 / w * total;
+        match grab {
+            1 => set_span(ps, (a0 + moved).clamp(0.0, b0 - 0.25), b0),
+            2 => set_span(ps, a0, (b0 + moved).max(a0 + 0.25)),
+            _ => ps.scroll_x = (a0 + moved).max(0.0),
+        }
+    }
+    if resp.drag_stopped() {
+        ps.tbar_grab = None;
+    }
+    let hover = resp.hover_pos();
+    let near_end = hover.is_some_and(|h| (h.x - thumb.left()).abs() <= 5.0 || (h.x - thumb.right()).abs() <= 5.0);
+    if near_end || matches!(ps.tbar_grab, Some((1 | 2, _, _))) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    let p = ui.painter_at(bar);
+    p.rect_filled(bar, Rounding::ZERO, c(th.panel));
+    // Where the clip ends, when the view runs past it.
+    let end = x_of(clip_len);
+    if end < bar.right() {
+        p.rect_filled(Rect::from_min_max(pos2(end, bar.top()), bar.max), Rounding::ZERO, Color32::from_black_alpha(90));
+    }
+    let hot = resp.hovered() || resp.dragged();
+    p.rect_filled(thumb, Rounding::same(3.0), ca(th.accent, if hot { 150 } else { 95 }));
+    for x in [thumb.left() + 2.0, thumb.right() - 2.0] {
+        p.line_segment([pos2(x, thumb.top() + 2.0), pos2(x, thumb.bottom() - 2.0)], Stroke::new(1.0_f32, c(th.text)));
+    }
+}
+
+/// What a key on the computer keyboard does in the Piano Roll.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Typed {
+    /// A note, in semitones above C of the keyboard's octave.
+    Note(i32),
+    OctaveDown,
+    OctaveUp,
+}
+
+/// The computer keyboard as a piano, laid out as in the well-known
+/// pattern sequencers: the bottom letter row (Z to /, then ' for F) is one
+/// octave and a bit, its sharps on the row above (S D, G H J, L ;); the top
+/// row (Q to P, then [ and ]) the next, its sharps on the number row (2 3,
+/// 5 6 7, 9 0, =). - sits over E to F, where there is no sharp. Page Down
+/// and Page Up move both an octave.
+pub fn typed_key(k: egui::Key) -> Option<Typed> {
+    use egui::Key::*;
+    let n = match k {
+        Z => 0,
+        S => 1,
+        X => 2,
+        D => 3,
+        C => 4,
+        V => 5,
+        G => 6,
+        B => 7,
+        H => 8,
+        N => 9,
+        J => 10,
+        M => 11,
+        Comma => 12,
+        L => 13,
+        Period => 14,
+        Semicolon => 15,
+        Slash => 16,
+        Q => 12,
+        Num2 => 13,
+        W => 14,
+        Num3 => 15,
+        E => 16,
+        R => 17,
+        Num5 => 18,
+        T => 19,
+        Num6 => 20,
+        Y => 21,
+        Num7 => 22,
+        U => 23,
+        I => 24,
+        Num9 => 25,
+        O => 26,
+        Num0 => 27,
+        P => 28,
+        Quote => 17,
+        OpenBracket => 29,
+        Equals => 30,
+        CloseBracket => 31,
+        PageDown => return Some(Typed::OctaveDown),
+        PageUp => return Some(Typed::OctaveUp),
+        _ => return None,
+    };
+    Some(Typed::Note(n))
+}
+
+/// The MIDI note a typed key plays, with Z at C of `octave` (4: middle C).
+fn typed_pitch(octave: i32, n: i32) -> u8 {
+    (12 * (octave + 1) + n).clamp(0, 127) as u8
+}
+
+/// Plays (and, while recording into this clip, keeps) the notes typed on
+/// the computer keyboard; lets them all go when the roll loses the keys.
+fn play_typed(st: &mut State, ps: &mut PianoState, ti: usize, ci: usize) {
+    use af2_core::midi_live::KeyEvent;
+    let track = st.session.tracks[ti].id;
+    let into = st.piano_rec_clip == Some(st.session.tracks[ti].midi[ci].id) && st.is_recording();
+    let keys = std::mem::take(&mut st.piano_keys);
+    if !(ps.focused && ps.typing_on) {
+        for (_, pitch, heard) in std::mem::take(&mut ps.typed) {
+            st.audition_off(heard, ps.channel);
+            if into {
+                st.midi_capture(track, KeyEvent::Off { pitch, channel: ps.channel });
+            }
+        }
+        return;
+    }
+    for (key, down) in keys {
+        match typed_key(key) {
+            Some(Typed::OctaveDown) if down => ps.kb_octave = (ps.kb_octave - 1).max(-1),
+            Some(Typed::OctaveUp) if down => ps.kb_octave = (ps.kb_octave + 1).min(8),
+            Some(Typed::Note(n)) => {
+                if down {
+                    if ps.typed.iter().any(|t| t.0 == key) {
+                        continue;
+                    }
+                    let pitch = typed_pitch(ps.kb_octave, n);
+                    // Heard at the clip's pitch, kept as played (playback
+                    // transposes it the same way).
+                    let shift = st.session.tracks[ti].midi[ci].pitch.round() as i32;
+                    let heard = (pitch as i32 + shift).clamp(0, 127) as u8;
+                    st.audition_on(ti, heard, ps.kb_velocity, 0.0, ps.channel);
+                    ps.typed.push((key, pitch, heard));
+                    if into {
+                        st.midi_capture(
+                            track,
+                            KeyEvent::On {
+                                pitch,
+                                velocity: ps.kb_velocity as f32 / 127.0,
+                                channel: ps.channel,
+                            },
+                        );
+                    }
+                } else if let Some(k) = ps.typed.iter().position(|t| t.0 == key) {
+                    let (_, pitch, heard) = ps.typed.remove(k);
+                    // Another key may still hold the same note.
+                    if !ps.typed.iter().any(|t| t.2 == heard) {
+                        st.audition_off(heard, ps.channel);
+                    }
+                    if into {
+                        st.midi_capture(track, KeyEvent::Off { pitch, channel: ps.channel });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The Piano Roll's transport: the time, Stop, Play, Pause, back to the
+/// clip's start, Record into the clip and Loop the clip, the metronome,
+/// and the computer keyboard's octave and velocity.
+fn transport_row(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState, ti: usize, ci: usize) {
+    use crate::hud::{transport_button as tb, Icon};
+    use crate::transport::PlayMode;
+    let th = st.theme.clone();
+    let clip = &st.session.tracks[ti].midi[ci];
+    let (clip_id, clip_start, clip_len) = (clip.id, clip.start, clip.length);
+    let tempo = st.session.tempo.clone();
+    let span = (tempo.secs(clip_start), tempo.secs(clip_start + clip_len));
+    // Scrolls sideways when the panel is too narrow for all of it.
+    egui::ScrollArea::horizontal()
+        .id_salt("piano-transport")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| ui.horizontal_centered(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let rec = st.is_recording();
+        let playing = st.transport_playing();
+        let caption = if rec {
+            "REC // TIME"
+        } else if playing {
+            "PLAY // TIME"
+        } else if st.paused {
+            "PAUSED // TIME"
+        } else {
+            "TIME"
+        };
+        let fx = st.fx.clone();
+        let t = st.time_ctx().format(st.position());
+        crate::hud::readout(ui, &t, caption, &th, &fx, st.meter);
+        ui.add_sized(
+            vec2(64.0, 26.0),
+            egui::Label::new(RichText::new(tempo.format(st.position())).monospace().color(c(th.text_dim))),
+        );
+        ui.add_space(6.0);
+        if tb(ui, Icon::Stop, "Stop (Space)", false, th.text, &th).clicked() {
+            if rec {
+                st.stop_recording();
+            } else {
+                st.stop();
+            }
+        }
+        if tb(ui, Icon::Play, "Play (Space)", playing, th.accent, &th).clicked() && !playing {
+            st.mode = crate::state::Mode::Multitrack;
+            st.play();
+        }
+        if tb(ui, Icon::Pause, "Pause", st.paused, th.accent, &th).clicked() {
+            st.toggle_pause();
+        }
+        if tb(ui, Icon::ToStart, "To the clip's start", false, th.text, &th).clicked() {
+            st.mode = crate::state::Mode::Multitrack;
+            st.jump_to(span.0);
+        }
+        let mine = rec && st.piano_rec_clip == Some(clip_id);
+        if tb(
+            ui,
+            Icon::Record,
+            "Record into this clip from the playhead: play the computer keyboard (or an armed MIDI keyboard); Stop puts the notes in",
+            mine,
+            th.accent_alt,
+            &th,
+        )
+        .clicked()
+        {
+            if rec {
+                st.stop_recording();
+            } else {
+                st.piano_record_start(clip_id);
+            }
+        }
+        // What a take does to the notes already there.
+        let mode = if st.piano_rec_replace { "Replace" } else { "Overdub" };
+        if ui
+            .button(mode)
+            .on_hover_text(
+                "Overdub: a take adds to the notes already in the clip. Replace: it clears the notes in the stretch recorded over. Click to switch.",
+            )
+            .clicked()
+        {
+            st.piano_rec_replace = !st.piano_rec_replace;
+        }
+        let looping = st.play_mode() == PlayMode::Loop
+            && st
+                .session_sel
+                .is_some_and(|s| (s.0 - span.0).abs() < 1e-6 && (s.1 - span.1).abs() < 1e-6);
+        if tb(ui, Icon::Loop, "Loop this clip", looping, th.accent, &th).clicked() {
+            if looping {
+                st.set_play_mode(PlayMode::Normal);
+            } else {
+                st.mode = crate::state::Mode::Multitrack;
+                st.session_sel = Some(span);
+                st.set_play_mode(PlayMode::Loop);
+            }
+        }
+        let mut m = st.session.tempo.metronome;
+        if ui
+            .toggle_value(&mut m, "Click")
+            .on_hover_text("The click, while playing and recording")
+            .changed()
+        {
+            st.session.tempo.metronome = m;
+            st.live_metronome();
+        }
+        ui.separator();
+        ui.toggle_value(&mut ps.typing_on, "Keys").on_hover_text(
+            "Play notes on the computer keyboard while the Piano Roll has the keys (click in it first): \
+             Z to / and ' is one octave (sharps on S D G H J L ;), Q to ] the next (sharps on the number row and =); \
+             Page Down and Page Up change the octave",
+        );
+        ui.add_enabled_ui(ps.typing_on, |ui| {
+            ui.label(RichText::new(format!("C{}", ps.kb_octave)).monospace())
+                .on_hover_text("The octave the letter keys start at: Z plays this C (Page Down / Page Up)");
+            ui.add(egui::DragValue::new(&mut ps.kb_velocity).range(1..=127).prefix("Vel "))
+                .on_hover_text("How hard typed notes play");
+        });
+        ui.separator();
+        // The clip's pitch as three knobs: octaves, semitones and cents. It
+        // is heard on playback, and keys played are heard at it too.
+        clip_pitch_knobs(ui, st, ps, ti, ci, &th);
+    }));
+}
+/// The Oct, Trans and Fine knobs: the clip's pitch (`MidiClip::pitch`) in
+/// octaves, semitones and cents. The knobs keep their own positions (a
+/// drag moves them a fraction at a time), taking the clip's pitch again
+/// when something else changed it. Each gesture is one undo step.
+fn clip_pitch_knobs(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState, ti: usize, ci: usize, th: &crate::theme::Theme) {
+    use af2_core::midi::MIDI_PITCH_MAX;
+    use crate::track_views::dial;
+    let pitch = st.session.tracks[ti].midi[ci].pitch;
+    let composed = |k: &[f32; 3]| (k[0].round() * 12.0 + k[1].round() + k[2].round() / 100.0).clamp(-MIDI_PITCH_MAX, MIDI_PITCH_MAX);
+    if (composed(&ps.pitch_knobs) - pitch).abs() > 1e-4 {
+        let whole = pitch.round();
+        let oct = (whole / 12.0).trunc();
+        ps.pitch_knobs = [oct, whole - oct * 12.0, (pitch - whole) * 100.0];
+    }
+    let span = (MIDI_PITCH_MAX / 12.0).floor();
+    let mut k = ps.pitch_knobs;
+    // The octave: − and +, one undo step a click.
+    let before_oct = k[0];
+    if ui.small_button("\u{2212}").on_hover_text("This clip an octave down").clicked() {
+        k[0] = (k[0].round() - 1.0).max(-span);
+    }
+    let oct = ui.label(RichText::new(format!("Oct {:+}", k[0].round() as i32)).monospace());
+    let plus = ui.small_button("+").on_hover_text("This clip an octave up");
+    if plus.clicked() {
+        k[0] = (k[0].round() + 1.0).min(span);
+    }
+    ps.oct_plus = plus.rect;
+    let _ = oct;
+    if k[0] != before_oct {
+        ps.pitch_knobs = k;
+        let before = st.session.clone();
+        st.session.tracks[ti].midi[ci].pitch = composed(&k);
+        if before != st.session {
+            st.commit_session("Clip octave", before);
+        }
+    }
+    let rs = [
+        dial(ui, &mut k[1], -12.0..=12.0, 0.0, |v| format!("Trans {:+}", v.round() as i32), th)
+            .on_hover_text("Transposes this clip by semitones (double-click: none)"),
+        dial(ui, &mut k[2], -50.0..=50.0, 0.0, |v| format!("Fine {:+.0}c", v.round()), th)
+            .on_hover_text("Fine-tunes this clip, in cents (double-click: none)"),
+    ];
+    ps.knob_rects = [rs[0].rect, rs[1].rect];
+    if rs.iter().any(|r| r.drag_started()) {
+        ps.pitch_before = Some(st.session.clone());
+    }
+    if rs.iter().any(|r| r.changed()) {
+        ps.pitch_knobs = k;
+        let before = st.session.clone();
+        st.session.tracks[ti].midi[ci].pitch = composed(&k);
+        // A double-click: its own step at once.
+        if ps.pitch_before.is_none() && before != st.session {
+            st.commit_session("Clip pitch", before);
+        }
+    }
+    if rs.iter().any(|r| r.drag_stopped()) || (ps.pitch_before.is_some() && !ui.input(|i| i.pointer.any_down())) {
+        if let Some(b) = ps.pitch_before.take() {
+            if b != st.session {
+                st.commit_session("Clip pitch", b);
+            }
+        }
+    }
+}
+
 /// Key height limits, in pixels.
 const ROW_MIN: f32 = 6.0;
 const ROW_MAX: f32 = 32.0;
@@ -271,6 +673,11 @@ enum NoteDrag {
 pub struct PianoState {
     /// A note drawn on the press itself, held until the button comes up.
     press_new: bool,
+    /// Where the time ruler was last drawn.
+    ruler_r: Rect,
+    /// The time bar's drag: what was grabbed (0 the thumb, 1 its start, 2
+    /// its end) and the span in view when it began.
+    tbar_grab: Option<(u8, f64, f64)>,
     tool: Tool,
     lane: Lane,
     grid: Grid,
@@ -310,6 +717,23 @@ pub struct PianoState {
     click_at: f64,
     /// The pitch sounding from a press (note or key).
     held: Option<u8>,
+    /// The computer keyboard plays notes while the roll has the keys.
+    typing_on: bool,
+    /// The octave of the bottom letter row (Z is C of it; 4: middle C).
+    kb_octave: i32,
+    /// The clip pitch knobs' own positions (octaves, semitones, cents).
+    pitch_knobs: [f32; 3],
+    /// The session as a knob drag began (its undo step).
+    pitch_before: Option<af2_core::Session>,
+    /// Where the Trans and Fine knobs and the octave's + were last drawn
+    /// (for tests).
+    knob_rects: [Rect; 2],
+    oct_plus: Rect,
+    /// The velocity typed notes play and record at.
+    kb_velocity: u8,
+    /// Keys down now: the note each plays (kept as played) and the pitch it
+    /// is heard at (the clip's pitch on top).
+    typed: Vec<(egui::Key, u8, u8)>,
     /// Its MIDI channel (multi-part instruments sound it with that part).
     held_ch: u8,
     /// A note added by a click sounds at least until this time (ui seconds).
@@ -331,6 +755,8 @@ impl Default for PianoState {
     fn default() -> Self {
         PianoState {
             press_new: false,
+            ruler_r: Rect::NOTHING,
+            tbar_grab: None,
             tool: Tool::Draw,
             lane: Lane::Velocity,
             grid: Grid::Sixteenth,
@@ -354,6 +780,14 @@ impl Default for PianoState {
             clipboard: Vec::new(),
             click_at: 0.0,
             held: None,
+            typing_on: true,
+            kb_octave: 4,
+            pitch_knobs: [0.0; 3],
+            pitch_before: None,
+            knob_rects: [Rect::NOTHING; 2],
+            oct_plus: Rect::NOTHING,
+            kb_velocity: 100,
+            typed: Vec::new(),
             held_ch: 0,
             held_until: 0.0,
             show_tools: false,
@@ -417,6 +851,16 @@ pub fn lane_height(want: f32, total: f32) -> f32 {
     let want = if want.is_finite() { want } else { LANE_H };
     let room = (total - SPLIT_H - 80.0).min(LANE_MAX).max(LANE_MIN);
     want.clamp(LANE_MIN, room)
+}
+
+/// Whether a point inside note `r` grabs its start or its end: up to
+/// EDGE_IN in from each, at most a third of the note so its middle still
+/// moves it; a short note's start is grabbed from just outside it instead.
+fn grab_ends(r: Rect, q: egui::Pos2) -> (bool, bool) {
+    let zone = (r.width() / 3.0).min(EDGE_IN);
+    let left = r.width() > 12.0 && q.x - r.left() < zone;
+    let right = !left && r.right() - q.x < zone.max(4.0);
+    (left, right)
 }
 
 fn is_black(p: u8) -> bool {
@@ -571,6 +1015,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         ps.clip = st.piano_clip;
         st.audition_all_off();
         ps.held = None;
+        ps.typed.clear();
         ps.sel.clear();
         ps.drag = None;
         ps.click_at = 0.0;
@@ -727,13 +1172,34 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             None
         }
     }) {
-        ps.focused = ui.max_rect().contains(q) && ui.clip_rect().contains(q);
+        let here = ui.max_rect().contains(q) && ui.clip_rect().contains(q);
+        // A click in a floating window (the instrument's settings, an
+        // effect) leaves the keys with the roll, so they still play it.
+        let on_window = ui
+            .ctx()
+            .layer_id_at(q)
+            .is_some_and(|l| l.order == egui::Order::Middle && l != ui.layer_id());
+        if here {
+            ps.focused = true;
+        } else if !on_window {
+            ps.focused = false;
+        }
     }
     if ps.focused {
         st.piano_hover = true;
     }
-    let full = ui.available_rect_before_wrap();
+    if ps.focused && ps.typing_on {
+        st.piano_typing = true;
+    }
+    play_typed(st, ps, ti, ci);
+    // The transport along the bottom, as under the Editor.
+    let avail = ui.available_rect_before_wrap();
+    let bar_r = Rect::from_min_max(pos2(avail.left(), avail.bottom() - TRANSPORT_H), avail.max);
+    let full = Rect::from_min_max(avail.min, pos2(avail.right(), bar_r.top()));
     let (rect, resp) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bar_r.shrink2(vec2(2.0, 3.0))), |ui| {
+        transport_row(ui, st, ps, ti, ci);
+    });
     if resp.hovered() || resp.dragged() {
         st.piano_hover = true;
     }
@@ -745,10 +1211,20 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     // The lane keeps at least LANE_MIN, and the roll at least 80 points.
     ps.lane_h = lane_height(ps.lane_h, rect.height());
     let grid_r = Rect::from_min_max(
-        pos2(rect.left() + KEYS_W, rect.top()),
+        pos2(rect.left() + KEYS_W, rect.top() + TBAR_H + RULER_H),
         pos2(rect.right() - KBAR_W, rect.bottom() - ps.lane_h - SPLIT_H),
     );
-    let keys_r = Rect::from_min_max(rect.min, pos2(grid_r.left(), grid_r.bottom()));
+    let keys_r = Rect::from_min_max(pos2(rect.left(), grid_r.top()), pos2(grid_r.left(), grid_r.bottom()));
+    let tbar_r = Rect::from_min_max(pos2(grid_r.left(), rect.top()), pos2(grid_r.right(), rect.top() + TBAR_H));
+    let ruler_r = Rect::from_min_max(pos2(grid_r.left(), tbar_r.bottom()), pos2(grid_r.right(), grid_r.top()));
+    time_bar(ui, ps, tbar_r, grid_r.width(), clip_len, &th);
+    let ruler = ui
+        .interact(ruler_r, ui.id().with("piano-ruler"), Sense::click_and_drag())
+        .on_hover_text("Click or drag to move the playhead");
+    if ruler.hovered() || ruler.dragged() {
+        st.piano_hover = true;
+    }
+    ps.ruler_r = ruler_r;
     let lane_r = Rect::from_min_max(
         pos2(grid_r.left(), grid_r.bottom() + SPLIT_H),
         pos2(grid_r.right(), rect.bottom()),
@@ -794,6 +1270,26 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         }
     }
 
+    // The ruler, as in sessions: the wheel zooms in time at the pointer,
+    // Shift+wheel (or a sideways wheel) scrolls in time, a middle-button
+    // drag pans.
+    if let Some(h) = ruler.hover_pos() {
+        let (sc, shift) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.shift));
+        if shift || sc.x != 0.0 {
+            let d = if shift { sc.y + sc.x } else { sc.x };
+            ps.scroll_x = (ps.scroll_x - d as f64 / ps.zoom as f64).clamp(0.0, clip_len.max(1.0));
+        } else if sc.y != 0.0 {
+            let notches = sc.y / crate::zoom::NOTCH;
+            let px = (h.x - grid_r.left()).max(0.0);
+            let anchor = ps.scroll_x + (px / ps.zoom) as f64;
+            ps.zoom = (ps.zoom * 1.2f32.powf(notches)).clamp(20.0, 400.0);
+            ps.scroll_x = (anchor - (px / ps.zoom) as f64).max(0.0);
+        }
+    }
+    if ruler.dragged_by(PointerButton::Middle) {
+        let d = ruler.drag_delta();
+        ps.scroll_x = (ps.scroll_x - d.x as f64 / ps.zoom as f64).clamp(0.0, clip_len.max(1.0));
+    }
     // Scrolling and zoom.
     if let Some(h) = resp.hover_pos() {
         let (sc, zoomd, shift, alt) = ui.input(|i| {
@@ -844,8 +1340,39 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     let snap_down = |b: f64| if free { b } else { (b / step).floor() * step };
     let snap_near = |b: f64| if free { b } else { (b / step).round() * step };
 
+    // The ruler moves the playhead, within the clip.
+    if (ruler.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down())) || ruler.clicked() {
+        if let Some(q) = ruler.interact_pointer_pos() {
+            let b = b_of(q.x.clamp(grid_r.left(), grid_r.right())).clamp(0.0, clip_len);
+            let t = tempo.secs(clip_start + b);
+            // The clip's playhead is the session's.
+            if st.mode != crate::state::Mode::Multitrack {
+                st.mode = crate::state::Mode::Multitrack;
+            }
+            if (t - st.position()).abs() > 1e-4 {
+                st.jump_to(t);
+            }
+        }
+    }
+
     let p = ui.painter_at(rect);
     p.rect_filled(grid_r, Rounding::ZERO, c(th.wave_background));
+    // The ruler and the corner over the keys, edged below (the time bar
+    // over the ruler paints itself).
+    p.rect_filled(
+        Rect::from_min_max(pos2(rect.left(), ruler_r.top()), pos2(rect.right(), grid_r.top())),
+        Rounding::ZERO,
+        c(th.panel),
+    );
+    p.rect_filled(
+        Rect::from_min_max(rect.min, pos2(ruler_r.left(), ruler_r.top())),
+        Rounding::ZERO,
+        c(th.panel),
+    );
+    p.line_segment(
+        [pos2(rect.left(), grid_r.top() - 0.5), pos2(rect.right(), grid_r.top() - 0.5)],
+        Stroke::new(1.0_f32, c(th.border)),
+    );
     // Rows and keys.
     let lo = (top - grid_r.height() / row_h).floor().max(0.0) as i32;
     for pitch in lo..=(top as i32).min(127) {
@@ -862,7 +1389,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
         }
         let key = Rect::from_min_size(pos2(keys_r.left(), y), vec2(KEYS_W - 2.0, row_h - 1.0));
         let black = is_black(pitch as u8);
-        let down = ps.held == Some(pitch as u8);
+        let down = ps.held == Some(pitch as u8) || ps.typed.iter().any(|t| t.1 == pitch as u8);
         p.rect_filled(
             key,
             Rounding::same(2.0),
@@ -918,6 +1445,14 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         if is_bar { c(th.border) } else { c(th.grid) },
                     ),
                 );
+                // Its tick on the ruler: bars tall, beats short.
+                if x >= ruler_r.left() && x <= ruler_r.right() {
+                    let tick = if is_bar { RULER_H - 4.0 } else { 5.0 };
+                    p.line_segment(
+                        [pos2(x, grid_r.top() - tick), pos2(x, grid_r.top())],
+                        Stroke::new(1.0_f32, c(if is_bar { th.text } else { th.text_dim })),
+                    );
+                }
                 if is_bar && x >= grid_r.left() - 1.0 {
                     let label = if seg.bar == bar && seg.is_ramp() {
                         let word = if seg.end_bpm < seg.bpm {
@@ -932,11 +1467,11 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
                         format!("{}", bar + 1)
                     };
                     p.text(
-                        pos2(x + 3.0, grid_r.top() + 1.0),
+                        pos2(x + 3.0, ruler_r.top() + 2.0),
                         Align2::LEFT_TOP,
                         label,
-                        FontId::proportional(9.0),
-                        c(th.text_dim),
+                        FontId::proportional(10.0),
+                        c(th.text),
                     );
                 }
             }
@@ -945,7 +1480,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     let end_x = x_of(clip_len);
     if end_x < grid_r.right() {
         p.rect_filled(
-            Rect::from_min_max(pos2(end_x.max(grid_r.left()), grid_r.top()), grid_r.max),
+            Rect::from_min_max(pos2(end_x.max(grid_r.left()), ruler_r.top()), grid_r.max),
             Rounding::ZERO,
             Color32::from_black_alpha(110),
         );
@@ -962,18 +1497,37 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
             ),
         )
     };
+    // A note's ends also grab a little past it, except for Erase (a click
+    // beside a note should not remove it).
+    let reach = ps.tool != Tool::Erase;
     let hit = |q: egui::Pos2| -> Option<(usize, bool, bool)> {
-        notes
+        let inside = notes
             .iter()
             .enumerate()
             .rev()
             .find(|(_, n)| note_rect(n).contains(q))
             .map(|(i, n)| {
-                let r = note_rect(n);
-                let wide = r.width() > EDGE_PX * 3.0;
-                let left = wide && q.x - r.left() < EDGE_PX;
-                let right = !left && (r.right() - q.x < EDGE_PX.max(r.width() * 0.2).min(8.0));
+                let (left, right) = grab_ends(note_rect(n), q);
                 (i, left, right)
+            });
+        if inside.is_some() || !reach {
+            return inside;
+        }
+        notes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, n)| {
+                let r = note_rect(n);
+                if q.y < r.top() || q.y > r.bottom() {
+                    None
+                } else if q.x < r.left() && r.left() - q.x <= EDGE_OUT {
+                    Some((i, true, false))
+                } else if q.x > r.right() && q.x - r.right() <= EDGE_OUT {
+                    Some((i, false, true))
+                } else {
+                    None
+                }
             })
     };
     let shift = ui.input(|i| i.modifiers.shift);
@@ -1474,7 +2028,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State, ps: &mut PianoState) {
     // Playhead within the clip.
     let x = x_of(play_at);
     if x >= grid_r.left() && x <= grid_r.right() {
-        crate::waveform::playhead(&p, x, grid_r.top(), lane_r.bottom(), &th);
+        crate::waveform::playhead(&p, x, ruler_r.top(), lane_r.bottom(), &th);
     }
     // Where Paste goes when the playhead is outside the clip.
     if !(0.0..clip_len).contains(&play_at) {
@@ -2181,6 +2735,229 @@ mod key_zoom_tests {
         }
         assert_eq!(ps.row, row1);
         assert!(ps.top < top1);
+    }
+
+
+    #[test]
+    fn the_computer_keyboard_plays_two_octaves_from_z_and_q() {
+        use egui::Key;
+        assert_eq!(typed_key(Key::Z), Some(Typed::Note(0)));
+        assert_eq!(typed_key(Key::S), Some(Typed::Note(1)));
+        assert_eq!(typed_key(Key::M), Some(Typed::Note(11)));
+        assert_eq!(typed_key(Key::Q), Some(Typed::Note(12)));
+        assert_eq!(typed_key(Key::Num2), Some(Typed::Note(13)));
+        assert_eq!(typed_key(Key::P), Some(Typed::Note(28)));
+        assert_eq!(typed_key(Key::PageDown), Some(Typed::OctaveDown));
+        assert_eq!(typed_key(Key::Quote), Some(Typed::Note(17)));
+        assert_eq!(typed_key(Key::OpenBracket), Some(Typed::Note(29)));
+        assert_eq!(typed_key(Key::Equals), Some(Typed::Note(30)));
+        assert_eq!(typed_key(Key::CloseBracket), Some(Typed::Note(31)));
+        assert_eq!(typed_key(Key::Minus), None);
+        assert_eq!(typed_key(Key::Space), None);
+        assert_eq!(typed_key(Key::A), None);
+        // Z is middle C in octave 4.
+        assert_eq!(typed_pitch(4, 0), 60);
+        assert_eq!(typed_pitch(4, 12), 72);
+    }
+
+    #[test]
+    fn typed_keys_hold_notes_and_let_go_when_the_roll_loses_the_keys() {
+        let (mut st, mut ps) = piano_state();
+        let (ti, ci) = st.session.find_midi(st.piano_clip.unwrap()).unwrap();
+        ps.focused = true;
+        st.piano_keys = vec![(egui::Key::Z, true), (egui::Key::E, true)];
+        play_typed(&mut st, &mut ps, ti, ci);
+        assert_eq!(ps.typed.iter().map(|t| t.1).collect::<Vec<_>>(), vec![60, 76]);
+        st.piano_keys = vec![(egui::Key::Z, false), (egui::Key::PageUp, true)];
+        play_typed(&mut st, &mut ps, ti, ci);
+        assert_eq!(ps.typed.iter().map(|t| t.1).collect::<Vec<_>>(), vec![76]);
+        assert_eq!(ps.kb_octave, 5);
+        ps.focused = false;
+        play_typed(&mut st, &mut ps, ti, ci);
+        assert!(ps.typed.is_empty());
+    }
+
+    #[test]
+    fn replace_clears_the_recorded_span_and_overdub_keeps_it() {
+        use af2_core::midi_live::KeyEvent;
+        for replace in [false, true] {
+            let (mut st, _ps) = piano_state();
+            st.mode = crate::state::Mode::Multitrack;
+            let clip = st.piano_clip.unwrap();
+            let (ti, ci) = st.session.find_midi(clip).unwrap();
+            // A note already there at beat 0.
+            st.session.tracks[ti].midi[ci].notes.push(MidiNote { pitch: 60, start: 0.0, length: 1.0, velocity: 90, channel: 0, pan: 0.0 });
+            let track = st.session.tracks[ti].id;
+            st.piano_rec_clip = Some(clip);
+            st.piano_rec_replace = replace;
+            st.midi_record_start();
+            // The recording's clock, as each frame samples it (from 0 s).
+            st.midi_tick();
+            st.midi_capture(track, KeyEvent::On { pitch: 64, velocity: 0.8, channel: 0 });
+            st.midi_capture(track, KeyEvent::Off { pitch: 64, channel: 0 });
+            st.midi_record_stop(1.0);
+            let (ti, ci) = st.session.find_midi(clip).unwrap();
+            let pitches: Vec<u8> = st.session.tracks[ti].midi[ci].notes.iter().map(|n| n.pitch).collect();
+            if replace {
+                assert_eq!(pitches, vec![64], "replace clears the old note");
+            } else {
+                assert_eq!(pitches.len(), 2, "overdub keeps it: {pitches:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_take_recorded_from_the_piano_roll_goes_into_its_clip() {
+        use af2_core::midi_live::KeyEvent;
+        let (mut st, _ps) = piano_state();
+        st.mode = crate::state::Mode::Multitrack;
+        let clip = st.piano_clip.unwrap();
+        let (ti, _) = st.session.find_midi(clip).unwrap();
+        let track = st.session.tracks[ti].id;
+        let clips_before = st.session.tracks[ti].midi.len();
+        st.piano_rec_clip = Some(clip);
+        st.midi_record_start();
+        st.midi_capture(track, KeyEvent::On { pitch: 64, velocity: 0.8, channel: 0 });
+        st.midi_capture(track, KeyEvent::Off { pitch: 64, channel: 0 });
+        st.midi_record_stop(1.0);
+        let (ti, ci) = st.session.find_midi(clip).unwrap();
+        assert_eq!(st.session.tracks[ti].midi.len(), clips_before, "no new clip");
+        let notes = &st.session.tracks[ti].midi[ci].notes;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].pitch, 64);
+        assert!(st.piano_rec_clip.is_none());
+    }
+
+    #[test]
+    fn a_note_end_grabs_from_further_in_and_just_past_it() {
+        let r = Rect::from_min_max(pos2(100.0, 10.0), pos2(200.0, 20.0));
+        // Up to 10 points in from either end stretches; the middle moves.
+        assert_eq!(grab_ends(r, pos2(108.0, 15.0)), (true, false));
+        assert_eq!(grab_ends(r, pos2(192.0, 15.0)), (false, true));
+        assert_eq!(grab_ends(r, pos2(150.0, 15.0)), (false, false));
+        // A short note keeps a middle to move it by.
+        let short = Rect::from_min_max(pos2(100.0, 10.0), pos2(118.0, 20.0));
+        assert_eq!(grab_ends(short, pos2(109.0, 15.0)), (false, false));
+        assert_eq!(grab_ends(short, pos2(116.0, 15.0)), (false, true));
+    }
+
+    #[test]
+    fn plus_raises_the_clip_an_octave_and_trans_adds_semitones() {
+        use egui::PointerButton;
+        let (mut st, mut ps) = piano_state();
+        let ctx = egui::Context::default();
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        let pitch = |st: &State| {
+            let (ti, ci) = st.session.find_midi(st.piano_clip.unwrap()).unwrap();
+            st.session.tracks[ti].midi[ci].pitch
+        };
+        let b = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let at = ps.oct_plus.center();
+        run(&ctx, vec![Event::PointerMoved(at)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![b(at, true), b(at, false)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        assert_eq!(pitch(&st), 12.0, "+ raises it an octave");
+        let at = ps.knob_rects[0].left_center() + vec2(9.0, 0.0);
+        run(&ctx, vec![Event::PointerMoved(at)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![b(at, true)], &mut |ui| panel(ui, &mut st, &mut ps));
+        for i in 1..=10 {
+            let p = at - vec2(0.0, 3.0 * i as f32);
+            run(&ctx, vec![Event::PointerMoved(p)], &mut |ui| panel(ui, &mut st, &mut ps));
+        }
+        run(&ctx, vec![b(at - vec2(0.0, 30.0), false)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        let p = pitch(&st);
+        assert!(p > 12.0 && p.fract() == 0.0, "Trans adds whole semitones: {p}");
+        st.mode = crate::state::Mode::Multitrack;
+        st.undo();
+        assert_eq!(pitch(&st), 12.0, "one undo step for the knob");
+    }
+
+    #[test]
+    fn double_clicking_the_time_bar_shows_the_whole_clip() {
+        use egui::PointerButton;
+        let (mut st, mut ps) = piano_state();
+        let ctx = egui::Context::default();
+        ps.zoom = 400.0;
+        ps.scroll_x = 3.0;
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        let at = pos2(ps.ruler_r.center().x, ps.ruler_r.top() - TBAR_H / 2.0);
+        let b = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        run(&ctx, vec![Event::PointerMoved(at)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![b(true), b(false)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![b(true), b(false)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        assert_eq!(ps.scroll_x, 0.0, "back to the start");
+        assert!(ps.zoom < 400.0, "zoomed out to the clip: {}", ps.zoom);
+    }
+
+    #[test]
+    fn the_wheel_over_the_ruler_zooms_and_shift_scrolls_in_time() {
+        let (mut st, mut ps) = piano_state();
+        let ctx = egui::Context::default();
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        let at = ps.ruler_r.center();
+        let z0 = ps.zoom;
+        run(&ctx, vec![Event::PointerMoved(at)], &mut |ui| panel(ui, &mut st, &mut ps));
+        let wheel = |dy: f32, shift: bool| Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: vec2(0.0, dy),
+            modifiers: egui::Modifiers { shift, ..Default::default() },
+        };
+        run(&ctx, vec![wheel(2.0, false)], &mut |ui| panel(ui, &mut st, &mut ps));
+        for _ in 0..30 {
+            run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        }
+        assert!(ps.zoom > z0, "zoomed in: {z0} -> {}", ps.zoom);
+        let x0 = ps.scroll_x;
+        run(&ctx, vec![wheel(-3.0, true)], &mut |ui| panel(ui, &mut st, &mut ps));
+        for _ in 0..30 {
+            run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        }
+        assert!(ps.scroll_x > x0, "scrolled later: {x0} -> {}", ps.scroll_x);
+    }
+
+    #[test]
+    fn dragging_on_the_ruler_moves_the_playhead_back_and_forth() {
+        use egui::PointerButton;
+        let (mut st, mut ps) = piano_state();
+        let ctx = egui::Context::default();
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        let r = ps.ruler_r;
+        assert!(r.height() > 10.0, "a ruler is drawn: {r:?}");
+        let y = r.center().y;
+        let at = |frac: f32| pos2(r.left() + r.width() * frac, y);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        run(&ctx, vec![Event::PointerMoved(at(0.5))], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![press(at(0.5), true)], &mut |ui| panel(ui, &mut st, &mut ps));
+        run(&ctx, vec![], &mut |ui| panel(ui, &mut st, &mut ps));
+        let mid = st.position();
+        assert!(mid > 0.0, "a press on the ruler moves the playhead");
+        for k in 1..=5 {
+            let p = at(0.5 + 0.06 * k as f32);
+            run(&ctx, vec![Event::PointerMoved(p)], &mut |ui| panel(ui, &mut st, &mut ps));
+        }
+        let later = st.position();
+        assert!(later > mid, "dragging right moves it later: {mid} -> {later}");
+        for k in 1..=10 {
+            let p = at(0.8 - 0.07 * k as f32);
+            run(&ctx, vec![Event::PointerMoved(p)], &mut |ui| panel(ui, &mut st, &mut ps));
+        }
+        run(&ctx, vec![press(at(0.1), false)], &mut |ui| panel(ui, &mut st, &mut ps));
+        let back = st.position();
+        assert!(back < mid, "and dragging left moves it back: {back}");
+        // No notes were drawn on the way.
+        let (ti, ci) = st.session.find_midi(st.piano_clip.unwrap()).unwrap();
+        assert!(st.session.tracks[ti].midi[ci].notes.is_empty());
     }
 
     #[test]

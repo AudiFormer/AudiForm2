@@ -102,6 +102,14 @@ pub struct Prefs {
     pub copy_on_save: bool,
     /// Bring the Effects panel up when an effect is picked from the menu.
     pub show_effects_on_pick: bool,
+    /// Frames a second for a theme's own animation while nothing else is
+    /// moving (0: as fast as the screen shows them).
+    pub anim_fps: u16,
+    /// A theme's moving backdrop (wind, waves, drifting light); off holds it
+    /// still. Splash screens animate either way.
+    pub theme_motion: bool,
+    /// Play the theme's splash screen or the boot sequence at start-up.
+    pub splashes: bool,
     /// Text in the desktop's own UI font (KDE, GNOME, Windows, macOS)
     /// instead of the theme's.
     pub system_font: bool,
@@ -137,6 +145,15 @@ pub struct Prefs {
     /// Draw without waiting for the screen's refresh (less lag between the
     /// pointer and what follows it; frames capped at 240 a second).
     pub low_latency: bool,
+    /// Normal playback started inside the time selection stops at its
+    /// end (Transport > Stop at End of Selection, Shift+V).
+    pub stop_at_sel_end: bool,
+    /// Save in the Waveform editor asks before writing over the file.
+    pub ask_before_save: bool,
+    /// The folder a session was last saved to (Save Session As starts there).
+    pub session_folder: Option<std::path::PathBuf>,
+    /// Folders sessions were saved to lately, the latest first.
+    pub session_recent: Vec<std::path::PathBuf>,
     /// The Windows firewall choice made in Settings (Some(true) allow,
     /// Some(false) block), applied again for each new copy of the app.
     pub firewall: Option<bool>,
@@ -345,6 +362,9 @@ impl Default for Prefs {
             media_folder: "Audio".into(),
             copy_on_save: true,
             show_effects_on_pick: true,
+            anim_fps: 30,
+            theme_motion: true,
+            splashes: true,
             system_font: false,
             colors: ColorOverrides::default(),
             audio: AudioPrefs::default(),
@@ -361,6 +381,10 @@ impl Default for Prefs {
             start_view: StartView::Waveform,
             favorites: Vec::new(),
             low_latency: true,
+            stop_at_sel_end: true,
+            ask_before_save: false,
+            session_folder: None,
+            session_recent: Vec::new(),
             firewall: None,
             firewall_paths: Vec::new(),
             solo_exclusive: false,
@@ -517,12 +541,16 @@ impl Draft {
                 self.realistic = base.is_none_or(|t| t.realistic);
                 self.prefs.colors = d.colors;
                 self.prefs.system_font = d.system_font;
+                self.prefs.anim_fps = d.anim_fps;
+                self.prefs.theme_motion = d.theme_motion;
+                self.prefs.splashes = d.splashes;
             }
             "Autosave" => {
                 self.prefs.autosave = d.autosave;
                 self.prefs.autosave_minutes = d.autosave_minutes;
                 self.prefs.backups = d.backups;
                 self.prefs.backups_keep = d.backups_keep;
+                self.prefs.ask_before_save = d.ask_before_save;
             }
             "Session Media" => {
                 self.prefs.media_policy = d.media_policy;
@@ -540,6 +568,7 @@ impl Draft {
             "Playback and Recording" => {
                 self.prefs.space_returns = d.space_returns;
                 self.prefs.follow_playhead = d.follow_playhead;
+                self.prefs.stop_at_sel_end = d.stop_at_sel_end;
             }
             _ => {}
         }
@@ -585,6 +614,8 @@ impl Draft {
         prefs.new_session = st.prefs.new_session.clone();
         prefs.af1_import_asked = st.prefs.af1_import_asked;
         prefs.favorites = st.prefs.favorites.clone();
+        prefs.session_folder = st.prefs.session_folder.clone();
+        prefs.session_recent = st.prefs.session_recent.clone();
         if prefs != st.prefs {
             let reopen = prefs.audio != st.prefs.audio;
             st.prefs = prefs;
@@ -901,6 +932,13 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                     ),
                 );
             });
+            group(ui, th, "Saving in the Waveform editor", |ui| {
+                ui.checkbox(
+                    &mut d.prefs.ask_before_save,
+                    "Ask before Save writes over the original audio file",
+                );
+                note(ui, th, "Save As and Save Selection As always ask for a name instead.");
+            });
             group(ui, th, "Backups", |ui| {
                 ui.checkbox(
                     &mut d.prefs.backups,
@@ -1061,6 +1099,10 @@ fn page(ui: &mut egui::Ui, name: &str, d: &mut Draft, st: &State, th: &Theme) {
                 ui.checkbox(
                     &mut d.prefs.follow_playhead,
                     "Follow the playhead: the view scrolls along when it reaches the edge",
+                );
+                ui.checkbox(
+                    &mut d.prefs.stop_at_sel_end,
+                    "Stop at the end of the selection when playback starts inside it (Shift+V)",
                 );
             });
             group(ui, th, "Beside the mouse (Waveform editor)", |ui| {
@@ -1799,6 +1841,31 @@ fn appearance(ui: &mut egui::Ui, d: &mut Draft, st: &State, th: &Theme) {
         if d.visuals == 0 && st.visuals_lite {
             note(ui, th, "Auto chose Lite for this device.");
         }
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut d.prefs.theme_motion,
+            "Animate theme backgrounds (wind in the trees, moving water and light)",
+        );
+        ui.add_enabled_ui(d.prefs.theme_motion, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Theme animation frame rate");
+                let label = |f: u16| if f == 0 { "Match the screen".to_string() } else { format!("{f} fps") };
+                egui::ComboBox::from_id_salt("anim-fps")
+                    .selected_text(label(d.prefs.anim_fps))
+                    .show_ui(ui, |ui| {
+                        for f in [15u16, 24, 30, 60, 0] {
+                            ui.selectable_value(&mut d.prefs.anim_fps, f, label(f));
+                        }
+                    });
+            });
+        });
+        note(
+            ui,
+            th,
+            "While nothing else is moving. Lower rates save power; playing, recording and using the app run at full speed.",
+        );
+        ui.checkbox(&mut d.prefs.splashes, "Play splash screens at start-up");
+        note(ui, th, "Off: AudiForm 2 opens straight away, whatever the theme.");
     });
     group(ui, th, "Font", |ui| {
         ui.checkbox(

@@ -314,7 +314,10 @@ pub struct State {
     /// Auto mode decided this device needs the lighter look.
     pub visuals_lite: bool,
 
-    pub clipboard: Option<AudioBuffer>,
+    /// The Waveform editor's five clipboards (Ctrl+1 to Ctrl+5 pick one),
+    /// and the one Copy and Paste use now.
+    pub clipboards: [Option<AudioBuffer>; 5],
+    pub clip_slot: usize,
     /// The export dialog and any export running.
     pub export: crate::export::ExportUi,
     /// File > Archive Session.
@@ -471,6 +474,24 @@ pub struct State {
     /// files.
     pub files_focus: bool,
     pub piano_cmd: Option<crate::pianoroll::PianoCmd>,
+    /// The Piano Roll plays notes from the computer keyboard this frame
+    /// (it has the keys); its note keys then skip the shortcuts.
+    pub piano_typing: bool,
+    /// Note keys typed for the Piano Roll: (key, down).
+    pub piano_keys: Vec<(egui::Key, bool)>,
+    /// Recording started from the Piano Roll: the take goes into this clip.
+    pub piano_rec_clip: Option<af2_core::ClipId>,
+    /// Recording into the Piano Roll's clip replaces the notes in the span
+    /// recorded over (false: adds to them, overdub).
+    pub piano_rec_replace: bool,
+    /// Replace: where (seconds) the first key was played; notes in the clip
+    /// from there to the playhead are cleared as it goes.
+    pub piano_rec_from: Option<f64>,
+    /// The session as recording began (the take and anything Replace
+    /// cleared undo as one step).
+    pub piano_rec_before: Option<af2_core::Session>,
+    /// The session's Save As dialog, while open.
+    pub session_save: Option<crate::session_save::SessionSave>,
     /// What the engine's audition plays through (a track and its settings).
     pub audition_key: Option<String>,
     /// The session before a drag on a transport field began.
@@ -663,7 +684,8 @@ impl State {
             src_levels: Vec::new(),
             howl_secs: 0.0,
             meter_at: None,
-            clipboard: None,
+            clipboards: Default::default(),
+            clip_slot: 0,
             export: Default::default(),
             archive: Default::default(),
             linked: Default::default(),
@@ -740,6 +762,13 @@ impl State {
             piano_hover: false,
             files_focus: false,
             piano_cmd: None,
+            piano_typing: false,
+            piano_keys: Vec::new(),
+            piano_rec_clip: None,
+            piano_rec_replace: false,
+            piano_rec_from: None,
+            piano_rec_before: None,
+            session_save: None,
             audition_key: None,
             gesture_before: None,
             height_commit: Default::default(),
@@ -1292,6 +1321,86 @@ impl State {
         .filter(|s| (s.1 - s.0).abs() > 1e-6)
     }
 
+    /// The selection as playback sees it: in Normal playback with Stop at
+    /// End of Selection off, none (it plays on to the end).
+    fn play_selection(&self) -> Option<(f64, f64)> {
+        let through = self.play_mode() == crate::transport::PlayMode::Normal && !self.prefs.stop_at_sel_end;
+        self.selection().filter(|_| !through)
+    }
+
+    /// The time selection as it is kept (the file's, or the session's).
+    fn raw_selection(&self) -> Option<(f64, f64)> {
+        match self.mode {
+            Mode::Waveform => self.doc().and_then(|d| d.sel),
+            Mode::Multitrack => self.session_sel,
+        }
+    }
+
+    fn set_raw_selection(&mut self, sel: Option<(f64, f64)>) {
+        match self.mode {
+            Mode::Waveform => {
+                if let Some(d) = self.doc_mut() {
+                    d.sel = sel;
+                }
+            }
+            Mode::Multitrack => self.session_sel = sel,
+        }
+    }
+
+    /// Edit > Adjust Selection: one edge of the time selection moves one
+    /// pixel at the zoom on screen (`dir` -1 left, 1 right).
+    pub fn adjust_selection(&mut self, end: bool, dir: f64) {
+        let Some(sel) = self.raw_selection() else { return };
+        let (len, px) = match self.mode {
+            Mode::Waveform => (self.doc().map_or(0.0, |d| d.view.len), self.wave_px),
+            Mode::Multitrack => (self.session_view.len, self.session_px),
+        };
+        let max = match self.mode {
+            Mode::Waveform => self.program_len(),
+            Mode::Multitrack => f64::MAX,
+        };
+        let step = len / px.max(1.0) as f64;
+        let (a, b) = crate::transport::adjust_edge(sel, end, dir * step, max);
+        self.set_raw_selection(Some((a, b)));
+        if self.mode == Mode::Waveform {
+            if let Some(d) = self.doc_mut() {
+                d.cursor = a;
+            }
+        }
+    }
+
+    /// A marker picked in the Markers list or on a ruler: a range marker
+    /// selects its span (to play or loop it), a plain one clears the
+    /// selection so Play starts there. The view scrolls to it when it is
+    /// off screen.
+    pub fn go_to_marker(&mut self, time: f64, length: f64) {
+        self.set_raw_selection((length > 1e-6).then_some((time, time + length)));
+        self.jump_to(time);
+        self.reveal_time(time);
+    }
+
+    /// Scrolls the view in front so `t` shows, when it does not already.
+    pub fn reveal_time(&mut self, t: f64) {
+        match self.mode {
+            Mode::Waveform => {
+                if let Some(d) = self.doc_mut() {
+                    if t < d.view.start || t > d.view.start + d.view.len {
+                        d.view.start = t - d.view.len * 0.1;
+                        d.view.clamp_to(d.duration());
+                    }
+                }
+            }
+            Mode::Multitrack => {
+                let lim = self.session_limits();
+                let v = &mut self.session_view;
+                if t < v.start || t > v.start + v.len {
+                    v.start = (t - v.len * 0.1).max(0.0);
+                    v.limit(&lim);
+                }
+            }
+        }
+    }
+
     pub fn program_len(&self) -> f64 {
         match self.mode {
             Mode::Waveform => self.doc().map_or(0.0, |d| d.duration()),
@@ -1547,7 +1656,7 @@ impl State {
         } else {
             crate::transport::fresh_start(self.cursor(), len)
         };
-        let sel = self.selection();
+        let sel = self.play_selection();
         let (from, plan) = crate::transport::plan_for(self.play_mode(), sel, cursor, len, rec);
         // Continuing from Pause keeps the marker of where playback began.
         if !(self.paused && self.start_marker.is_some()) {
@@ -1641,7 +1750,7 @@ impl State {
         if self.transport_playing() {
             let len = self.program_len();
             let (from, plan) =
-                crate::transport::plan_for(self.play_mode(), self.selection(), t, len, false);
+                crate::transport::plan_for(self.play_mode(), self.play_selection(), t, len, false);
             if let Some(e) = &mut self.engine {
                 e.retarget(Some(from), plan);
             }
@@ -2181,7 +2290,7 @@ impl State {
             if d.sel.is_some() {
                 // Only the channels switched on.
                 let c = d.chans.pick(&d.buf.slice(d.target()));
-                self.clipboard = Some(c);
+                self.clipboards[self.clip_slot] = Some(c);
             }
         }
     }
@@ -2225,7 +2334,7 @@ impl State {
             crate::clip_ops::paste(self);
             return;
         }
-        let Some(clip) = self.clipboard.clone() else {
+        let Some(clip) = self.clipboards[self.clip_slot].clone() else {
             return;
         };
         let Some(d) = self.doc_mut() else { return };

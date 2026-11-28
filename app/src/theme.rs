@@ -88,6 +88,10 @@ pub struct Theme {
     /// shallow water (0 = off; see `caustics.rs`).
     #[serde(skip_serializing_if = "is_zero")]
     pub caustics: f32,
+    /// Wind in the backdrop picture: it sways and flutters, as branches
+    /// in a breeze, in gusts (0 = still; about 0.5 is a breeze, 1 a wind).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub wind: f32,
     /// Listed only while in use; opened by its phrase.
     pub hidden: bool,
     /// SHA-256 (hex) of the lowercase phrase that opens a hidden theme.
@@ -247,6 +251,7 @@ impl Theme {
             picture_veil: 0.0,
             vignette: 1.0,
             caustics: 0.0,
+            wind: 0.0,
             hidden: false,
             unlock: String::new(),
             columns: String::new(),
@@ -941,3 +946,4 @@ mod system_light_dark {
         }
     }
 }
+

@@ -29,6 +29,74 @@ fn soon(ui: &mut egui::Ui, label: &str) {
         .on_disabled_hover_text(SOON);
 }
 
+/// Swap Stereo Channels and Split Stereo to Center Mono for a track's
+/// stereo clips: their Source Channels change, the audio is not rewritten.
+fn stereo_items(ui: &mut egui::Ui, st: &mut State, track: af2_core::TrackId) {
+    let has = stereo_clips(&st.session, track) > 0;
+    let why = "The track has no stereo clips";
+    if ui
+        .add_enabled(has, egui::Button::new("Swap Stereo Channels"))
+        .on_hover_text("Left plays right and right plays left (Source Channels; no audio is rewritten)")
+        .on_disabled_hover_text(why)
+        .clicked()
+    {
+        edit(st, "Swap stereo channels", |s| set_stereo(s, track, true));
+        ui.close_menu();
+    }
+    if ui
+        .add_enabled(has, egui::Button::new("Split Stereo to Center Mono"))
+        .on_hover_text("Both sides play half of each channel, in the middle (Source Channels; no audio is rewritten)")
+        .on_disabled_hover_text(why)
+        .clicked()
+    {
+        edit(st, "Split stereo to center mono", |s| set_stereo(s, track, false));
+        ui.close_menu();
+    }
+}
+
+/// How many of the track's clips play a two-channel file.
+fn stereo_clips(s: &af2_core::Session, track: af2_core::TrackId) -> usize {
+    s.tracks
+        .iter()
+        .find(|t| t.id == track)
+        .map_or(0, |t| {
+            t.clips
+                .iter()
+                .filter(|c| s.media(c.media).is_some_and(|m| m.channels == 2))
+                .count()
+        })
+}
+
+/// Sets the Source Channels of the track's stereo clips: swapped, or both
+/// channels at half to both sides. False when nothing changed.
+fn set_stereo(s: &mut af2_core::Session, track: af2_core::TrackId, swap: bool) -> bool {
+    use af2_core::session::ChannelSend;
+    let map = if swap {
+        vec![ChannelSend { left: 0.0, right: 1.0 }, ChannelSend { left: 1.0, right: 0.0 }]
+    } else {
+        vec![ChannelSend { left: 0.5, right: 0.5 }; 2]
+    };
+    let stereo: Vec<bool> = match s.tracks.iter().find(|t| t.id == track) {
+        Some(t) => t
+            .clips
+            .iter()
+            .map(|c| s.media(c.media).is_some_and(|m| m.channels == 2))
+            .collect(),
+        None => return false,
+    };
+    let Some(t) = s.tracks.iter_mut().find(|t| t.id == track) else {
+        return false;
+    };
+    let mut changed = false;
+    for (c, two) in t.clips.iter_mut().zip(stereo) {
+        if two && c.props.channel_map.as_ref() != Some(&map) {
+            c.props.channel_map = Some(map.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// One undoable edit from a menu item.
 fn edit(st: &mut State, label: &str, f: impl FnOnce(&mut af2_core::Session) -> bool) {
     let before = st.session.clone();
@@ -346,6 +414,9 @@ fn track_items(ui: &mut egui::Ui, st: &mut State, ti: usize, below: bool) {
     if ui.button("Duplicate Track").clicked() {
         edit(st, "Duplicate track", |s| s.duplicate_track(me).is_some());
         ui.close_menu();
+    }
+    if t.kind != TrackKind::Bus {
+        stereo_items(ui, st, me);
     }
     if t.kind != TrackKind::Bus && ui.button("Bounce Track to New Track").clicked() {
         st.selected_track = Some(me);
@@ -879,4 +950,32 @@ pub fn multitrack_menu_top(ui: &mut egui::Ui, st: &mut State) {
         soon(ui, "Show Only Bus Tracks");
         soon(ui, "Show Only Tracks with Clips");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stereo_items_change_only_stereo_clips_source_channels() {
+        let mut st = State::new();
+        let stereo = st.add_doc("s.wav".into(), None, af2_core::AudioBuffer::new(48_000, 2, 4_800));
+        let mono = st.add_doc("m.wav".into(), None, af2_core::AudioBuffer::new(48_000, 1, 4_800));
+        let (ms, mm) = (st.media_for_doc(stereo).unwrap(), st.media_for_doc(mono).unwrap());
+        let t = st.session.tracks[0].id;
+        let a = st.session.add_clip(t, ms, 0.0).unwrap();
+        let b = st.session.add_clip(t, mm, 5.0).unwrap();
+        assert_eq!(stereo_clips(&st.session, t), 1);
+        let map = |st: &State, id| {
+            let (ti, ci) = st.session.find_clip(id).unwrap();
+            st.session.tracks[ti].clips[ci].props.channel_map.clone()
+        };
+        assert!(set_stereo(&mut st.session, t, true));
+        let m = map(&st, a).unwrap();
+        assert_eq!((m[0].left, m[0].right, m[1].left, m[1].right), (0.0, 1.0, 1.0, 0.0));
+        assert_eq!(map(&st, b), None);
+        assert!(!set_stereo(&mut st.session, t, true), "the same again changes nothing");
+        assert!(set_stereo(&mut st.session, t, false));
+        assert!(map(&st, a).unwrap().iter().all(|c| c.left == 0.5 && c.right == 0.5));
+    }
 }

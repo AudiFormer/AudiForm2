@@ -64,8 +64,8 @@ impl Fx {
     /// True while something on screen is moving on its own.
     pub fn animating(&self, th: &Theme) -> bool {
         // Caustics (`th.caustics`) move only with `motion` too: still water
-        // needs no frames.
-        th.motion > 0.0
+        // needs no frames. Wind moves the backdrop on its own.
+        th.motion > 0.0 || (th.wind > 0.0 && !th.picture.is_empty())
     }
 }
 
@@ -222,7 +222,15 @@ pub fn backdrop(p: &Painter, rect: Rect, th: &Theme, fx: &Fx) {
                     )
                 }
             };
-            p.image(tex.id(), rect, uv, Color32::WHITE);
+            if th.wind > 0.0 && th.picture_tile <= 0.0 {
+                // Real time: the wind blows whatever the theme's Motion is.
+                let now = p.ctx().input(|i| i.time) as f32;
+                if !crate::wind::draw(p, rect, uv, &th.picture, th.wind, now, Color32::WHITE) {
+                    p.image(tex.id(), rect, uv, Color32::WHITE);
+                }
+            } else {
+                p.image(tex.id(), rect, uv, Color32::WHITE);
+            }
             if th.picture_veil > 0.0 {
                 let a = (th.picture_veil.clamp(0.0, 1.0) * 255.0) as u8;
                 let mut m = Mesh::default();

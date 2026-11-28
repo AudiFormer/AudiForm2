@@ -56,6 +56,11 @@ pub fn draw_ruler(
             c(th.text_dim),
         );
     }
+    // An edge under the ruler, so it never runs into what is below it.
+    p.line_segment(
+        [pos2(rect.left(), rect.bottom() - 0.5), pos2(rect.right(), rect.bottom() - 0.5)],
+        Stroke::new(1.0_f32, c(th.border)),
+    );
     for m in markers {
         let x = time_to_x(v, rect, m.time);
         if x >= rect.left() && x <= rect.right() {
@@ -132,7 +137,11 @@ pub fn input(
         let t = snap(st, x_to_time(v, x_rect, pp.x), v, x_rect, markers).clamp(0.0, max_t);
         let release =
             r.clicked() || (r.drag_stopped() && ui.data(|d| d.get_temp::<f64>(id)).is_some());
-        if st.transport_playing() {
+        let hit = if r.clicked() { marker_at(st, v, x_rect, pp.x) } else { None };
+        if let Some((mt, ml)) = hit {
+            st.go_to_marker(mt, ml);
+            ui.data_mut(|d| d.remove::<f64>(id));
+        } else if st.transport_playing() {
             if release {
                 st.jump_to(t);
                 ui.data_mut(|d| d.remove::<f64>(id));
@@ -202,6 +211,20 @@ pub fn input(
 
 /// Where playback began (while playing or paused): an outlined triangle on
 /// the ruler and a dashed line down the lanes.
+/// The marker (time, length) drawn nearest `x` on a ruler, within
+/// [`EDGE_PX`].
+fn marker_at(st: &State, v: &View, x_rect: Rect, x: f32) -> Option<(f64, f64)> {
+    let list = match st.mode {
+        crate::state::Mode::Waveform => &st.doc()?.markers,
+        crate::state::Mode::Multitrack => &st.session.markers,
+    };
+    list.iter()
+        .map(|m| ((time_to_x(v, x_rect, m.time) - x).abs(), m.time, m.length))
+        .filter(|h| h.0 <= EDGE_PX)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, t, l)| (t, l))
+}
+
 pub fn start_marker(p: &egui::Painter, x: f32, ruler: Rect, bottom: f32, th: &Theme) {
     let x = pixel_x(p, x);
     let col = ca(th.playhead, 200);

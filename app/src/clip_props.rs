@@ -668,7 +668,7 @@ fn source_channels(
 
 /// The Properties panel for the MIDI clip at track `ti`, clip `ci`.
 fn midi_panel(ui: &mut egui::Ui, st: &mut State, ti: usize, ci: usize) {
-    use af2_core::midi::{ClipTiming, MIDI_PITCH_MAX, MIDI_STRETCH_MAX, MIDI_STRETCH_MIN};
+    use af2_core::midi::{ClipTiming, MIDI_STRETCH_MAX, MIDI_STRETCH_MIN};
     let th = st.theme.clone();
     let before = st.session.clone();
     let tempo = st.session.tempo.clone();
@@ -748,7 +748,7 @@ fn midi_panel(ui: &mut egui::Ui, st: &mut State, ti: usize, ci: usize) {
                 });
             }
 
-            section(ui, &th, "Stretch and Pitch", "");
+            section(ui, &th, "Stretch", "");
             row(ui, &th, "Stretch", |ui| {
                 let mut pct = (c2.ratio() * 100.0) as f32;
                 let r = ui.add(
@@ -764,38 +764,15 @@ fn midi_panel(ui: &mut egui::Ui, st: &mut State, ti: usize, ci: usize) {
                 live_drag |= r.dragged();
                 done |= r.drag_stopped() || (r.changed() && !r.dragged());
             });
-            row(ui, &th, "Pitch", |ui| {
-                let r = ui.add(
-                    crate::widgets::Slider::new(&mut c2.pitch, -MIDI_PITCH_MAX..=MIDI_PITCH_MAX)
-                        .step_by(0.1)
-                        .suffix(" st"),
-                )
-                .on_hover_text(
-                    "Whole semitones transpose the notes; a fraction detunes the instrument",
-                );
-                live_drag |= r.dragged();
-                done |= r.drag_stopped() || (r.changed() && !r.dragged());
-            });
             ui.horizontal(|ui| {
                 ui.add_space(100.0);
-                if ui.small_button("−1 st").clicked() {
-                    c2.pitch = (c2.pitch - 1.0).max(-MIDI_PITCH_MAX);
-                    done = true;
-                }
-                if ui.small_button("+1 st").clicked() {
-                    c2.pitch = (c2.pitch + 1.0).min(MIDI_PITCH_MAX);
-                    done = true;
-                }
-                if ui
-                    .small_button("Reset")
-                    .on_hover_text("Remove the stretch and pitch")
-                    .clicked()
-                {
-                    c2.pitch = 0.0;
+                if ui.small_button("Reset").on_hover_text("Back to its own length").clicked() {
                     c2.stretch = 1.0;
                     done = true;
                 }
             });
+            // The clip's pitch is set in the Piano Roll (Oct, Trans, Fine).
+            ui.label(RichText::new("Pitch: in the Piano Roll (Oct, Trans, Fine)").small().color(c(th.text_dim)));
         });
 
     if keep != !c2.timing.is_follow() {

@@ -382,8 +382,11 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     let drag_t = resp
         .interact_pointer_pos()
         .map(|pp| snapped(st, x_to_time(&snap_view, body, pp.x)));
-    let on_edge = resp
-        .interact_pointer_pos()
+    // Where the button went down while it is held: a drag only counts as
+    // started a few pixels later, by when the pointer may have left the
+    // edge it grabbed.
+    let on_edge = held_at(ui)
+        .or(resp.interact_pointer_pos())
         .or(resp.hover_pos())
         .filter(|pp| body.contains(*pp))
         .and_then(|pp| crate::ruler::edge_at(st.doc().and_then(|d| d.sel), &snap_view, body, pp.x));
@@ -447,7 +450,10 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
             }
         }
         if resp.double_clicked() {
-            d.sel = Some((0.0, dur));
+            // What is in view (Select All takes the whole file).
+            let a = d.view.start.clamp(0.0, dur);
+            let b = (d.view.start + d.view.len).clamp(a, dur);
+            d.sel = Some((a, b));
         }
     }
     if moved_by_hand {
@@ -469,11 +475,25 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     }
 
     let pos = st.position();
+    // Recording into this file: where the take has reached.
+    let rec_end = match st.recording_target {
+        Some(crate::state::RecordTarget::File(doc, at)) if st.current == Some(doc) => {
+            st.engine.as_ref().filter(|e| e.is_recording()).map(|e| at + e.recording_len_secs())
+        }
+        _ => None,
+    };
     {
-        // Whatever moved the view this frame, it stays inside the file.
+        // Whatever moved the view this frame, it stays inside the file (and
+        // the take growing past its end, while recording).
         let d = st.doc_mut().unwrap();
         let dur = d.duration();
-        d.view.clamp_to(dur);
+        match rec_end {
+            Some(end) => {
+                follow_take(&mut d.view, end);
+                d.view.clamp_to(dur.max(end * 1.25));
+            }
+            None => d.view.clamp_to(dur),
+        }
     }
     let d = st.doc().unwrap();
     let v = d.view;
@@ -1273,6 +1293,25 @@ pub fn channel_long_name_in(n: usize, mask: Option<u32>, ch: usize) -> String {
 
 /// The playhead: the HUD's laser. The motion and music state come from
 /// the shared [`crate::hud::Fx`] the app keeps in egui's memory each frame.
+/// The view while a take is recorded, its end at `end` seconds: seen from
+/// the start, it zooms out to keep the whole take in view; zoomed in
+/// elsewhere, it scrolls along with the take's end.
+pub fn follow_take(v: &mut View, end: f64) {
+    if end <= v.start + v.len * 0.95 {
+        return;
+    }
+    if v.start <= 1e-6 {
+        v.len = (end * 1.25).max(v.len);
+    } else {
+        v.start = (end - v.len * 0.8).max(0.0);
+    }
+}
+
+/// Where the primary button went down, while it is still held.
+pub fn held_at(ui: &egui::Ui) -> Option<egui::Pos2> {
+    ui.input(|i| i.pointer.primary_down().then(|| i.pointer.press_origin()).flatten())
+}
+
 pub fn playhead(p: &egui::Painter, x: f32, top: f32, bottom: f32, th: &Theme) {
     // The head on the ruler and the line on the same pixel column.
     let x = crate::ruler::pixel_x(p, x);
@@ -1366,6 +1405,52 @@ mod wheel_tests {
         st.mode = crate::state::Mode::Waveform;
         st.doc_mut().unwrap().spectral = true;
         (st, Caches::default())
+    }
+
+    #[test]
+    fn the_view_follows_a_take_being_recorded() {
+        // From the start: zooms out to keep the whole take.
+        let mut v = View { start: 0.0, len: 2.0 };
+        follow_take(&mut v, 3.0);
+        assert!(v.start == 0.0 && v.len >= 3.0, "{v:?}");
+        // Zoomed in further on: scrolls with the take's end.
+        let mut v = View { start: 10.0, len: 2.0 };
+        follow_take(&mut v, 12.5);
+        assert!(v.start > 10.0 && v.start + v.len > 12.5 && (v.len - 2.0).abs() < 1e-9, "{v:?}");
+        // Still in view: left alone.
+        let mut v = View { start: 0.0, len: 10.0 };
+        follow_take(&mut v, 4.0);
+        assert_eq!((v.start, v.len), (0.0, 10.0));
+    }
+
+    #[test]
+    fn a_quick_pull_on_a_selection_edge_moves_that_edge() {
+        use egui::PointerButton;
+        let (mut st, mut caches) = setup();
+        st.doc_mut().unwrap().spectral = false;
+        let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let y = 300.0;
+        // Make a selection by dragging from x 400 to 900.
+        run(&mut st, &mut caches, vec![Event::PointerMoved(pos2(400.0, y))]);
+        run(&mut st, &mut caches, vec![press(pos2(400.0, y), true)]);
+        for x in (420..=900).step_by(20) {
+            run(&mut st, &mut caches, vec![Event::PointerMoved(pos2(x as f32, y))]);
+        }
+        run(&mut st, &mut caches, vec![press(pos2(900.0, y), false)]);
+        run(&mut st, &mut caches, vec![]);
+        let (a, b) = st.doc().unwrap().sel.expect("a selection");
+        // Grab its right edge and pull away fast: the first move is already
+        // past the grab distance.
+        run(&mut st, &mut caches, vec![Event::PointerMoved(pos2(900.0, y))]);
+        run(&mut st, &mut caches, vec![press(pos2(900.0, y), true)]);
+        for x in [914.0, 940.0, 980.0, 1100.0] {
+            run(&mut st, &mut caches, vec![Event::PointerMoved(pos2(x, y))]);
+        }
+        run(&mut st, &mut caches, vec![press(pos2(1100.0, y), false)]);
+        run(&mut st, &mut caches, vec![]);
+        let (a2, b2) = st.doc().unwrap().sel.expect("still a selection");
+        assert!((a2 - a).abs() < 1e-6, "the start stays put: {a} -> {a2}");
+        assert!(b2 > b + 0.1, "the end moved out: {b} -> {b2}");
     }
 
     #[test]

@@ -27,6 +27,10 @@ pub fn bytes(name: &str) -> Option<&'static [u8]> {
         "mall-sun" => include_bytes!("../../assets/themes/mall-sun.png"),
         "mall-moon" => include_bytes!("../../assets/themes/mall-moon.png"),
         "title-undercurrent" => include_bytes!("../../assets/themes/title-undercurrent.png"),
+        // AUDIFORM as on the water: warped (the menu bar), and its straight
+        // letters as a mask, which the splash warps live with the water.
+        "title-audiform" => include_bytes!("../../assets/themes/title-audiform.png"),
+        "title-audiform-mask" => include_bytes!("../../assets/themes/title-audiform-mask.png"),
         "mall-day-tiles" => include_bytes!("../../assets/themes/mall-day-tiles.png"),
         "mall-night-tiles" => include_bytes!("../../assets/themes/mall-night-tiles.png"),
         "mall-day-real-capital" => include_bytes!("../../assets/themes/mall-day-real-capital.png"),

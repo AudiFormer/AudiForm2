@@ -364,6 +364,351 @@ fn warped(
     p.add(Shape::mesh(m));
 }
 
+/// A title's letters as a grey mask (0..1), decoded once.
+#[derive(Clone, Copy)]
+struct Mask {
+    w: usize,
+    h: usize,
+    px: &'static [f32],
+}
+
+fn water_mask(name: &str) -> Option<Mask> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<Mask>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut c = cache.lock().ok()?;
+    *c.entry(name.to_string()).or_insert_with(|| {
+        let b = crate::pictures::bytes(name)?;
+        let img = image::load_from_memory(b).ok()?.to_luma8();
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let px: Vec<f32> = img.pixels().map(|p| p.0[0] as f32 / 255.0).collect();
+        Some(Mask { w, h, px: Box::leak(px.into_boxed_slice()) })
+    })
+}
+
+impl Mask {
+    /// Bilinear, at (x, y) in the mask's pixels; nothing outside it.
+    fn at(&self, x: f32, y: f32) -> f32 {
+        if x < 0.0 || y < 0.0 || x >= (self.w - 1) as f32 || y >= (self.h - 1) as f32 {
+            return 0.0;
+        }
+        let (x0, y0) = (x as usize, y as usize);
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let i = y0 * self.w + x0;
+        let top = self.px[i] * (1.0 - fx) + self.px[i + 1] * fx;
+        let bot = self.px[i + self.w] * (1.0 - fx) + self.px[i + self.w + 1] * fx;
+        top * (1.0 - fy) + bot * fy
+    }
+}
+
+/// The title on the water, made this frame: the letters ride the water's
+/// swell (bent too while still rising), and their shadow is a second copy
+/// the water moves on its own, pushed down and to the right by an amount
+/// that drifts along the word; the shadow is cut away under the letters,
+/// which are see-through. Drawn into `r`.
+#[allow(clippy::too_many_arguments)]
+fn water_title(p: &Painter, screen: Rect, r: Rect, t: f32, bend: f32, m: Mask, fill: Rgb, alpha: f32, water: Option<&Pixels>) {
+    let started = std::time::Instant::now();
+    let aspect = screen.width() / screen.height().max(1.0);
+    let centre = screen.center();
+    let reach = screen.width().max(screen.height()) * 0.75;
+    let ppp = p.ctx().pixels_per_point();
+    let ow = (r.width() * ppp).clamp(64.0, 1100.0) as usize;
+    let oh = ((ow as f32) * r.height() / r.width()).max(16.0) as usize;
+    let (sw, sh) = (screen.width().max(1.0), screen.height().max(1.0));
+    let (mw, mh) = (m.w as f32, m.h as f32);
+    let fill = [fill[0] as f32, fill[1] as f32, fill[2] as f32];
+    let dark = [6.0f32, 12.0, 40.0];
+    // The letters fill about two thirds of the mask's height (the rest is
+    // room for the waves and the shadow).
+    let letter_h = r.height() * 0.674;
+    let (tilt_s, tilt_c) = TILT.to_radians().sin_cos();
+    // Everything that moves is smooth, so it is worked out on a coarse grid
+    // (every GRID pixels) and blended between: for each node, the letters'
+    // and the shadow's displacement and where the water under it is.
+    const GRID: usize = 8;
+    let (gw, gh) = (ow / GRID + 2, oh / GRID + 2);
+    let node = |gx: usize, gy: usize| -> [f32; 7] {
+        let u = (gx * GRID) as f32 / ow as f32;
+        let v = (gy * GRID) as f32 / oh as f32;
+        let x = r.left() + u * r.width();
+        let y = r.top() + v * r.height();
+        let (su, sv) = ((x - screen.left()) / sw, (y - screen.top()) / sh);
+        // The letters: where the water has moved this point from, plus the
+        // rendered logo's own waves.
+        let s = water_swell(su, sv, t);
+        let (wx, wy) = logo_waves(u * r.width(), v * r.height(), letter_h, t, 0.0);
+        let lx = bend * (v * 8.0 + t * 2.6 + u * 3.0).sin() - RIDE * s / 0.86 * sw + wx;
+        let ly = bend * 0.5 * (u * 6.5 + t * 2.1).cos() - RIDE * s * 0.7 / 0.86 * sh + wy;
+        // The shadow: its own swell (elsewhere on the water, later in
+        // time), its own waves, and a push that swings along the word.
+        let s2 = water_swell(su + 0.13, sv + 0.07, t + 0.9);
+        let push_x = r.height() * 0.030 * (1.0 + 0.9 * (u * 5.1 + 0.7 + t * 0.4).sin());
+        let push_y = r.height() * 0.028 * (1.0 + 0.8 * (u * 3.7 + v * 2.0 + 1.3 - t * 0.3).cos());
+        let fine = r.height() * 0.004;
+        let (wx2, wy2) = logo_waves(u * r.width(), v * r.height(), letter_h, t, 2.3);
+        let sx = push_x - RIDE * s2 / 0.86 * sw * 1.3 + fine * (v * 23.0 + u * 9.0 + t * 3.1).sin() + wx2 * 1.1;
+        let sy = push_y - RIDE * s2 * 0.7 / 0.86 * sh * 1.3 + fine * (u * 19.0 - v * 7.0 + t * 2.7).cos() + wy2 * 1.1;
+        // The water under it, and how dark the depth makes it there.
+        let (wu, wv) = water_uv(su, sv, t, aspect);
+        let d = ((x - centre.x).powi(2) + (y - centre.y).powi(2)).sqrt() / reach;
+        let depth = (1.0 - 0.85 * d.min(1.0)) * 0.75 * 235.0 / 255.0;
+        [lx, ly, sx, sy, wu, wv, depth]
+    };
+    let mut nodes = vec![[0.0f32; 7]; gw * gh];
+    for gy in 0..gh {
+        for gx in 0..gw {
+            nodes[gy * gw + gx] = node(gx, gy);
+        }
+    }
+    let mut out = vec![Color32::TRANSPARENT; ow * oh];
+    // The pixels, a band of rows to each core.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let band = oh.div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (bi, rows) in out.chunks_mut(band * ow).enumerate() {
+            let nodes = &nodes;
+            scope.spawn(move || {
+                for (ri, row) in rows.chunks_mut(ow).enumerate() {
+                    let oy = bi * band + ri;
+                    let v = oy as f32 / oh as f32;
+                    let gy = oy / GRID;
+                    let fy = (oy % GRID) as f32 / GRID as f32;
+                    for (ox, px) in row.iter_mut().enumerate() {
+                        let u = ox as f32 / ow as f32;
+                        let gx = ox / GRID;
+                        let fx = (ox % GRID) as f32 / GRID as f32;
+                        let (n00, n10) = (&nodes[gy * gw + gx], &nodes[gy * gw + gx + 1]);
+                        let (n01, n11) = (&nodes[(gy + 1) * gw + gx], &nodes[(gy + 1) * gw + gx + 1]);
+                        let mut q = [0.0f32; 7];
+                        for k in 0..7 {
+                            let top = n00[k] + (n10[k] - n00[k]) * fx;
+                            let bot = n01[k] + (n11[k] - n01[k]) * fx;
+                            q[k] = top + (bot - top) * fy;
+                        }
+                        let [lx, ly, sx, sy, wu, wv, depth] = q;
+                        // The title tilted TILT counterclockwise: this point
+                        // of the screen shows the title from (tu, tv).
+                        let (ox_, oy_) = ((u - 0.5) * r.width(), (v - 0.5) * r.height());
+                        let tu = 0.5 + (ox_ * tilt_c - oy_ * tilt_s) / r.width();
+                        let tv = 0.5 + (ox_ * tilt_s + oy_ * tilt_c) / r.height();
+                        let a_l = m.at((tu - lx / r.width()) * mw, (tv - ly / r.height()) * mh);
+                        let a_s = m.at((tu - sx / r.width()) * mw, (tv - sy / r.height()) * mh) * (1.0 - a_l);
+                        let lit = a_l * alpha;
+                        let as_ = a_s * 0.62 * alpha;
+                        if lit + as_ <= 0.002 {
+                            continue;
+                        }
+                        // The letters raise the exposure of the water under
+                        // them (it is added back EXPOSE times, with a little
+                        // pale lift); the shadow darkens as usual.
+                        let under = match water {
+                            Some(w) => {
+                                let c = w.at(wu, wv);
+                                [c[0] * depth * 255.0, c[1] * depth * 255.0, c[2] * depth * 255.0]
+                            }
+                            None => [0.0; 3],
+                        };
+                        let a = a_l * COVER * alpha + as_;
+                        let ch = |k: usize| {
+                            (under[k] * EXPOSE * lit + fill[k] * LIFT * lit + dark[k] * as_).clamp(0.0, 255.0) as u8
+                        };
+                        *px = Color32::from_rgba_premultiplied(ch(0), ch(1), ch(2), (a * 255.0).clamp(0.0, 255.0) as u8);
+                    }
+                }
+            });
+        }
+    });
+    let img = egui::ColorImage { size: [ow, oh], pixels: out };
+    let id = egui::Id::new("af2-water-title");
+    let ctx = p.ctx();
+    let tex = match ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        Some(mut h) => {
+            h.set(img, egui::TextureOptions::LINEAR);
+            h
+        }
+        None => {
+            let h = ctx.load_texture("water-title", img, egui::TextureOptions::LINEAR);
+            ctx.data_mut(|d| d.insert_temp(id, h.clone()));
+            h
+        }
+    };
+    p.image(tex.id(), r, FULL, Color32::WHITE);
+    if std::env::var_os("AF2_TRACE_SPLASH").is_some() {
+        eprintln!("water title {ow}x{oh}: {:.1} ms", started.elapsed().as_secs_f64() * 1e3);
+    }
+}
+
+/// The waves of the rendered logo at point (x, y) of the title (points),
+/// scaled to its letters' height `lh`: a fine ripple about an eighth of the
+/// letters' height long and a swell about half of it, as offsets (points).
+/// `ph` shifts the pattern (the shadow takes its own).
+fn logo_waves(x: f32, y: f32, lh: f32, t: f32, ph: f32) -> (f32, f32) {
+    // As in the rendered logo: smooth random noise, not regular waves; a
+    // fine ripple about a quarter of the letters' height across and a
+    // swell about the height, drifting slowly.
+    let (u, v) = (x / lh, y / lh);
+    let seed = (ph * 1000.0) as u32;
+    let fine = lh * 0.022;
+    let swell = lh * 0.055;
+    let n = |sx: f32, sy: f32, k: u32| value_noise(sx, sy, seed.wrapping_add(k));
+    let dx = fine * n(u * 4.0 + t * 0.35, v * 4.0 - t * 0.2, 1) + swell * n(u * 1.0 - t * 0.12, v * 1.0 + t * 0.08, 2);
+    let dy = fine * n(u * 4.0 - t * 0.3, v * 4.0 + t * 0.25, 3) + swell * 1.3 * n(u * 1.0 + t * 0.1, v * 1.0 - t * 0.1, 4);
+    (dx, dy)
+}
+
+/// Smooth value noise in -1..1: random heights on a unit grid, blended
+/// with a smoothstep between them.
+pub fn value_noise(x: f32, y: f32, seed: u32) -> f32 {
+    let (x0, y0) = (x.floor(), y.floor());
+    let (fx, fy) = (x - x0, y - y0);
+    let s = |t: f32| t * t * (3.0 - 2.0 * t);
+    let (sx, sy) = (s(fx), s(fy));
+    let g = |i: i32, j: i32| {
+        let k = (i as u32).wrapping_mul(0x8DA6_B343) ^ (j as u32).wrapping_mul(0xD816_3841) ^ seed.wrapping_mul(0xCB1A_B31F);
+        h(k) * 2.0 - 1.0
+    };
+    let (i, j) = (x0 as i32, y0 as i32);
+    let a = g(i, j) + (g(i + 1, j) - g(i, j)) * sx;
+    let b = g(i, j + 1) + (g(i + 1, j + 1) - g(i, j + 1)) * sx;
+    a + (b - a) * sy
+}
+
+/// The splash title's letters: how much light they add (of their colour)
+/// and how much of the water behind them they hide.
+const COVER: f32 = 0.04;
+/// How many times over the water under the letters is added again (1.6:
+/// the letters show it at 2.6 times its brightness).
+const EXPOSE: f32 = 1.6;
+/// A little of the letters' pale colour on top, so dark water under them
+/// still reads as a letter.
+const LIFT: f32 = 0.16;
+
+/// The splash title (and its shadow) tilted this many degrees
+/// counterclockwise.
+const TILT: f32 = 5.0;
+
+/// How far the title follows the water's swell (1 would move it as far
+/// as the painted water moves; the letters read better with less).
+const RIDE: f32 = 0.5;
+
+/// A finer, uneven ripple over the water at (x, y) (x in screen heights),
+/// in -1..1: smooth noise a few tenths of the screen across, drifting.
+fn water_ripple(x: f32, y: f32, t: f32) -> f32 {
+    0.65 * value_noise(x * 9.0 + t * 0.6, y * 9.0 - t * 0.4, 71)
+        + 0.35 * value_noise(x * 23.0 - t * 0.9, y * 23.0 + t * 0.7, 72)
+}
+
+/// The colour streaks under the Undercurrent splash, made once: noise
+/// swirled through itself, lit along a few thin bands in orange,
+/// yellow-green and cyan (black elsewhere, for adding as light).
+fn flare_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new("af2-splash-flares");
+    if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(t);
+    }
+    let (w, h) = (640usize, 400usize);
+    let mut px = vec![Color32::BLACK; w * h];
+    // Few and soft: broad bands, and only where a slow patch lets them.
+    let bands: [(f32, f32, [f32; 3]); 3] = [
+        (0.30, 0.055, [235.0, 105.0, 35.0]),
+        (0.50, 0.045, [60.0, 205.0, 235.0]),
+        (0.70, 0.060, [175.0, 235.0, 55.0]),
+    ];
+    for y in 0..h {
+        for x in 0..w {
+            let (u, v) = (x as f32 / h as f32 * 2.2, y as f32 / h as f32 * 2.2);
+            // Swirled: the noise looked up where other noise points.
+            let q = (value_noise(u, v, 11), value_noise(u + 5.2, v + 1.3, 12));
+            let r2 = (
+                value_noise(u + 3.0 * q.0 + 1.7, v + 3.0 * q.1 + 9.2, 13),
+                value_noise(u + 3.0 * q.0 + 8.3, v + 3.0 * q.1 + 2.8, 14),
+            );
+            let f = 0.5 + 0.5 * value_noise(u * 1.6 + 3.5 * r2.0, v * 1.6 + 3.5 * r2.1, 15);
+            // Fine ripples along the streaks.
+            let f = f + 0.012 * value_noise(u * 40.0, v * 40.0, 16);
+            let patch = (value_noise(u * 0.7 + 4.0, v * 0.7 + 7.0, 17) * 1.4 - 0.15).clamp(0.0, 1.0);
+            let mut c = [0.0f32; 3];
+            for (centre, width, col) in bands {
+                let d = (f - centre) / width;
+                let k = (-d * d).exp() * patch;
+                for i in 0..3 {
+                    c[i] += col[i] * k;
+                }
+            }
+            px[y * w + x] = Color32::from_rgb(c[0].min(255.0) as u8, c[1].min(255.0) as u8, c[2].min(255.0) as u8);
+        }
+    }
+    let img = egui::ColorImage { size: [w, h], pixels: px };
+    let t = ctx.load_texture("splash-flares", img, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    Some(t)
+}
+
+/// Where in the painted water picture the Undercurrent splash shows at
+/// screen point (u, v) (0..1 across): a vortex winding tighter near the
+/// middle, with the swell and a finer ripple over it.
+fn water_uv(u: f32, v: f32, t: f32, aspect: f32) -> (f32, f32) {
+    let (dx, dy) = ((u - 0.5) * aspect, v - 0.5);
+    let r = (dx * dx + dy * dy).sqrt();
+    let ang = (0.15 + 0.22 * t) * (-r * 2.4).exp() + 0.04 * (t * 0.7 + r * 6.0).sin();
+    let (s_, c_) = ang.sin_cos();
+    let (rx, ry) = (dx * c_ - dy * s_, dx * s_ + dy * c_);
+    let swell = water_swell(u, v, t) + water_ripple(u * aspect, v, t) * 0.0035;
+    (0.5 + rx / aspect * 0.86 + swell, 0.5 + ry * 0.86 + swell * 0.7)
+}
+
+/// A picture's pixels on the CPU (RGB, 0..1), decoded once at about
+/// `w` wide: the splash title samples the water under it.
+struct Pixels {
+    w: usize,
+    h: usize,
+    px: &'static [[f32; 3]],
+}
+
+fn cpu_picture(name: &str, w: u32) -> Option<&'static Pixels> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<&'static Pixels>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut c = cache.lock().ok()?;
+    *c.entry(name.to_string()).or_insert_with(|| {
+        let img = image::load_from_memory(crate::pictures::bytes(name)?).ok()?;
+        let img = img.resize(w, u32::MAX, image::imageops::FilterType::Triangle).to_rgb8();
+        let px: Vec<[f32; 3]> = img
+            .pixels()
+            .map(|p| [p.0[0] as f32 / 255.0, p.0[1] as f32 / 255.0, p.0[2] as f32 / 255.0])
+            .collect();
+        let out = Pixels { w: img.width() as usize, h: img.height() as usize, px: Box::leak(px.into_boxed_slice()) };
+        Some(&*Box::leak(Box::new(out)))
+    })
+}
+
+impl Pixels {
+    /// Bilinear at (u, v) in 0..1, the edges held.
+    fn at(&self, u: f32, v: f32) -> [f32; 3] {
+        let x = (u * (self.w - 1) as f32).clamp(0.0, (self.w - 2) as f32);
+        let y = (v * (self.h - 1) as f32).clamp(0.0, (self.h - 2) as f32);
+        let (x0, y0) = (x as usize, y as usize);
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let i = y0 * self.w + x0;
+        let mut o = [0.0; 3];
+        for k in 0..3 {
+            let top = self.px[i][k] * (1.0 - fx) + self.px[i + 1][k] * fx;
+            let bot = self.px[i + self.w][k] * (1.0 - fx) + self.px[i + self.w + 1][k] * fx;
+            o[k] = top * (1.0 - fy) + bot * fy;
+        }
+        o
+    }
+}
+
+/// The gentle swell over the Undercurrent water at screen point (u, v)
+/// (0..1 across), as an offset into the picture (its x; y takes 0.7 of it).
+fn water_swell(u: f32, v: f32, t: f32) -> f32 {
+    0.006 * (v * 11.0 + t * 1.3).sin() + 0.004 * (u * 17.0 - t * 1.1).cos()
+}
+
 /// The Undercurrent splash: looking straight down into deep water while
 /// its colours swirl, the title rising out of the dark and settling at the
 /// surface.
@@ -376,22 +721,13 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
     if let Some(tex) = crate::pictures::texture(p.ctx(), &th.picture, screen.width() * ppp) {
         let aspect = screen.width() / screen.height().max(1.0);
         let tint = Color32::from_white_alpha((a * 235.0) as u8);
-        warped(p, tex.id(), screen, 48, 30, |u, v| {
+        warped(p, tex.id(), screen, 128, 80, |u, v| {
             let pos = Pos2::new(
                 screen.left() + u * screen.width(),
                 screen.top() + v * screen.height(),
             );
-            let (dx, dy) = ((u - 0.5) * aspect, v - 0.5);
-            let r = (dx * dx + dy * dy).sqrt();
-            let ang = (0.15 + 0.22 * t) * (-r * 2.4).exp() + 0.04 * (t * 0.7 + r * 6.0).sin();
-            let (s_, c_) = ang.sin_cos();
-            let (rx, ry) = (dx * c_ - dy * s_, dx * s_ + dy * c_);
-            let swell = 0.006 * (v * 11.0 + t * 1.3).sin() + 0.004 * (u * 17.0 - t * 1.1).cos();
-            let uv = Pos2::new(
-                0.5 + rx / aspect * 0.86 + swell,
-                0.5 + ry * 0.86 + swell * 0.7,
-            );
-            (pos, uv, tint)
+            let (wu, wv) = water_uv(u, v, t, aspect);
+            (pos, Pos2::new(wu, wv), tint)
         });
     }
     // Depth: the water darkens away from the middle, as if very deep.
@@ -412,6 +748,19 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
     }
     p.add(Shape::mesh(m));
     p.rect_filled(screen, 0.0, rgba([2, 6, 28], 0.25 * a));
+    // Colour flaring through the water: thin bright streaks, as of oil
+    // on it, drifting with the swell; added light, so they brighten it.
+    if let Some(tex) = flare_texture(p.ctx()) {
+        let aspect = screen.width() / screen.height().max(1.0);
+        let k = (a * 120.0) as u8;
+        let tint = Color32::from_rgba_premultiplied(k, k, k, 0);
+        warped(p, tex.id(), screen, 96, 60, |u, v| {
+            let pos = Pos2::new(screen.left() + u * screen.width(), screen.top() + v * screen.height());
+            let s = water_swell(u, v, t) + water_ripple(u * aspect, v, t + 3.0) * 0.004;
+            let uv = Pos2::new(0.08 + u * 0.84 + s * 1.6 + t * 0.012, 0.08 + v * 0.84 + s * 1.1 - t * 0.008);
+            (pos, uv, tint)
+        });
+    }
     // Light playing through the water, under the title.
     if th.caustics > 0.0 {
         let time = if th.motion > 0.0 { t * 0.5 } else { 0.0 };
@@ -428,8 +777,14 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
 
     // The title rises from the deep: dim, blue and bent by the water at
     // first, clearing and steadying as it reaches the surface.
+    // A theme with a letter mask for its title (`<title>-mask`) has the
+    // title built each frame on the water, its shadow moving on its own.
+    let mask = water_mask(&format!("{}-mask", th.title_picture));
     if let Some(tex) = crate::pictures::texture(p.ctx(), &th.title_picture, f32::MAX) {
-        let [tw, tht] = tex.size_vec2().into();
+        let [tw, tht] = match mask {
+            Some(m) => [m.w as f32, m.h as f32],
+            None => tex.size_vec2().into(),
+        };
         let rise = ease((t - 0.15) / 1.9);
         let w = (screen.width() * 0.44).min(tw * 1.7) * (0.82 + 0.18 * rise);
         let hgt = w * tht / tw;
@@ -439,62 +794,29 @@ pub fn undercurrent(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32) {
         let col = mix(deep, [255, 255, 255], rise);
         let alpha = (rise.powf(1.4) * a).clamp(0.0, 1.0);
         let tint = rgba(col, alpha);
-        // As it breaks the surface, ripples spread out over the water:
-        // uneven rings that wander, thin out and break up as they go.
-        let rt = t - 1.85;
-        if rt > 0.0 {
-            for k in 0..5u32 {
-                let q = rt - k as f32 * 0.13 - h(k + 70) * 0.12;
-                if q <= 0.0 {
-                    continue;
-                }
-                let life = (1.0 - q / 1.1).max(0.0);
-                if life <= 0.0 {
-                    continue;
-                }
-                let grow = 1.0 + q * (1.3 + h(k + 80) * 0.5);
-                let base = Vec2::new(w * 0.56, hgt * 0.66) * grow;
-                let (p1, p2, p3) = (h(k + 90) * 6.3, h(k + 91) * 6.3, h(k + 92) * 6.3);
-                let n = 120;
-                let pt = |i: u32| {
-                    let ang = i as f32 / n as f32 * std::f32::consts::TAU;
-                    let wob = 1.0
-                        + 0.07 * (3.0 * ang + p1 + q * 1.7).sin()
-                        + 0.045 * (5.0 * ang + p2 - q * 2.3).sin()
-                        + 0.025 * (9.0 * ang + p3 + q * 3.1).sin();
-                    Pos2::new(
-                        r.center().x + ang.cos() * base.x * wob,
-                        r.center().y + ang.sin() * base.y * wob,
-                    )
-                };
-                for i in 0..n {
-                    let ang = (i as f32 + 0.5) / n as f32 * std::f32::consts::TAU;
-                    // Broken: the ring fades in and out around its length.
-                    let gap = (0.5 + 0.5 * (4.0 * ang + p3 + q * 2.0).sin())
-                        * (0.6 + 0.4 * (7.0 * ang + p1).cos());
-                    let al = life * life * gap.clamp(0.0, 1.0) * a;
-                    if al < 0.02 {
-                        continue;
-                    }
-                    let (s0, s1) = (pt(i), pt(i + 1));
-                    let soft = 2.0 + q * 6.0;
-                    p.line_segment(
-                        [s0, s1],
-                        Stroke::new(soft, rgba([158, 230, 238], 0.10 * al)),
-                    );
-                    p.line_segment(
-                        [s0, s1],
-                        Stroke::new(1.2_f32, rgba([200, 245, 250], 0.38 * al)),
-                    );
-                }
-            }
+        // The title, riding the water. It rides the
+        // same swell as the water under it (that swell moves the painted
+        // water by `water_swell` of the picture, here turned to points),
+        // with the rising bend on top while it is still under the surface.
+        if let Some(m) = mask {
+            // Pale cyan light, as the cover's letters.
+            let water = cpu_picture(&th.picture, 960);
+            water_title(p, screen, r, t, bend, m, mix(col, [150, 215, 240], 0.55), alpha, water);
+            return;
         }
-        // The title over its own ripples, never under lines.
-        warped(p, tex.id(), r, 30, 10, |u, v| {
-            let dx = bend * (v * 8.0 + t * 2.6 + u * 3.0).sin();
-            let dy = bend * 0.5 * (u * 6.5 + t * 2.1).cos();
-            let pos = Pos2::new(r.left() + u * r.width() + dx, r.top() + v * r.height() + dy);
-            (pos, Pos2::new(u, v), tint)
+        warped(p, tex.id(), r, 60, 20, |u, v| {
+            let x = r.left() + u * r.width();
+            let y = r.top() + v * r.height();
+            let (su, sv) = (
+                (x - screen.left()) / screen.width(),
+                (y - screen.top()) / screen.height(),
+            );
+            let s = water_swell(su, sv, t);
+            let ride_x = -s / 0.86 * screen.width();
+            let ride_y = -s * 0.7 / 0.86 * screen.height();
+            let dx = bend * (v * 8.0 + t * 2.6 + u * 3.0).sin() + ride_x;
+            let dy = bend * 0.5 * (u * 6.5 + t * 2.1).cos() + ride_y;
+            (Pos2::new(x + dx, y + dy), Pos2::new(u, v), tint)
         });
     }
 }
@@ -576,7 +898,16 @@ pub fn pop(p: &Painter, screen: Rect, th: &Theme, t: f32, fade: f32, prefix: &st
         uw *= zoom;
         vh *= zoom;
         let uv = Rect::from_center_size(Pos2::new(0.5, 0.5), Vec2::new(uw, vh));
-        p.image(tex.id(), screen, uv, Color32::from_white_alpha((a * 255.0) as u8));
+        let tint = Color32::from_white_alpha((a * 255.0) as u8);
+        if th.wind > 0.0 {
+            // The hedge in the breeze, as behind the app.
+            let now = p.ctx().input(|i| i.time) as f32;
+            if !crate::wind::draw(p, screen, uv, &th.picture, th.wind, now, tint) {
+                p.image(tex.id(), screen, uv, tint);
+            }
+        } else {
+            p.image(tex.id(), screen, uv, tint);
+        }
         p.rect_filled(screen, 0.0, rgba(th.backdrop_top, 0.35 * a));
     }
     let letters = pop_letters(prefix);

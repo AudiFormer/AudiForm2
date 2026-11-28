@@ -1058,7 +1058,13 @@ fn strip_options_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) -
 /// preset) or a VST3 instrument. The name opens its settings (the
 /// synth's window, the SoundFont's presets, the plug-in's own window);
 /// the arrow next to it picks another.
-fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
+pub fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
+    instrument_control(ui, st, ti, th, 128.0, true);
+}
+
+/// The instrument control: its name (`name_w` wide; a click opens its
+/// settings) and ▾ to pick another, after a ♪ when `glyph`.
+pub fn instrument_control(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, name_w: f32, glyph: bool) {
     let sf = st.session.tracks[ti].soundfont.clone();
     let plug = crate::instruments::slot_of(st, ti).cloned();
     let stopped = plug.as_ref().and_then(|_| crate::instruments::stopped(st, ti));
@@ -1093,18 +1099,21 @@ fn instrument_row(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme) {
     let mut preset: Option<af2_engine::soundfont::Preset> = None;
     let mut settings = false;
     let mut restart = false;
-    let popup = egui::Id::new(("instrument-presets", ti));
+    // Its own popup wherever it is drawn (track header, Effects rack).
+    let popup = egui::Id::new(("instrument-presets", ti)).with(ui.id());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        ui.label(RichText::new("♪").color(c(th.text_dim)))
-            .on_hover_text("Instrument");
+        if glyph {
+            ui.label(RichText::new("♪").color(c(th.text_dim)))
+                .on_hover_text("Instrument");
+        }
         let mut text = RichText::new(&shown).size(11.0);
         if stopped.is_some() {
             text = text.color(egui::Color32::from_rgb(230, 90, 80));
         }
         let name = ui
             .add_sized(
-                [128.0, 18.0],
+                [name_w, 18.0],
                 egui::Button::new(text).wrap_mode(egui::TextWrapMode::Truncate),
             )
             .on_hover_text(hover);
@@ -1926,6 +1935,13 @@ pub fn metronome_menu(
     }
 }
 
+/// The metronome row's background: the panel tinted toward the text, so
+/// the row stands apart from the ruler above it (drawn in the panel colour)
+/// in every theme, light or dark.
+pub fn metro_bg(th: &Theme) -> egui::Color32 {
+    lerp(th.panel, th.text, 0.12)
+}
+
 /// The metronome row's lane: bar and beat lines (bars brighter).
 pub fn metronome_lane(
     p: &egui::Painter,
@@ -1936,7 +1952,7 @@ pub fn metronome_lane(
 ) {
     let th = &st.theme;
     let muted = st.prefs.metronome.muted;
-    p.rect_filled(row, Rounding::ZERO, lerp(th.wave_background, th.panel, 0.5));
+    p.rect_filled(row, Rounding::ZERO, metro_bg(th));
     let tempo = &st.session.tempo;
     let t0 = to_t(row.left()).max(0.0);
     let t1 = to_t(row.right());
@@ -1983,6 +1999,15 @@ fn unused(_: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_metronome_row_stands_apart_from_the_ruler_in_every_theme() {
+        let lum = |c: egui::Color32| 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
+        for th in Theme::builtins() {
+            let d = (lum(metro_bg(&th)) - lum(c(th.panel))).abs();
+            assert!(d >= 12.0, "{}: only {d:.1} apart", th.name);
+        }
+    }
 
     /// Draws track `ti`'s header at a known place for one frame.
     fn frame(ctx: &egui::Context, st: &mut State, ti: usize, rect: Rect, events: Vec<egui::Event>) {

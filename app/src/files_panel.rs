@@ -135,18 +135,18 @@ pub fn files(ui: &mut egui::Ui, st: &mut State) {
     }
     ui.horizontal_wrapped(|ui| {
         if ui
-            .button("New Session")
-            .on_hover_text("New Multitrack session (the one open is set aside, not closed)")
-            .clicked()
-        {
-            crate::new_dialogs::open_new_session(st, None);
-        }
-        if ui
             .button("New Audio File")
             .on_hover_text("New empty audio file, listed here")
             .clicked()
         {
             crate::new_dialogs::open_new_file(st);
+        }
+        if ui
+            .button("New Session")
+            .on_hover_text("New Multitrack session (the one open is set aside, not closed)")
+            .clicked()
+        {
+            crate::new_dialogs::open_new_session(st, None);
         }
         if ui
             .button("Open")
@@ -163,6 +163,7 @@ pub fn files(ui: &mut egui::Ui, st: &mut State) {
     );
     ui.add_space(2.0);
     sessions(ui, st);
+    midi_clips(ui, st);
 
     // The files, filtered and sorted.
     let filter = st.files_ui.filter.to_lowercase();
@@ -638,6 +639,81 @@ fn sessions(ui: &mut egui::Ui, st: &mut State) {
             st.close_all_sessions();
         }
         None => {}
+    }
+}
+
+/// The session in front's MIDI clips, under the sessions: "track • clip"
+/// with its notes and length. Double-click opens one in the Piano Roll
+/// (the one open there is marked); right-click to open it or show it in
+/// the Multitrack.
+fn midi_clips(ui: &mut egui::Ui, st: &mut State) {
+    let th = st.theme.clone();
+    let tempo = st.session.tempo.clone();
+    let mut clips: Vec<(af2_core::ClipId, af2_core::TrackId, String, usize, f64)> = Vec::new();
+    for t in &st.session.tracks {
+        for m in &t.midi {
+            let secs = tempo.secs(m.start + m.length) - tempo.secs(m.start);
+            clips.push((m.id, t.id, format!("{} \u{2022} {}", t.name, m.name), m.notes.len(), secs));
+        }
+    }
+    if clips.is_empty() {
+        return;
+    }
+    ui.label(RichText::new("MIDI CLIPS").small().color(c(th.text_dim)));
+    let mut open: Option<af2_core::ClipId> = None;
+    let mut show: Option<(af2_core::ClipId, af2_core::TrackId)> = None;
+    for (id, track, name, notes, secs) in clips {
+        let w = ui.available_width();
+        let (rect, r) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
+        let p = ui.painter_at(rect);
+        let here = st.piano_clip == Some(id);
+        if here {
+            p.rect_filled(rect, Rounding::same(3.0), ca(th.accent, 22));
+        } else if r.hovered() {
+            p.rect_filled(rect, Rounding::same(3.0), ca(th.panel_raised, 120));
+        }
+        p.text(
+            pos2(rect.left() + 12.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            format!("\u{266a} {name}"),
+            FontId::proportional(12.0),
+            if here { c(th.accent) } else { c(th.text) },
+        );
+        p.text(
+            pos2(rect.right() - 6.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            format!("{notes} notes \u{2022} {}", format_time(secs)),
+            FontId::proportional(10.5),
+            c(th.text_dim),
+        );
+        let r = r.on_hover_text("Double-click to open it in the Piano Roll");
+        if r.double_clicked() {
+            open = Some(id);
+        }
+        r.context_menu(|ui| {
+            if ui.button("Open in Piano Roll").clicked() {
+                open = Some(id);
+                ui.close_menu();
+            }
+            if ui.button("Show in Multitrack").clicked() {
+                show = Some((id, track));
+                ui.close_menu();
+            }
+        });
+    }
+    ui.add_space(2.0);
+    if let Some(id) = open {
+        st.mode = Mode::Multitrack;
+        st.piano_clip = Some(id);
+        st.want_piano = true;
+    }
+    if let Some((id, track)) = show {
+        st.mode = Mode::Multitrack;
+        st.selected_track = Some(track);
+        if let Some((ti, ci)) = st.session.find_midi(id) {
+            let t = st.session.tempo.secs(st.session.tracks[ti].midi[ci].start);
+            st.jump_to(t);
+        }
     }
 }
 

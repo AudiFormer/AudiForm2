@@ -75,7 +75,7 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
                 } else {
                     let r = ui.selectable_label(false, &m.name);
                     if r.clicked() {
-                        jump = Some(m.time);
+                        jump = Some((m.time, m.length));
                     }
                     if r.double_clicked() {
                         caches.marker_edit = Some(i);
@@ -105,8 +105,8 @@ pub fn markers(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
         st.session_dirty = true;
         st.session_version += 1;
     }
-    if let Some(t) = jump {
-        st.set_cursor(t);
+    if let Some((t, len)) = jump {
+        st.go_to_marker(t, len);
     }
 }
 

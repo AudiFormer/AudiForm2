@@ -4,6 +4,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod af1_import;
+mod window_memory;
+mod wind;
+mod session_save;
+mod quit_flow;
 mod app_icon;
 mod archive;
 mod linked;
@@ -113,6 +117,20 @@ fn main() -> eframe::Result<()> {
     } else {
         eframe::Renderer::Wgpu
     };
+    let r = run_any(first, glow_first, files);
+    // Closed and everything saved: end at once. Left to itself, Windows
+    // then unloads every DLL, and an ASIO driver can take seconds over
+    // that (the window gone, the app still running).
+    if r.is_ok() {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        af2_vst3::exit_now(0);
+    }
+    r
+}
+
+fn run_any(first: eframe::Renderer, glow_first: bool, files: Vec<std::path::PathBuf>) -> eframe::Result<()> {
     match run(first, files.clone()) {
         // A machine whose graphics driver has no DirectX 12 / Vulkan (old
         // or virtual machines) still gets a window, through OpenGL.
@@ -133,10 +151,20 @@ fn run(renderer: eframe::Renderer, files: Vec<std::path::PathBuf>) -> eframe::Re
     if let Some(icon) = app_icon::default_icon_data() {
         viewport = viewport.with_icon(icon);
     }
+    // The window as it was left last time (a screenshot run sets its own).
+    match (selfshot::window_size(), window_memory::WindowMemory::load()) {
+        (Some(size), _) => viewport = viewport.with_inner_size(size),
+        (None, Some(m)) => {
+            viewport = viewport
+                .with_inner_size(m.size())
+                .with_position([m.x, m.y])
+                .with_maximized(m.maximized);
+        }
+        (None, None) => viewport = viewport.with_inner_size([1600.0, 940.0]),
+    }
     let options = eframe::NativeOptions {
         viewport: viewport
-            .with_inner_size(selfshot::window_size().unwrap_or([1600.0, 940.0]))
-            .with_min_inner_size([900.0, 560.0])
+            .with_min_inner_size(window_memory::MIN)
             .with_drag_and_drop(true),
         // wgpu (DirectX 12, Vulkan or Metal) presents reliably on more
         // machines than OpenGL; AF2_RENDERER=glow switches back.

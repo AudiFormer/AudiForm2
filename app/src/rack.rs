@@ -284,6 +284,15 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
                     .strong()
                     .color(c(th.text)),
             );
+            // A MIDI track's instrument heads its rack, drawn as a slot of
+            // its own: its effects come after it.
+            if !is_clip(target) && target != FILE && target != MASTER {
+                let ti = target as usize;
+                if st.session.tracks.get(ti).is_some_and(|t| t.kind == TrackKind::Midi) {
+                    instrument_slot(ui, st, ti, &th, w0 - 10.0);
+                    ui.add_space(4.0);
+                }
+            }
             ui.add_space(2.0);
             egui::ScrollArea::vertical()
                 .id_salt("rack-slots")
@@ -294,6 +303,27 @@ pub fn panel(ui: &mut egui::Ui, st: &mut State) {
                     slots(ui, st, target, &th)
                 });
         });
+}
+
+/// A MIDI track's instrument as a rack row, styled as the slots below it:
+/// a ♪ where they have their number, the instrument's name across the
+/// row (a click opens its settings or window), ▾ at the right to pick
+/// another.
+fn instrument_slot(ui: &mut egui::Ui, st: &mut State, ti: usize, th: &Theme, w: f32) {
+    let row_h = 24.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, Rounding::ZERO, ca(th.panel_raised, 140));
+    p.rect_stroke(rect, Rounding::ZERO, Stroke::new(1.0_f32, ca(th.border, 200)));
+    let glyph = Rect::from_min_size(rect.min, vec2(42.0, row_h));
+    p.line_segment([glyph.right_top(), glyph.right_bottom()], Stroke::new(1.0_f32, ca(th.border, 120)));
+    p.text(glyph.center(), Align2::CENTER_CENTER, "♪", FontId::proportional(13.0), c(th.accent));
+    let inner = Rect::from_min_max(pos2(glyph.right() + 4.0, rect.top() + 2.0), pos2(rect.right() - 2.0, rect.bottom() - 2.0));
+    // The name fills the row; ▾ (about 22 points) takes the end.
+    let name_w = (inner.width() - 26.0).max(60.0);
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
+        crate::track_views::instrument_control(ui, st, ti, th, name_w, false);
+    });
 }
 
 /// Which slot sits in each of the sixteen rows (slots keep their row, so

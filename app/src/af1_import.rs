@@ -332,7 +332,7 @@ pub fn apply_prefs(st: &mut State, v: &Value) -> Vec<String> {
         done.push("Phase Wheel".into());
     }
     // Save Audio As and Export.
-    let mut ex = crate::export::ExportPrefs::load();
+    let (mut ex, _) = crate::export::ExportPrefs::load_for(false);
     let mut ex_changed = false;
     let sa = &v["save-audio.format"];
     if sa.is_object() {
@@ -355,7 +355,7 @@ pub fn apply_prefs(st: &mut State, v: &Value) -> Vec<String> {
         ex_changed = true;
     }
     if ex_changed {
-        ex.save();
+        ex.save_for(false);
         done.push("Save Audio As and Export format and folder".into());
     }
     // Workspace.

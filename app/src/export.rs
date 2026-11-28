@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 
-use af2_core::{AudioBuffer, Session, TrackKind};
+use af2_core::{AudioBuffer, Range, Session, TrackKind};
 use af2_io::export::{
     self as ex, ChannelChoice, Container, LoudnessTarget, MarkerOut, Meta, Options, Report,
     SampleFormat, Tag,
@@ -72,7 +72,12 @@ pub struct ExportPrefs {
     pub custom: LoudnessTarget,
     pub range: MixRange,
     pub folder: Option<PathBuf>,
+    /// Folders saved or exported to lately, the latest first.
+    pub recent: Vec<PathBuf>,
 }
+
+/// How many recent folders the Location list keeps.
+const RECENT_FOLDERS: usize = 8;
 
 impl Default for ExportPrefs {
     fn default() -> Self {
@@ -90,27 +95,47 @@ impl Default for ExportPrefs {
             },
             range: MixRange::Session,
             folder: None,
+            recent: Vec::new(),
         }
     }
 }
 
 impl ExportPrefs {
-    fn path() -> PathBuf {
-        data_dir().join("export.json")
+    /// Save As and Save keep their own settings (saveas.json), apart from
+    /// the exports' (export.json).
+    fn path(save: bool) -> PathBuf {
+        data_dir().join(if save { "saveas.json" } else { "export.json" })
     }
 
-    pub fn load() -> ExportPrefs {
-        std::fs::read_to_string(Self::path())
+    fn read(save: bool) -> Option<ExportPrefs> {
+        std::fs::read_to_string(Self::path(save))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
     }
 
-    pub fn save(&self) {
+    /// The settings last used, and whether there were any: Save As starts
+    /// from the export settings until it has its own.
+    pub fn load_for(save: bool) -> (ExportPrefs, bool) {
+        match Self::read(save) {
+            Some(p) => (p, true),
+            None if save => (Self::read(false).unwrap_or_default(), false),
+            None => (ExportPrefs::default(), false),
+        }
+    }
+
+    pub fn save_for(&self, save: bool) {
         let _ = std::fs::create_dir_all(data_dir());
         if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(Self::path(), s);
+            let _ = std::fs::write(Self::path(save), s);
         }
+    }
+
+    /// `folder` used now: it goes first in the recent list.
+    pub fn used_folder(&mut self, folder: &Path) {
+        self.folder = Some(folder.to_path_buf());
+        self.recent.retain(|f| f != folder);
+        self.recent.insert(0, folder.to_path_buf());
+        self.recent.truncate(RECENT_FOLDERS);
     }
 
     pub fn fmt(&self, c: Container) -> &FormatPrefs {
@@ -154,6 +179,8 @@ impl ExportPrefs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
     SaveDoc(DocId),
+    /// The frames `.1..2` of a file, as a new file (the open one stays).
+    SaveSelection(DocId, usize, usize),
     Mixdown,
     Bed,
     Stems,
@@ -231,9 +258,34 @@ fn with_ext(name: &str, c: Container) -> String {
 
 // ------------------------------------------------------------ opening
 
-fn open_with(st: &mut State, purpose: Purpose, name: String, folder: Option<PathBuf>) {
-    let prefs = ExportPrefs::load();
-    let folder = folder.or_else(|| prefs.folder.clone()).unwrap_or_else(home);
+/// A long path cut in the middle to about `max` characters.
+fn short_path(p: &str, max: usize) -> String {
+    let n = p.chars().count();
+    if n <= max {
+        return p.to_string();
+    }
+    let keep = max.saturating_sub(1) / 2;
+    let head: String = p.chars().take(keep).collect();
+    let tail: String = p.chars().skip(n - keep).collect();
+    format!("{head}\u{2026}{tail}")
+}
+
+/// Saving the open file (Save As, Save Selection As) rather than exporting.
+fn is_save(p: Purpose) -> bool {
+    matches!(p, Purpose::SaveDoc(_) | Purpose::SaveSelection(..))
+}
+
+/// Opens the dialog with the settings last used for this kind of job: the
+/// last folder saved or exported to comes first, then `folder` (the file's
+/// or session's own). True when there were settings to remember.
+fn open_with(st: &mut State, purpose: Purpose, name: String, folder: Option<PathBuf>) -> bool {
+    let (prefs, remembered) = ExportPrefs::load_for(is_save(purpose));
+    let folder = prefs
+        .folder
+        .clone()
+        .filter(|f| f.is_dir())
+        .or(folder)
+        .unwrap_or_else(home);
     let ui = &mut st.export;
     ui.name = with_ext(&ex::safe_file_name(&name), prefs.container);
     ui.folder = folder;
@@ -241,6 +293,7 @@ fn open_with(st: &mut State, purpose: Purpose, name: String, folder: Option<Path
     ui.purpose = Some(purpose);
     ui.confirm = None;
     ui.open = true;
+    remembered
 }
 
 /// File > Export > Multitrack Session (.sesx): a copy of the session for
@@ -308,17 +361,18 @@ pub fn open_save_as(st: &mut State) {
             .as_ref()
             .and_then(|p| p.parent().map(Path::to_path_buf)),
     );
-    open_with(st, Purpose::SaveDoc(id), name, folder);
+    let remembered = open_with(st, Purpose::SaveDoc(id), name, folder);
     // A file already in FLAC or WAV keeps its format; one never saved
-    // starts as FLAC (lossless and compressed) at the depth it was made.
+    // starts with the format last saved in, or else as FLAC (lossless and
+    // compressed) at the depth it was made.
     let (ext, new_bits) = st.doc().map_or((None, None), |d| {
         (d.path.as_deref().and_then(Container::from_path), d.new_bits)
     });
     let unsaved = st.doc().is_some_and(|d| d.path.is_none());
-    let c = ext.or(unsaved.then_some(Container::Flac));
+    let c = ext.or((unsaved && !remembered).then_some(Container::Flac));
     if let (Some(c), Some(p)) = (c, st.export.prefs.as_mut()) {
         p.container = c;
-        if c == Container::Flac {
+        if c == Container::Flac && !remembered {
             if let Some(b) = new_bits {
                 p.flac.format = if b == 16 {
                     SampleFormat::I16
@@ -331,13 +385,44 @@ pub fn open_save_as(st: &mut State) {
     }
 }
 
+/// File > Save Selection As (Ctrl+Alt+S): just the selected part of the
+/// open file, as a new file. The open file is left as it is.
+pub fn open_save_selection(st: &mut State) {
+    let Some(d) = st.doc() else {
+        st.error("Open a file in the Waveform editor first.");
+        return;
+    };
+    let Some(sel) = d.sel.filter(|s| s.1 - s.0 > 1e-6) else {
+        st.error("Select the part to save first.");
+        return;
+    };
+    let r = d.frames_of(sel);
+    let (id, name, folder) = (
+        d.id,
+        format!("{} part", stem_of(&d.name)),
+        d.path
+            .as_ref()
+            .and_then(|p| p.parent().map(Path::to_path_buf)),
+    );
+    let ext = d.path.as_deref().and_then(Container::from_path);
+    let _ = open_with(st, Purpose::SaveSelection(id, r.start, r.end), name, folder);
+    if let (Some(c), Some(p)) = (ext, st.export.prefs.as_ref()) {
+        if p.container != c {
+            if let Some(p) = st.export.prefs.as_mut() {
+                p.container = c;
+            }
+            st.export.name = with_ext(&st.export.name, c);
+        }
+    }
+}
+
 pub fn open_mixdown(st: &mut State) {
     let name = format!("{} Mixdown", st.session.name);
     let folder = st
         .session_path
         .as_ref()
         .and_then(|p| p.parent().map(Path::to_path_buf));
-    open_with(st, Purpose::Mixdown, name, folder);
+    let _ = open_with(st, Purpose::Mixdown, name, folder);
 }
 
 pub fn open_bed(st: &mut State) {
@@ -346,7 +431,7 @@ pub fn open_bed(st: &mut State) {
         .session_path
         .as_ref()
         .and_then(|p| p.parent().map(Path::to_path_buf));
-    open_with(st, Purpose::Bed, name, folder);
+    let _ = open_with(st, Purpose::Bed, name, folder);
 }
 
 pub fn open_stems(st: &mut State) {
@@ -359,7 +444,7 @@ pub fn open_stems(st: &mut State) {
         .as_ref()
         .and_then(|p| p.parent().map(Path::to_path_buf));
     let name = st.session.name.clone();
-    open_with(st, Purpose::Stems, name, folder);
+    let _ = open_with(st, Purpose::Stems, name, folder);
 }
 
 /// File > Save in the Waveform editor: a WAV or FLAC saves in place with
@@ -375,7 +460,17 @@ pub fn save_in_place(st: &mut State) {
         open_save_as(st);
         return;
     };
-    let prefs = ExportPrefs::load();
+    if st.prefs.ask_before_save {
+        let text = format!(
+            "Save writes over {}. Write over the original audio file?",
+            path.display()
+        );
+        let r = crate::file_dialog::ask("AudiForm 2", &text, &["Save", "Cancel"], false, true);
+        if r != crate::file_dialog::Reply::Yes {
+            return;
+        }
+    }
+    let (prefs, _) = ExportPrefs::load_for(true);
     let f = prefs.fmt(c);
     let opts = Options {
         container: c,
@@ -673,6 +768,63 @@ fn start_save_doc(st: &mut State, id: DocId, path: PathBuf, mut opts: Options) {
     );
 }
 
+/// Save Selection As: frames `r` of file `id` written to `path`, with the
+/// markers inside them; the open file and its name stay as they are.
+fn start_save_part(st: &mut State, id: DocId, r: Range, path: PathBuf, mut opts: Options) {
+    if st.export.job.is_some() {
+        st.error("An export is still running.");
+        return;
+    }
+    let Some(d) = st.doc_by_id(id) else { return };
+    if d.path.as_deref() == Some(path.as_path()) {
+        st.error("Save Selection As will not write over the open file. Pick another name.");
+        return;
+    }
+    let r = r.clamp(d.buf.frames());
+    let buf = d.buf.slice(r);
+    if opts.channels.count(buf.num_channels()) == buf.num_channels() {
+        opts.channel_mask = opts.channel_mask.or(d.speaker_mask());
+    }
+    let rate = d.buf.rate as f64;
+    let (a, b) = (r.start as f64 / rate, r.end as f64 / rate);
+    let meta = Meta {
+        markers: d
+            .markers
+            .iter()
+            .filter(|m| m.time >= a && m.time < b)
+            .map(|m| MarkerOut {
+                name: m.name.clone(),
+                time: m.time - a,
+                length: m.length.min(b - m.time),
+                chapter: m.kind == af2_core::session::MarkerKind::Chapter,
+            })
+            .collect(),
+        tags: tags(&stem_of(
+            &path.file_name().unwrap_or_default().to_string_lossy(),
+        )),
+    };
+    let total = buf.frames() as u64;
+    let p2 = path.clone();
+    let float = opts.effective_format() == SampleFormat::F32;
+    spawn(
+        st,
+        format!("Saving {}", path.display()),
+        total,
+        Then::Files,
+        float,
+        move |done, _| {
+            let rep = ex::export_buffer(&p2, &buf, &opts, &meta)?;
+            done.store(total, Ordering::Relaxed);
+            Ok(Done {
+                note: None,
+                reports: vec![rep],
+                reload: None,
+            })
+        },
+        vec![path],
+    );
+}
+
 /// Multitrack > Bounce Selected Track to New Track: the selected track
 /// alone (its effects, fader and pan, the master) over the time
 /// selection or the whole session, onto a new track.
@@ -752,13 +904,16 @@ fn start(st: &mut State, paths: Vec<PathBuf>) {
         return;
     };
     let prefs = st.export.prefs.clone().unwrap_or_default();
-    prefs.save();
+    prefs.save_for(is_save(purpose));
     let opts = prefs.options();
     let float = opts.effective_format() == SampleFormat::F32;
     let rate = st.session.rate;
     match purpose {
         Purpose::SaveDoc(id) => {
             start_save_doc(st, id, paths[0].clone(), opts);
+        }
+        Purpose::SaveSelection(id, a, b) => {
+            start_save_part(st, id, Range::new(a, b), paths[0].clone(), opts);
         }
         Purpose::Mixdown | Purpose::Bed => {
             let bed = purpose == Purpose::Bed;
@@ -995,6 +1150,7 @@ pub fn poll(st: &mut State, ctx: &egui::Context) {
 fn title(p: Purpose) -> &'static str {
     match p {
         Purpose::SaveDoc(_) => "Save Audio As",
+        Purpose::SaveSelection(..) => "Save Selection As",
         Purpose::Mixdown => "Export Multitrack Mixdown",
         Purpose::Bed => "Export 3D Speaker Bed",
         Purpose::Stems => "Export Track Stems",
@@ -1026,6 +1182,10 @@ fn source_shape(st: &State, purpose: Purpose, range: MixRange) -> (f64, usize, u
     match purpose {
         Purpose::SaveDoc(id) => st.doc_by_id(id).map_or((0.0, 2, 48_000, 1), |d| {
             (d.duration(), d.buf.num_channels(), d.buf.rate, 1)
+        }),
+        Purpose::SaveSelection(id, a, b) => st.doc_by_id(id).map_or((0.0, 2, 48_000, 1), |d| {
+            let rate = d.buf.rate.max(1);
+            (b.saturating_sub(a) as f64 / rate as f64, d.buf.num_channels(), rate, 1)
         }),
         Purpose::Mixdown => {
             let (_, a, b) = mix_source(st, range);
@@ -1094,6 +1254,17 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
     let confirm = st.export.confirm.clone();
     let session_name = st.session.name.clone();
     let session_layout = st.session.space;
+    // The file's or session's own folder, offered in the Location list.
+    let own_folder: Option<PathBuf> = match purpose {
+        Purpose::SaveDoc(id) | Purpose::SaveSelection(id, ..) => st
+            .docs
+            .iter()
+            .find(|d| d.id == id)
+            .and_then(|d| d.path.as_deref())
+            .and_then(Path::parent)
+            .map(Path::to_path_buf),
+        _ => st.session_path.as_deref().and_then(Path::parent).map(Path::to_path_buf),
+    };
     crate::ui::popup(ctx, egui::Id::new(("af2-popup", "export.rs", 1)), title(purpose))
         .open(&mut open)
         .collapsible(false)
@@ -1121,7 +1292,28 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                     }
                     ui.label("Location");
                     ui.horizontal(|ui| {
-                        ui.label(ex_ui.folder.display().to_string());
+                        // The folder, and the ones saved or exported to lately.
+                        let shown = ex_ui.folder.display().to_string();
+                        egui::ComboBox::from_id_salt("export-folder")
+                            .selected_text(short_path(&shown, 44))
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                let mut list = vec![ex_ui.folder.clone()];
+                                for f in prefs.recent.iter().chain(own_folder.iter()) {
+                                    if !list.contains(f) {
+                                        list.push(f.clone());
+                                    }
+                                }
+                                for f in list {
+                                    let text = f.display().to_string();
+                                    let on = f == ex_ui.folder;
+                                    if ui.selectable_label(on, short_path(&text, 60)).on_hover_text(&text).clicked() {
+                                        ex_ui.folder = f;
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(&shown);
                         if ui.button("Browse...").clicked() {
                             if purpose == Purpose::Stems {
                                 if let Some(d) = crate::file_dialog::FileDialog::new()
@@ -1322,7 +1514,7 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                 });
             } else {
                 ui.horizontal(|ui| {
-                    let label = if matches!(purpose, Purpose::SaveDoc(_)) { "Save" } else { "Export" };
+                    let label = if matches!(purpose, Purpose::SaveDoc(_) | Purpose::SaveSelection(..)) { "Save" } else { "Export" };
                     go = ui.button(RichText::new(label).strong()).clicked();
                     close = ui.button("Cancel").clicked();
                 });
@@ -1343,8 +1535,9 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
                 return;
             }
         }
+        let folder = st.export.folder.clone();
         if let Some(p) = st.export.prefs.as_mut() {
-            p.folder = Some(st.export.folder.clone());
+            p.used_folder(&folder);
         }
         st.export.open = false;
         st.export.confirm = None;
@@ -1355,6 +1548,32 @@ pub fn show(ctx: &egui::Context, st: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_folders_keep_the_latest_first_without_repeats() {
+        let mut p = ExportPrefs::default();
+        for f in ["a", "b", "a", "c"] {
+            p.used_folder(Path::new(f));
+        }
+        assert_eq!(p.recent, vec![PathBuf::from("c"), PathBuf::from("a"), PathBuf::from("b")]);
+        assert_eq!(p.folder, Some(PathBuf::from("c")));
+        for i in 0..20 {
+            p.used_folder(&PathBuf::from(format!("f{i}")));
+        }
+        assert_eq!(p.recent.len(), RECENT_FOLDERS);
+        // Old settings files without the list still load.
+        let old: ExportPrefs = serde_json::from_str(r#"{"folder":"x"}"#).unwrap();
+        assert!(old.recent.is_empty());
+        assert!(is_save(Purpose::SaveDoc(1)) && !is_save(Purpose::Mixdown));
+    }
+
+    #[test]
+    fn a_long_path_is_cut_in_the_middle() {
+        assert_eq!(short_path("C:/a", 10), "C:/a");
+        let s = short_path("B:/NASH/Documents/Projects/Untitled Session 1630", 21);
+        assert_eq!(s.chars().count(), 21);
+        assert!(s.starts_with("B:/NASH") && s.ends_with("1630"));
+    }
 
     #[test]
     fn stems_take_unmuted_tracks_with_clips_and_ignore_solo() {

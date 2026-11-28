@@ -347,6 +347,27 @@ pub fn copy_to_next_track(st: &mut State, down: bool) -> Option<bool> {
 
 // ------------------------------------------------------------ moving
 
+/// Alt+Comma / Alt+Period (Alt+Shift for 5): the selected clips move
+/// `steps` steps, a step being one pixel at the zoom on screen, as one
+/// undo step. False when no clip is selected.
+pub fn nudge(st: &mut State, steps: f64) -> bool {
+    let ids = selected(st);
+    if ids.is_empty() {
+        return false;
+    }
+    let step = st.session_view.len / st.session_px.max(1.0) as f64;
+    let mut before = st.session.clone();
+    let Some(g) = GroupDrag::begin(&mut before, ids, false) else {
+        return false;
+    };
+    let (s, ids) = moved(&before, &g, steps * step, 0);
+    st.session = s;
+    select(st, ids);
+    let label = if g.ids.len() > 1 { "Nudge clips" } else { "Nudge clip" };
+    st.commit_session(label, before);
+    true
+}
+
 /// Selected clips being dragged together (kept in the editor's drag).
 #[derive(Clone, Debug, Default)]
 pub struct GroupDrag {
@@ -450,6 +471,50 @@ mod tests {
         });
         st.session.track_mut(t).unwrap().midi.push(clip);
         (st, a, mid)
+    }
+
+    #[test]
+    fn nudging_moves_the_selected_clips_by_pixels_and_undoes_in_one_step() {
+        let (mut st, a, _) = setup();
+        st.session_view.len = 10.0;
+        st.session_px = 1000.0;
+        select(&mut st, vec![a]);
+        assert!(nudge(&mut st, 5.0));
+        let start = |st: &State| locate(&st.session, a).unwrap().1;
+        assert!((start(&st) - 2.05).abs() < 1e-9);
+        assert!(nudge(&mut st, -1.0));
+        assert!((start(&st) - 2.04).abs() < 1e-9);
+        st.undo();
+        assert!((start(&st) - 2.05).abs() < 1e-9);
+        select(&mut st, Vec::new());
+        assert!(!nudge(&mut st, 1.0));
+    }
+
+    #[test]
+    fn a_range_marker_selects_its_span_and_a_plain_one_clears_it() {
+        let (mut st, _, _) = setup();
+        st.session_view = crate::state::View { start: 0.0, len: 10.0 };
+        st.session_sel = Some((1.0, 2.0));
+        st.go_to_marker(30.0, 4.0);
+        assert_eq!(st.session_sel, Some((30.0, 34.0)));
+        assert_eq!(st.session_cursor, 30.0);
+        // Off screen: the view comes to it.
+        assert!(st.session_view.start <= 30.0 && 30.0 <= st.session_view.start + st.session_view.len);
+        st.go_to_marker(3.0, 0.0);
+        assert_eq!(st.session_sel, None);
+        assert_eq!(st.session_cursor, 3.0);
+    }
+
+    #[test]
+    fn adjust_selection_moves_an_edge_one_pixel() {
+        let (mut st, _, _) = setup();
+        st.session_view = crate::state::View { start: 0.0, len: 10.0 };
+        st.session_px = 1000.0;
+        st.session_sel = Some((1.0, 2.0));
+        st.adjust_selection(false, -1.0);
+        st.adjust_selection(true, 1.0);
+        let (x, y) = st.session_sel.unwrap();
+        assert!((x - 0.99).abs() < 1e-9 && (y - 2.01).abs() < 1e-9);
     }
 
     fn midi_count(s: &Session) -> usize {

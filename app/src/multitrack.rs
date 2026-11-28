@@ -676,8 +676,8 @@ pub fn editor(ui: &mut egui::Ui, st: &mut State, caches: &mut Caches) {
     let snapped = |st: &State, x: f32| {
         crate::ruler::snap(st, x_to_time(&v, lanes, x), &v, lanes, &snap_marks).max(0.0)
     };
-    let on_edge = resp
-        .interact_pointer_pos()
+    let on_edge = crate::waveform::held_at(ui)
+        .or(resp.interact_pointer_pos())
         .or(resp.hover_pos())
         .filter(|pp| lanes.contains(*pp) && st.tool != Tool::Razor)
         .and_then(|pp| crate::ruler::edge_at(st.session_sel, &v, lanes, pp.x));

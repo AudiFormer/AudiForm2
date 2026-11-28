@@ -63,6 +63,21 @@ pub enum Cmd {
     BounceTrack,
     RepeatEffect,
     RepeatEffectAdjust,
+    SaveSelectionAs,
+    SelStartLeft,
+    SelStartRight,
+    SelEndLeft,
+    SelEndRight,
+    Clipboard1,
+    Clipboard2,
+    Clipboard3,
+    Clipboard4,
+    Clipboard5,
+    NudgeLeft,
+    NudgeRight,
+    NudgeLeft5,
+    NudgeRight5,
+    StopAtSelectionEnd,
 }
 
 impl Cmd {
@@ -116,6 +131,21 @@ impl Cmd {
         Cmd::BounceTrack,
         Cmd::RepeatEffect,
         Cmd::RepeatEffectAdjust,
+        Cmd::SaveSelectionAs,
+        Cmd::SelStartLeft,
+        Cmd::SelStartRight,
+        Cmd::SelEndLeft,
+        Cmd::SelEndRight,
+        Cmd::Clipboard1,
+        Cmd::Clipboard2,
+        Cmd::Clipboard3,
+        Cmd::Clipboard4,
+        Cmd::Clipboard5,
+        Cmd::NudgeLeft,
+        Cmd::NudgeRight,
+        Cmd::NudgeLeft5,
+        Cmd::NudgeRight5,
+        Cmd::StopAtSelectionEnd,
     ];
 
     pub fn label(self) -> &'static str {
@@ -163,12 +193,27 @@ impl Cmd {
             Cmd::MoveTool => "Move Tool",
             Cmd::RazorTool => "Razor Tool",
             Cmd::TimeSelectTool => "Time Selection Tool",
-            Cmd::SaveAs => "Save Audio As...",
+            Cmd::SaveAs => "Save As...",
             Cmd::ExportMixdown => "Export Multitrack Mixdown...",
             Cmd::ExportStems => "Export Track Stems...",
             Cmd::BounceTrack => "Bounce Selected Track to New Track",
             Cmd::RepeatEffect => "Repeat Last Effect",
             Cmd::RepeatEffectAdjust => "Repeat Last Effect with Changes...",
+            Cmd::SaveSelectionAs => "Save Selection As...",
+            Cmd::SelStartLeft => "Move Selection Start Left",
+            Cmd::SelStartRight => "Move Selection Start Right",
+            Cmd::SelEndLeft => "Move Selection End Left",
+            Cmd::SelEndRight => "Move Selection End Right",
+            Cmd::Clipboard1 => "Clipboard 1",
+            Cmd::Clipboard2 => "Clipboard 2",
+            Cmd::Clipboard3 => "Clipboard 3",
+            Cmd::Clipboard4 => "Clipboard 4",
+            Cmd::Clipboard5 => "Clipboard 5",
+            Cmd::NudgeLeft => "Nudge Clips Left",
+            Cmd::NudgeRight => "Nudge Clips Right",
+            Cmd::NudgeLeft5 => "Nudge Clips Left 5 Steps",
+            Cmd::NudgeRight5 => "Nudge Clips Right 5 Steps",
+            Cmd::StopAtSelectionEnd => "Stop at End of Selection",
         }
     }
 
@@ -178,6 +223,7 @@ impl Cmd {
             | Cmd::Open
             | Cmd::Save
             | Cmd::SaveAs
+            | Cmd::SaveSelectionAs
             | Cmd::ExportMixdown
             | Cmd::ExportStems => "File",
             Cmd::Undo
@@ -191,12 +237,25 @@ impl Cmd {
             | Cmd::AddMarker
             | Cmd::ClearSelection
             | Cmd::KeyboardShortcuts
-            | Cmd::Preferences => "Edit",
+            | Cmd::Preferences
+            | Cmd::SelStartLeft
+            | Cmd::SelStartRight
+            | Cmd::SelEndLeft
+            | Cmd::SelEndRight
+            | Cmd::Clipboard1
+            | Cmd::Clipboard2
+            | Cmd::Clipboard3
+            | Cmd::Clipboard4
+            | Cmd::Clipboard5 => "Edit",
             Cmd::SplitAtPlayhead
             | Cmd::DuplicateClips
             | Cmd::CopyClipsUp
             | Cmd::CopyClipsDown
-            | Cmd::BounceTrack => "Multitrack",
+            | Cmd::BounceTrack
+            | Cmd::NudgeLeft
+            | Cmd::NudgeRight
+            | Cmd::NudgeLeft5
+            | Cmd::NudgeRight5 => "Multitrack",
             Cmd::Invert
             | Cmd::Reverse
             | Cmd::Silence
@@ -210,7 +269,8 @@ impl Cmd {
             | Cmd::Loop
             | Cmd::ReturnOnStop
             | Cmd::ToStart
-            | Cmd::ToEnd => "Transport",
+            | Cmd::ToEnd
+            | Cmd::StopAtSelectionEnd => "Transport",
             Cmd::WaveformView
             | Cmd::MultitrackView
             | Cmd::ZoomIn
@@ -236,6 +296,10 @@ impl Cmd {
         use Key as K;
         let c = |k| Binding::ctrl(k);
         let p = |k| Binding::plain(k);
+        let s = |k| Binding {
+            shift: true,
+            ..Binding::plain(k)
+        };
         match self {
             Cmd::NewFile => vec![c(K::N)],
             Cmd::Open => vec![c(K::O)],
@@ -310,6 +374,36 @@ impl Cmd {
                 ..p(K::R)
             }],
             Cmd::RepeatEffectAdjust => vec![c(K::R)],
+            Cmd::SaveSelectionAs => vec![Binding {
+                alt: true,
+                ..c(K::S)
+            }],
+            Cmd::SelStartLeft => vec![s(K::H)],
+            Cmd::SelStartRight => vec![s(K::J)],
+            Cmd::SelEndLeft => vec![s(K::K)],
+            Cmd::SelEndRight => vec![s(K::L)],
+            Cmd::Clipboard1 => vec![c(K::Num1)],
+            Cmd::Clipboard2 => vec![c(K::Num2)],
+            Cmd::Clipboard3 => vec![c(K::Num3)],
+            Cmd::Clipboard4 => vec![c(K::Num4)],
+            Cmd::Clipboard5 => vec![c(K::Num5)],
+            Cmd::NudgeLeft => vec![Binding {
+                alt: true,
+                ..p(K::Comma)
+            }],
+            Cmd::NudgeRight => vec![Binding {
+                alt: true,
+                ..p(K::Period)
+            }],
+            Cmd::NudgeLeft5 => vec![Binding {
+                alt: true,
+                ..s(K::Comma)
+            }],
+            Cmd::NudgeRight5 => vec![Binding {
+                alt: true,
+                ..s(K::Period)
+            }],
+            Cmd::StopAtSelectionEnd => vec![s(K::V)],
             Cmd::Preferences
             | Cmd::Pause
             | Cmd::Invert

@@ -41,8 +41,8 @@ pub enum SynthModel {
     // named after where each was heard so they are easy to tell apart
     // while being tuned; rename them before release.
     /// An FM chime: two carriers an octave apart on one modulator at 4x,
-    /// a three-voice ensemble and a quarter-note echo (verse and chorus
-    /// alike).
+    /// and a three-voice ensemble, with no echo of its own (verse and
+    /// chorus alike).
     AtlantisVerseLead,
     /// Two beating sines with a faint partial three octaves up that
     /// fades as the note decays.
@@ -50,8 +50,7 @@ pub enum SynthModel {
     /// A glassy lead: a sine plus an inharmonic partial about 5.37 times
     /// the note, slow to swell.
     WildHorsesIntroLead,
-    /// Soft background chords pulsed in eighths by the LFO and
-    /// bit-crushed.
+    /// Soft, steady background chords with a bit-crushed edge.
     WildHorsesCrushDrone,
     /// A crystal bell lead: a bright FM attack over a sine and a glassy
     /// inharmonic partial.
@@ -110,7 +109,7 @@ impl SynthModel {
             SynthModel::StringMachine => "String ensemble: stacked saws in a deep ensemble chorus",
             SynthModel::SyncLead => "Hard-sync lead whose second oscillator sweeps on every note",
             SynthModel::AtlantisVerseLead => {
-                "FM chime: two carriers on one modulator, ensemble shimmer, quarter-note echo"
+                "FM chime: two carriers on one modulator, ensemble shimmer"
             }
             SynthModel::WildHorsesDemoPad => {
                 "Beating sines with a faint high partial and an airy shimmer on top"
@@ -119,7 +118,7 @@ impl SynthModel {
                 "Glassy lead: sine plus an inharmonic partial, slow swell"
             }
             SynthModel::WildHorsesCrushDrone => {
-                "Soft background chords, pulsed in eighths and bit-crushed"
+                "Soft, steady background chords with a bit-crushed edge"
             }
             SynthModel::IceQueen => "Crystal bell lead: bright FM strike over a glassy partial",
         }
@@ -308,8 +307,8 @@ impl SynthModel {
                 // upper, driven hard, gives 2, 6, 10, 14 and 18; every
                 // fourth harmonic is missing. Each harmonic is split three
                 // ways about 10 cents apart (an ensemble shimmer). Notes
-                // are short, ~50 ms to speak, and come back about 0.49 s
-                // later (a quarter at ~122 BPM), fading.
+                // are short, ~50 ms to speak. The repeat heard about 0.49 s
+                // later is not part of the patch, so no echo here.
                 i.wave = Wave::Sine;
                 i.detune = 0.0;
                 i.attack = 0.04;
@@ -318,7 +317,7 @@ impl SynthModel {
                 i.release = 0.25;
                 i.cutoff = 16_000.0;
                 i.resonance = 0.0;
-                i.gain_db = -17.5;
+                i.gain_db = -16.3;
                 x.osc2_wave = Some(Wave::Sine);
                 x.osc2_octave = 1;
                 x.osc2_level = 0.6;
@@ -331,9 +330,6 @@ impl SynthModel {
                 x.width = 0.5;
                 x.voices = 8;
                 x.velocity = 0.5;
-                x.echo = 0.7;
-                x.echo_time = 0.49;
-                x.echo_feedback = 0.4;
             }
             SynthModel::WildHorsesDemoPad => {
                 // Measured: nearly a pure sine, the 2nd harmonic 11-23 dB
@@ -397,9 +393,9 @@ impl SynthModel {
             SynthModel::WildHorsesCrushDrone => {
                 // Measured: chords behind the song (an A major chord with
                 // the 7th, spread over two octaves), each note soft (few
-                // harmonics), pulsing in eighths (~2.8 a second at 83 BPM)
-                // with a quick rise and a fall, and a gritty crushed edge.
-                // Play the chords; the pulse comes from the LFO.
+                // harmonics), held steady, with a gritty crushed edge. By
+                // ear the level does not pulse or waver, so no LFO on the
+                // amp (an eighth-note tremolo was tried and sounded wrong).
                 i.wave = Wave::Triangle;
                 i.detune = 0.0;
                 i.attack = 0.01;
@@ -408,15 +404,10 @@ impl SynthModel {
                 i.release = 0.3;
                 i.cutoff = 1800.0;
                 i.resonance = 0.1;
-                i.gain_db = -19.0;
+                i.gain_db = -21.9;
                 x.osc2_wave = Some(Wave::Sine);
                 x.osc2_octave = 1;
                 x.osc2_level = 0.2;
-                x.lfo_shape = LfoShape::Saw;
-                x.lfo_rate = 2.77;
-                x.lfo_depth = 1.0;
-                x.lfo_pitch = 0.0;
-                x.lfo_amp = 0.6;
                 x.voices = 12;
                 x.velocity = 0.5;
                 x.crush_bits = 7.0;
