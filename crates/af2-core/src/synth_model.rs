@@ -41,8 +41,8 @@ pub enum SynthModel {
     // named after where each was heard so they are easy to tell apart
     // while being tuned; rename them before release.
     /// An FM chime: two carriers an octave apart on one modulator at 4x,
-    /// a three-voice ensemble and a quarter-note echo (verse and chorus
-    /// alike).
+    /// two wide voices beating slowly, a curved fall and an echo (verse
+    /// and chorus alike).
     AtlantisVerseLead,
     /// Two beating sines with a faint partial three octaves up that
     /// fades as the note decays.
@@ -110,7 +110,7 @@ impl SynthModel {
             SynthModel::StringMachine => "String ensemble: stacked saws in a deep ensemble chorus",
             SynthModel::SyncLead => "Hard-sync lead whose second oscillator sweeps on every note",
             SynthModel::AtlantisVerseLead => {
-                "FM chime: two carriers on one modulator, ensemble shimmer, quarter-note echo"
+                "FM chime: two carriers on one modulator, two beating voices, echo"
             }
             SynthModel::WildHorsesDemoPad => {
                 "Beating sines with a faint high partial and an airy shimmer on top"
@@ -301,39 +301,41 @@ impl SynthModel {
                 x.velocity = 0.5;
             }
             SynthModel::AtlantisVerseLead => {
-                // Measured (B4 at 0:15, alone in the right channel): two
-                // FM carriers, at the note and an octave up, sharing one
-                // modulator at 4x the note. The lower carrier, lightly
-                // modulated, gives the odd harmonics 1-9 (none past); the
-                // upper, driven hard, gives 2, 6, 10, 14 and 18; every
-                // fourth harmonic is missing. Each harmonic is split three
-                // ways about 10 cents apart (an ensemble shimmer). Notes
-                // are short, ~50 ms to speak, and come back about 0.49 s
-                // later (a quarter at ~122 BPM), fading.
+                // Measured from isolated takes (the demo's verse and the
+                // album's chorus, the same patch): two FM carriers, at the
+                // note and an octave up, sharing one modulator at 4x the
+                // note (odd harmonics 1-9 from the lower, 2-6-10-14 from
+                // the upper, every fourth missing), steady in brightness.
+                // Two voices about 14 cents apart beat some 3.5 times a
+                // second, deep, and wide in stereo. Struck in ~20 ms, then
+                // a curved fall: about -7 dB at 0.65 s, -24 dB at 1.65 s,
+                // gone by about 2.8 s. Each note repeats about 0.445 s
+                // later (echo), fainter each time.
                 i.wave = Wave::Sine;
                 i.detune = 0.0;
-                i.attack = 0.04;
-                i.decay = 0.8;
-                i.sustain = 0.6;
-                i.release = 0.25;
+                i.attack = 0.015;
+                i.decay = 2.8;
+                i.sustain = 0.06;
+                i.release = 0.8;
                 i.cutoff = 16_000.0;
                 i.resonance = 0.0;
-                i.gain_db = -17.5;
+                i.gain_db = -16.5;
                 x.osc2_wave = Some(Wave::Sine);
                 x.osc2_octave = 1;
-                x.osc2_level = 0.6;
-                x.fm = 1.0;
-                x.fm2 = 4.0;
+                x.osc2_level = 0.5;
+                x.fm = 0.65;
+                x.fm2 = 1.8;
                 x.fm_ratio = 4.0;
-                x.fm_decay = 1.2;
-                x.unison = 3;
-                x.spread = 20.0;
-                x.width = 0.5;
-                x.voices = 8;
+                x.fm_decay = 5.0;
+                x.env_curve = 0.67;
+                x.unison = 2;
+                x.spread = 14.0;
+                x.width = 0.7;
+                x.voices = 10;
                 x.velocity = 0.5;
-                x.echo = 0.7;
-                x.echo_time = 0.49;
-                x.echo_feedback = 0.4;
+                x.echo = 0.55;
+                x.echo_time = 0.445;
+                x.echo_feedback = 0.35;
             }
             SynthModel::WildHorsesDemoPad => {
                 // Measured: nearly a pure sine, the 2nd harmonic 11-23 dB
@@ -592,6 +594,10 @@ pub struct SynthControls {
     pub width: f32,
     /// How much velocity changes loudness, 0..1.
     pub velocity: f32,
+    /// How the amp envelope's decay and release fall, 0..1: 0 a straight
+    /// line (the original), up to a steep curve that drops fast and then
+    /// tails off, like a struck or plucked note.
+    pub env_curve: f32,
     /// Accent on loud notes (velocity 100 and up): louder and brighter.
     pub accent: f32,
     /// Pitch bend range in semitones.
@@ -667,6 +673,7 @@ impl Default for SynthControls {
             spread: 15.0,
             width: 0.5,
             velocity: 1.0,
+            env_curve: 0.0,
             accent: 0.0,
             bend_range: 2.0,
             chorus: 0.0,

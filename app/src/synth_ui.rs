@@ -161,7 +161,7 @@ fn body(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit) {
     });
     // …then what shapes it, and the envelopes that move it…
     let w_filter = sec_w(DRAW_GAP + CURVE_W, 3);
-    let w_amp = sec_w(0.0, 2);
+    let w_amp = sec_w(0.0, 3);
     let w_env = WIDTH - w_filter - w_amp - 2.0 * GAP;
     band(ui, "shape", |ui| {
         section(ui, th, "3", "Filter", w_filter, "shape", 0, |ui, iw| {
@@ -893,7 +893,7 @@ fn filter(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit, i
 /// The output stage: level, how velocity sets loudness, accents.
 fn amp(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit, iw: f32, kh: f32) {
     caption_line(ui, th, "output");
-    let cw = iw / 2.0;
+    let cw = iw / 3.0;
     row(ui, |ui| {
         cell(ui, cw, |ui| {
             knob(
@@ -921,6 +921,20 @@ fn amp(ui: &mut egui::Ui, th: &Theme, inst: &mut Instrument, ed: &mut Edit, iw: 
                 1.0,
                 false,
                 &pct,
+            )
+        });
+        cell(ui, cw, |ui| {
+            knob(
+                ui,
+                ed,
+                "curve",
+                "Curve",
+                &mut inst.ext.env_curve,
+                0.0,
+                1.0,
+                0.0,
+                false,
+                &|v| if v <= 0.0 { "Line".into() } else { pct(v) },
             )
         });
     });
@@ -1550,13 +1564,14 @@ fn preview_for(ctx: &egui::Context, inst: &Instrument) -> (Shot, bool) {
 
 /// The voice's sound for a held A3 once its envelopes have settled:
 /// rendered with the synth's own engine (oscillators, mix, filter and
-/// its envelope, the amp at sustain), the LFO and chorus left out so the
+/// its envelope, the amp at sustain), the LFO, chorus and echo left out so the
 /// shape holds still. Two cycles of its lowest part, from a rising zero.
 fn render_preview(inst: &Instrument) -> Shot {
     use af2_engine::synth::{note, Synth};
     let mut still = *inst;
     still.ext.lfo_depth = 0.0;
     still.ext.chorus = 0.0;
+    still.ext.echo = 0.0;
     still.ext.glide = 0.0;
     let mut open = still;
     open.cutoff = 18_000.0;

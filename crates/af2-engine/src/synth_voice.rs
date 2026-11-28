@@ -601,7 +601,11 @@ impl Engine {
         let air_g = x.air.clamp(0.0, 1.0);
         for i in 0..l.len() {
             let tl = (t - v.start + dt * i as f64) as f32;
-            let env = envelope(&inst, tl, held);
+            let env = if x.env_curve > 0.0 {
+                curved_envelope(&inst, x.env_curve, tl, held)
+            } else {
+                envelope(&inst, tl, held)
+            };
             if env <= 0.0 && tl > held {
                 continue;
             }
@@ -735,12 +739,64 @@ impl Engine {
     }
 }
 
+#[cfg(test)]
+mod curve_tests {
+    use super::*;
+
+    #[test]
+    fn a_curved_decay_falls_faster_then_tails_off_and_ends_together() {
+        let inst = Instrument {
+            attack: 0.01,
+            decay: 2.0,
+            sustain: 0.0,
+            release: 0.5,
+            ..Instrument::default()
+        };
+        let line = |t: f32| envelope(&inst, t, 10.0);
+        let curve = |t: f32| curved_envelope(&inst, 0.67, t, 10.0);
+        // The same peak and the same end; well under the line midway.
+        assert_eq!(curve(0.01), line(0.01));
+        assert!(curve(1.0) < line(1.0) * 0.3);
+        assert!(curve(2.02) == 0.0 && line(2.02) == 0.0);
+        // Released early: also falls on the curve, from where it was.
+        let rel = curved_envelope(&inst, 0.67, 0.75, 0.5);
+        assert!(rel > 0.0 && rel < envelope(&inst, 0.75, 0.5));
+    }
+}
+
 #[inline]
 fn wrap(p: f32) -> f32 {
     if p >= 1.0 {
         p - 1.0
     } else {
         p
+    }
+}
+
+/// The amp envelope with curved decay and release (`curve` 0..1: the
+/// falling parts as (1 - x)^(1 + 3 curve)); the attack stays a line.
+pub(crate) fn curved_envelope(i: &Instrument, curve: f32, t: f32, held: f32) -> f32 {
+    let p = 1.0 + 3.0 * curve.clamp(0.0, 1.0);
+    let held_level = |t: f32| -> f32 {
+        let a = i.attack.max(0.0005);
+        let d = i.decay.max(0.001);
+        if t < a {
+            t / a
+        } else if t < a + d {
+            i.sustain + (1.0 - i.sustain) * (1.0 - (t - a) / d).powf(p)
+        } else {
+            i.sustain
+        }
+    };
+    if t <= held {
+        held_level(t)
+    } else {
+        let x = (t - held) / i.release.max(0.001);
+        if x >= 1.0 {
+            0.0
+        } else {
+            held_level(held) * (1.0 - x).powf(p)
+        }
     }
 }
 
